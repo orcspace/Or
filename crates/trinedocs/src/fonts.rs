@@ -256,6 +256,43 @@ pub fn font_bytes(bold: bool, italic: bool) -> Result<Vec<u8>, String> {
     }
     Err("Не найден системный шрифт Arial / Segoe UI".into())
 }
+/// Single line height of a family in em, as Word computes it on Windows:
+/// (OS/2 winAscent + winDescent) / unitsPerEm, falling back to hhea metrics.
+pub fn line_factor(family: &str) -> f32 {
+    static FACTORS: OnceLock<Mutex<HashMap<String, f32>>> = OnceLock::new();
+    let factors = FACTORS.get_or_init(Default::default);
+    let key = canonical(family)
+        .cloned()
+        .unwrap_or_else(|| DEFAULT_FAMILY.into());
+    if let Some(f) = factors.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+        return *f;
+    }
+    let factor = face(&key, false, false)
+        .ok()
+        .and_then(|(bytes, index)| {
+            let face = ttf_parser::Face::parse(&bytes, index).ok()?;
+            let units = f32::from(face.units_per_em()).max(1.0);
+            let os2 = face.tables().os2;
+            let (ascent, descent) = match os2 {
+                Some(t) if t.windows_ascender() > 0 => (
+                    f32::from(t.windows_ascender()),
+                    f32::from(t.windows_descender()).abs(),
+                ),
+                _ => (
+                    f32::from(face.ascender()),
+                    f32::from(face.descender()).abs() + f32::from(face.line_gap()),
+                ),
+            };
+            Some((ascent + descent) / units)
+        })
+        .filter(|f| f.is_finite() && (0.8..=2.5).contains(f))
+        .unwrap_or(1.15);
+    factors
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(key, factor);
+    factor
+}
 /// Horizontal advances (em fractions) of a family/style; cached per face.
 pub fn advances(family: &str, bold: bool, italic: bool) -> Arc<HashMap<char, f32>> {
     type Tables = HashMap<(String, usize), Arc<HashMap<char, f32>>>;

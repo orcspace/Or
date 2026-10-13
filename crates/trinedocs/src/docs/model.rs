@@ -257,7 +257,19 @@ pub struct Table {
     /// Word tables without borders (e.g. signature blocks) stay borderless.
     #[serde(default, skip_serializing_if = "is_false")]
     pub borderless: bool,
+    /// Cell padding in points: top, right, bottom, left (`w:tblCellMar`).
+    #[serde(default = "legacy_cell_margin")]
+    pub cell_margin: [f32; 4],
+    /// Minimum height of each row in points (`w:trHeight`); 0 or missing = automatic.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub row_heights: Vec<f32>,
 }
+/// Padding of tables saved before cell margins were stored.
+fn legacy_cell_margin() -> [f32; 4] {
+    [5.0; 4]
+}
+/// Word's default cell margins: 0 top/bottom, 0.19 cm left/right.
+pub const WORD_CELL_MARGIN: [f32; 4] = [0.0, 5.4, 0.0, 5.4];
 impl Table {
     /// Number of grid columns, counting merged cells by their span.
     pub fn grid_columns(&self) -> usize {
@@ -531,6 +543,10 @@ type FaceMetrics = (
     bool,
     std::sync::Arc<std::collections::HashMap<char, f32>>,
 );
+/// Height of a text line: font line metrics × size × paragraph line spacing.
+pub fn line_height(format: &TextFormat, size: f32, spacing: f32) -> f32 {
+    (size * crate::fonts::line_factor(&format.font) * spacing).max(4.0)
+}
 pub fn char_width(ch: char, format: &TextFormat) -> f32 {
     thread_local! {
         static LAST: std::cell::RefCell<Option<FaceMetrics>> =
@@ -1219,6 +1235,8 @@ impl Doc {
             column_widths: vec![width; columns],
             border_color: [100, 110, 120],
             borderless: false,
+            cell_margin: WORD_CELL_MARGIN,
+            row_heights: Vec::new(),
         });
         Ok(id)
     }
@@ -1276,6 +1294,9 @@ impl Doc {
                     })
                     .collect();
                 table.rows.insert(at, row);
+                if at <= table.row_heights.len() {
+                    table.row_heights.insert(at, 0.0);
+                }
             }
             TableEdit::InsertColumn(at) => {
                 if columns >= 64 {
@@ -1323,6 +1344,9 @@ impl Doc {
                     remove = true;
                 } else {
                     table.rows.remove(at);
+                    if at < table.row_heights.len() {
+                        table.row_heights.remove(at);
+                    }
                 }
             }
             TableEdit::DeleteColumn(at) => {
@@ -1595,7 +1619,7 @@ impl Doc {
                     .take(end.saturating_sub(start))
                     .map(|(_, f)| f.size)
                     .fold(p.format_at(start).size.max(4.0), f32::max);
-                let height = (max_size * 1.28 * p.line_spacing).max(8.0);
+                let height = line_height(&p.format_at(start), max_size, p.line_spacing);
                 if y + height > setup.height - setup.margin_bottom {
                     next_page(&mut layout, setup, &mut y);
                 }
@@ -1843,11 +1867,12 @@ fn render_row(page: &mut Page, row: &Row) {
         }
     }
 }
-fn table_lines(cell: &Cell, width: f32) -> Vec<Row> {
+fn table_lines(cell: &Cell, width: f32, margin: [f32; 4]) -> Vec<Row> {
     let mut lines = Vec::new();
     for (paragraph, p) in cell.paragraphs.iter().enumerate() {
         let available =
-            (width - 10.0 - p.indent.max(0.0) - f32::from(p.list_level) * 18.0).max(1.0);
+            (width - margin[1] - margin[3] - p.indent.max(0.0) - f32::from(p.list_level) * 18.0)
+                .max(1.0);
         let chars: Vec<(char, TextFormat)> = p
             .runs
             .iter()
@@ -1895,11 +1920,11 @@ fn table_lines(cell: &Cell, width: f32) -> Vec<Row> {
                 .take(end - start)
                 .map(|(_, f)| f.size)
                 .fold(p.format_at(start).size, f32::max);
-            let text_height = (max_size * 1.28 * p.line_spacing).max(8.0);
+            let text_height = line_height(&p.format_at(start), max_size, p.line_spacing);
             let before = if first { p.spacing_before } else { 0.0 };
             let final_line = end + usize::from(hard_break) >= chars.len() && !hard_break;
             let after = if final_line { p.spacing_after } else { 0.0 };
-            let x = 5.0
+            let x = margin[3]
                 + p.indent.max(0.0)
                 + f32::from(p.list_level) * 18.0
                 + indent
@@ -1962,11 +1987,15 @@ fn render_table(layout: &mut Layout, setup: &PageSetup, table: &Table, y: &mut f
         })
         .collect();
     let raw_sum: f32 = widths.iter().sum();
-    if raw_sum > usable_width {
+    // Word lets tables run into the margins a little; only clearly oversized ones shrink.
+    let limit = usable_width + setup.margin_right.min(36.0);
+    if raw_sum > limit {
         for width in &mut widths {
-            *width *= usable_width / raw_sum;
+            *width *= limit / raw_sum;
         }
     }
+    let margin = table.cell_margin.map(|m| m.clamp(0.0, 72.0));
+    let pad = margin[0] + margin[2];
     for (row_index, cells) in table.rows.iter().enumerate() {
         let starts = table.grid_starts(row_index);
         let next_starts = table.grid_starts(row_index + 1);
@@ -2006,6 +2035,7 @@ fn render_table(layout: &mut Layout, setup: &PageSetup, table: &Table, y: &mut f
                         .get(ci)
                         .copied()
                         .unwrap_or(usable_width / columns as f32),
+                    margin,
                 )
             })
             .collect();
@@ -2020,7 +2050,14 @@ fn render_table(layout: &mut Layout, setup: &PageSetup, table: &Table, y: &mut f
             })
             .collect();
         let body_height = setup.height - setup.margin_top - setup.margin_bottom;
-        let full_height = heights.iter().sum::<f32>() + 10.0;
+        let min_height = table
+            .row_heights
+            .get(row_index)
+            .copied()
+            .filter(|h| h.is_finite())
+            .unwrap_or_default()
+            .clamp(0.0, body_height);
+        let full_height = (heights.iter().sum::<f32>() + pad).max(min_height);
         if full_height <= body_height && *y + full_height > setup.height - setup.margin_bottom {
             next_page(layout, setup, y);
         }
@@ -2028,18 +2065,21 @@ fn render_table(layout: &mut Layout, setup: &PageSetup, table: &Table, y: &mut f
         while line_offset < line_total {
             let available = setup.height - setup.margin_bottom - *y;
             let first_height = heights.get(line_offset).copied().unwrap_or(8.0);
-            if available < first_height + 10.0 && *y > setup.margin_top {
+            if available < first_height + pad && *y > setup.margin_top {
                 next_page(layout, setup, y);
                 continue;
             }
             let mut count = 0;
-            let mut row_height = 10.0;
+            let mut row_height = pad;
             for height in heights.iter().skip(line_offset) {
                 if count > 0 && row_height + height > available {
                     break;
                 }
                 row_height += height;
                 count += 1;
+            }
+            if line_offset == 0 && count == line_total {
+                row_height = row_height.max(min_height);
             }
             let page_index = layout.pages.len().saturating_sub(1);
             if let Some(page) = layout.pages.last_mut() {
@@ -2096,9 +2136,9 @@ fn render_table(layout: &mut Layout, setup: &PageSetup, table: &Table, y: &mut f
                         .filter(|li| cell_lines.get(ci).is_some_and(|lines| *li < lines.len()))
                         .map(|li| heights.get(li).copied().unwrap_or(8.0))
                         .sum();
-                    let free = (row_height - 10.0 - content).max(0.0);
+                    let free = (row_height - pad - content).max(0.0);
                     let mut slot_y = *y
-                        + 5.0
+                        + margin[0]
                         + match cell.v_align {
                             VAlign::Top => 0.0,
                             VAlign::Center => free / 2.0,

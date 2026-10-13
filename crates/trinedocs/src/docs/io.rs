@@ -389,11 +389,13 @@ fn canonical_style(styles: &BTreeMap<String, Node>, id: &str) -> String {
         _ => id.into(),
     }
 }
+#[allow(clippy::too_many_arguments)]
 fn paragraph(
     node: &Node,
     doc: &mut Doc,
     styles: &BTreeMap<String, Node>,
     defaults: &Defaults,
+    table_style: &[&Node],
     nums: &BTreeMap<String, List>,
     rels: &BTreeMap<String, String>,
 ) -> Paragraph {
@@ -410,7 +412,9 @@ fn paragraph(
         .and_then(|n| n.child("pStyle"))
         .and_then(Node::value)
         .unwrap_or(defaults.normal);
-    let mut chain = Vec::new();
+    // Word layers a table style between the document defaults and the paragraph style,
+    // which is why "Table Grid" cells have no spacing after paragraphs.
+    let mut chain = table_style.to_vec();
     style_chain(styles, style, &mut chain, 0);
     for n in chain {
         if let Some(rpr) = n.child("rPr") {
@@ -635,7 +639,7 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
     for node in &body.children {
         match node.name.as_str() {
             "p" => {
-                let p = paragraph(node, &mut doc, &styles, &defaults, &nums, &rels);
+                let p = paragraph(node, &mut doc, &styles, &defaults, &[], &nums, &rels);
                 let mut drawings = Vec::new();
                 node.descendants("drawing", &mut drawings);
                 // Our spacer between adjacent tables is not part of the document.
@@ -695,11 +699,27 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
                 }
                 let after = doc.paragraphs.last().map(|p| p.id).unwrap_or_default();
                 let id = doc.alloc_id();
+                let tbl_pr = node.child("tblPr");
+                let mut chain = Vec::new();
+                if let Some(style) = tbl_pr
+                    .and_then(|n| n.child("tblStyle"))
+                    .and_then(Node::value)
+                {
+                    style_chain(&styles, style, &mut chain, 0);
+                }
                 let mut rows = Vec::new();
+                let mut row_heights = Vec::new();
                 if node.children.iter().filter(|n| n.name == "tr").count() > 10000 {
                     return Err("Таблица DOCX превышает 10 000 строк".into());
                 }
                 for tr in node.children.iter().filter(|n| n.name == "tr") {
+                    row_heights.push(
+                        tr.child("trPr")
+                            .and_then(|n| n.child("trHeight"))
+                            .filter(|n| n.attr("hRule") != Some("auto"))
+                            .map(|n| (number(n.attr("val"), 0.0) / 20.0).clamp(0.0, 1500.0))
+                            .unwrap_or_default(),
+                    );
                     let mut cells = Vec::new();
                     if tr.children.iter().filter(|n| n.name == "tc").count() > 256 {
                         return Err("Таблица DOCX превышает 256 столбцов".into());
@@ -716,8 +736,9 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
                         let cell_id = doc.alloc_id();
                         let mut paragraphs = Vec::new();
                         for p in tc.children.iter().filter(|n| n.name == "p") {
-                            paragraphs
-                                .push(paragraph(p, &mut doc, &styles, &defaults, &nums, &rels));
+                            paragraphs.push(paragraph(
+                                p, &mut doc, &styles, &defaults, &chain, &nums, &rels,
+                            ));
                         }
                         if paragraphs.is_empty() {
                             let id = doc.alloc_id();
@@ -765,14 +786,30 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
                     .unwrap_or_default();
                 // Borders come from the table itself, its style, or the cells; Word's plain
                 // table has none, so a table without any of them stays borderless.
-                let tbl_pr = node.child("tblPr");
                 let own = tbl_pr.and_then(|n| n.child("tblBorders"));
-                let mut chain = Vec::new();
-                if let Some(style) = tbl_pr
-                    .and_then(|n| n.child("tblStyle"))
-                    .and_then(Node::value)
+                let mut cell_margin = WORD_CELL_MARGIN;
+                for mar in chain
+                    .iter()
+                    .filter_map(|s| s.child("tblPr"))
+                    .chain(tbl_pr)
+                    .filter_map(|n| n.child("tblCellMar"))
                 {
-                    style_chain(&styles, style, &mut chain, 0);
+                    for (slot, names) in [
+                        (0, ["top", "top"]),
+                        (1, ["right", "end"]),
+                        (2, ["bottom", "bottom"]),
+                        (3, ["left", "start"]),
+                    ] {
+                        if let Some(side) = names.iter().find_map(|name| mar.child(name))
+                            && matches!(side.attr("type"), None | Some("dxa"))
+                        {
+                            cell_margin[slot] =
+                                (number(side.attr("w"), 0.0) / 20.0).clamp(0.0, 72.0);
+                        }
+                    }
+                }
+                if row_heights.iter().all(|h| *h <= 0.0) {
+                    row_heights.clear();
                 }
                 let styled = chain
                     .iter()
@@ -797,6 +834,8 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
                     column_widths: widths,
                     border_color,
                     borderless: !visible,
+                    cell_margin,
+                    row_heights,
                 });
             }
             "sectPr" => read_section(node, &mut doc, &rels, &parts)?,
@@ -1073,13 +1112,29 @@ fn table_xml(table: &Table, usable_width: f32, links: &mut Vec<(String, String)>
             ));
         }
     }
-    out.push_str("</w:tblBorders><w:tblLayout w:type=\"fixed\"/><w:tblCellMar><w:left w:w=\"100\" w:type=\"dxa\"/><w:right w:w=\"100\" w:type=\"dxa\"/></w:tblCellMar></w:tblPr><w:tblGrid>");
+    out.push_str("</w:tblBorders><w:tblLayout w:type=\"fixed\"/><w:tblCellMar>");
+    let twips = table
+        .cell_margin
+        .map(|m| (m.clamp(0.0, 72.0) * 20.0).round() as u32);
+    for (tag, value) in ["top", "left", "bottom", "right"]
+        .into_iter()
+        .zip([twips[0], twips[3], twips[2], twips[1]])
+    {
+        out.push_str(&format!("<w:{tag} w:w=\"{value}\" w:type=\"dxa\"/>"));
+    }
+    out.push_str("</w:tblCellMar></w:tblPr><w:tblGrid>");
     for width in &widths {
         out.push_str(&format!("<w:gridCol w:w=\"{width}\"/>"));
     }
     out.push_str("</w:tblGrid>");
     for (row_index, row) in table.rows.iter().enumerate() {
         out.push_str("<w:tr>");
+        if let Some(height) = table.row_heights.get(row_index).filter(|h| **h > 0.0) {
+            out.push_str(&format!(
+                "<w:trPr><w:trHeight w:val=\"{}\" w:hRule=\"atLeast\"/></w:trPr>",
+                (height.min(1500.0) * 20.0).round() as u32
+            ));
+        }
         let starts = table.grid_starts(row_index);
         let below = table.grid_starts(row_index + 1);
         for (ci, cell) in row.iter().enumerate() {
@@ -1744,6 +1799,37 @@ mod tests {
                 .first()
                 .is_some_and(|p| p.spacing_after == 0.0 && p.line_spacing == 1.0)
         );
+        Ok(())
+    }
+    #[test]
+    fn docx_table_style_margins_and_row_height() -> Result<(), String> {
+        let styles = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:pPrDefault><w:pPr><w:spacing w:after="160" w:line="259" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="table" w:styleId="Grid"><w:name w:val="Table Grid"/><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:tblPr><w:tblCellMar><w:left w:w="108" w:type="dxa"/><w:right w:w="108" w:type="dxa"/></w:tblCellMar></w:tblPr></w:style></w:styles>"#;
+        let xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>a</w:t></w:r></w:p><w:tbl><w:tblPr><w:tblStyle w:val="Grid"/><w:tblCellMar><w:top w:w="40" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:trPr><w:trHeight w:val="600"/></w:trPr><w:tc><w:p><w:r><w:t>b</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/></w:body></w:document>"#;
+        let bytes = crate::package::write_zip(vec![
+            ("word/document.xml".into(), xml.as_bytes().to_vec()),
+            ("word/styles.xml".into(), styles.as_bytes().to_vec()),
+        ])?;
+        let doc = read(&bytes, "docx")?;
+        let table = doc.tables.first().ok_or("table")?;
+        assert_eq!(table.cell_margin, [2.0, 5.4, 0.0, 5.4]);
+        assert_eq!(table.row_heights, vec![30.0]);
+        let cell = table
+            .rows
+            .first()
+            .and_then(|r| r.first())
+            .and_then(|c| c.paragraphs.first())
+            .ok_or("cell")?;
+        assert_eq!((cell.spacing_after, cell.line_spacing), (0.0, 1.0));
+        // Body text keeps the document defaults.
+        assert!(
+            doc.paragraphs
+                .first()
+                .is_some_and(|p| p.spacing_after == 8.0)
+        );
+        let again = read(&write(&doc, "docx")?, "docx")?;
+        let table = again.tables.first().ok_or("table")?;
+        assert_eq!(table.cell_margin, [2.0, 5.4, 0.0, 5.4]);
+        assert_eq!(table.row_heights, vec![30.0]);
         Ok(())
     }
     #[test]
