@@ -5,7 +5,8 @@ use rmcp::{
 };
 // Upstream negotiates via `initialize` (pre-2026-07-28) and receives results
 // without `resultType`; downstream clients may negotiate 2026-07-28, where the
-// field is required, so the proxy restores the "complete" discriminator.
+// field is required, so the proxy restores the "complete" discriminator and the
+// required list caching hints (`ttlMs: 0`, `cacheScope: "private"` — never cache).
 #[derive(Clone)]
 struct Proxy {
     peer: Peer<RoleClient>,
@@ -38,6 +39,8 @@ impl ServerHandler for Proxy {
             .await
             .map(|mut r| {
                 r.result_type.get_or_insert(ResultType::COMPLETE);
+                r.ttl_ms.get_or_insert(0);
+                r.cache_scope.get_or_insert(CacheScope::Private);
                 r
             })
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))
@@ -66,6 +69,8 @@ impl ServerHandler for Proxy {
             .await
             .map(|mut r| {
                 r.result_type.get_or_insert(ResultType::COMPLETE);
+                r.ttl_ms.get_or_insert(0);
+                r.cache_scope.get_or_insert(CacheScope::Private);
                 r
             })
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))

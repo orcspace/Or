@@ -56,7 +56,10 @@ impl ServerHandler for Server {
         _: Option<PaginatedRequestParams>,
         _: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, rmcp::ErrorData> {
-        Ok(ListToolsResult::with_all_items(super::tools::definitions()))
+        let mut result = ListToolsResult::with_all_items(super::tools::definitions());
+        result.ttl_ms = Some(0);
+        result.cache_scope = Some(CacheScope::Private);
+        Ok(result)
     }
     async fn call_tool(
         &self,
@@ -93,7 +96,7 @@ impl ServerHandler for Server {
         _: Option<PaginatedRequestParams>,
         _: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, rmcp::ErrorData> {
-        serde_json::from_value(json!({"resources":[{"uri":"trinedocs://documents","name":"Open documents","mimeType":"application/json"}]})).map_err(|e|rmcp::ErrorData::internal_error(e.to_string(),None))
+        serde_json::from_value(json!({"resources":[{"uri":"trinedocs://documents","name":"Open documents","mimeType":"application/json"}],"ttlMs":0,"cacheScope":"private"})).map_err(|e|rmcp::ErrorData::internal_error(e.to_string(),None))
     }
     async fn read_resource(
         &self,
