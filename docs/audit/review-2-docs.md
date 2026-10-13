@@ -179,3 +179,48 @@ Premultiplied color×texture и source-over over opaque background соотве�
 TexturesDelta API обработан как texture ID → последовательность full/patch deltas; применяется каждый delta в порядке до tessellation. Triangles извлекаются as_chunks::<3>(), remainder запрещён прежней length%3 проверкой, dynamic vertex access guarded. В этой повторной проверке новых critical/blocker findings не обнаружено.
 
 Root сообщил о 126 Rust tests PASS (112 app +14 shell) после PNG fixes. Агент не запускал собственную сборку и не заменяет этим сообщением фактический installer/UI smoke gate. Independent pixel comparison, CJK fallback, rotations support, all-slide PNG routing и измерения memory/performance остаются ограничениями. Все исходники в этом task только читались; изменён данный report под claim.
+
+## HIGH stable ID reuse после Undo/Redo: исправление ops
+
+Root обнаружил новый data-identity defect перед следующим preview build: история содержала entire Document snapshots, включая next_id. Undo/Redo и AI rollback могли уменьшить allocator counter. После создания объекта → Undo → создания другого объекта удалённый ID выдавался повторно; stale MCP handle с optional base_version мог обратиться к другой сущности.
+
+По отдельной claim изменён только ops.rs:
+- Replace повышает candidate next_id до текущего floor для Docs/Book/Deck.
+- Undo/Redo клонируют history snapshot, сохраняют floor и validate candidate до pop/commit. Version-overflow guard остаётся перед pop; ошибки не меняют модель, counter или history.
+- reject_ai сравнивает current с expected_after, выровненным по текущему floor. Metadata-only high-water difference после Undo/Redo не создаёт ложный conflict; реальные последующие изменения по-прежнему блокируют откат.
+- Центральный Replace guard запрещает смену editor kind существующей вкладки; тип не меняется при исправлении allocator metadata.
+
+Добавлены пять meaningful regressions: реальные paragraphs/cells/elements создаются, commit → Undo → другой объект во всех трёх редакторах без ID reuse; Redo → Undo → AI rollback с высоким counter и real-content conflict; Replace старого snapshot не снижает floor; Redo overflow/readonly сохраняют model/history; kind change отказ атомарный. Старый test equality обновлён, поскольку возвращаемый контент прежний, а allocator metadata теперь намеренно монотонна. Cargo/target этим агентом не запускались; root запускает fmt/tests после последнего изменения.
+
+Независимый агент Slides повторно прочитал исправленный ops: preflight/atomicity и counter-only AI normalization корректны; Deck.allocate_id используется также для group/duplicate/paste, а validate включает group IDs в max_id. Агент Sheets выполняет дополнительный read-only review.
+
+Не закрытые этим локальным исправлением external paths переданы root/владельцам:
+- App direct Office reload с прежним TabID присваивает imported model вне ops и сбрасывает идентичность; нужен новый document namespace/TabID при reload, одного counter floor недостаточно для существующих imported IDs.
+- Explicit replace_document_model может задать ранее удалённый ID вручную: allocator floor защищает нормальное выделение новых IDs, а не произвольный поддельный full model.
+- Docs before/after flatten cursor mapping неоднозначен при одинаковых paragraphs; untouched stable ID требуется учитывать. Split-target identical insert в начале/конце невозможно всегда различить только по snapshots, для полного position transform нужны Op deltas.
+
+Это исправление делает обычные editor allocations монотонными в пределах текущей вкладки. Оно не является заявлением полного CRDT/MCP идентичностного паритета или завершённого Office release.
+
+## Точное преобразование cursor/anchor для MCP, повторный текст
+
+Новая независимая находка Sheets показала неоднозначность snapshot-only diff: одинаковые paragraphs и одинаковый inserted text не позволяют достоверно восстановить место операции. Этот дефект исправлен точными metadata для четырёх MCP text tools; эвристика не выдаётся за полный position-transform contract.
+
+В Docs model добавлен TextEditDelta со стабильными ID якорей и фактическими start/end/after_end scalar positions, полученными непосредственно во время операции. insert_text, replace_range, delete_range и replace_all передают deltas в ops; replace_all использует bounded linear find и максимум10 000 matches, заменяя с конца с сохранением известного порядка.
+
+История хранит известные deltas. Undo/AI rollback инвертируют их в обратном порядке, Redo применяет исходный порядок. Таблица pending edits ограничена20 000 и передаётся в новый show_with_edits. Старый show API сохранён. Editor применяет очередь один раз к обеим точкам selection, после чего существующий end-of-frame baseline обновляется без дополнительного Doc clone; следующая отрисовка не применяет diff повторно.
+
+Unknown full-model/user-history changes явно отмечены None и reconciled ограниченным stable-ID/diff fallback. После successful unknown Docs edit App завершает batch, активирует target и запрашивает следующий кадр; transient pending-busy error также активирует конкретный target, чтобы off-tab reconciliation не блокировалась навсегда. Known deltas не отбрасываются молча; ошибки bounds/queue оставляют model/history без изменений. Новый namespace при tagged reload создаёт свежий Tab и не переносит старую pending queue.
+
+Regressions: untouched identical paragraph следует своему stable ID; одинаковые insert в начале/конце имеют различный точный transform; sequential edits с обоими selection ends и inverses; реальные MCP три вызова → headless editor consumer → следующий frame без double transform; replace_all → Undo/Redo reverse/forward delta order. Root выполняет cargo/fmt/clippy после source freeze. Изнутри replaced range caret возвращается к range boundary, а не угадывает утраченную внутреннюю позицию; это явное правило affinity.
+
+Дополнительный независимый read-only pass Slides raw model guard подтвердил required base_version в schema/runtime, stale check до parse, typed live-role IDs или fresh IDs>=current floor, включая11 structural roles и group IDs. Deep validation предшествует acceptance; rejected apply/dry-run не меняют модель/версию/history. Raw full model разрешает редактировать живую сущность той же роли, но запрещает возвращать retired ID или присвоить paragraph ID таблице. Код tools этого guard агент Docs не изменял после handoff.
+
+Scope ограничения сохраняются: неизвестная полная замена/история без deltas использует эвристику; grapheme/bidi/shaping и CJK fallback, full Word parity и ручной IME/UI acceptance не реализованы/не доказаны. Все source claims освобождены до общей проверки; этот этап изменяет только report/matrix.
+
+## Общая проверка: дефект headless test harness и повторное подтверждение ID guard
+
+Root сообщил: global clippy clean, первый общий запуск после нового delta/identity batch дал130/131 app tests PASS. Единственное падение mcp_multicall_editor_selection_rebases_once произошло из-за debug assert egui0.36 при уничтожении unapplied TexturesDelta. Это дефект нового headless test harness: renderer намеренно отсутствует, но run_ui output нужно явно discard через clear. Падение не свидетельствовало о production cursor transform или native eframe renderer defect.
+
+Root изменил только три run_ui outputs внутри #[cfg(test)]: mutable output и output.textures_delta.clear(). Агент Docs независимо прочитал актуальный test и закреплённый epaint0.36.2 TexturesDelta::Drop, который явно требует clear() для intentional discard. Все три места обработаны; реальные cursor/anchor/no-double-transform assertions сохранены. Source/target этим агентом в этой проверке не изменялись. Повторный общий cargo test в момент записи ещё выполнялся.
+
+Также независимо подтверждён финальный tools lifecycle guard: validate_replacement_ids вызывается после deep candidate validation для всех typed/full-model candidate changes, а не только raw replacement. Поэтому slides_update_element не может присвоить уже retired group ID; normal live same-role/fresh IDs остаются разрешены. Undo/Redo идут отдельным ранним путём; inverse history и AI rollback могут намеренно восстановить прежние IDs при сохранении allocator high-water. Этот source pass закрывает известный typed group injection bypass; окончательное green отражает повторная общая проверка root.

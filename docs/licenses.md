@@ -1,7 +1,7 @@
 # Зависимости и лицензии
 
 Полный production Cargo.lock: 444 registry packages. Проверка exact versions на 2026-10-13T00:00:00+00:00.
-Cargo.lock SHA-256: 867b0bbe1c0e2a3e0e144f2f175b7f4ea7f03fc5074297b7f227bf1c29f156eb.
+Cargo.lock SHA-256: a799a9c9cfebd0d3df604b765563b896565a43d512a5335174779b1ce809ed80.
 
 Реестр консервативно включает все target-specific и build-time зависимости lock; это не заявление, что каждый crate связан с Windows exe. Qt/CRDT spike не входят в этот граф.
 Декларации лицензий взяты из checksum-verified crates, даты/yank/checksum — из crates.io API. Отсутствующие в package LICENSE/NOTICE дополнены только с exact upstream commit из .cargo_vcs_info.json.

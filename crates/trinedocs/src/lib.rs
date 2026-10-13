@@ -1,4 +1,5 @@
 pub mod app;
+pub mod chrome;
 pub mod docs;
 pub mod file_io;
 pub mod fonts;

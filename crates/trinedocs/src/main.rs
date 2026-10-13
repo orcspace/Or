@@ -56,6 +56,13 @@ fn main() -> eframe::Result {
         .with_inner_size([1250.0, 820.0])
         .with_min_inner_size([780.0, 550.0])
         .with_title("TrineDocs");
+    if ui_root.is_some() {
+        if std::env::args().any(|a| a == "--ui-smoke-compact") {
+            viewport = viewport.with_inner_size([780.0, 550.0]);
+        } else if std::env::args().any(|a| a == "--ui-smoke-wide") {
+            viewport = viewport.with_inner_size([1680.0, 940.0]);
+        }
+    }
     if let Some(icon) = icon {
         viewport = viewport.with_icon(icon);
     }

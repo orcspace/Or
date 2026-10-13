@@ -14,8 +14,15 @@ struct ImageJob {
 #[derive(Clone, Default)]
 struct State {
     slide_id: u64,
+    table_rows: usize,
+    table_columns: usize,
+    show_thumbnails: bool,
+    hide_thumbnails: bool,
+    show_properties: bool,
+    canvas_rect: Option<Rect>,
+    show_notes: bool,
     selected: Vec<u64>,
-    clipboard: Vec<Element>,
+    clipboard: std::sync::Arc<Vec<Element>>,
     drag_original: Vec<(u64, f32, f32, f32, f32)>,
     edit_text: Option<u64>,
     grid: bool,
@@ -62,6 +69,17 @@ pub fn show(ui: &mut egui::Ui, deck: &mut Deck) -> bool {
     if state.zoom <= 0.0 {
         state.zoom = 1.0;
     }
+    if state.table_rows == 0 {
+        state.table_rows = 3;
+    }
+    if state.table_columns == 0 {
+        state.table_columns = 3;
+    }
+    if let Some(clipboard) = ui.ctx().data(|data| {
+        data.get_temp::<std::sync::Arc<Vec<Element>>>(egui::Id::new("slides-shared-clipboard"))
+    }) {
+        state.clipboard = clipboard;
+    }
     let mut dropped_slide = None;
     if deck.slide(state.slide_id).is_none() {
         state.slide_id = deck.slides.first().map(|s| s.id).unwrap_or(0);
@@ -77,7 +95,10 @@ pub fn show(ui: &mut egui::Ui, deck: &mut Deck) -> bool {
     }) {
         state.edit_text = None;
     }
-    if ui.input(|i| i.key_pressed(egui::Key::F5)) {
+    if ui.is_enabled()
+        && !egui::Popup::is_any_open(ui.ctx())
+        && ui.input(|i| i.key_pressed(egui::Key::F5))
+    {
         let index = if ui.input(|i| i.modifiers.shift) {
             deck.slides
                 .iter()
@@ -141,177 +162,8 @@ pub fn show(ui: &mut egui::Ui, deck: &mut Deck) -> bool {
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(50));
     }
+    changed |= ribbon(ui, deck, &mut state);
     let (deck_width, deck_height) = (deck.width, deck.height);
-    ui.horizontal_wrapped(|ui| {
-        ui.menu_button("Новый слайд", |ui| {
-            for (name, layout) in [
-                ("Титульный", "title"),
-                ("Заголовок и текст", "content"),
-                ("Пустой", "blank"),
-            ] {
-                if ui.button(name).clicked() {
-                    state.slide_id = deck.add_slide(layout);
-                    state.selected.clear();
-                    changed = true;
-                    ui.close();
-                }
-            }
-        });
-        if ui.button("Дубликат").clicked() {
-            match deck.duplicate_slide(state.slide_id) {
-                Ok(id) => {
-                    state.slide_id = id;
-                    changed = true;
-                }
-                Err(e) => state.error = e,
-            }
-        }
-        if ui
-            .add_enabled(!deck.slides.is_empty(), egui::Button::new("Удалить слайд"))
-            .clicked()
-        {
-            match deck.delete_slide(state.slide_id) {
-                Ok(()) => {
-                    state.slide_id = deck.slides.first().map(|s| s.id).unwrap_or(0);
-                    state.selected.clear();
-                    changed = true;
-                }
-                Err(e) => state.error = e,
-            }
-        }
-        ui.separator();
-        ui.menu_button("Вставить", |ui| {
-            for (label, kind) in [
-                ("Текст", ElementKind::Text),
-                ("Прямоугольник", ElementKind::Rect),
-                ("Эллипс", ElementKind::Ellipse),
-                ("Линия", ElementKind::Line),
-                ("Стрелка", ElementKind::Arrow),
-                (
-                    "Таблица 3×3",
-                    ElementKind::Table {
-                        cells: vec![vec!["".into(); 3]; 3],
-                    },
-                ),
-                (
-                    "Столбчатая диаграмма",
-                    ElementKind::Chart {
-                        values: vec![30.0, 60.0, 45.0],
-                        labels: vec!["A".into(), "B".into(), "C".into()],
-                    },
-                ),
-            ] {
-                if ui.button(label).clicked() {
-                    match deck.add_element(state.slide_id, kind) {
-                        Ok(id) => {
-                            state.selected = vec![id];
-                            changed = true;
-                        }
-                        Err(e) => state.error = e,
-                    };
-                    ui.close();
-                }
-            }
-            if ui
-                .add_enabled(
-                    state.image_job.is_none(),
-                    egui::Button::new("Изображение PNG / JPEG…"),
-                )
-                .clicked()
-            {
-                let (sender, receiver) = std::sync::mpsc::channel();
-                let ctx = ui.ctx().clone();
-                state.image_job = Some(ImageJob {
-                    slide_id: state.slide_id,
-                    result: std::sync::Arc::new(std::sync::Mutex::new(receiver)),
-                });
-                std::thread::spawn(move || {
-                    let result = (|| {
-                        let Some(path) = rfd::FileDialog::new()
-                            .add_filter("Изображения", &["png", "jpg", "jpeg"])
-                            .pick_file()
-                        else {
-                            return Ok(None);
-                        };
-                        let bytes = crate::util::read_file(&path)?;
-                        if bytes.len() > 32 * 1024 * 1024 {
-                            return Err("Изображение превышает 32 МБ".into());
-                        }
-                        super::model::image_dimensions(&bytes)?;
-                        crate::util::decode_image(&bytes)?;
-                        Ok(Some(bytes))
-                    })();
-                    let _ = sender.send(result);
-                    ctx.request_repaint();
-                });
-                ui.close();
-            }
-        });
-        ui.menu_button("Макет", |ui| {
-            for (label, layout) in [
-                ("Титульный", "title"),
-                ("Заголовок и текст", "content"),
-                ("Две колонки", "two_content"),
-                ("Пустой", "blank"),
-            ] {
-                if ui.button(label).clicked() {
-                    match deck.set_layout(state.slide_id, layout) {
-                        Ok(()) => changed = true,
-                        Err(e) => state.error = e,
-                    }
-                    ui.close();
-                }
-            }
-        });
-        ui.menu_button("Тема", |ui| {
-            for theme in [
-                Theme::default(),
-                Theme {
-                    name: "Тёмная".into(),
-                    background: [24, 30, 42],
-                    foreground: [244, 246, 250],
-                    accent: [84, 156, 230],
-                    ..Theme::default()
-                },
-                Theme {
-                    name: "Зелёная".into(),
-                    background: [245, 250, 247],
-                    foreground: [26, 53, 38],
-                    accent: [62, 153, 101],
-                    ..Theme::default()
-                },
-            ] {
-                if ui.button(&theme.name).clicked() {
-                    deck.apply_theme(theme);
-                    changed = true;
-                    ui.close();
-                }
-            }
-        });
-        if ui.button("16:9").clicked() {
-            deck.width = 960.0;
-            deck.height = 540.0;
-            changed = true;
-        }
-        if ui.button("4:3").clicked() {
-            deck.width = 720.0;
-            deck.height = 540.0;
-            changed = true;
-        }
-        ui.checkbox(&mut state.grid, "Сетка");
-        ui.add(egui::Slider::new(&mut state.zoom, 0.25..=2.0).text("Масштаб"));
-        if ui.button("Показ F5").clicked() {
-            state.presentation.start(ui.ctx(), deck, 0);
-        }
-        if ui.button("С текущего").clicked() {
-            let index = deck
-                .slides
-                .iter()
-                .position(|s| s.id == state.slide_id)
-                .unwrap_or(0);
-            state.presentation.start(ui.ctx(), deck, index);
-        }
-    });
     if !state.error.is_empty() {
         ui.horizontal(|ui| {
             ui.colored_label(Color32::from_rgb(190, 50, 50), &state.error);
@@ -323,16 +175,316 @@ pub fn show(ui: &mut egui::Ui, deck: &mut Deck) -> bool {
     if let Some(warning) = deck.warnings.first() {
         ui.small(warning);
     }
-    ui.separator();
-    let main_height = (ui.available_height() - 135.0).max(180.0);
+    let compact = ui.available_width() < 860.0;
+    let compact_notes = ui.available_height() < 300.0;
+    let notes_visible = state.show_notes && !compact_notes;
+    let main_height =
+        (ui.available_height() - 34.0 - if notes_visible { 94.0 } else { 0.0 }).max(60.0);
     let main_width = ui.available_width();
-    let center_width = (main_width - 420.0).max(180.0);
+    let thumbnails_visible = !compact && !state.hide_thumbnails;
+    let properties_visible = !compact && state.show_properties;
+    let spacing = ui.spacing().item_spacing.x;
+    let center_width = (main_width
+        - if thumbnails_visible {
+            172.0 + spacing
+        } else {
+            0.0
+        }
+        - if properties_visible {
+            260.0 + spacing
+        } else {
+            0.0
+        })
+    .max(100.0);
     ui.horizontal_top(|ui| {
-        ui.allocate_ui(Vec2::new(155.0, main_height), |ui| {
-            ui.set_width(155.0);
+        if thumbnails_visible {
+            ui.allocate_ui_with_layout(
+                Vec2::new(172.0, main_height),
+                egui::Layout::top_down(egui::Align::LEFT),
+                |ui| {
+                    changed |=
+                        thumbnail_panel(ui, deck, &mut state, main_height, &mut dropped_slide);
+                },
+            );
+        }
+        ui.allocate_ui_with_layout(
+            Vec2::new(center_width, main_height),
+            egui::Layout::top_down(egui::Align::LEFT),
+            |ui| {
+                ui.set_width(center_width);
+                egui::Frame::new()
+                    .fill(crate::chrome::workspace(ui))
+                    .inner_margin(12)
+                    .corner_radius(6)
+                    .show(ui, |ui| {
+                        let available_width = (center_width - 24.0).max(76.0);
+                        let available_height = (main_height - 24.0).max(24.0);
+                        if let Some(slide) = deck.slide_mut(state.slide_id) {
+                            let scale = (available_width / deck_width)
+                                .min(available_height / deck_height)
+                                * state.zoom;
+                            egui::ScrollArea::both()
+                                .id_salt("slides_canvas")
+                                .auto_shrink([false, false])
+                                .max_height(available_height)
+                                .show(ui, |ui| {
+                                    ui.add_space(
+                                        ((available_height - deck_height * scale) / 2.0).max(0.0),
+                                    );
+                                    ui.horizontal(|ui| {
+                                        ui.add_space(
+                                            ((available_width - deck_width * scale) / 2.0).max(0.0),
+                                        );
+                                        changed |= canvas(
+                                            ui,
+                                            slide,
+                                            deck_width,
+                                            deck_height,
+                                            scale,
+                                            &mut state,
+                                        );
+                                    });
+                                });
+                        } else {
+                            ui.centered_and_justified(|ui| {
+                                ui.label("Создайте первый слайд");
+                            });
+                        }
+                    });
+            },
+        );
+        if properties_visible {
+            ui.allocate_ui_with_layout(
+                Vec2::new(260.0, main_height),
+                egui::Layout::top_down(egui::Align::LEFT),
+                |ui| {
+                    changed |= slide_panel(ui, deck, &mut state, main_height);
+                },
+            );
+        }
+    });
+    if compact {
+        let enabled = ui.is_enabled();
+        if state.show_thumbnails {
+            let mut open = true;
+            egui::Window::new("Слайды")
+                .id(memory_id.with("thumbnails-window"))
+                .open(&mut open)
+                .default_width(195.0)
+                .default_height(420.0)
+                .show(ui.ctx(), |ui| {
+                    ui.add_enabled_ui(enabled, |ui| {
+                        let height = ui.available_height().clamp(140.0, 600.0);
+                        changed |=
+                            thumbnail_panel(ui, deck, &mut state, height, &mut dropped_slide);
+                    });
+                });
+            state.show_thumbnails = open;
+        }
+        if state.show_properties {
+            let mut open = true;
+            egui::Window::new("Свойства слайда и объекта")
+                .id(memory_id.with("properties-window"))
+                .open(&mut open)
+                .default_width(280.0)
+                .default_height(500.0)
+                .show(ui.ctx(), |ui| {
+                    ui.add_enabled_ui(enabled, |ui| {
+                        let height = ui.available_height().clamp(140.0, 650.0);
+                        changed |= slide_panel(ui, deck, &mut state, height);
+                    });
+                });
+            state.show_properties = open;
+        }
+    }
+    if let Some((id, index)) = dropped_slide {
+        match deck.move_slide(id, index) {
+            Ok(()) => changed = true,
+            Err(e) => state.error = e,
+        }
+    }
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        let index = deck
+            .slides
+            .iter()
+            .position(|slide| slide.id == state.slide_id);
+        ui.label(
+            egui::RichText::new(format!(
+                "Слайд {} из {}",
+                index.map(|index| index + 1).unwrap_or(0),
+                deck.slides.len()
+            ))
+            .color(crate::chrome::muted(ui)),
+        );
+        ui.separator();
+        ui.toggle_value(&mut state.show_notes, "Заметки");
+        ui.toggle_value(&mut state.show_properties, "Свойства");
+        if compact && ui.button("Слайды…").clicked() {
+            state.show_thumbnails = true;
+        }
+    });
+    if compact_notes {
+        if state.show_notes {
+            let mut open = true;
+            let enabled = ui.is_enabled();
+            egui::Window::new("Заметки докладчика")
+                .id(memory_id.with("notes-window"))
+                .open(&mut open)
+                .default_size(Vec2::new(500.0, 250.0))
+                .show(ui.ctx(), |ui| {
+                    ui.add_enabled_ui(enabled, |ui| {
+                        if let Some(slide) = deck.slide_mut(state.slide_id) {
+                            changed |= ui
+                                .add(
+                                    egui::TextEdit::multiline(&mut slide.notes)
+                                        .id(memory_id.with("notes"))
+                                        .desired_rows(8)
+                                        .desired_width(f32::INFINITY),
+                                )
+                                .changed();
+                        }
+                    });
+                });
+            state.show_notes = open;
+        }
+    } else if state.show_notes
+        && let Some(slide) = deck.slide_mut(state.slide_id)
+    {
+        ui.label(egui::RichText::new("Заметки докладчика").color(crate::chrome::muted(ui)));
+        changed |= ui
+            .add_sized(
+                Vec2::new(ui.available_width(), 70.0),
+                egui::TextEdit::multiline(&mut slide.notes)
+                    .id(memory_id.with("notes"))
+                    .desired_rows(3),
+            )
+            .changed();
+    }
+    if let Some(id) = state.edit_text {
+        let mut open = true;
+        let editor_enabled = ui.is_enabled();
+        egui::Window::new("Текст объекта")
+            .id(memory_id.with("text"))
+            .open(&mut open)
+            .default_width(500.0)
+            .show(ui.ctx(), |ui| {
+                ui.add_enabled_ui(ui.is_enabled() && editor_enabled, |ui| {
+                    if let Some(element) = deck
+                        .slide_mut(state.slide_id)
+                        .and_then(|s| s.element_mut(id))
+                    {
+                        changed |= ui
+                            .add(
+                                egui::TextEdit::multiline(&mut element.text)
+                                    .desired_width(480.0)
+                                    .desired_rows(8),
+                            )
+                            .changed();
+                    }
+                });
+            });
+        if !open {
+            state.edit_text = None;
+        }
+    }
+    if ui.is_enabled()
+        && !ui.ctx().text_edit_focused()
+        && !egui::Popup::is_any_open(ui.ctx())
+        && state.edit_text.is_none()
+    {
+        let key = |key| ui.input(|i| i.modifiers.ctrl && i.key_pressed(key));
+        if key(egui::Key::A)
+            && let Some(slide) = deck.slide(state.slide_id)
+        {
+            state.selected = slide.elements.iter().map(|e| e.id).collect();
+        }
+        if key(egui::Key::C)
+            || ui.input(|i| {
+                i.events
+                    .iter()
+                    .any(|event| matches!(event, egui::Event::Copy))
+            })
+        {
+            copy_selection(ui.ctx(), deck, &mut state);
+        }
+        if key(egui::Key::X)
+            || ui.input(|i| {
+                i.events
+                    .iter()
+                    .any(|event| matches!(event, egui::Event::Cut))
+            })
+        {
+            copy_selection(ui.ctx(), deck, &mut state);
+            changed |= delete_selection(deck, &mut state);
+        }
+        let pasted_text = ui.input(|i| {
+            i.events.iter().find_map(|event| {
+                if let egui::Event::Paste(text) = event {
+                    Some(text.clone())
+                } else {
+                    None
+                }
+            })
+        });
+        if let Some(text) = pasted_text {
+            let internal_text = state
+                .clipboard
+                .iter()
+                .map(|e| e.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !state.clipboard.is_empty() && text == internal_text {
+                changed |= paste_selection(deck, &mut state);
+            } else if !text.is_empty() {
+                match deck.add_element(state.slide_id, ElementKind::Text) {
+                    Ok(id) => {
+                        if let Some(element) = deck
+                            .slide_mut(state.slide_id)
+                            .and_then(|slide| slide.element_mut(id))
+                        {
+                            element.text = text;
+                        }
+                        state.selected = vec![id];
+                        changed = true;
+                    }
+                    Err(error) => state.error = error,
+                }
+            }
+        } else if key(egui::Key::V) {
+            changed |= paste_selection(deck, &mut state);
+        }
+        if key(egui::Key::D) {
+            changed |= duplicate_selection(deck, &mut state);
+        }
+    }
+    record_presentation(ui.ctx(), memory_id, state.presentation.active);
+    ui.ctx().data_mut(|d| d.insert_temp(memory_id, state));
+    changed
+}
+fn thumbnail_panel(
+    ui: &mut egui::Ui,
+    deck: &mut Deck,
+    state: &mut State,
+    main_height: f32,
+    dropped_slide: &mut Option<(u64, usize)>,
+) -> bool {
+    let mut changed = false;
+    let left_width = 172.0;
+    egui::Frame::new()
+        .fill(ui.visuals().window_fill)
+        .inner_margin(9)
+        .corner_radius(8)
+        .show(ui, |ui| {
+            ui.set_width(left_width - 18.0);
+            ui.label(
+                egui::RichText::new(format!("Слайды · {}", deck.slides.len()))
+                    .strong()
+                    .color(crate::chrome::muted(ui)),
+            );
             egui::ScrollArea::vertical()
                 .id_salt("slide_thumbnails")
-                .max_height(main_height)
+                .max_height((main_height - 70.0).max(70.0))
                 .show(ui, |ui| {
                     for (index, slide) in deck.slides.iter().enumerate() {
                         let selected = slide.id == state.slide_id;
@@ -345,338 +497,630 @@ pub fn show(ui: &mut egui::Ui, deck: &mut Deck) -> bool {
                         {
                             ui.strong(&slide.section);
                         }
-                        let (rect, response) = ui
-                            .allocate_exact_size(Vec2::new(145.0, 100.0), Sense::click_and_drag());
+                        let preview_width = 140.0;
+                        let preview_height = preview_width * deck.height / deck.width;
+                        let (rect, response) = ui.allocate_exact_size(
+                            Vec2::new(150.0, preview_height + 35.0),
+                            Sense::click_and_drag(),
+                        );
                         response.dnd_set_drag_payload(SlideDrag(slide.id));
                         if response.dnd_hover_payload::<SlideDrag>().is_some() {
                             ui.painter().line_segment(
                                 [rect.left_top(), rect.right_top()],
-                                Stroke::new(3.0, Color32::from_rgb(230, 106, 45)),
+                                Stroke::new(3.0, crate::chrome::accent(ui)),
                             );
                         }
                         if let Some(payload) = response.dnd_release_payload::<SlideDrag>() {
-                            dropped_slide = Some((payload.0, index));
+                            *dropped_slide = Some((payload.0, index));
                         }
                         ui.painter().rect_filled(
                             rect,
-                            4.0,
+                            6,
                             if selected {
                                 ui.visuals().selection.bg_fill
                             } else {
-                                ui.visuals().faint_bg_color
+                                ui.visuals().panel_fill
                             },
                         );
+                        if selected {
+                            ui.painter().rect_stroke(
+                                rect,
+                                6,
+                                Stroke::new(1.5, crate::chrome::accent(ui)),
+                                StrokeKind::Inside,
+                            );
+                        }
                         let canvas = Rect::from_min_size(
-                            rect.min + Vec2::new(5.0, 5.0),
-                            Vec2::new(135.0, 135.0 * deck.height / deck.width),
+                            rect.min + Vec2::splat(5.0),
+                            Vec2::new(preview_width, preview_height),
                         );
                         paint_slide(ui.ctx(), ui.painter(), canvas, deck, slide, None);
                         ui.painter().text(
-                            rect.left_bottom() + Vec2::new(5.0, -5.0),
+                            rect.left_bottom() + Vec2::new(8.0, -7.0),
                             Align2::LEFT_BOTTOM,
                             format!(
-                                "{}{} {}",
+                                "{}{}  {}",
                                 index + 1,
                                 if slide.hidden { " ◌" } else { "" },
-                                slide.title.chars().take(14).collect::<String>()
+                                slide.title.chars().take(15).collect::<String>()
                             ),
-                            FontId::proportional(12.0),
+                            FontId::proportional(11.0),
                             ui.visuals().text_color(),
                         );
                         if response.clicked() {
                             state.slide_id = slide.id;
                             state.selected.clear();
+                            state.edit_text = None;
                         }
                     }
                 });
             ui.horizontal(|ui| {
-                if ui.button("↑").clicked()
+                if ui
+                    .button("↑")
+                    .on_hover_text("Сдвинуть слайд вверх")
+                    .clicked()
                     && let Some(index) = deck.slides.iter().position(|s| s.id == state.slide_id)
                     && index > 0
                 {
                     match deck.move_slide(state.slide_id, index - 1) {
                         Ok(()) => changed = true,
-                        Err(e) => state.error = e,
+                        Err(error) => state.error = error,
                     }
                 }
-                if ui.button("↓").clicked()
+                if ui
+                    .button("↓")
+                    .on_hover_text("Сдвинуть слайд вниз")
+                    .clicked()
                     && let Some(index) = deck.slides.iter().position(|s| s.id == state.slide_id)
                     && index + 1 < deck.slides.len()
                 {
                     match deck.move_slide(state.slide_id, index + 1) {
                         Ok(()) => changed = true,
-                        Err(e) => state.error = e,
+                        Err(error) => state.error = error,
                     }
                 }
+                ui.small("Перетащите");
             });
         });
-        ui.allocate_ui(Vec2::new(center_width, main_height), |ui| {
-            ui.set_width(center_width);
-            if let Some(slide) = deck.slide_mut(state.slide_id) {
-                let scale = (center_width / deck_width).min((main_height - 20.0) / deck_height)
-                    * state.zoom;
-                egui::ScrollArea::both()
-                    .id_salt("slides_canvas")
-                    .max_height(main_height)
-                    .show(ui, |ui| {
-                        changed |= canvas(ui, slide, deck_width, deck_height, scale, &mut state);
-                    });
-            } else {
-                ui.centered_and_justified(|ui| {
-                    ui.label("Добавьте слайд");
-                });
-            }
-        });
-        ui.allocate_ui(Vec2::new(245.0, main_height), |ui| {
-            ui.set_width(245.0);
-            egui::ScrollArea::vertical()
-                .id_salt("slides_properties")
-                .max_height(main_height)
-                .show(ui, |ui| {
+
+    changed
+}
+fn slide_panel(ui: &mut egui::Ui, deck: &mut Deck, state: &mut State, main_height: f32) -> bool {
+    let mut changed = false;
+    let right_width = 260.0;
+    egui::Frame::new().fill(ui.visuals().window_fill).inner_margin(10).corner_radius(8).show(ui, |ui| {
+                ui.set_width(right_width - 20.0);
+                egui::ScrollArea::vertical().id_salt("slides_properties").max_height(main_height - 20.0).show(ui, |ui| {
                     if let Some(slide) = deck.slide_mut(state.slide_id) {
-                        ui.strong("Слайд");
-                        changed |= ui.text_edit_singleline(&mut slide.title).changed();
-                        changed |= ui.checkbox(&mut slide.hidden, "Скрыть в показе").changed();
+                        ui.strong("Свойства слайда");
+                        changed |= ui.add(egui::TextEdit::singleline(&mut slide.title).desired_width(f32::INFINITY)).changed();
                         ui.horizontal(|ui| {
+                            changed |= ui.checkbox(&mut slide.hidden, "Скрыть в показе").changed();
                             ui.label("Фон");
                             changed |= ui.color_edit_button_srgb(&mut slide.background).changed();
                         });
-                        ui.label("Раздел");
-                        changed |= ui.text_edit_singleline(&mut slide.section).changed();
+                        ui.label(egui::RichText::new("Раздел").color(crate::chrome::muted(ui)));
+                        changed |= ui.add(egui::TextEdit::singleline(&mut slide.section).desired_width(f32::INFINITY).hint_text("Без раздела")).changed();
                         ui.separator();
-                        ui.label("Переход");
-                        egui::ComboBox::from_id_salt("transition")
-                            .selected_text(&slide.transition.effect)
-                            .show_ui(ui, |ui| {
+                        egui::CollapsingHeader::new("Переход слайда").default_open(false).show(ui, |ui| {
+                            egui::ComboBox::from_id_salt("transition").selected_text(effect_label(&slide.transition.effect)).show_ui(ui, |ui| {
                                 for effect in ["none", "fade", "push", "wipe"] {
-                                    changed |= ui
-                                        .selectable_value(
-                                            &mut slide.transition.effect,
-                                            effect.into(),
-                                            effect,
-                                        )
-                                        .changed();
+                                    changed |= ui.selectable_value(&mut slide.transition.effect, effect.into(), effect_label(effect)).changed();
                                 }
                             });
-                        changed |= ui
-                            .add(
-                                egui::Slider::new(&mut slide.transition.duration, 0.1..=3.0)
-                                    .text("Сек."),
-                            )
-                            .changed();
-                        let mut auto = slide.transition.advance_after.is_some();
-                        if ui.checkbox(&mut auto, "Автопереход").changed() {
-                            slide.transition.advance_after = if auto { Some(5.0) } else { None };
-                            changed = true;
-                        }
-                        if let Some(seconds) = &mut slide.transition.advance_after {
-                            changed |= ui
-                                .add(
-                                    egui::DragValue::new(seconds)
-                                        .range(0.1..=3600.0)
-                                        .suffix(" сек."),
-                                )
-                                .changed();
-                        }
-                        ui.separator();
-                        if let Some(id) = state.selected.first().copied() {
-                            if let Some(element) = slide.element_mut(id) {
-                                changed |= properties(ui, element);
+                            changed |= ui.add(egui::Slider::new(&mut slide.transition.duration, 0.1..=3.0).text("Сек.")).changed();
+                            let mut auto = slide.transition.advance_after.is_some();
+                            if ui.checkbox(&mut auto, "Автоматический переход").changed() {
+                                slide.transition.advance_after = if auto { Some(5.0) } else { None }; changed = true;
                             }
-                        } else {
-                            ui.label("Выберите объект на слайде");
-                        }
-                    }
-                    if !state.selected.is_empty() {
-                        ui.horizontal_wrapped(|ui| {
-                            if ui.button("Копия").clicked() {
-                                let selected = state.selected.clone();
-                                state.selected.clear();
-                                for id in selected {
-                                    match deck.duplicate_element(state.slide_id, id) {
-                                        Ok(id) => {
-                                            state.selected.push(id);
-                                            changed = true;
-                                        }
-                                        Err(e) => state.error = e,
-                                    }
-                                }
-                            }
-                            if ui.button("Удалить").clicked() {
-                                for id in state.selected.clone() {
-                                    match deck.delete_element(state.slide_id, id) {
-                                        Ok(()) => changed = true,
-                                        Err(e) => state.error = e,
-                                    }
-                                }
-                                state.selected.clear();
-                            }
-                            if ui.button("Вперёд").clicked() {
-                                match deck.set_z_order_many(state.slide_id, &state.selected, true) {
-                                    Ok(()) => changed = true,
-                                    Err(error) => state.error = error,
-                                }
-                            }
-                            if ui.button("Назад").clicked() {
-                                match deck.set_z_order_many(state.slide_id, &state.selected, false)
-                                {
-                                    Ok(()) => changed = true,
-                                    Err(error) => state.error = error,
-                                }
+                            if let Some(seconds) = &mut slide.transition.advance_after {
+                                changed |= ui.add(egui::DragValue::new(seconds).range(0.1..=3600.0).suffix(" сек.")).changed();
                             }
                         });
-                        ui.menu_button("Выровнять", |ui| {
-                            for (label, axis) in [
-                                ("Слева", "left"),
-                                ("По центру", "center"),
-                                ("Справа", "right"),
-                                ("Сверху", "top"),
-                                ("Посередине", "middle"),
-                                ("Снизу", "bottom"),
-                                ("Распределить по горизонтали", "horizontal"),
-                                ("Распределить по вертикали", "vertical"),
+                        ui.separator();
+                        if let Some(id) = state.selected.first().copied() {
+                            if state.selected.len() > 1 { ui.small(format!("Выделено {} · свойства первого объекта", state.selected.len())); }
+                            if let Some(element) = slide.element_mut(id) { changed |= properties(ui, element); }
+                        } else {
+                            ui.add_space(15.0);
+                            ui.label(egui::RichText::new("Выберите объект").strong());
+                            ui.label(egui::RichText::new("Клик — выделение\nДвойной клик — текст\nCtrl / Shift — несколько объектов").color(crate::chrome::muted(ui)));
+                        }
+                    }
+                });
+            });
+
+    changed
+}
+
+fn ribbon(ui: &mut egui::Ui, deck: &mut Deck, state: &mut State) -> bool {
+    let mut changed = false;
+    let has_slide = deck.slide(state.slide_id).is_some();
+    let has_selection = has_slide && !state.selected.is_empty();
+    let compact = ui.available_width() < 860.0;
+    egui::Frame::new()
+        .fill(ui.visuals().window_fill)
+        .inner_margin(8)
+        .show(ui, |ui| {
+            egui::ScrollArea::horizontal()
+                .id_salt("slides_commands")
+                .max_height(36.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.menu_button("Новый слайд", |ui| {
+                            for (name, layout) in [
+                                ("Титульный", "title"),
+                                ("Заголовок и текст", "content"),
+                                ("Пустой", "blank"),
                             ] {
-                                if ui.button(label).clicked() {
-                                    if let Some(slide) = deck.slide_mut(state.slide_id) {
-                                        align(
-                                            slide,
-                                            &state.selected,
-                                            axis,
-                                            deck_width,
-                                            deck_height,
-                                        );
-                                        changed = true;
-                                    }
+                                if ui.button(name).clicked() {
+                                    state.slide_id = deck.add_slide(layout);
+                                    state.selected.clear();
+                                    state.edit_text = None;
+                                    changed = true;
                                     ui.close();
                                 }
                             }
                         });
-                        if state.selected.len() > 1 && ui.button("Сгруппировать").clicked()
-                        {
-                            let group = deck.allocate_id();
-                            if let Some(slide) = deck.slide_mut(state.slide_id) {
-                                for id in &state.selected {
-                                    if let Some(e) = slide.element_mut(*id) {
-                                        e.group = Some(group);
+                        ui.add_enabled_ui(has_slide, |ui| {
+                            ui.menu_button("Вставка", |ui| {
+                                if insert_button(ui, deck, state, "Текстовое поле", ElementKind::Text) {
+                                    changed = true;
+                                    ui.close();
+                                }
+                                ui.menu_button("Фигура", |ui| {
+                                    for (label, kind) in [
+                                        ("Прямоугольник", ElementKind::Rect),
+                                        ("Эллипс", ElementKind::Ellipse),
+                                        ("Линия", ElementKind::Line),
+                                        ("Стрелка", ElementKind::Arrow),
+                                    ] {
+                                        if insert_button(ui, deck, state, label, kind) {
+                                            changed = true;
+                                            ui.close();
+                                        }
                                     }
+                                });
+                                if ui.add_enabled(state.image_job.is_none(), egui::Button::new("Изображение…"))
+                                    .on_hover_text("PNG, JPEG · до 32 МБ").clicked() {
+                                    start_image_job(ui.ctx(), state);
+                                    ui.close();
                                 }
-                                changed = true;
-                            }
-                        }
-                        if ui.button("Разгруппировать").clicked()
-                            && let Some(slide) = deck.slide_mut(state.slide_id)
-                        {
-                            for id in &state.selected {
-                                if let Some(e) = slide.element_mut(*id) {
-                                    e.group = None;
+                                ui.menu_button("Таблица…", |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label("Строки");
+                                        ui.add(egui::DragValue::new(&mut state.table_rows).range(1..=20));
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("Столбцы");
+                                        ui.add(egui::DragValue::new(&mut state.table_columns).range(1..=20));
+                                    });
+                                    let kind = ElementKind::Table {
+                                        cells: vec![vec![String::new(); state.table_columns.max(1)]; state.table_rows.max(1)],
+                                    };
+                                    if insert_button(ui, deck, state, "Создать таблицу", kind) {
+                                        changed = true;
+                                        ui.close();
+                                    }
+                                });
+                                if insert_button(
+                                    ui, deck, state, "Столбчатая диаграмма",
+                                    ElementKind::Chart {
+                                        values: vec![30.0, 60.0, 45.0],
+                                        labels: vec!["A".into(), "B".into(), "C".into()],
+                                    },
+                                ) {
+                                    changed = true;
+                                    ui.close();
+                                }
+                            });
+                            ui.menu_button("Объект", |ui| {
+                                if ui.add_enabled(has_selection, egui::Button::new("Копировать · Ctrl+C")).clicked() {
+                                    copy_selection(ui.ctx(), deck, state);
+                                    ui.close();
+                                }
+                                if ui.add_enabled(has_selection, egui::Button::new("Вырезать · Ctrl+X")).clicked() {
+                                    copy_selection(ui.ctx(), deck, state);
+                                    changed |= delete_selection(deck, state);
+                                    ui.close();
+                                }
+                                if ui.add_enabled(!state.clipboard.is_empty(), egui::Button::new("Вставить объекты · Ctrl+V"))
+                                    .on_hover_text("Объекты из TrineDocs. Внешний текст вставляется через Ctrl+V.").clicked() {
+                                    changed |= paste_selection(deck, state);
+                                    ui.close();
+                                }
+                                if ui.add_enabled(has_selection, egui::Button::new("Дублировать · Ctrl+D")).clicked() {
+                                    changed |= duplicate_selection(deck, state);
+                                    ui.close();
+                                }
+                                ui.separator();
+                                ui.add_enabled_ui(has_selection, |ui| {
+                                    if ui.button("Редактировать текст…").clicked() {
+                                        state.edit_text = state.selected.first().copied();
+                                        ui.close();
+                                    }
+                                    ui.menu_button("Выровнять", |ui| {
+                                        for (label, axis) in [
+                                            ("Слева", "left"), ("По центру", "center"), ("Справа", "right"),
+                                            ("Сверху", "top"), ("Посередине", "middle"), ("Снизу", "bottom"),
+                                            ("Распределить по горизонтали", "horizontal"),
+                                            ("Распределить по вертикали", "vertical"),
+                                        ] {
+                                            if ui.add_enabled(
+                                                !matches!(axis, "horizontal" | "vertical") || state.selected.len() >= 3,
+                                                egui::Button::new(label),
+                                            ).clicked() {
+                                                let (width, height) = (deck.width, deck.height);
+                                                if let Some(slide) = deck.slide_mut(state.slide_id) {
+                                                    align(slide, &state.selected, axis, width, height);
+                                                    changed = true;
+                                                }
+                                                ui.close();
+                                            }
+                                        }
+                                    });
+                                    for (label, front) in [("На передний план", true), ("На задний план", false)] {
+                                        if ui.button(label).clicked() {
+                                            match deck.set_z_order_many(state.slide_id, &state.selected, front) {
+                                                Ok(()) => changed = true,
+                                                Err(error) => state.error = error,
+                                            }
+                                            ui.close();
+                                        }
+                                    }
+                                    if ui.add_enabled(state.selected.len() > 1, egui::Button::new("Сгруппировать")).clicked() {
+                                        let group = deck.allocate_id();
+                                        if let Some(slide) = deck.slide_mut(state.slide_id) {
+                                            for id in &state.selected {
+                                                if let Some(element) = slide.element_mut(*id) {
+                                                    element.group = Some(group);
+                                                }
+                                            }
+                                            changed = true;
+                                        }
+                                        ui.close();
+                                    }
+                                    if ui.button("Разгруппировать").clicked() {
+                                        if let Some(slide) = deck.slide_mut(state.slide_id) {
+                                            for id in &state.selected {
+                                                if let Some(element) = slide.element_mut(*id) {
+                                                    changed |= element.group.take().is_some();
+                                                }
+                                            }
+                                        }
+                                        ui.close();
+                                    }
+                                    ui.separator();
+                                    if ui.button("Удалить объект · Delete").clicked() {
+                                        changed |= delete_selection(deck, state);
+                                        ui.close();
+                                    }
+                                });
+                            });
+                            ui.menu_button("Оформление", |ui| {
+                                changed |= layout_menu(ui, deck, state);
+                                changed |= theme_menu(ui, deck);
+                                ui.menu_button("Размер слайда", |ui| {
+                                    for (label, width) in [("16:9", 960.0), ("4:3", 720.0)] {
+                                        if ui.selectable_label(deck.width == width && deck.height == 540.0, label).clicked() {
+                                            changed |= deck.width != width || deck.height != 540.0;
+                                            deck.width = width;
+                                            deck.height = 540.0;
+                                            ui.close();
+                                        }
+                                    }
+                                });
+                                ui.separator();
+                                if ui.button("Дублировать слайд").clicked() {
+                                    match deck.duplicate_slide(state.slide_id) {
+                                        Ok(id) => {
+                                            state.slide_id = id;
+                                            state.selected.clear();
+                                            state.edit_text = None;
+                                            changed = true;
+                                        }
+                                        Err(error) => state.error = error,
+                                    }
+                                    ui.close();
+                                }
+                                if ui.button("Удалить слайд").clicked() {
+                                    match deck.delete_slide(state.slide_id) {
+                                        Ok(()) => {
+                                            state.slide_id = deck.slides.first().map(|slide| slide.id).unwrap_or(0);
+                                            state.selected.clear();
+                                            state.edit_text = None;
+                                            changed = true;
+                                        }
+                                        Err(error) => state.error = error,
+                                    }
+                                    ui.close();
+                                }
+                            });
+                        });
+                        ui.menu_button("Вид", |ui| {
+                            if compact {
+                                if ui.button("Слайды…").clicked() {
+                                    state.show_thumbnails = true;
+                                    ui.close();
+                                }
+                            } else {
+                                let mut thumbnails = !state.hide_thumbnails;
+                                if ui.checkbox(&mut thumbnails, "Миниатюры слайдов").changed() {
+                                    state.hide_thumbnails = !thumbnails;
                                 }
                             }
-                            changed = true;
-                        }
-                    }
+                            ui.checkbox(&mut state.show_properties, "Свойства слайда и объекта");
+                            ui.checkbox(&mut state.show_notes, "Заметки докладчика");
+                            ui.separator();
+                            ui.checkbox(&mut state.grid, "Сетка и привязка");
+                            ui.add(egui::Slider::new(&mut state.zoom, 0.25..=2.0).text("Масштаб"));
+                            if ui.button("Вписать в окно").clicked() {
+                                state.zoom = 1.0;
+                                ui.close();
+                            }
+                        });
+                        ui.add_enabled_ui(has_slide, |ui| {
+                            ui.menu_button("Показ", |ui| {
+                                if ui.button("С начала · F5").clicked() {
+                                    state.presentation.start(ui.ctx(), deck, 0);
+                                    ui.close();
+                                }
+                                if ui.button("С текущего · Shift+F5").clicked() {
+                                    let index = deck.slides.iter().position(|slide| slide.id == state.slide_id).unwrap_or(0);
+                                    state.presentation.start(ui.ctx(), deck, index);
+                                    ui.close();
+                                }
+                                ui.separator();
+                                ui.small("← → / пробел — следующий слайд");
+                                ui.small("Esc — закончить · указка и перо в показе");
+                            });
+                        });
+                    });
                 });
         });
-    });
-    if let Some((id, index)) = dropped_slide {
-        match deck.move_slide(id, index) {
-            Ok(()) => changed = true,
-            Err(e) => state.error = e,
-        }
-    }
-    if !ui.ctx().egui_wants_keyboard_input() {
-        let key = |key| ui.input(|i| i.modifiers.ctrl && i.key_pressed(key));
-        if key(egui::Key::A)
-            && let Some(slide) = deck.slide(state.slide_id)
-        {
-            state.selected = slide.elements.iter().map(|e| e.id).collect();
-        }
-        if key(egui::Key::C)
-            && let Some(slide) = deck.slide(state.slide_id)
-        {
-            state.clipboard = slide
-                .elements
-                .iter()
-                .filter(|e| state.selected.contains(&e.id))
-                .cloned()
-                .collect();
-            ui.ctx().copy_text(
-                state
-                    .clipboard
-                    .iter()
-                    .map(|e| e.text.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            );
-        }
-        if key(egui::Key::V) && !state.clipboard.is_empty() {
-            state.selected.clear();
-            for mut e in state.clipboard.clone() {
-                e.id = deck.allocate_id();
-                e.x += 20.0;
-                e.y += 20.0;
-                e.group = None;
-                if let Some(slide) = deck.slide_mut(state.slide_id) {
-                    state.selected.push(e.id);
-                    slide.elements.push(e);
-                    changed = true;
-                }
-            }
-        }
-        if key(egui::Key::D) {
-            let selected = state.selected.clone();
-            state.selected.clear();
-            for id in selected {
-                match deck.duplicate_element(state.slide_id, id) {
-                    Ok(id) => {
-                        state.selected.push(id);
-                        changed = true;
-                    }
-                    Err(e) => state.error = e,
-                }
-            }
-        }
-    }
-    ui.separator();
-    if let Some(slide) = deck.slide_mut(state.slide_id) {
-        ui.label("Заметки докладчика");
-        changed |= ui
-            .add_sized(
-                Vec2::new(ui.available_width(), 85.0),
-                egui::TextEdit::multiline(&mut slide.notes).desired_rows(3),
-            )
-            .changed();
-    }
-    if let Some(id) = state.edit_text {
-        let mut open = true;
-        egui::Window::new("Текст объекта")
-            .id(memory_id.with("text"))
-            .open(&mut open)
-            .default_width(500.0)
-            .show(ui.ctx(), |ui| {
-                if let Some(element) = deck
-                    .slide_mut(state.slide_id)
-                    .and_then(|s| s.element_mut(id))
-                {
-                    changed |= ui
-                        .add(
-                            egui::TextEdit::multiline(&mut element.text)
-                                .desired_width(480.0)
-                                .desired_rows(8),
-                        )
-                        .changed();
-                }
-            });
-        if !open {
-            state.edit_text = None;
-        }
-    }
-    record_presentation(ui.ctx(), memory_id, state.presentation.active);
-    ui.ctx().data_mut(|d| d.insert_temp(memory_id, state));
+    ui.add_space(6.0);
     changed
 }
+fn insert_button(
+    ui: &mut egui::Ui,
+    deck: &mut Deck,
+    state: &mut State,
+    label: &str,
+    kind: ElementKind,
+) -> bool {
+    if !ui.button(label).clicked() {
+        return false;
+    }
+    match deck.add_element(state.slide_id, kind) {
+        Ok(id) => {
+            state.selected = vec![id];
+            true
+        }
+        Err(error) => {
+            state.error = error;
+            false
+        }
+    }
+}
+fn layout_menu(ui: &mut egui::Ui, deck: &mut Deck, state: &mut State) -> bool {
+    let mut changed = false;
+    ui.menu_button("Макет", |ui| {
+        for (label, layout) in [
+            ("Титульный", "title"),
+            ("Заголовок и текст", "content"),
+            ("Две колонки", "two_content"),
+            ("Пустой", "blank"),
+        ] {
+            if ui.button(label).clicked() {
+                match deck.set_layout(state.slide_id, layout) {
+                    Ok(()) => changed = true,
+                    Err(error) => state.error = error,
+                }
+                state.selected.clear();
+                state.edit_text = None;
+                ui.close();
+            }
+        }
+    });
+    changed
+}
+fn theme_menu(ui: &mut egui::Ui, deck: &mut Deck) -> bool {
+    let mut changed = false;
+    ui.menu_button("Тема", |ui| {
+        for theme in [
+            Theme::default(),
+            Theme {
+                name: "Тёмная".into(),
+                background: [24, 30, 42],
+                foreground: [244, 246, 250],
+                accent: [84, 156, 230],
+                ..Theme::default()
+            },
+            Theme {
+                name: "Зелёная".into(),
+                background: [245, 250, 247],
+                foreground: [26, 53, 38],
+                accent: [62, 153, 101],
+                ..Theme::default()
+            },
+        ] {
+            if ui.button(&theme.name).clicked() {
+                deck.apply_theme(theme);
+                changed = true;
+                ui.close();
+            }
+        }
+    });
+    changed
+}
+fn start_image_job(ctx: &egui::Context, state: &mut State) {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let ctx = ctx.clone();
+    state.image_job = Some(ImageJob {
+        slide_id: state.slide_id,
+        result: std::sync::Arc::new(std::sync::Mutex::new(receiver)),
+    });
+    std::thread::spawn(move || {
+        let result = (|| {
+            let Some(path) = rfd::FileDialog::new()
+                .add_filter("Изображения", &["png", "jpg", "jpeg"])
+                .pick_file()
+            else {
+                return Ok(None);
+            };
+            let bytes = crate::util::read_file(&path)?;
+            if bytes.len() > 32 * 1024 * 1024 {
+                return Err("Изображение превышает 32 МБ".into());
+            }
+            super::model::image_dimensions(&bytes)?;
+            crate::util::decode_image(&bytes)?;
+            Ok(Some(bytes))
+        })();
+        let _ = sender.send(result);
+        ctx.request_repaint();
+    });
+}
+fn copy_selection(ctx: &egui::Context, deck: &Deck, state: &mut State) {
+    if let Some(slide) = deck.slide(state.slide_id) {
+        state.clipboard = slide
+            .elements
+            .iter()
+            .filter(|e| state.selected.contains(&e.id))
+            .cloned()
+            .collect::<Vec<_>>()
+            .into();
+        ctx.data_mut(|data| {
+            data.insert_temp(
+                egui::Id::new("slides-shared-clipboard"),
+                state.clipboard.clone(),
+            )
+        });
+        ctx.copy_text(
+            state
+                .clipboard
+                .iter()
+                .map(|e| e.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+}
+fn paste_selection(deck: &mut Deck, state: &mut State) -> bool {
+    if state.clipboard.is_empty() || deck.slide(state.slide_id).is_none() {
+        return false;
+    }
+    let mut groups = std::collections::HashMap::new();
+    state.selected.clear();
+    for mut element in state.clipboard.iter().cloned() {
+        element.id = deck.allocate_id();
+        element.x += 20.0;
+        element.y += 20.0;
+        element.group = element
+            .group
+            .map(|group| *groups.entry(group).or_insert_with(|| deck.allocate_id()));
+        if let Some(slide) = deck.slide_mut(state.slide_id) {
+            state.selected.push(element.id);
+            slide.elements.push(element);
+        }
+    }
+    true
+}
+fn delete_selection(deck: &mut Deck, state: &mut State) -> bool {
+    let mut changed = false;
+    for id in state.selected.clone() {
+        match deck.delete_element(state.slide_id, id) {
+            Ok(()) => changed = true,
+            Err(error) => state.error = error,
+        }
+    }
+    state.selected.clear();
+    state.edit_text = None;
+    changed
+}
+fn duplicate_selection(deck: &mut Deck, state: &mut State) -> bool {
+    let mut changed = false;
+    let selected = state.selected.clone();
+    state.selected.clear();
+    for id in selected {
+        match deck.duplicate_element(state.slide_id, id) {
+            Ok(id) => {
+                state.selected.push(id);
+                changed = true;
+            }
+            Err(error) => state.error = error,
+        }
+    }
+    changed
+}
+
+fn table_columns(cells: &[Vec<String>]) -> usize {
+    cells.iter().map(Vec::len).max().unwrap_or(0)
+}
+fn add_table_row(cells: &mut Vec<Vec<String>>) -> bool {
+    if cells.len() >= 1000 {
+        return false;
+    }
+    cells.push(vec![String::new(); table_columns(cells).max(1)]);
+    true
+}
+fn add_table_column(cells: &mut Vec<Vec<String>>) -> bool {
+    let columns = table_columns(cells);
+    if columns >= 1000 {
+        return false;
+    }
+    if cells.is_empty() {
+        cells.push(Vec::new());
+    }
+    for row in cells {
+        row.resize_with(columns + 1, String::new);
+    }
+    true
+}
+fn delete_table_column(cells: &mut [Vec<String>]) -> bool {
+    let columns = table_columns(cells);
+    if columns <= 1 {
+        return false;
+    }
+    for row in cells {
+        row.resize_with(columns, String::new);
+        row.pop();
+    }
+    true
+}
+
+fn effect_label(effect: &str) -> &str {
+    match effect {
+        "none" => "Без эффекта",
+        "fade" => "Плавное появление",
+        "push" => "Сдвиг",
+        "wipe" => "Открывание",
+        "fly_in" => "Вылет",
+        "zoom" => "Масштаб",
+        _ => effect,
+    }
+}
+fn trigger_label(trigger: &str) -> &str {
+    match trigger {
+        "on_click" => "По щелчку",
+        "after_previous" => "После предыдущего",
+        "with_previous" => "С предыдущим",
+        _ => trigger,
+    }
+}
+
 fn properties(ui: &mut egui::Ui, e: &mut Element) -> bool {
     let mut changed = false;
-    ui.strong(format!("Объект {}", e.id));
+    ui.strong(match e.kind {
+        ElementKind::Text => "Текстовое поле",
+        ElementKind::Rect => "Прямоугольник",
+        ElementKind::Ellipse => "Эллипс",
+        ElementKind::Line => "Линия",
+        ElementKind::Arrow => "Стрелка",
+        ElementKind::Image { .. } => "Изображение",
+        ElementKind::Table { .. } => "Таблица",
+        ElementKind::Chart { .. } => "Диаграмма",
+    });
     ui.horizontal(|ui| {
         ui.label("X");
         changed |= ui.add(egui::DragValue::new(&mut e.x).speed(1.0)).changed();
@@ -731,97 +1175,165 @@ fn properties(ui: &mut egui::Ui, e: &mut Element) -> bool {
         changed |= ui.checkbox(&mut e.italic, "I").changed();
         changed |= ui.color_edit_button_srgb(&mut e.color).changed();
     });
-    changed |= ui.text_edit_multiline(&mut e.text).changed();
+    ui.label(egui::RichText::new("Текст объекта").color(crate::chrome::muted(ui)));
+    changed |= ui
+        .add(
+            egui::TextEdit::multiline(&mut e.text)
+                .desired_rows(3)
+                .desired_width(f32::INFINITY),
+        )
+        .changed();
     match &mut e.kind {
         ElementKind::Table { cells } => {
             ui.label("Ячейки таблицы");
-            for (ri, row) in cells.iter_mut().enumerate() {
-                ui.push_id(ri, |ui| {
-                    ui.horizontal(|ui| {
-                        for (ci, value) in row.iter_mut().enumerate() {
-                            ui.push_id(ci, |ui| {
-                                changed |= ui
-                                    .add(egui::TextEdit::singleline(value).desired_width(55.0))
-                                    .changed();
+            egui::ScrollArea::both()
+                .id_salt(("slide_table_cells", e.id))
+                .max_height(210.0)
+                .show_rows(ui, 26.0, cells.len(), |ui, rows| {
+                    for ri in rows {
+                        let Some(row) = cells.get_mut(ri) else {
+                            continue;
+                        };
+                        ui.push_id(ri, |ui| {
+                            ui.horizontal(|ui| {
+                                for (ci, value) in row.iter_mut().enumerate() {
+                                    ui.push_id(ci, |ui| {
+                                        changed |= ui
+                                            .add(
+                                                egui::TextEdit::singleline(value)
+                                                    .desired_width(65.0),
+                                            )
+                                            .on_hover_text(format!(
+                                                "Строка {}, столбец {}",
+                                                ri + 1,
+                                                ci + 1
+                                            ))
+                                            .changed();
+                                    });
+                                }
                             });
-                        }
-                    });
-                });
-            }
-            ui.horizontal_wrapped(|ui| {
-                if ui.button("+ строка").clicked() {
-                    cells.push(vec![
-                        String::new();
-                        cells.first().map(Vec::len).unwrap_or(1)
-                    ]);
-                    changed = true;
-                }
-                if ui.button("+ столбец").clicked() {
-                    for row in cells.iter_mut() {
-                        row.push(String::new());
+                        });
                     }
-                    changed = true;
+                });
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add_enabled(cells.len() < 1000, egui::Button::new("+ строка"))
+                    .clicked()
+                {
+                    changed |= add_table_row(cells);
+                }
+                if ui
+                    .add_enabled(table_columns(cells) < 1000, egui::Button::new("+ столбец"))
+                    .clicked()
+                {
+                    changed |= add_table_column(cells);
                 }
                 if ui
                     .add_enabled(cells.len() > 1, egui::Button::new("− строка"))
+                    .on_hover_text("Удалить последнюю строку")
                     .clicked()
                 {
                     cells.pop();
                     changed = true;
                 }
                 if ui
-                    .add_enabled(
-                        cells.first().map(Vec::len).unwrap_or(0) > 1,
-                        egui::Button::new("− столбец"),
-                    )
+                    .add_enabled(table_columns(cells) > 1, egui::Button::new("− столбец"))
+                    .on_hover_text("Удалить последний столбец")
                     .clicked()
                 {
-                    for row in cells.iter_mut() {
-                        row.pop();
-                    }
-                    changed = true;
+                    changed |= delete_table_column(cells);
                 }
             });
         }
         ElementKind::Chart { values, labels } => {
             ui.label("Данные диаграммы");
-            for (index, value) in values.iter_mut().enumerate() {
-                ui.push_id(index, |ui| {
-                    ui.horizontal(|ui| {
-                        if let Some(label) = labels.get_mut(index) {
-                            changed |= ui
-                                .add(egui::TextEdit::singleline(label).desired_width(90.0))
-                                .changed();
-                        }
-                        changed |= ui.add(egui::DragValue::new(value)).changed();
-                    });
+            egui::ScrollArea::vertical()
+                .id_salt(("slide_chart_values", e.id))
+                .max_height(210.0)
+                .show_rows(ui, 26.0, values.len(), |ui, rows| {
+                    for index in rows {
+                        let Some(value) = values.get_mut(index) else {
+                            continue;
+                        };
+                        ui.push_id(index, |ui| {
+                            ui.horizontal(|ui| {
+                                let mut label = labels
+                                    .get(index)
+                                    .cloned()
+                                    .unwrap_or_else(|| (index + 1).to_string());
+                                if ui
+                                    .add(
+                                        egui::TextEdit::singleline(&mut label).desired_width(100.0),
+                                    )
+                                    .changed()
+                                {
+                                    if labels.len() <= index {
+                                        labels.resize_with(index + 1, String::new);
+                                    }
+                                    if let Some(stored) = labels.get_mut(index) {
+                                        *stored = label;
+                                        changed = true;
+                                    }
+                                }
+                                changed |= ui
+                                    .add(egui::DragValue::new(value).range(-1.0e20..=1.0e20))
+                                    .changed();
+                            });
+                        });
+                    }
                 });
-            }
-            if ui.button("+ категория").clicked() {
-                values.push(0.0);
-                labels.push((values.len()).to_string());
-                changed = true;
-            }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(values.len() < 10000, egui::Button::new("+ категория"))
+                    .clicked()
+                {
+                    let index = values.len();
+                    values.push(0.0);
+                    if labels.len() <= index {
+                        labels.resize_with(index + 1, String::new);
+                        if let Some(label) = labels.get_mut(index) {
+                            *label = (index + 1).to_string();
+                        }
+                    }
+                    changed = true;
+                }
+                if ui
+                    .add_enabled(!values.is_empty(), egui::Button::new("− категория"))
+                    .on_hover_text("Удалить последнюю категорию")
+                    .clicked()
+                {
+                    let removed = values.len() - 1;
+                    values.pop();
+                    if removed < labels.len() {
+                        labels.remove(removed);
+                    }
+                    changed = true;
+                }
+            });
         }
         _ => {}
     }
     ui.separator();
     ui.label("Анимация при показе");
     egui::ComboBox::from_id_salt("animation_effect")
-        .selected_text(&e.animation.effect)
+        .selected_text(effect_label(&e.animation.effect))
         .show_ui(ui, |ui| {
             for effect in ["none", "fade", "fly_in", "zoom"] {
                 changed |= ui
-                    .selectable_value(&mut e.animation.effect, effect.into(), effect)
+                    .selectable_value(&mut e.animation.effect, effect.into(), effect_label(effect))
                     .changed();
             }
         });
     egui::ComboBox::from_id_salt("animation_trigger")
-        .selected_text(&e.animation.trigger)
+        .selected_text(trigger_label(&e.animation.trigger))
         .show_ui(ui, |ui| {
             for trigger in ["with_previous", "after_previous", "on_click"] {
                 changed |= ui
-                    .selectable_value(&mut e.animation.trigger, trigger.into(), trigger)
+                    .selectable_value(
+                        &mut e.animation.trigger,
+                        trigger.into(),
+                        trigger_label(trigger),
+                    )
                     .changed();
             }
         });
@@ -853,8 +1365,10 @@ fn canvas(
         Vec2::new(width * scale, height * scale),
         Sense::click_and_drag(),
     );
+    state.canvas_rect = Some(rect);
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, rgb(slide.background));
+    painter.rect_stroke(rect, 0, ui.visuals().window_stroke, StrokeKind::Inside);
     let mut changed = false;
     if state.grid {
         for x in (0..width as usize).step_by(24) {
@@ -945,7 +1459,7 @@ fn canvas(
         painter.rect_stroke(
             object,
             0.0,
-            Stroke::new(1.5, Color32::from_rgb(40, 120, 230)),
+            Stroke::new(1.5, crate::chrome::accent(ui)),
             StrokeKind::Outside,
         );
         for (handle, (hx, hy)) in [
@@ -970,7 +1484,7 @@ fn canvas(
             painter.rect_stroke(
                 handle_rect,
                 1.0,
-                Stroke::new(1.0, Color32::from_rgb(40, 120, 230)),
+                Stroke::new(1.0, crate::chrome::accent(ui)),
                 StrokeKind::Inside,
             );
             let response = ui.interact(
@@ -999,7 +1513,24 @@ fn canvas(
             }
         }
     }
-    if (response.has_focus() || response.hovered()) && !ui.ctx().egui_wants_keyboard_input() {
+    if response.has_focus() {
+        ui.memory_mut(|memory| {
+            memory.set_focus_lock_filter(
+                response.id,
+                egui::EventFilter {
+                    horizontal_arrows: true,
+                    vertical_arrows: true,
+                    ..Default::default()
+                },
+            )
+        });
+    }
+    if ui.is_enabled()
+        && response.has_focus()
+        && !ui.ctx().text_edit_focused()
+        && !egui::Popup::is_any_open(ui.ctx())
+        && state.edit_text.is_none()
+    {
         let delete = ui.input(|i| i.key_pressed(egui::Key::Delete));
         let step = if ui.input(|i| i.modifiers.shift) {
             10.0
@@ -1336,11 +1867,12 @@ fn paint_element(
                             .into(),
                         ),
                     );
+                    let cell_painter = painter.with_clip_rect(cell.shrink(2.0 * scale));
                     for (index, line) in super::model::text_lines(&cell_element)
                         .into_iter()
                         .enumerate()
                     {
-                        painter.text(
+                        cell_painter.text(
                             cell.left_top()
                                 + Vec2::new(5.0, 5.0 + index as f32 * cell_element.font_size * 1.2)
                                     * scale,
@@ -1434,6 +1966,349 @@ fn paint_element(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn input_key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+    fn editor_frame(
+        ctx: &egui::Context,
+        deck: &mut Deck,
+        mut events: Vec<egui::Event>,
+        modifiers: egui::Modifiers,
+        focus_notes: bool,
+    ) -> Result<State, String> {
+        events.insert(0, egui::Event::ModifiersChanged(modifiers));
+        let mut saved = None;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1250.0, 820.0))),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                let memory_id = ui.id().with("slides_editor");
+                if focus_notes {
+                    let mut state = ui
+                        .ctx()
+                        .data(|data| data.get_temp::<State>(memory_id))
+                        .unwrap_or_default();
+                    state.show_notes = true;
+                    ui.ctx().data_mut(|data| data.insert_temp(memory_id, state));
+                    ui.memory_mut(|memory| memory.request_focus(memory_id.with("notes")));
+                }
+                show(ui, deck);
+                saved = ui.ctx().data_mut(|data| data.get_temp::<State>(memory_id));
+            },
+        );
+        output.textures_delta.clear();
+        saved.ok_or_else(|| "Нет состояния редактора".into())
+    }
+    fn clicked_object(ctx: &egui::Context, deck: &mut Deck, id: u64) -> Result<State, String> {
+        let state = editor_frame(ctx, deck, Vec::new(), egui::Modifiers::NONE, false)?;
+        let element = deck
+            .slide(state.slide_id)
+            .and_then(|slide| slide.element(id))
+            .ok_or("Нет объекта")?;
+        let canvas_rect = state.canvas_rect.ok_or("Нет геометрии холста")?;
+        assert!(
+            Rect::from_min_size(Pos2::ZERO, Vec2::new(1250.0, 820.0)).contains_rect(canvas_rect),
+            "Холст должен находиться внутри окна: {canvas_rect:?}"
+        );
+        let scale = canvas_rect.width() / deck.width;
+        let position = canvas_rect.min
+            + Vec2::new(element.x + element.w / 2.0, element.y + element.h / 2.0) * scale;
+        editor_frame(
+            ctx,
+            deck,
+            vec![
+                egui::Event::PointerMoved(position),
+                egui::Event::PointerButton {
+                    pos: position,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            egui::Modifiers::NONE,
+            false,
+        )?;
+        let state = editor_frame(
+            ctx,
+            deck,
+            vec![egui::Event::PointerButton {
+                pos: position,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            egui::Modifiers::NONE,
+            false,
+        )?;
+        assert!(
+            state.selected.contains(&id),
+            "Click {:?}; old canvas {:?}, new canvas {:?}; selected {:?}; focused {:?}",
+            position,
+            canvas_rect,
+            state.canvas_rect,
+            state.selected,
+            ctx.memory(|memory| memory.focused())
+        );
+        assert!(ctx.egui_wants_keyboard_input());
+        assert!(!ctx.text_edit_focused());
+        Ok(state)
+    }
+    #[test]
+    fn clicked_canvas_moves_copies_and_deletes_objects() -> Result<(), String> {
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx)?;
+        let mut deck = Deck::empty();
+        let slide_id = deck.add_slide("blank");
+        let id = deck.add_element(slide_id, ElementKind::Rect)?;
+        let x = deck
+            .slide(slide_id)
+            .and_then(|slide| slide.element(id))
+            .ok_or("Нет объекта")?
+            .x;
+        clicked_object(&ctx, &mut deck, id)?;
+        editor_frame(
+            &ctx,
+            &mut deck,
+            vec![input_key(egui::Key::ArrowRight, egui::Modifiers::NONE)],
+            egui::Modifiers::NONE,
+            false,
+        )?;
+        assert_eq!(
+            deck.slide(slide_id)
+                .and_then(|slide| slide.element(id))
+                .map(|e| e.x),
+            Some(x + 1.0)
+        );
+        let state = editor_frame(
+            &ctx,
+            &mut deck,
+            vec![egui::Event::Copy],
+            egui::Modifiers::NONE,
+            false,
+        )?;
+        assert_eq!(state.clipboard.len(), 1);
+        assert_eq!(state.clipboard.first().map(|element| element.id), Some(id));
+        editor_frame(
+            &ctx,
+            &mut deck,
+            vec![input_key(egui::Key::Delete, egui::Modifiers::NONE)],
+            egui::Modifiers::NONE,
+            false,
+        )?;
+        assert!(
+            deck.slide(slide_id)
+                .is_some_and(|slide| slide.elements.is_empty())
+        );
+        assert!(deck.validate().is_ok());
+        Ok(())
+    }
+    #[test]
+    fn notes_focus_keeps_object_shortcuts_out_of_text_editor() -> Result<(), String> {
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx)?;
+        let mut deck = Deck::empty();
+        let slide_id = deck.add_slide("blank");
+        let id = deck.add_element(slide_id, ElementKind::Rect)?;
+        clicked_object(&ctx, &mut deck, id)?;
+        let before = deck
+            .slide(slide_id)
+            .and_then(|slide| slide.element(id))
+            .cloned()
+            .ok_or("Нет объекта")?;
+        editor_frame(&ctx, &mut deck, Vec::new(), egui::Modifiers::NONE, true)?;
+        assert!(ctx.text_edit_focused());
+        editor_frame(
+            &ctx,
+            &mut deck,
+            vec![input_key(egui::Key::ArrowRight, egui::Modifiers::NONE)],
+            egui::Modifiers::NONE,
+            true,
+        )?;
+        editor_frame(
+            &ctx,
+            &mut deck,
+            vec![input_key(egui::Key::Delete, egui::Modifiers::NONE)],
+            egui::Modifiers::NONE,
+            true,
+        )?;
+        let state = editor_frame(
+            &ctx,
+            &mut deck,
+            vec![egui::Event::Copy],
+            egui::Modifiers::NONE,
+            true,
+        )?;
+        assert!(state.clipboard.is_empty());
+        assert_eq!(
+            deck.slide(slide_id).and_then(|slide| slide.element(id)),
+            Some(&before)
+        );
+        Ok(())
+    }
+    fn scoped_editor_frame(
+        ctx: &egui::Context,
+        deck: &mut Deck,
+        scope: &str,
+        events: Vec<egui::Event>,
+    ) -> Result<(State, egui::Id), String> {
+        let mut saved = None;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1250.0, 820.0))),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                ui.push_id(scope, |ui| {
+                    let memory_id = ui.id().with("slides_editor");
+                    show(ui, deck);
+                    saved = ui.ctx().data_mut(|data| {
+                        data.get_temp::<State>(memory_id)
+                            .map(|state| (state, memory_id))
+                    });
+                });
+            },
+        );
+        output.textures_delta.clear();
+        saved.ok_or_else(|| "Нет состояния вкладки".into())
+    }
+    #[test]
+    fn object_clipboard_crosses_tabs_and_external_text_stays_text() -> Result<(), String> {
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx)?;
+        let mut source = Deck::empty();
+        let source_slide = source.add_slide("blank");
+        let first = source.add_element(source_slide, ElementKind::Rect)?;
+        let second = source.add_element(source_slide, ElementKind::Ellipse)?;
+        let source_group = source.allocate_id();
+        for id in [first, second] {
+            if let Some(element) = source
+                .slide_mut(source_slide)
+                .and_then(|slide| slide.element_mut(id))
+            {
+                element.group = Some(source_group);
+                element.text = "clipboard".into();
+            }
+        }
+        let (mut source_state, source_memory) =
+            scoped_editor_frame(&ctx, &mut source, "tab-a", Vec::new())?;
+        source_state.selected = vec![first, second];
+        ctx.data_mut(|data| data.insert_temp(source_memory, source_state));
+        scoped_editor_frame(&ctx, &mut source, "tab-a", vec![egui::Event::Copy])?;
+        let mut destination = Deck::empty();
+        let destination_slide = destination.add_slide("blank");
+        destination.add_element(destination_slide, ElementKind::Rect)?;
+        let floor = destination.next_id;
+        let (destination_state, _) = scoped_editor_frame(
+            &ctx,
+            &mut destination,
+            "tab-b",
+            vec![egui::Event::Paste("clipboard\nclipboard".into())],
+        )?;
+        assert_eq!(destination_state.selected.len(), 2);
+        let copied: Vec<_> = destination
+            .slide(destination_slide)
+            .ok_or("Нет слайда")?
+            .elements
+            .iter()
+            .filter(|element| destination_state.selected.contains(&element.id))
+            .collect();
+        assert_eq!(copied.len(), 2);
+        assert!(matches!(
+            copied.first().map(|element| &element.kind),
+            Some(ElementKind::Rect)
+        ));
+        assert!(matches!(
+            copied.last().map(|element| &element.kind),
+            Some(ElementKind::Ellipse)
+        ));
+        assert!(copied.iter().all(|element| element.id >= floor));
+        let group = copied.first().and_then(|element| element.group);
+        assert!(group.is_some() && copied.iter().all(|element| element.group == group));
+        scoped_editor_frame(
+            &ctx,
+            &mut destination,
+            "tab-b",
+            vec![egui::Event::Paste("external plain text".into())],
+        )?;
+        let external = destination
+            .slide(destination_slide)
+            .and_then(|slide| slide.elements.last())
+            .ok_or("Нет текста")?;
+        assert!(matches!(external.kind, ElementKind::Text));
+        assert_eq!(external.text, "external plain text");
+        assert!(destination.validate().is_ok());
+        Ok(())
+    }
+    #[test]
+    fn empty_and_ragged_tables_remain_editable() {
+        let mut cells = Vec::new();
+        assert!(add_table_column(&mut cells));
+        assert_eq!(cells, vec![vec![String::new()]]);
+        cells = vec![vec!["A".into()], vec!["B".into(), "C".into()]];
+        assert!(add_table_column(&mut cells));
+        assert_eq!(
+            cells,
+            vec![
+                vec!["A".into(), String::new(), String::new()],
+                vec!["B".into(), "C".into(), String::new()]
+            ]
+        );
+        assert!(delete_table_column(&mut cells));
+        assert_eq!(
+            cells,
+            vec![
+                vec!["A".into(), String::new()],
+                vec!["B".into(), "C".into()]
+            ]
+        );
+        assert!(add_table_row(&mut cells));
+        assert_eq!(cells.last(), Some(&vec![String::new(), String::new()]));
+    }
+    #[test]
+    fn paste_preserves_groups_with_fresh_ids() {
+        let mut deck = Deck::default();
+        let slide_id = deck.slides.first().map(|s| s.id).unwrap_or(0);
+        let group = deck.allocate_id();
+        let mut copied = deck
+            .slide(slide_id)
+            .map(|slide| slide.elements.clone())
+            .unwrap_or_default();
+        for element in &mut copied {
+            element.group = Some(group);
+        }
+        let mut state = State {
+            slide_id,
+            clipboard: copied.clone().into(),
+            ..State::default()
+        };
+        assert!(paste_selection(&mut deck, &mut state));
+        let pasted = deck
+            .slide(slide_id)
+            .map(|slide| {
+                slide
+                    .elements
+                    .iter()
+                    .filter(|e| state.selected.contains(&e.id))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        assert_eq!(pasted.len(), copied.len());
+        let pasted_group = pasted.first().and_then(|element| element.group);
+        assert!(pasted_group.is_some() && pasted_group != Some(group));
+        assert!(pasted.iter().all(|element| element.group == pasted_group
+            && !copied.iter().any(|old| old.id == element.id)));
+        assert!(deck.validate().is_ok());
+    }
     #[test]
     fn proportional_side_resize_moves_both_dimensions() {
         let (x, y, w, h) = resize_geometry(

@@ -110,6 +110,10 @@ impl Recovery {
     pub fn start() -> Self {
         Self::start_at(crate::util::app_dir().join("recovery"))
     }
+    #[cfg(test)]
+    pub(crate) fn start_for_test(root: PathBuf) -> Self {
+        Self::start_at(root)
+    }
     fn start_at(root: PathBuf) -> Self {
         let queue = Arc::new((Mutex::new(Queue::default()), Condvar::new()));
         let worker = queue.clone();

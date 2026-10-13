@@ -17,7 +17,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             language: "ru".into(),
-            theme: "system".into(),
+            theme: "light".into(),
             scale: 1.0,
             mcp: true,
             dark_paper: false,

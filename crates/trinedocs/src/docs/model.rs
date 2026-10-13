@@ -128,8 +128,10 @@ impl Paragraph {
     }
     pub fn normalize(&mut self) {
         let mut compact: Vec<Run> = Vec::new();
+        let mut empty_format = None;
         for run in self.runs.drain(..) {
             if run.text.is_empty() {
+                empty_format.get_or_insert(run.format);
                 continue;
             }
             if let Some(last) = compact.last_mut().filter(|last| last.format == run.format) {
@@ -139,7 +141,10 @@ impl Paragraph {
             }
         }
         if compact.is_empty() {
-            compact.push(Run::default());
+            compact.push(Run {
+                text: String::new(),
+                format: empty_format.unwrap_or_default(),
+            });
         }
         self.runs = compact;
     }
@@ -247,6 +252,91 @@ pub struct Position {
     pub paragraph: usize,
     pub offset: usize,
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextEditDelta {
+    pub start_id: u64,
+    pub end_id: u64,
+    pub after_end_id: u64,
+    pub start: Position,
+    pub end: Position,
+    pub after_end: Position,
+}
+impl TextEditDelta {
+    pub fn capture(doc: &Doc, start: Position, end: Position) -> Result<Self, String> {
+        let (start, end) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
+        let a = doc
+            .paragraphs
+            .get(start.paragraph)
+            .ok_or("Нет начального абзаца delta")?;
+        let b = doc
+            .paragraphs
+            .get(end.paragraph)
+            .ok_or("Нет конечного абзаца delta")?;
+        if start.offset > a.len() || end.offset > b.len() {
+            return Err("Delta за пределами текста".into());
+        }
+        Ok(Self {
+            start_id: a.id,
+            end_id: b.id,
+            after_end_id: a.id,
+            start,
+            end,
+            after_end: start,
+        })
+    }
+    pub fn finish(mut self, doc: &Doc, after_end: Position) -> Result<Self, String> {
+        let p = doc
+            .paragraphs
+            .get(after_end.paragraph)
+            .ok_or("Нет конечного абзаца после delta")?;
+        if after_end.offset > p.len() {
+            return Err("Конечная delta за пределами текста".into());
+        }
+        self.after_end_id = p.id;
+        self.after_end = after_end;
+        Ok(self)
+    }
+    pub fn transform(&self, position: Position) -> Position {
+        if position < self.start {
+            return position;
+        }
+        if position <= self.end {
+            return self.after_end;
+        }
+        if position.paragraph == self.end.paragraph {
+            Position {
+                paragraph: self.after_end.paragraph,
+                offset: self
+                    .after_end
+                    .offset
+                    .saturating_add(position.offset.saturating_sub(self.end.offset)),
+            }
+        } else {
+            Position {
+                paragraph: self
+                    .after_end
+                    .paragraph
+                    .saturating_add(position.paragraph.saturating_sub(self.end.paragraph)),
+                offset: position.offset,
+            }
+        }
+    }
+    pub fn inverse(&self) -> Self {
+        Self {
+            start_id: self.start_id,
+            end_id: self.after_end_id,
+            after_end_id: self.end_id,
+            start: self.start,
+            end: self.after_end,
+            after_end: self.end,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Segment {
     pub text: String,
@@ -826,6 +916,20 @@ impl Doc {
             start_paragraph,
             count.min(100),
             max_matches.min(1000),
+        )
+    }
+    pub(crate) fn find_bounded(
+        &self,
+        needle: &str,
+        case_sensitive: bool,
+        max_matches: usize,
+    ) -> Vec<(Position, Position)> {
+        self.find_in(
+            needle,
+            case_sensitive,
+            0,
+            self.paragraphs.len(),
+            max_matches,
         )
     }
     fn find_in(
@@ -1519,6 +1623,61 @@ fn render_table(layout: &mut Layout, setup: &PageSetup, table: &Table, y: &mut f
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn empty_table_cell_format_survives_frames_and_first_input() -> Result<(), String> {
+        let mut doc = Doc::from_text("anchor");
+        let anchor = doc.paragraphs.first().ok_or("anchor")?.id;
+        doc.add_table(anchor, 1, 1)?;
+        let expected = TextFormat {
+            font: "Arial".into(),
+            size: 18.0,
+            bold: true,
+            italic: true,
+            color: [34, 86, 172],
+            highlight: Some([240, 230, 160]),
+            ..TextFormat::default()
+        };
+        let cell = doc
+            .tables
+            .first_mut()
+            .and_then(|table| table.rows.first_mut())
+            .and_then(|row| row.first_mut())
+            .ok_or("cell")?;
+        let cell_id = cell.id;
+        let paragraph = cell.paragraphs.first_mut().ok_or("paragraph")?;
+        let paragraph_id = paragraph.id;
+        paragraph.runs.first_mut().ok_or("run")?.format = expected.clone();
+
+        doc.normalize();
+        doc.normalize();
+        doc.validate()?;
+        let cell = doc
+            .tables
+            .first()
+            .and_then(|table| table.rows.first())
+            .and_then(|row| row.first())
+            .ok_or("cell")?;
+        assert_eq!(cell.id, cell_id);
+        assert_eq!(cell.paragraphs.first().ok_or("paragraph")?.id, paragraph_id);
+        assert_eq!(
+            cell.paragraphs.first().ok_or("paragraph")?.format_at(0),
+            expected
+        );
+
+        let mut nested = Doc {
+            paragraphs: cell.paragraphs.clone(),
+            next_id: doc.next_id,
+            ..Doc::default()
+        };
+        nested.replace_range(Position::default(), Position::default(), "Привет 🌍", None)?;
+        nested.normalize();
+        assert_eq!(nested.plain_text(), "Привет 🌍");
+        let paragraph = nested.paragraphs.first().ok_or("paragraph")?;
+        assert_eq!(paragraph.id, paragraph_id);
+        assert_eq!(paragraph.runs.len(), 1);
+        assert_eq!(paragraph.runs.first().ok_or("run")?.format, expected);
+        Ok(())
+    }
     #[test]
     fn unicode_insert_delete() {
         let mut d = Doc::from_text("Привет 🌍");

@@ -16,7 +16,14 @@ struct State {
     replace: String,
     find_open: bool,
     rename: String,
-    chart_kind: ChartKind,
+    ribbon_tab: usize,
+    location: String,
+    scroll_to_selection: bool,
+    rename_sheet_id: Option<u64>,
+    #[cfg(test)]
+    formula_rect: Option<Rect>,
+    #[cfg(test)]
+    test_controls: BTreeMap<String, Rect>,
 }
 fn color(c: [u8; 3]) -> Color32 {
     Color32::from_rgb(c[0], c[1], c[2])
@@ -53,19 +60,649 @@ fn commit(book: &mut Book, state: &mut State) -> bool {
     if !state.editing {
         return false;
     }
-    state.editing = false;
     let value = book
         .set_cell(state.last.0, state.last.1, state.last.2, &state.buffer)
         .map(|_| ());
-    result(state, value)
+    let changed = result(state, value);
+    if changed {
+        state.editing = false;
+    }
+    changed
 }
+fn cancel_edit(book: &Book, state: &mut State) {
+    state.editing = false;
+    state.error.clear();
+    state.buffer = book
+        .sheet_by_id(state.last.0)
+        .and_then(|sheet| sheet.cell(state.last.1, state.last.2))
+        .map(|cell| cell.input.clone())
+        .unwrap_or_default();
+}
+fn command_action(
+    response: egui::Response,
+    book: &mut Book,
+    state: &mut State,
+    changed: &mut bool,
+) -> bool {
+    if response.clicked() || response.changed() {
+        *changed |= commit(book, state);
+        !state.editing
+    } else {
+        false
+    }
+}
+fn toolbar(
+    ui: &mut egui::Ui,
+    book: &mut Book,
+    state: &mut State,
+    selected: &CellFormat,
+    state_id: egui::Id,
+) -> bool {
+    let mut changed = false;
+    let id = book.active_id();
+    let find_id = state_id.with("find");
+    crate::chrome::tabs(
+        ui,
+        &mut state.ribbon_tab,
+        &["Главная", "Вставка", "Данные", "Вид"],
+    );
+    crate::chrome::ribbon(ui, |ui| match state.ribbon_tab {
+        0 => {
+            crate::chrome::group(ui, "Буфер", 126.0, |ui| {
+                ui.horizontal(|ui| {
+                    if command_action(
+                        ui.button("Вставить").on_hover_text("Ctrl+V"),
+                        book,
+                        state,
+                        &mut changed,
+                    ) {
+                        ui.ctx()
+                            .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+                    }
+                    ui.menu_button("Ещё", |ui| {
+                        if command_action(
+                            ui.button("Копировать · Ctrl+C"),
+                            book,
+                            state,
+                            &mut changed,
+                        ) {
+                            copy_range(ui, book, state);
+                            ui.close();
+                        }
+                        if command_action(ui.button("Вырезать · Ctrl+X"), book, state, &mut changed)
+                        {
+                            if copy_range(ui, book, state) {
+                                changed |= clear(book, state);
+                            }
+                            ui.close();
+                        }
+                        ui.separator();
+                        if command_action(
+                            ui.button("Очистить значения · Delete"),
+                            book,
+                            state,
+                            &mut changed,
+                        ) {
+                            changed |= clear(book, state);
+                            ui.close();
+                        }
+                    });
+                });
+            });
+            crate::chrome::group(ui, "Текст", 226.0, |ui| {
+                ui.horizontal(|ui| {
+                    let mut size = selected.size;
+                    if command_action(
+                        ui.add(
+                            egui::DragValue::new(&mut size)
+                                .range(6.0..=72.0)
+                                .speed(0.5)
+                                .suffix(" pt"),
+                        ),
+                        book,
+                        state,
+                        &mut changed,
+                    ) {
+                        changed |= result(state, apply_format(book, |format| format.size = size));
+                    }
+                    for (label, flag, tip) in [
+                        ("B", selected.bold, "Полужирный"),
+                        ("I", selected.italic, "Курсив"),
+                    ] {
+                        if command_action(
+                            ui.selectable_label(flag, label).on_hover_text(tip),
+                            book,
+                            state,
+                            &mut changed,
+                        ) {
+                            changed |= result(
+                                state,
+                                apply_format(book, |format| {
+                                    if label == "B" {
+                                        format.bold = !flag;
+                                    } else {
+                                        format.italic = !flag;
+                                    }
+                                }),
+                            );
+                        }
+                    }
+                    ui.menu_button("Шрифт", |ui| {
+                        let mut family = selected.font.clone();
+                        egui::ComboBox::from_id_salt(state_id.with("font"))
+                            .width(150.0)
+                            .selected_text(&family)
+                            .show_ui(ui, |ui| {
+                                for name in [
+                                    "Calibri",
+                                    "Arial",
+                                    "Times New Roman",
+                                    "Courier New",
+                                    "Segoe UI",
+                                ] {
+                                    ui.selectable_value(&mut family, name.into(), name);
+                                }
+                            });
+                        if family != selected.font {
+                            changed |= commit(book, state);
+                            if !state.editing {
+                                changed |= result(
+                                    state,
+                                    apply_format(book, |format| format.font = family.clone()),
+                                );
+                            }
+                        }
+                        ui.separator();
+                        for (label, flag) in [
+                            ("Подчёркнутый", selected.underline),
+                            ("Зачёркнутый", selected.strike),
+                        ] {
+                            if command_action(
+                                ui.selectable_label(flag, label),
+                                book,
+                                state,
+                                &mut changed,
+                            ) {
+                                changed |= result(
+                                    state,
+                                    apply_format(book, |format| {
+                                        if label == "Подчёркнутый" {
+                                            format.underline = !flag;
+                                        } else {
+                                            format.strike = !flag;
+                                        }
+                                    }),
+                                );
+                            }
+                        }
+                        ui.horizontal(|ui| {
+                            ui.label("Цвет текста");
+                            let mut color = selected.color;
+                            if command_action(
+                                ui.color_edit_button_srgb(&mut color),
+                                book,
+                                state,
+                                &mut changed,
+                            ) {
+                                changed |= result(
+                                    state,
+                                    apply_format(book, |format| format.color = color),
+                                );
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Заливка");
+                            let mut fill = selected.fill.unwrap_or([255, 255, 255]);
+                            if command_action(
+                                ui.color_edit_button_srgb(&mut fill),
+                                book,
+                                state,
+                                &mut changed,
+                            ) {
+                                changed |= result(
+                                    state,
+                                    apply_format(book, |format| format.fill = Some(fill)),
+                                );
+                            }
+                        });
+                    });
+                });
+            });
+            crate::chrome::group(ui, "Ячейки", 254.0, |ui| {
+                ui.horizontal(|ui| {
+                    let mut number = selected.number.clone();
+                    egui::ComboBox::from_id_salt(state_id.with("number-format"))
+                        .width(120.0)
+                        .selected_text(
+                            super::format::NUMBER_FORMATS
+                                .iter()
+                                .find(|(_, code)| *code == number)
+                                .map(|(label, _)| *label)
+                                .unwrap_or("Свой формат"),
+                        )
+                        .show_ui(ui, |ui| {
+                            for (label, code) in super::format::NUMBER_FORMATS {
+                                ui.selectable_value(&mut number, code.to_string(), *label);
+                            }
+                        });
+                    if number != selected.number {
+                        changed |= commit(book, state);
+                        if !state.editing {
+                            changed |= result(
+                                state,
+                                apply_format(book, |format| format.number = number.clone()),
+                            );
+                        }
+                    }
+                    ui.menu_button("Формат", |ui| {
+                        for (label, align) in [
+                            ("По левому краю", Align::Left),
+                            ("По центру", Align::Center),
+                            ("По правому краю", Align::Right),
+                        ] {
+                            if command_action(
+                                ui.selectable_label(selected.align == align, label),
+                                book,
+                                state,
+                                &mut changed,
+                            ) {
+                                changed |= result(
+                                    state,
+                                    apply_format(book, |format| format.align = align),
+                                );
+                                ui.close();
+                            }
+                        }
+                        ui.separator();
+                        if command_action(
+                            ui.selectable_label(selected.wrap, "Перенос текста"),
+                            book,
+                            state,
+                            &mut changed,
+                        ) {
+                            changed |= result(
+                                state,
+                                apply_format(book, |format| format.wrap = !selected.wrap),
+                            );
+                            ui.close();
+                        }
+                        if command_action(
+                            ui.selectable_label(selected.border, "Границы"),
+                            book,
+                            state,
+                            &mut changed,
+                        ) {
+                            changed |= result(
+                                state,
+                                apply_format(book, |format| format.border = !selected.border),
+                            );
+                            ui.close();
+                        }
+                        ui.separator();
+                        merge_menu(ui, book, state, &mut changed);
+                        ui.separator();
+                        if command_action(ui.button("Очистить формат"), book, state, &mut changed)
+                        {
+                            changed |= result(
+                                state,
+                                apply_format(book, |format| *format = CellFormat::default()),
+                            );
+                            ui.close();
+                        }
+                    });
+                });
+            });
+            crate::chrome::group(ui, "Правка", 92.0, |ui| {
+                if command_action(
+                    ui.button("Поиск")
+                        .on_hover_text("Найти и заменить · Ctrl+F / Ctrl+H"),
+                    book,
+                    state,
+                    &mut changed,
+                ) {
+                    state.find_open = true;
+                    ui.memory_mut(|memory| memory.request_focus(find_id));
+                }
+            });
+        }
+        1 => {
+            crate::chrome::group(ui, "Данные", 175.0, |ui| {
+                if command_action(
+                    ui.button("Оформить диапазон")
+                        .on_hover_text("Заголовок, чередование строк и границы выделенных ячеек"),
+                    book,
+                    state,
+                    &mut changed,
+                ) {
+                    changed |= result(state, table_format(book));
+                }
+            });
+            crate::chrome::group(ui, "Диаграммы", 138.0, |ui| {
+                ui.menu_button("Диаграмма", |ui| {
+                    for kind in [
+                        ChartKind::Column,
+                        ChartKind::Bar,
+                        ChartKind::Line,
+                        ChartKind::Area,
+                        ChartKind::Pie,
+                        ChartKind::Doughnut,
+                        ChartKind::Scatter,
+                    ] {
+                        if command_action(
+                            ui.button(chart_kind_name(kind)),
+                            book,
+                            state,
+                            &mut changed,
+                        ) {
+                            changed |= result(
+                                state,
+                                book.add_chart(id, kind, book.selection.range(), "Диаграмма")
+                                    .map(|_| ()),
+                            );
+                            ui.close();
+                        }
+                    }
+                });
+            });
+            crate::chrome::group(ui, "Лист", 244.0, |ui| {
+                ui.horizontal(|ui| {
+                    ui.menu_button("Строки и столбцы", |ui| {
+                        dimension_menu(ui, book, state, &mut changed);
+                    });
+                    let response = ui.button("Новый лист");
+                    #[cfg(test)]
+                    state
+                        .test_controls
+                        .insert("toolbar-new-sheet".into(), response.rect);
+                    if command_action(response, book, state, &mut changed) {
+                        changed |= add_sheet(book, state);
+                    }
+                });
+            });
+        }
+        2 => {
+            crate::chrome::group(ui, "Порядок данных", 282.0, |ui| {
+                ui.horizontal(|ui| {
+                    ui.menu_button("Сортировка", |ui| {
+                        for (label, descending) in [("А → Я", false), ("Я → А", true)] {
+                            if command_action(ui.button(label), book, state, &mut changed) {
+                                let range = book.selection.range();
+                                changed |= result(
+                                    state,
+                                    book.sort(id, range, &[(range.c0, descending)], false),
+                                );
+                                ui.close();
+                            }
+                        }
+                    });
+                    ui.menu_button("Заполнение", |ui| {
+                        for (label, down) in [("Вниз · Ctrl+D", true), ("Вправо · Ctrl+R", false)]
+                        {
+                            if command_action(ui.button(label), book, state, &mut changed) {
+                                let target = book.selection.range();
+                                let source = if down {
+                                    Range::new(target.r0, target.c0, target.r0, target.c1)
+                                } else {
+                                    Range::new(target.r0, target.c0, target.r1, target.c0)
+                                };
+                                changed |= result(state, book.fill(id, source, target));
+                                ui.close();
+                            }
+                        }
+                    });
+                });
+            });
+            crate::chrome::group(ui, "Работа с данными", 216.0, |ui| {
+                ui.horizontal(|ui| {
+                    if command_action(
+                        ui.button("Поиск")
+                            .on_hover_text("Найти и заменить · Ctrl+F / Ctrl+H"),
+                        book,
+                        state,
+                        &mut changed,
+                    ) {
+                        state.find_open = true;
+                        ui.memory_mut(|memory| memory.request_focus(find_id));
+                    }
+                    if command_action(
+                        ui.button("Пересчитать")
+                            .on_hover_text("Обновить значения всех формул"),
+                        book,
+                        state,
+                        &mut changed,
+                    ) {
+                        book.recalculate();
+                        changed = true;
+                    }
+                });
+            });
+        }
+        _ => {
+            crate::chrome::group(ui, "Область просмотра", 170.0, |ui| {
+                ui.menu_button("Закрепление", |ui| {
+                    if command_action(ui.button("До выбранной ячейки"), book, state, &mut changed)
+                    {
+                        let row = book.selection.row;
+                        let col = book.selection.col;
+                        changed |= freeze_selection(book, state, row, col);
+                        ui.close();
+                    }
+                    if command_action(ui.button("Снять закрепление"), book, state, &mut changed)
+                    {
+                        if let Some(sheet) = book.active_sheet_mut() {
+                            sheet.frozen_rows = 0;
+                            sheet.frozen_cols = 0;
+                            changed = true;
+                        }
+                        ui.close();
+                    }
+                });
+            });
+            crate::chrome::group(ui, "Размеры и видимость", 248.0, |ui| {
+                ui.horizontal(|ui| {
+                    ui.menu_button("Размеры", |ui| {
+                        let row = book.selection.row;
+                        let col = book.selection.col;
+                        let mut width = book
+                            .active_sheet()
+                            .and_then(|sheet| sheet.widths.get(&col))
+                            .copied()
+                            .unwrap_or(96.0);
+                        let mut height = book
+                            .active_sheet()
+                            .and_then(|sheet| sheet.row_heights.get(&row))
+                            .copied()
+                            .unwrap_or(26.0);
+                        ui.horizontal(|ui| {
+                            ui.label("Ширина столбца");
+                            if command_action(
+                                ui.add(
+                                    egui::DragValue::new(&mut width)
+                                        .range(24.0..=1000.0)
+                                        .speed(1.0),
+                                ),
+                                book,
+                                state,
+                                &mut changed,
+                            ) && let Some(sheet) = book.active_sheet_mut()
+                            {
+                                sheet.widths.insert(col, width);
+                                changed = true;
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Высота строки");
+                            if command_action(
+                                ui.add(
+                                    egui::DragValue::new(&mut height)
+                                        .range(14.0..=500.0)
+                                        .speed(1.0),
+                                ),
+                                book,
+                                state,
+                                &mut changed,
+                            ) && let Some(sheet) = book.active_sheet_mut()
+                            {
+                                sheet.row_heights.insert(row, height);
+                                changed = true;
+                            }
+                        });
+                        ui.separator();
+                        if command_action(ui.button("Автоподбор ширины"), book, state, &mut changed)
+                        {
+                            if let Some(sheet) = book.active_sheet_mut() {
+                                let width = sheet
+                                    .cells
+                                    .iter()
+                                    .filter(|(address, _)| {
+                                        super::model::parse_address(address)
+                                            .is_some_and(|(_, c)| c == col)
+                                    })
+                                    .map(|(_, cell)| {
+                                        cell.value.display().chars().count() as f32 * 7.5 + 18.0
+                                    })
+                                    .fold(96.0, f32::max)
+                                    .min(600.0);
+                                sheet.widths.insert(col, width);
+                                changed = true;
+                            }
+                            ui.close();
+                        }
+                    });
+                    ui.menu_button("Видимость", |ui| {
+                        visibility_menu(ui, book, state, &mut changed);
+                    });
+                });
+            });
+        }
+    });
+    changed
+}
+
+fn merge_menu(ui: &mut egui::Ui, book: &mut Book, state: &mut State, changed: &mut bool) {
+    if command_action(
+        ui.button("Объединить")
+            .on_hover_text("Непустые ячейки сохраняются"),
+        book,
+        state,
+        changed,
+    ) {
+        *changed |= result(state, book.merge(book.active_id(), book.selection.range()));
+        ui.close();
+    }
+    if command_action(ui.button("Разъединить"), book, state, changed) {
+        let range = book.selection.range();
+        if let Some(sheet) = book.active_sheet_mut() {
+            sheet.merges.retain(|merge| {
+                !(merge.r0 <= range.r1
+                    && range.r0 <= merge.r1
+                    && merge.c0 <= range.c1
+                    && range.c0 <= merge.c1)
+            });
+            *changed = true;
+        }
+        ui.close();
+    }
+}
+fn dimension_menu(ui: &mut egui::Ui, book: &mut Book, state: &mut State, changed: &mut bool) {
+    for (label, rows, delete) in [
+        ("Вставить строку", true, false),
+        ("Удалить строку", true, true),
+        ("Вставить столбец", false, false),
+        ("Удалить столбец", false, true),
+    ] {
+        if command_action(ui.button(label), book, state, changed) {
+            *changed |= result(
+                state,
+                book.edit_dimension(
+                    book.active_id(),
+                    if rows {
+                        book.selection.row
+                    } else {
+                        book.selection.col
+                    },
+                    1,
+                    rows,
+                    delete,
+                ),
+            );
+            ui.close();
+        }
+    }
+    ui.separator();
+    visibility_menu(ui, book, state, changed);
+}
+fn visibility_menu(ui: &mut egui::Ui, book: &mut Book, state: &mut State, changed: &mut bool) {
+    for (label, rows) in [("Скрыть строку", true), ("Скрыть столбец", false)]
+    {
+        if command_action(ui.button(label), book, state, changed) {
+            let row = book.selection.row;
+            let col = book.selection.col;
+            if let Some(sheet) = book.active_sheet_mut() {
+                if rows {
+                    sheet.hidden_rows.insert(row);
+                } else {
+                    sheet.hidden_cols.insert(col);
+                }
+                *changed = true;
+            }
+            ui.close();
+        }
+    }
+    if command_action(ui.button("Показать скрытые"), book, state, changed) {
+        if let Some(sheet) = book.active_sheet_mut() {
+            sheet.hidden_rows.clear();
+            sheet.hidden_cols.clear();
+            *changed = true;
+        }
+        ui.close();
+    }
+}
+
 pub fn show(ui: &mut egui::Ui, book: &mut Book) -> bool {
-    let state_id = ui.id().with("sheets-editor");
+    show_impl(ui, book, ui.id().with("sheets-editor"))
+}
+pub fn show_for_tab(ui: &mut egui::Ui, book: &mut Book, tab_id: u64) -> bool {
+    show_impl(ui, book, egui::Id::new(("sheets-editor", tab_id)))
+}
+pub fn commit_pending(ctx: &egui::Context, tab_id: u64, book: &mut Book) -> Result<bool, String> {
+    let id = egui::Id::new(("sheets-editor", tab_id));
+    let Some(mut state) = ctx.data_mut(|data| data.get_temp::<State>(id)) else {
+        return Ok(false);
+    };
+    let changed = commit(book, &mut state);
+    let error = if state.editing {
+        Some(state.error.clone())
+    } else {
+        None
+    };
+    ctx.data_mut(|data| data.insert_temp(id, state));
+    match error {
+        Some(error) => Err(error),
+        None => Ok(changed),
+    }
+}
+fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
     let mut state = ui
         .ctx()
         .data_mut(|d| d.get_temp::<State>(state_id))
         .unwrap_or_default();
     let mut changed = false;
+    let formula_id = state_id.with("formula");
+    let canvas_id = state_id.with("canvas");
+    #[cfg(test)]
+    state.test_controls.clear();
+    if ui.is_enabled() && state.editing && !state.error.is_empty() {
+        ui.memory_mut(|memory| memory.request_focus(formula_id));
+    }
+    let formula_active =
+        ui.memory(|memory| memory.has_focus(formula_id) || memory.had_focus_last_frame(formula_id));
+    let canvas_active = ui.is_enabled()
+        && !state.editing
+        && ui.memory(|memory| memory.focused().is_none() || memory.has_focus(canvas_id));
+    if canvas_active {
+        ui.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
+    }
     if book.sheets.is_empty() {
         ui.label("Нет листов");
         return false;
@@ -76,293 +713,139 @@ pub fn show(ui: &mut egui::Ui, book: &mut Book) -> bool {
     let col = book.selection.col;
     if state.last != (id, row, col) {
         changed |= commit(book, &mut state);
-        state.last = (id, row, col);
-        state.buffer = book
-            .active_sheet()
-            .and_then(|s| s.cell(row, col))
-            .map(|c| c.input.clone())
-            .unwrap_or_default();
+        if !state.editing {
+            state.last = (id, row, col);
+            state.buffer = book
+                .active_sheet()
+                .and_then(|s| s.cell(row, col))
+                .map(|c| c.input.clone())
+                .unwrap_or_default();
+        }
     }
     let selected = book
         .active_sheet()
         .and_then(|s| s.cell(row, col))
         .map(|c| c.fmt.clone())
         .unwrap_or_default();
-    ui.horizontal_wrapped(|ui| {
-        let mut size = selected.size;
-        if ui
-            .add(
-                egui::DragValue::new(&mut size)
-                    .range(6.0..=72.0)
-                    .speed(0.5)
-                    .suffix(" pt"),
-            )
-            .changed()
-        {
-            changed |= result(&mut state, apply_format(book, |f| f.size = size));
+    changed |= toolbar(ui, book, &mut state, &selected, state_id);
+    let id = book.active_id();
+    let row = book.selection.row;
+    let col = book.selection.col;
+    if state.last != (id, row, col) {
+        changed |= commit(book, &mut state);
+        if !state.editing {
+            state.last = (id, row, col);
+            state.buffer = book
+                .active_sheet()
+                .and_then(|sheet| sheet.cell(row, col))
+                .map(|cell| cell.input.clone())
+                .unwrap_or_default();
         }
-        let mut family = selected.font.clone();
-        egui::ComboBox::from_id_salt("sheet-font")
-            .width(100.0)
-            .selected_text(&family)
-            .show_ui(ui, |ui| {
-                for name in [
-                    "Calibri",
-                    "Arial",
-                    "Times New Roman",
-                    "Courier New",
-                    "Segoe UI",
-                ] {
-                    ui.selectable_value(&mut family, name.into(), name);
-                }
-            });
-        if family != selected.font {
-            changed |= result(&mut state, apply_format(book, |f| f.font = family.clone()));
-        }
-        for (label, flag) in [
-            ("B", selected.bold),
-            ("I", selected.italic),
-            ("U", selected.underline),
-            ("S", selected.strike),
-        ] {
-            if ui.selectable_label(flag, label).clicked() {
-                changed |= result(
-                    &mut state,
-                    apply_format(book, |f| match label {
-                        "B" => f.bold = !flag,
-                        "I" => f.italic = !flag,
-                        "U" => f.underline = !flag,
-                        _ => f.strike = !flag,
-                    }),
-                );
-            }
-        }
-        let mut number = selected.number.clone();
-        egui::ComboBox::from_id_salt("sheet-format")
-            .width(112.0)
-            .selected_text(
-                super::format::NUMBER_FORMATS
-                    .iter()
-                    .find(|(_, c)| *c == number)
-                    .map(|(label, _)| *label)
-                    .unwrap_or("Свой формат"),
-            )
-            .show_ui(ui, |ui| {
-                for (label, code) in super::format::NUMBER_FORMATS {
-                    ui.selectable_value(&mut number, code.to_string(), *label);
-                }
-            });
-        if number != selected.number {
-            changed |= result(
-                &mut state,
-                apply_format(book, |f| f.number = number.clone()),
-            );
-        }
-        let mut fg = selected.color;
-        if ui
-            .color_edit_button_srgb(&mut fg)
-            .on_hover_text("Цвет текста")
-            .changed()
-        {
-            changed |= result(&mut state, apply_format(book, |f| f.color = fg));
-        }
-        let mut fill = selected.fill.unwrap_or([255, 255, 255]);
-        if ui
-            .color_edit_button_srgb(&mut fill)
-            .on_hover_text("Заливка")
-            .changed()
-        {
-            changed |= result(&mut state, apply_format(book, |f| f.fill = Some(fill)));
-        }
-        for (label, align) in [
-            ("≡", Align::Left),
-            ("↔", Align::Center),
-            ("☰", Align::Right),
-        ] {
-            if ui
-                .selectable_label(selected.align == align, label)
-                .clicked()
-            {
-                changed |= result(&mut state, apply_format(book, |f| f.align = align));
-            }
-        }
-        if ui.selectable_label(selected.wrap, "Перенос").clicked() {
-            changed |= result(&mut state, apply_format(book, |f| f.wrap = !selected.wrap));
-        }
-        if ui.selectable_label(selected.border, "Границы").clicked() {
-            changed |= result(
-                &mut state,
-                apply_format(book, |f| f.border = !selected.border),
-            );
-        }
-        ui.menu_button("Данные", |ui| {
-            if ui.button("Сортировать А → Я").clicked() {
-                let range = book.selection.range();
-                changed |= result(
-                    &mut state,
-                    book.sort(id, range, &[(range.c0, false)], false),
-                );
-                ui.close();
-            }
-            if ui.button("Сортировать Я → А").clicked() {
-                let range = book.selection.range();
-                changed |= result(&mut state, book.sort(id, range, &[(range.c0, true)], false));
-                ui.close();
-            }
-            if ui.button("Заполнить вниз · Ctrl+D").clicked() {
-                let target = book.selection.range();
-                let source = Range::new(target.r0, target.c0, target.r0, target.c1);
-                changed |= result(&mut state, book.fill(id, source, target));
-                ui.close();
-            }
-            if ui.button("Заполнить вправо · Ctrl+R").clicked() {
-                let target = book.selection.range();
-                let source = Range::new(target.r0, target.c0, target.r1, target.c0);
-                changed |= result(&mut state, book.fill(id, source, target));
-                ui.close();
-            }
-            if ui.button("Объединить").clicked() {
-                changed |= result(&mut state, book.merge(id, book.selection.range()));
-                ui.close();
-            }
-            if ui.button("Разъединить").clicked() {
-                let range = book.selection.range();
-                if let Some(s) = book.active_sheet_mut() {
-                    s.merges.retain(|m| {
-                        !(m.r0 <= range.r1
-                            && range.r0 <= m.r1
-                            && m.c0 <= range.c1
-                            && range.c0 <= m.c1)
-                    });
-                    changed = true;
-                }
-                ui.close();
-            }
-            if ui.button("Закрепить до выбранной ячейки").clicked() {
-                if let Some(s) = book.active_sheet_mut() {
-                    s.frozen_rows = row;
-                    s.frozen_cols = col;
-                    changed = true;
-                }
-                ui.close();
-            }
-            if ui.button("Снять закрепление").clicked() {
-                if let Some(s) = book.active_sheet_mut() {
-                    s.frozen_rows = 0;
-                    s.frozen_cols = 0;
-                    changed = true;
-                }
-                ui.close();
-            }
-            if ui.button("Автоподбор ширины столбца").clicked() {
-                if let Some(s) = book.active_sheet_mut() {
-                    let width = s
-                        .cells
-                        .iter()
-                        .filter(|(a, _)| {
-                            super::model::parse_address(a).is_some_and(|(_, c)| c == col)
-                        })
-                        .map(|(_, c)| c.value.display().chars().count() as f32 * 7.5 + 18.0)
-                        .fold(96.0, f32::max)
-                        .min(600.0);
-                    s.widths.insert(col, width);
-                    changed = true;
-                }
-                ui.close();
-            }
-            if ui.button("Пересчитать").clicked() {
-                book.recalculate();
-                changed = true;
-                ui.close();
-            }
-            if ui.button("Найти и заменить · Ctrl+H").clicked() {
-                state.find_open = true;
-                ui.close();
-            }
-            if ui.button("Очистить формат").clicked() {
-                changed |= result(
-                    &mut state,
-                    apply_format(book, |f| *f = CellFormat::default()),
-                );
-                ui.close();
-            }
-        });
-        ui.menu_button("Строки / столбцы", |ui| {
-            for (label, rows, delete) in [
-                ("Вставить строку", true, false),
-                ("Удалить строку", true, true),
-                ("Вставить столбец", false, false),
-                ("Удалить столбец", false, true),
-            ] {
-                if ui.button(label).clicked() {
-                    changed |= result(
-                        &mut state,
-                        book.edit_dimension(id, if rows { row } else { col }, 1, rows, delete),
-                    );
-                    ui.close();
-                }
-            }
-            if ui.button("Скрыть строку").clicked() {
-                if let Some(s) = book.active_sheet_mut() {
-                    s.hidden_rows.insert(row);
-                    changed = true;
-                }
-                ui.close();
-            }
-            if ui.button("Скрыть столбец").clicked() {
-                if let Some(s) = book.active_sheet_mut() {
-                    s.hidden_cols.insert(col);
-                    changed = true;
-                }
-                ui.close();
-            }
-            if ui.button("Показать скрытые").clicked() {
-                if let Some(s) = book.active_sheet_mut() {
-                    s.hidden_rows.clear();
-                    s.hidden_cols.clear();
-                    changed = true;
-                }
-                ui.close();
-            }
-        });
-        ui.menu_button("Диаграмма", |ui| {
-            for (label, kind) in [
-                ("Столбцы", ChartKind::Column),
-                ("Линейчатая", ChartKind::Bar),
-                ("Линии", ChartKind::Line),
-                ("Область", ChartKind::Area),
-                ("Круговая", ChartKind::Pie),
-                ("Кольцевая", ChartKind::Doughnut),
-                ("Точечная", ChartKind::Scatter),
-            ] {
-                if ui.button(label).clicked() {
-                    state.chart_kind = kind;
-                    changed |= result(
-                        &mut state,
-                        book.add_chart(id, kind, book.selection.range(), "Диаграмма")
-                            .map(|_| ()),
-                    );
-                    ui.close();
-                }
-            }
-        });
-    });
+    }
+    ui.add_space(8.0);
     ui.horizontal(|ui| {
-        ui.monospace(address(row, col));
-        ui.label("ƒx");
+        let location_id = state_id.with("location");
+        if !ui.memory(|m| m.has_focus(location_id)) {
+            let range = book.selection.range();
+            state.location = if (range.r0, range.c0) == (range.r1, range.c1) {
+                address(row, col)
+            } else {
+                format!(
+                    "{}:{}",
+                    address(range.r0, range.c0),
+                    address(range.r1, range.c1)
+                )
+            };
+        }
+        let location_focused = ui.memory(|memory| memory.has_focus(location_id));
+        let location_enter = ui.is_enabled()
+            && location_focused
+            && ui.input_mut(|input| input.consume_key(input.modifiers, Key::Enter));
+        let location = ui
+            .add(
+                egui::TextEdit::singleline(&mut state.location)
+                    .desired_width(110.0)
+                    .id(location_id),
+            )
+            .on_hover_text("Адрес ячейки или диапазона · например A1:D8");
+        if location_enter {
+            location.surrender_focus();
+            match super::model::parse_range(&state.location) {
+                Ok(range) => {
+                    changed |= commit(book, &mut state);
+                    if !state.editing {
+                        book.selection = Selection {
+                            row: range.r0,
+                            col: range.c0,
+                            anchor_row: range.r1,
+                            anchor_col: range.c1,
+                        };
+                        state.scroll_to_selection = true;
+                        state.error.clear();
+                    }
+                }
+                Err(error) => state.error = error,
+            }
+        }
+        ui.label(
+            egui::RichText::new("ƒx")
+                .size(18.0)
+                .color(crate::chrome::accent(ui)),
+        );
+        let focused = ui.memory(|memory| memory.has_focus(formula_id));
+        let modifiers = ui.input(|i| i.modifiers);
+        let action = if ui.is_enabled() && (focused || (state.editing && formula_active)) {
+            ui.input_mut(|i| {
+                if i.consume_key(modifiers, Key::Escape) {
+                    Some(Key::Escape)
+                } else if i.consume_key(modifiers, Key::Enter) {
+                    Some(Key::Enter)
+                } else if i.consume_key(modifiers, Key::Tab) {
+                    Some(Key::Tab)
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        };
         let response = ui.add(
             egui::TextEdit::singleline(&mut state.buffer)
                 .desired_width(ui.available_width())
-                .id(state_id.with("formula")),
+                .id(formula_id)
+                .event_filter(egui::EventFilter {
+                    tab: true,
+                    escape: true,
+                    horizontal_arrows: true,
+                    vertical_arrows: true,
+                })
+                .hint_text("Введите значение или формулу =SUM(A1:A10)"),
         );
+        #[cfg(test)]
+        {
+            state.formula_rect = Some(response.rect);
+        }
         if response.changed() {
             state.editing = true;
         }
-        if response.has_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-            changed |= commit(book, &mut state);
-            response.surrender_focus();
-        }
-        if response.lost_focus() {
+        if let Some(key) = action {
+            if key == Key::Escape {
+                cancel_edit(book, &mut state);
+            } else {
+                changed |= commit(book, &mut state);
+                if !state.editing {
+                    advance(&mut book.selection, key, modifiers.shift);
+                    state.scroll_to_selection = true;
+                }
+            }
+            if !state.editing {
+                response.surrender_focus();
+                ui.memory_mut(|memory| {
+                    memory.request_focus(canvas_id);
+                    memory.move_focus(egui::FocusDirection::None);
+                });
+            }
+        } else if ui.is_enabled() && response.lost_focus() {
             changed |= commit(book, &mut state);
         }
         if !state.editing {
@@ -373,13 +856,23 @@ pub fn show(ui: &mut egui::Ui, book: &mut Book) -> bool {
                 .unwrap_or_default();
         }
     });
+    if book
+        .active_sheet()
+        .is_some_and(|sheet| sheet.frozen_rows > 20 || sheet.frozen_cols > 10)
+    {
+        ui.small("Холст отображает закрепление до 20 строк и 10 столбцов. Полная область сохраняется в файле.");
+    }
     if !state.error.is_empty() {
         ui.colored_label(Color32::from_rgb(200, 60, 50), &state.error);
     }
     if state.find_open {
         ui.horizontal(|ui| {
-            ui.label("Найти");
-            ui.add(egui::TextEdit::singleline(&mut state.find).desired_width(140.0));
+            ui.label(egui::RichText::new("Найти").strong());
+            ui.add(
+                egui::TextEdit::singleline(&mut state.find)
+                    .desired_width(140.0)
+                    .id(state_id.with("find")),
+            );
             if ui.button("Следующее").clicked()
                 && !state.find.is_empty()
                 && let Some(s) = book.active_sheet()
@@ -401,17 +894,27 @@ pub fn show(ui: &mut egui::Ui, book: &mut Book) -> bool {
                     })
                     .map(|(pos, _)| *pos);
                 if let Some((r, c)) = found {
-                    book.selection = Selection {
-                        row: r,
-                        col: c,
-                        anchor_row: r,
-                        anchor_col: c,
-                    };
+                    changed |= commit(book, &mut state);
+                    if !state.editing {
+                        book.selection = Selection {
+                            row: r,
+                            col: c,
+                            anchor_row: r,
+                            anchor_col: c,
+                        };
+                        state.scroll_to_selection = true;
+                    }
                 }
             }
             ui.label("Заменить");
-            ui.add(egui::TextEdit::singleline(&mut state.replace).desired_width(140.0));
-            if ui.button("Все").clicked() && !state.find.is_empty() {
+            ui.add(
+                egui::TextEdit::singleline(&mut state.replace)
+                    .desired_width(140.0)
+                    .id(state_id.with("replace")),
+            );
+            if command_action(ui.button("Все"), book, &mut state, &mut changed)
+                && !state.find.is_empty()
+            {
                 let inputs: Vec<_> = book
                     .active_sheet()
                     .map(|s| {
@@ -451,7 +954,11 @@ pub fn show(ui: &mut egui::Ui, book: &mut Book) -> bool {
                     .show(ui, |ui| {
                         for chart in &sheet.charts {
                             ui.strong(&chart.title);
-                            ui.label(format!("{:?}", chart.kind));
+                            ui.label(
+                                egui::RichText::new(chart_kind_name(chart.kind))
+                                    .small()
+                                    .color(crate::chrome::muted(ui)),
+                            );
                             let width = ui.available_width().min(chart.width);
                             let (rect, _) = ui.allocate_exact_size(
                                 Vec2::new(width, chart.height.min(220.0)),
@@ -474,12 +981,39 @@ pub fn show(ui: &mut egui::Ui, book: &mut Book) -> bool {
                 return;
             };
             let (max_row, max_col) = sheet.extent();
-            let rows = (max_row.saturating_add(100)).clamp(1000, MAX_ROWS);
-            let cols = (max_col.saturating_add(20)).clamp(26, MAX_COLS);
+            let rows = (max_row
+                .max(book.selection.row)
+                .max(book.selection.anchor_row)
+                .saturating_add(100))
+            .clamp(1000, MAX_ROWS);
+            let cols = (max_col
+                .max(book.selection.col)
+                .max(book.selection.anchor_col)
+                .saturating_add(20))
+            .clamp(26, MAX_COLS);
             let width = axis_pos(cols, 96.0, &sheet.widths, &sheet.hidden_cols) + 48.0;
             let height = axis_pos(rows, 26.0, &sheet.row_heights, &sheet.hidden_rows) + 28.0;
-            let (rect, response) =
-                ui.allocate_exact_size(Vec2::new(width, height), Sense::click_and_drag());
+            let (_, rect) = ui.allocate_space(Vec2::new(width, height));
+            let response = ui.interact(rect, canvas_id, Sense::click_and_drag());
+            if ui.is_enabled()
+                && !state.editing
+                && (response.clicked() || ui.memory(|memory| memory.focused().is_none()))
+            {
+                response.request_focus();
+            }
+            if ui.is_enabled() {
+                ui.memory_mut(|memory| {
+                    memory.set_focus_lock_filter(
+                        canvas_id,
+                        egui::EventFilter {
+                            tab: true,
+                            escape: true,
+                            horizontal_arrows: true,
+                            vertical_arrows: true,
+                        },
+                    )
+                });
+            }
             let origin = rect.min;
             let painter = ui.painter().with_clip_rect(ui.clip_rect());
             let bg = ui.visuals().extreme_bg_color;
@@ -520,6 +1054,11 @@ pub fn show(ui: &mut egui::Ui, book: &mut Book) -> bool {
             let selection = book.selection.range();
             let frozen_r = sheet.frozen_rows.min(20);
             let frozen_c = sheet.frozen_cols.min(10);
+            #[cfg(test)]
+            state.test_controls.insert(
+                "grid-b1".into(),
+                cell_rect(sheet, origin, viewport, 0, 1, frozen_r, frozen_c),
+            );
             for r in (r0..r1).chain(0..frozen_r) {
                 if sheet.hidden_rows.contains(&r) {
                     continue;
@@ -539,12 +1078,12 @@ pub fn show(ui: &mut egui::Ui, book: &mut Book) -> bool {
                     }
                     let mut cell_rect = cell_rect;
                     if let Some(merge) = sheet.merges.iter().find(|m| m.r0 == r && m.c0 == c) {
-                        cell_rect.max.x = origin.x
-                            + 48.0
-                            + axis_pos(merge.c1 + 1, 96.0, &sheet.widths, &sheet.hidden_cols);
-                        cell_rect.max.y = origin.y
-                            + 28.0
-                            + axis_pos(merge.r1 + 1, 26.0, &sheet.row_heights, &sheet.hidden_rows);
+                        cell_rect.max.x = cell_rect.min.x
+                            + axis_pos(merge.c1 + 1, 96.0, &sheet.widths, &sheet.hidden_cols)
+                            - axis_pos(merge.c0, 96.0, &sheet.widths, &sheet.hidden_cols);
+                        cell_rect.max.y = cell_rect.min.y
+                            + axis_pos(merge.r1 + 1, 26.0, &sheet.row_heights, &sheet.hidden_rows)
+                            - axis_pos(merge.r0, 26.0, &sheet.row_heights, &sheet.hidden_rows);
                     }
                     let cell = sheet.cell(r, c);
                     let fmt = cell.map(|c| c.fmt.clone()).unwrap_or_default();
@@ -575,7 +1114,7 @@ pub fn show(ui: &mut egui::Ui, book: &mut Book) -> bool {
                         painter.rect_filled(
                             cell_rect,
                             0.0,
-                            Color32::from_rgba_unmultiplied(40, 150, 105, 35),
+                            crate::chrome::accent(ui).gamma_multiply(0.12),
                         );
                     }
                     painter.rect_stroke(
@@ -617,17 +1156,29 @@ pub fn show(ui: &mut egui::Ui, book: &mut Book) -> bool {
                         Pos2::new(cell_rect.left() + 5.0, cell_rect.center().y)
                     };
                     let clipped = painter.with_clip_rect(cell_rect.shrink(2.0));
-                    clipped.text(
-                        point,
-                        align,
-                        text,
-                        font,
-                        if ui.visuals().dark_mode && fmt.color == [28, 32, 38] {
-                            ui.visuals().text_color()
+                    let text_color = if ui.visuals().dark_mode && fmt.color == [28, 32, 38] {
+                        ui.visuals().text_color()
+                    } else {
+                        color(fmt.color)
+                    };
+                    if fmt.wrap {
+                        let galley = clipped.layout(
+                            text,
+                            font,
+                            text_color,
+                            (cell_rect.width() - 10.0).max(1.0),
+                        );
+                        let x = if fmt.align == Align::Center {
+                            cell_rect.center().x - galley.size().x / 2.0
+                        } else if right {
+                            cell_rect.right() - 5.0 - galley.size().x
                         } else {
-                            color(fmt.color)
-                        },
-                    );
+                            cell_rect.left() + 5.0
+                        };
+                        clipped.galley(Pos2::new(x, cell_rect.top() + 3.0), galley, text_color);
+                    } else {
+                        clipped.text(point, align, text, font, text_color);
+                    }
                     if fmt.underline || fmt.strike {
                         let y = cell_rect.center().y + if fmt.strike { 0.0 } else { 7.0 };
                         clipped.line_segment(
@@ -642,7 +1193,7 @@ pub fn show(ui: &mut egui::Ui, book: &mut Book) -> bool {
                         painter.rect_stroke(
                             cell_rect,
                             0.0,
-                            Stroke::new(2.0, Color32::from_rgb(35, 150, 100)),
+                            Stroke::new(2.0, crate::chrome::accent(ui)),
                             StrokeKind::Inside,
                         );
                     }
@@ -661,7 +1212,16 @@ pub fn show(ui: &mut egui::Ui, book: &mut Book) -> bool {
                 .collect();
             for (c, x, w) in headers {
                 let header = Rect::from_min_size(Pos2::new(x, header_y), Vec2::new(w, 28.0));
-                painter.rect_filled(header, 0.0, ui.visuals().panel_fill);
+                painter.rect_filled(
+                    header,
+                    0.0,
+                    if selection.c0 <= c && c <= selection.c1 {
+                        crate::chrome::accent(ui).gamma_multiply(0.12)
+                    } else {
+                        crate::chrome::workspace(ui)
+                    },
+                );
+                painter.rect_stroke(header, 0.0, Stroke::new(0.5, grid), StrokeKind::Inside);
                 painter.text(
                     header.center(),
                     Align2::CENTER_CENTER,
@@ -696,7 +1256,16 @@ pub fn show(ui: &mut egui::Ui, book: &mut Book) -> bool {
                     Pos2::new(origin.x + viewport.min.x, y),
                     Vec2::new(48.0, h),
                 );
-                painter.rect_filled(header, 0.0, ui.visuals().panel_fill);
+                painter.rect_filled(
+                    header,
+                    0.0,
+                    if selection.r0 <= r && r <= selection.r1 {
+                        crate::chrome::accent(ui).gamma_multiply(0.12)
+                    } else {
+                        crate::chrome::workspace(ui)
+                    },
+                );
+                painter.rect_stroke(header, 0.0, Stroke::new(0.5, grid), StrokeKind::Inside);
                 painter.text(
                     header.center(),
                     Align2::CENTER_CENTER,
@@ -752,27 +1321,38 @@ pub fn show(ui: &mut egui::Ui, book: &mut Book) -> bool {
                     } else {
                         c
                     };
+                    let (r, c) = sheet
+                        .merges
+                        .iter()
+                        .find(|merge| merge.contains(r, c))
+                        .map(|merge| (merge.r0, merge.c0))
+                        .unwrap_or((r, c));
                     let extended = ui.input(|i| i.modifiers.shift) || response.dragged();
                     changed |= commit(book, &mut state);
-                    book.selection.row = r;
-                    book.selection.col = c;
-                    if !extended {
-                        book.selection.anchor_row = r;
-                        book.selection.anchor_col = c;
-                    }
-                    if response.double_clicked() {
-                        state.last = (id, r, c);
-                        state.buffer = book
-                            .active_sheet()
-                            .and_then(|s| s.cell(r, c))
-                            .map(|c| c.input.clone())
-                            .unwrap_or_default();
-                        state.editing = true;
-                        ui.memory_mut(|m| m.request_focus(state_id.with("formula")));
+                    if !state.editing {
+                        book.selection.row = r;
+                        book.selection.col = c;
+                        if !extended {
+                            book.selection.anchor_row = r;
+                            book.selection.anchor_col = c;
+                        }
+                        if response.double_clicked() {
+                            state.last = (id, r, c);
+                            state.buffer = book
+                                .active_sheet()
+                                .and_then(|s| s.cell(r, c))
+                                .map(|c| c.input.clone())
+                                .unwrap_or_default();
+                            state.editing = true;
+                            ui.memory_mut(|m| m.request_focus(state_id.with("formula")));
+                        }
                     }
                 }
             }
-            if !state.editing && !ui.ctx().egui_wants_keyboard_input() {
+            if ui.is_enabled()
+                && !state.editing
+                && (response.has_focus() || !ui.ctx().egui_wants_keyboard_input())
+            {
                 let events = ui.input(|i| i.events.clone());
                 for event in events {
                     match event {
@@ -802,7 +1382,11 @@ pub fn show(ui: &mut egui::Ui, book: &mut Book) -> bool {
                             Err(e) => state.error = e,
                         },
                         egui::Event::Text(text) => {
-                            state.buffer = text;
+                            if state.editing {
+                                state.buffer.push_str(&text);
+                            } else {
+                                state.buffer = text;
+                            }
                             state.last = (id, book.selection.row, book.selection.col);
                             state.editing = true;
                             ui.memory_mut(|m| m.request_focus(state_id.with("formula")));
@@ -813,8 +1397,27 @@ pub fn show(ui: &mut egui::Ui, book: &mut Book) -> bool {
                             modifiers,
                             ..
                         } => {
+                            if state.editing {
+                                if key == Key::Escape {
+                                    cancel_edit(book, &mut state);
+                                } else if key == Key::Enter || key == Key::Tab {
+                                    changed |= commit(book, &mut state);
+                                    if !state.editing {
+                                        advance(&mut book.selection, key, modifiers.shift);
+                                        state.scroll_to_selection = true;
+                                    }
+                                }
+                                if !state.editing {
+                                    ui.memory_mut(|memory| {
+                                        memory.request_focus(canvas_id);
+                                        memory.move_focus(egui::FocusDirection::None);
+                                    });
+                                }
+                                continue;
+                            }
                             if modifiers.ctrl && (key == Key::F || key == Key::H) {
                                 state.find_open = true;
+                                ui.memory_mut(|memory| memory.request_focus(state_id.with("find")));
                                 continue;
                             }
                             if modifiers.ctrl && (key == Key::D || key == Key::R) {
@@ -836,17 +1439,22 @@ pub fn show(ui: &mut egui::Ui, book: &mut Book) -> bool {
                                 ui.memory_mut(|m| m.request_focus(state_id.with("formula")));
                                 continue;
                             }
+                            if key == Key::Enter || key == Key::Tab {
+                                advance(&mut book.selection, key, modifiers.shift);
+                                state.scroll_to_selection = true;
+                                continue;
+                            }
                             let step = if modifiers.ctrl { 20 } else { 1 };
                             let selection = &mut book.selection;
                             match key {
                                 Key::ArrowUp => selection.row = selection.row.saturating_sub(step),
-                                Key::ArrowDown | Key::Enter => {
+                                Key::ArrowDown => {
                                     selection.row = (selection.row + step).min(MAX_ROWS - 1)
                                 }
                                 Key::ArrowLeft => {
                                     selection.col = selection.col.saturating_sub(step)
                                 }
-                                Key::ArrowRight | Key::Tab => {
+                                Key::ArrowRight => {
                                     selection.col = (selection.col + step).min(MAX_COLS - 1)
                                 }
                                 Key::Home => {
@@ -871,104 +1479,239 @@ pub fn show(ui: &mut egui::Ui, book: &mut Book) -> bool {
                                 selection.anchor_row = selection.row;
                                 selection.anchor_col = selection.col;
                             }
-                            let target = Rect::from_min_size(
-                                origin
-                                    + Vec2::new(
-                                        48.0 + selection.col as f32 * 96.0,
-                                        28.0 + selection.row as f32 * 26.0,
-                                    ),
-                                Vec2::new(96.0, 26.0),
-                            );
-                            ui.scroll_to_rect(target, None);
+                            state.scroll_to_selection = true;
                         }
                         _ => (),
                     }
                 }
             }
+            if state.scroll_to_selection
+                && let Some(sheet) = book.active_sheet()
+            {
+                let target = cell_rect(
+                    sheet,
+                    origin,
+                    viewport,
+                    book.selection.row,
+                    book.selection.col,
+                    frozen_r,
+                    frozen_c,
+                );
+                ui.scroll_to_rect(target, None);
+                state.scroll_to_selection = false;
+            }
         });
-    ui.horizontal(|ui| {
-        let visible: Vec<_> = book
-            .sheets
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| !s.hidden)
-            .map(|(i, s)| (i, s.id, s.name.clone()))
-            .collect();
-        for (index, sid, name) in visible {
-            let response = ui.selectable_label(book.active == index, &name);
-            if response.clicked() {
-                changed |= commit(book, &mut state);
-                book.active = index;
-                book.selection = Selection::default();
-            }
-            response.context_menu(|ui| {
-                ui.label("Имя листа");
-                if state.rename.is_empty() {
-                    state.rename = name.clone();
-                }
-                ui.text_edit_singleline(&mut state.rename);
-                if ui.button("Переименовать").clicked() {
-                    let name = state.rename.clone();
-                    changed |= result(&mut state, book.rename_sheet(sid, &name));
-                    state.rename.clear();
-                    ui.close();
-                }
-                if ui.button("Переместить в начало").clicked() {
-                    changed |= result(&mut state, book.move_sheet(sid, 0));
-                    ui.close();
-                }
-                if ui.button("Удалить лист").clicked() {
-                    changed |= result(&mut state, book.delete_sheet(sid));
-                    ui.close();
-                }
-            });
-        }
-        if ui.button("+").clicked() {
-            let mut index = book.sheets.len() + 1;
-            loop {
-                let name = format!("Лист{index}");
-                if !book.sheets.iter().any(|s| s.name == name) {
-                    changed |= result(&mut state, book.add_sheet(&name).map(|_| ()));
-                    book.active = book.sheets.len() - 1;
-                    break;
-                }
-                index += 1;
-            }
-        }
-        let range = book.selection.range();
-        if range.validate().is_ok()
-            && let Some(s) = book.active_sheet()
-        {
-            let mut sum = 0.0;
-            let mut count = 0;
-            let mut nonempty = 0;
-            for r in range.r0..=range.r1 {
-                for c in range.c0..=range.c1 {
-                    if let Some(cell) = s.cell(r, c) {
-                        if cell.value != Value::Empty {
-                            nonempty += 1;
+    ui.add_space(6.0);
+    egui::ScrollArea::horizontal()
+        .id_salt(state_id.with("sheet-tabs"))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let visible: Vec<_> = book
+                    .sheets
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| !s.hidden)
+                    .map(|(i, s)| (i, s.id, s.name.clone()))
+                    .collect();
+                for (index, sid, name) in visible {
+                    let response = ui.selectable_label(book.active == index, &name);
+                    #[cfg(test)]
+                    state
+                        .test_controls
+                        .insert(format!("sheet-{sid}"), response.rect);
+                    if command_action(response.clone(), book, &mut state, &mut changed) {
+                        book.active = index;
+                        book.selection = Selection::default();
+                    }
+                    response.context_menu(|ui| {
+                        ui.label("Имя листа");
+                        if state.rename_sheet_id != Some(sid) {
+                            state.rename_sheet_id = Some(sid);
+                            state.rename = name.clone();
                         }
-                        if let Value::Number(v) = cell.value {
-                            sum += v;
-                            count += 1;
+                        ui.text_edit_singleline(&mut state.rename);
+                        if command_action(
+                            ui.button("Переименовать"),
+                            book,
+                            &mut state,
+                            &mut changed,
+                        ) {
+                            let name = state.rename.clone();
+                            changed |= result(&mut state, book.rename_sheet(sid, &name));
+                            state.rename.clear();
+                            state.rename_sheet_id = None;
+                            ui.close();
+                        }
+                        if command_action(
+                            ui.button("Переместить в начало"),
+                            book,
+                            &mut state,
+                            &mut changed,
+                        ) {
+                            changed |= result(&mut state, book.move_sheet(sid, 0));
+                            ui.close();
+                        }
+                        if command_action(ui.button("Удалить лист"), book, &mut state, &mut changed)
+                        {
+                            changed |= result(&mut state, book.delete_sheet(sid));
+                            ui.close();
+                        }
+                    });
+                }
+                let response = ui.button("+").on_hover_text("Добавить лист");
+                #[cfg(test)]
+                state
+                    .test_controls
+                    .insert("new-sheet".into(), response.rect);
+                if response.clicked() {
+                    changed |= add_sheet(book, &mut state);
+                }
+                let range = book.selection.range();
+                if range.validate().is_ok()
+                    && let Some(s) = book.active_sheet()
+                {
+                    let mut sum = 0.0;
+                    let mut count = 0;
+                    let mut nonempty = 0;
+                    for r in range.r0..=range.r1 {
+                        for c in range.c0..=range.c1 {
+                            if let Some(cell) = s.cell(r, c) {
+                                if cell.value != Value::Empty {
+                                    nonempty += 1;
+                                }
+                                if let Value::Number(v) = cell.value {
+                                    sum += v;
+                                    count += 1;
+                                }
+                            }
                         }
                     }
+                    ui.separator();
+                    ui.label(format!(
+                        "Сумма: {sum:.4}  Среднее: {:.4}  Количество: {nonempty}",
+                        if count == 0 {
+                            0.0
+                        } else {
+                            sum / f64::from(count)
+                        }
+                    ));
                 }
-            }
-            ui.separator();
-            ui.label(format!(
-                "Сумма: {sum:.4}  Среднее: {:.4}  Количество: {nonempty}",
-                if count == 0 {
-                    0.0
-                } else {
-                    sum / f64::from(count)
-                }
-            ));
-        }
-    });
+            });
+        });
     ui.ctx().data_mut(|d| d.insert_temp(state_id, state));
     changed
 }
+fn freeze_selection(book: &mut Book, state: &mut State, row: u32, col: u32) -> bool {
+    if row > 20 || col > 10 {
+        state.error = "Холст пока поддерживает закрепление не более 20 строк и 10 столбцов. Выберите ячейку в этой области.".into();
+        return false;
+    }
+    if let Some(sheet) = book.active_sheet_mut() {
+        let changed = sheet.frozen_rows != row || sheet.frozen_cols != col;
+        sheet.frozen_rows = row;
+        sheet.frozen_cols = col;
+        state.error.clear();
+        changed
+    } else {
+        false
+    }
+}
+fn advance(selection: &mut Selection, key: Key, backwards: bool) {
+    match (key, backwards) {
+        (Key::Enter, true) => selection.row = selection.row.saturating_sub(1),
+        (Key::Enter, false) => selection.row = selection.row.saturating_add(1).min(MAX_ROWS - 1),
+        (Key::Tab, true) => selection.col = selection.col.saturating_sub(1),
+        (Key::Tab, false) => selection.col = selection.col.saturating_add(1).min(MAX_COLS - 1),
+        _ => (),
+    }
+    selection.anchor_row = selection.row;
+    selection.anchor_col = selection.col;
+}
+fn add_sheet(book: &mut Book, state: &mut State) -> bool {
+    let committed = commit(book, state);
+    if state.editing {
+        return committed;
+    }
+    let mut index = book.sheets.len() + 1;
+    loop {
+        let name = format!("Лист{index}");
+        if !book
+            .sheets
+            .iter()
+            .any(|sheet| sheet.name.eq_ignore_ascii_case(&name))
+        {
+            let changed = result(state, book.add_sheet(&name).map(|_| ()));
+            if changed {
+                book.active = book.sheets.len().saturating_sub(1);
+                book.selection = Selection::default();
+                state.scroll_to_selection = true;
+            }
+            return committed || changed;
+        }
+        index += 1;
+    }
+}
+fn copy_range(ui: &egui::Ui, book: &Book, state: &mut State) -> bool {
+    let range = book.selection.range();
+    match book.read_range(book.active_id(), range.r0, range.c0, range.r1, range.c1) {
+        Ok(rows) => {
+            ui.ctx().copy_text(super::io::to_csv(&rows, '\t'));
+            state.error.clear();
+            true
+        }
+        Err(error) => {
+            state.error = error;
+            false
+        }
+    }
+}
+fn table_format(book: &mut Book) -> Result<(), String> {
+    let id = book.active_id();
+    let range = book.selection.range();
+    range.validate()?;
+    for row in range.r0..=range.r1 {
+        for col in range.c0..=range.c1 {
+            if book
+                .sheet_by_id(id)
+                .and_then(|sheet| sheet.cell(row, col))
+                .is_none()
+            {
+                book.set_input(id, row, col, "")?;
+            }
+            if let Some(cell) = book
+                .sheet_by_id_mut(id)
+                .and_then(|sheet| sheet.cell_mut(row, col))
+            {
+                cell.fmt.border = true;
+                if row == range.r0 {
+                    cell.fmt.bold = true;
+                    cell.fmt.color = [255, 255, 255];
+                    cell.fmt.fill = Some([29, 116, 83]);
+                } else {
+                    cell.fmt.color = [28, 32, 38];
+                    cell.fmt.fill = Some(if (row - range.r0).is_multiple_of(2) {
+                        [255, 255, 255]
+                    } else {
+                        [236, 246, 240]
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+fn chart_kind_name(kind: ChartKind) -> &'static str {
+    match kind {
+        ChartKind::Column => "Столбчатая",
+        ChartKind::Bar => "Линейчатая",
+        ChartKind::Line => "Линейная",
+        ChartKind::Area => "С областями",
+        ChartKind::Pie => "Круговая",
+        ChartKind::Doughnut => "Кольцевая",
+        ChartKind::Scatter => "Точечная",
+    }
+}
+
 fn clear(book: &mut Book, state: &mut State) -> bool {
     let range = book.selection.range();
     if let Err(e) = range.validate() {
@@ -1188,5 +1931,510 @@ fn paint_chart(ui: &egui::Ui, sheet: &Sheet, chart: &super::model::Chart, rect: 
         if !points.is_empty() {
             painter.add(egui::Shape::line(points, Stroke::new(2.0, c)));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn key(key: Key, shift: bool) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers {
+                shift,
+                ..Default::default()
+            },
+        }
+    }
+    fn frame(
+        ctx: &egui::Context,
+        book: &mut Book,
+        events: Vec<egui::Event>,
+        shift: bool,
+    ) -> Result<State, String> {
+        frame_enabled(ctx, book, events, shift, true)
+    }
+    fn frame_enabled(
+        ctx: &egui::Context,
+        book: &mut Book,
+        events: Vec<egui::Event>,
+        shift: bool,
+        enabled: bool,
+    ) -> Result<State, String> {
+        frame_with_ribbon(ctx, book, events, shift, enabled, None)
+    }
+    fn frame_with_ribbon(
+        ctx: &egui::Context,
+        book: &mut Book,
+        mut events: Vec<egui::Event>,
+        shift: bool,
+        enabled: bool,
+        ribbon: Option<usize>,
+    ) -> Result<State, String> {
+        events.insert(
+            0,
+            egui::Event::ModifiersChanged(egui::Modifiers {
+                shift,
+                ..Default::default()
+            }),
+        );
+        let mut saved = None;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1250.0, 820.0))),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                if !enabled {
+                    ui.disable();
+                }
+                if let Some(ribbon) = ribbon {
+                    let id = ui.id().with("sheets-editor");
+                    let mut state = ui
+                        .ctx()
+                        .data_mut(|data| data.get_temp::<State>(id))
+                        .unwrap_or_default();
+                    state.ribbon_tab = ribbon;
+                    ui.ctx().data_mut(|data| data.insert_temp(id, state));
+                }
+                show(ui, book);
+                saved = ui
+                    .ctx()
+                    .data_mut(|data| data.get_temp::<State>(ui.id().with("sheets-editor")));
+            },
+        );
+        output.textures_delta.clear();
+        saved.ok_or_else(|| "Состояние редактора не сохранено".into())
+    }
+    #[test]
+    fn text_events_accumulate_and_escape_keeps_original_cell() -> Result<(), String> {
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx)?;
+        let mut book = Book::default();
+        book.set_cell(book.active_id(), 0, 0, "original")?;
+        frame(&ctx, &mut book, Vec::new(), false)?;
+        let state = frame(
+            &ctx,
+            &mut book,
+            vec![egui::Event::Text("a".into()), egui::Event::Text("b".into())],
+            false,
+        )?;
+        assert_eq!(state.buffer, "ab");
+        let state = frame(&ctx, &mut book, vec![key(Key::Escape, false)], false)?;
+        assert!(!state.editing);
+        assert_eq!(
+            book.active_sheet()
+                .and_then(|sheet| sheet.cell(0, 0))
+                .map(|cell| cell.input.as_str()),
+            Some("original")
+        );
+        Ok(())
+    }
+    #[test]
+    fn typed_value_commits_before_enter_and_shift_navigation() -> Result<(), String> {
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx)?;
+        let mut book = Book {
+            selection: Selection {
+                row: 1,
+                col: 1,
+                anchor_row: 1,
+                anchor_col: 1,
+            },
+            ..Default::default()
+        };
+        frame(&ctx, &mut book, Vec::new(), false)?;
+        frame(&ctx, &mut book, vec![egui::Event::Text("42".into())], false)?;
+        frame(&ctx, &mut book, vec![key(Key::Enter, true)], true)?;
+        assert_eq!(
+            book.active_sheet()
+                .and_then(|sheet| sheet.cell(1, 1))
+                .map(|cell| cell.input.as_str()),
+            Some("42")
+        );
+        assert_eq!((book.selection.row, book.selection.col), (0, 1));
+        frame(&ctx, &mut book, vec![key(Key::Tab, true)], true)?;
+        assert_eq!(
+            (
+                book.selection.row,
+                book.selection.col,
+                book.selection.anchor_row,
+                book.selection.anchor_col
+            ),
+            (0, 0, 0, 0)
+        );
+        Ok(())
+    }
+    #[test]
+    fn clicking_inside_formula_does_not_commit_draft_before_escape() -> Result<(), String> {
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx)?;
+        let mut book = Book::default();
+        book.set_cell(book.active_id(), 0, 0, "original")?;
+        frame(&ctx, &mut book, Vec::new(), false)?;
+        frame(&ctx, &mut book, vec![key(Key::F2, false)], false)?;
+        let state = frame(
+            &ctx,
+            &mut book,
+            vec![egui::Event::Text("draft".into())],
+            false,
+        )?;
+        assert!(state.editing);
+        assert_ne!(state.buffer, "original");
+        let formula = state.formula_rect.ok_or("Нет геометрии строки формул")?;
+        assert!(
+            Rect::from_min_size(Pos2::ZERO, Vec2::new(1250.0, 820.0)).contains_rect(formula),
+            "Formula outside viewport: {formula:?}"
+        );
+        let position = formula.center();
+        let state = frame(
+            &ctx,
+            &mut book,
+            vec![
+                egui::Event::PointerMoved(position),
+                egui::Event::PointerButton {
+                    pos: position,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            false,
+        )?;
+        assert!(state.editing);
+        assert_eq!(
+            book.active_sheet()
+                .and_then(|sheet| sheet.cell(0, 0))
+                .map(|cell| cell.input.as_str()),
+            Some("original")
+        );
+        let state = frame(
+            &ctx,
+            &mut book,
+            vec![egui::Event::PointerButton {
+                pos: position,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            false,
+        )?;
+        assert!(state.editing);
+        assert_eq!(
+            book.active_sheet()
+                .and_then(|sheet| sheet.cell(0, 0))
+                .map(|cell| cell.input.as_str()),
+            Some("original")
+        );
+        let state = frame(&ctx, &mut book, vec![key(Key::Escape, false)], false)?;
+        assert!(!state.editing);
+        assert_eq!(
+            book.active_sheet()
+                .and_then(|sheet| sheet.cell(0, 0))
+                .map(|cell| cell.input.as_str()),
+            Some("original")
+        );
+        Ok(())
+    }
+    #[test]
+    fn text_and_navigation_in_one_frame_commit_before_moving() -> Result<(), String> {
+        for (navigation, backwards, expected) in [
+            (Key::Enter, false, (2, 1)),
+            (Key::Enter, true, (0, 1)),
+            (Key::Tab, false, (1, 2)),
+            (Key::Tab, true, (1, 0)),
+        ] {
+            let ctx = egui::Context::default();
+            crate::fonts::install(&ctx)?;
+            let mut book = Book {
+                selection: Selection {
+                    row: 1,
+                    col: 1,
+                    anchor_row: 1,
+                    anchor_col: 1,
+                },
+                ..Default::default()
+            };
+            frame(&ctx, &mut book, Vec::new(), false)?;
+            let state = frame(
+                &ctx,
+                &mut book,
+                vec![egui::Event::Text("42".into()), key(navigation, backwards)],
+                backwards,
+            )?;
+            assert!(!state.editing);
+            assert_eq!(
+                book.active_sheet()
+                    .and_then(|sheet| sheet.cell(1, 1))
+                    .map(|cell| cell.input.as_str()),
+                Some("42"),
+            );
+            assert_eq!((book.selection.row, book.selection.col), expected);
+            assert_eq!(
+                (book.selection.anchor_row, book.selection.anchor_col),
+                expected
+            );
+        }
+        Ok(())
+    }
+    #[test]
+    fn text_and_escape_in_one_frame_leave_cell_unchanged() -> Result<(), String> {
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx)?;
+        let mut book = Book::default();
+        book.set_cell(book.active_id(), 0, 0, "original")?;
+        frame(&ctx, &mut book, Vec::new(), false)?;
+        let state = frame(
+            &ctx,
+            &mut book,
+            vec![egui::Event::Text("draft".into()), key(Key::Escape, false)],
+            false,
+        )?;
+        assert!(!state.editing);
+        assert_eq!(state.buffer, "original");
+        assert_eq!(
+            book.active_sheet()
+                .and_then(|sheet| sheet.cell(0, 0))
+                .map(|cell| cell.input.as_str()),
+            Some("original"),
+        );
+        frame(&ctx, &mut book, vec![key(Key::ArrowRight, false)], false)?;
+        assert_eq!((book.selection.row, book.selection.col), (0, 1));
+        Ok(())
+    }
+    #[test]
+    fn disabled_grid_ignores_delete_paste_cut_and_text() -> Result<(), String> {
+        for previously_focused in [false, true] {
+            let ctx = egui::Context::default();
+            crate::fonts::install(&ctx)?;
+            let mut book = Book::default();
+            book.set_cell(book.active_id(), 0, 0, "original")?;
+            if previously_focused {
+                frame(&ctx, &mut book, Vec::new(), false)?;
+            }
+            let original = book.clone();
+            for events in [
+                vec![key(Key::Delete, false)],
+                vec![egui::Event::Paste("replacement".into())],
+                vec![egui::Event::Cut],
+                vec![egui::Event::Text("draft".into()), key(Key::Enter, false)],
+                vec![key(Key::ArrowRight, false)],
+            ] {
+                let state = frame_enabled(&ctx, &mut book, events, false, false)?;
+                assert_eq!(book, original);
+                assert!(!state.editing);
+                assert!(ctx.memory(|memory| memory.focused().is_none()));
+            }
+        }
+        Ok(())
+    }
+    #[test]
+    fn disabling_formula_does_not_commit_pending_draft() -> Result<(), String> {
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx)?;
+        let mut book = Book::default();
+        book.set_cell(book.active_id(), 0, 0, "original")?;
+        frame(&ctx, &mut book, Vec::new(), false)?;
+        frame(
+            &ctx,
+            &mut book,
+            vec![egui::Event::Text("draft".into())],
+            false,
+        )?;
+        let original = book.clone();
+        let state = frame_enabled(&ctx, &mut book, vec![key(Key::Enter, false)], false, false)?;
+        assert_eq!(book, original);
+        assert!(state.editing);
+        assert_eq!(state.buffer, "draft");
+        let state = frame_enabled(&ctx, &mut book, Vec::new(), false, false)?;
+        assert_eq!(book, original);
+        assert!(state.editing);
+        assert_eq!(state.buffer, "draft");
+        Ok(())
+    }
+    #[test]
+    fn pending_flush_is_scoped_to_tab_and_retains_invalid_draft() -> Result<(), String> {
+        let ctx = egui::Context::default();
+        let mut book = Book::default();
+        let state_id = egui::Id::new(("sheets-editor", 7_u64));
+        ctx.data_mut(|data| {
+            data.insert_temp(
+                state_id,
+                State {
+                    editing: true,
+                    buffer: "42".into(),
+                    last: (book.active_id(), 0, 0),
+                    ..Default::default()
+                },
+            )
+        });
+        assert!(!commit_pending(&ctx, 8, &mut book)?);
+        assert!(commit_pending(&ctx, 7, &mut book)?);
+        assert_eq!(
+            book.active_sheet()
+                .and_then(|sheet| sheet.cell(0, 0))
+                .map(|cell| cell.value.clone()),
+            Some(Value::Number(42.0))
+        );
+        assert!(!commit_pending(&ctx, 7, &mut book)?);
+        ctx.data_mut(|data| {
+            data.insert_temp(
+                state_id,
+                State {
+                    editing: true,
+                    buffer: "draft".into(),
+                    last: (999, 0, 0),
+                    ..Default::default()
+                },
+            )
+        });
+        assert!(commit_pending(&ctx, 7, &mut book).is_err());
+        let state = ctx
+            .data_mut(|data| data.get_temp::<State>(state_id))
+            .ok_or("Нет состояния")?;
+        assert!(state.editing);
+        assert_eq!(state.buffer, "draft");
+        Ok(())
+    }
+
+    fn click_control(ctx: &egui::Context, book: &mut Book, rect: Rect) -> Result<State, String> {
+        assert!(
+            Rect::from_min_size(Pos2::ZERO, Vec2::new(1250.0, 820.0)).contains_rect(rect),
+            "Control outside viewport: {rect:?}"
+        );
+        let position = rect.center();
+        frame(
+            ctx,
+            book,
+            vec![
+                egui::Event::PointerMoved(position),
+                egui::Event::PointerButton {
+                    pos: position,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            false,
+        )?;
+        frame(
+            ctx,
+            book,
+            vec![egui::Event::PointerButton {
+                pos: position,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            false,
+        )?;
+        frame(ctx, book, Vec::new(), false)
+    }
+    #[test]
+    fn invalid_formula_draft_survives_grid_sheet_and_new_sheet_clicks() -> Result<(), String> {
+        for action in ["grid-b1", "other-sheet", "new-sheet", "toolbar-new-sheet"] {
+            let ctx = egui::Context::default();
+            crate::fonts::install(&ctx)?;
+            let mut book = Book::default();
+            let sheet_id = book.active_id();
+            book.set_cell(sheet_id, 0, 0, "original")?;
+            let other_sheet = book.add_sheet("Second")?;
+            let control = if action == "other-sheet" {
+                format!("sheet-{other_sheet}")
+            } else {
+                action.to_string()
+            };
+            frame_with_ribbon(
+                &ctx,
+                &mut book,
+                Vec::new(),
+                false,
+                true,
+                (action == "toolbar-new-sheet").then_some(1),
+            )?;
+            let original = book.clone();
+            let draft = "я".repeat(16384);
+            let state = frame(
+                &ctx,
+                &mut book,
+                vec![egui::Event::Text(draft.clone())],
+                false,
+            )?;
+            assert!(state.editing, "{action}");
+            assert_eq!(state.buffer, draft, "{action}");
+            let state = frame(&ctx, &mut book, Vec::new(), false)?;
+            let rect = state
+                .test_controls
+                .get(&control)
+                .copied()
+                .ok_or_else(|| format!("No geometry for {control}"))?;
+            let state = click_control(&ctx, &mut book, rect)?;
+            assert_eq!(book, original, "{action}");
+            assert!(state.editing, "{action}");
+            assert_eq!(state.last, (sheet_id, 0, 0), "{action}");
+            assert_eq!(state.buffer, draft, "{action}");
+            assert!(!state.error.is_empty(), "{action}");
+            let state = frame(&ctx, &mut book, vec![key(Key::Escape, false)], false)?;
+            assert!(!state.editing, "{action}");
+            assert_eq!(state.buffer, "original", "{action}");
+            assert_eq!(book, original, "{action}");
+            frame(
+                &ctx,
+                &mut book,
+                vec![egui::Event::Text("42".into()), key(Key::Enter, false)],
+                false,
+            )?;
+            assert_eq!(
+                book.sheet_by_id(sheet_id)
+                    .and_then(|sheet| sheet.cell(0, 0))
+                    .map(|cell| cell.input.as_str()),
+                Some("42"),
+                "{action}"
+            );
+        }
+        Ok(())
+    }
+    #[test]
+    fn selection_sync_retains_draft_when_commit_fails() -> Result<(), String> {
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx)?;
+        let mut book = Book::default();
+        let sheet = book.active_id();
+        book.set_cell(sheet, 0, 0, "original")?;
+        frame(&ctx, &mut book, Vec::new(), false)?;
+        let draft = "x".repeat(32768);
+        frame(
+            &ctx,
+            &mut book,
+            vec![egui::Event::Text(draft.clone())],
+            false,
+        )?;
+        book.selection = Selection {
+            row: 0,
+            col: 1,
+            anchor_row: 0,
+            anchor_col: 1,
+        };
+        let state = frame(&ctx, &mut book, Vec::new(), false)?;
+        assert!(state.editing);
+        assert_eq!(state.buffer, draft);
+        assert_eq!(state.last, (sheet, 0, 0));
+        assert!(!state.error.is_empty());
+        assert_eq!(
+            book.sheet_by_id(sheet)
+                .and_then(|sheet| sheet.cell(0, 0))
+                .map(|cell| cell.input.as_str()),
+            Some("original"),
+        );
+        assert!(
+            book.sheet_by_id(sheet)
+                .and_then(|sheet| sheet.cell(0, 1))
+                .is_none()
+        );
+        Ok(())
     }
 }

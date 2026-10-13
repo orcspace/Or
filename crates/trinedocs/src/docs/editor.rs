@@ -24,12 +24,15 @@ struct EditorState {
     typing: TextFormat,
     zoom: f32,
     show_find: bool,
+    find_focus: Option<bool>,
+    ribbon_tab: usize,
+    show_tables: bool,
+    show_objects: bool,
     search: String,
     replacement: String,
     case_sensitive: bool,
     match_index: usize,
     preedit: String,
-    clipboard: Option<Clipboard>,
     format_painter: Option<TextFormat>,
     link: String,
     table_rows: usize,
@@ -48,12 +51,15 @@ impl Default for EditorState {
             typing: TextFormat::default(),
             zoom: 1.25,
             show_find: false,
+            find_focus: None,
+            ribbon_tab: 0,
+            show_tables: false,
+            show_objects: false,
             search: String::new(),
             replacement: String::new(),
             case_sensitive: false,
             match_index: 0,
             preedit: String::new(),
-            clipboard: None,
             format_painter: None,
             link: String::new(),
             table_rows: 3,
@@ -112,6 +118,9 @@ impl EditorState {
 }
 
 pub fn show(ui: &mut egui::Ui, doc: &mut Doc) -> bool {
+    show_with_edits(ui, doc, None)
+}
+pub fn show_with_edits(ui: &mut egui::Ui, doc: &mut Doc, edits: Option<&[TextEditDelta]>) -> bool {
     doc.normalize();
     let state_id = ui.id().with("docs-state");
     let canvas_id = ui.id().with("docs-canvas");
@@ -121,7 +130,15 @@ pub fn show(ui: &mut egui::Ui, doc: &mut Doc) -> bool {
         .unwrap_or_default();
     let before = doc.clone();
     poll_image(doc, &mut state);
-    if let Some(previous) = &state.previous
+    if let Some(edits) = edits {
+        for edit in edits {
+            state.cursor = edit.transform(state.cursor);
+            state.anchor = edit.transform(state.anchor);
+        }
+        if !edits.is_empty() || state.previous.as_deref() != Some(doc) {
+            state.cached_layout = None;
+        }
+    } else if let Some(previous) = &state.previous
         && previous.as_ref() != doc
     {
         state.cursor = rebase_position(previous, doc, state.cursor);
@@ -143,9 +160,35 @@ pub fn show(ui: &mut egui::Ui, doc: &mut Doc) -> bool {
             },
         );
     }
+    let canvas_was_focused = ui.is_enabled() && ui.memory(|m| m.has_focus(canvas_id));
+    let find_was_focused = ui.is_enabled()
+        && ui.memory(|m| {
+            m.has_focus(find_field_id(canvas_id, false))
+                || m.has_focus(find_field_id(canvas_id, true))
+        });
+    if (canvas_was_focused || find_was_focused)
+        && let Some((index, replacement)) = ui.input(|i| {
+            i.events
+                .iter()
+                .enumerate()
+                .find_map(|(index, event)| find_shortcut(event).map(|target| (index, target)))
+        })
+    {
+        if canvas_was_focused {
+            // Preserve input that preceded the shortcut; later text belongs to the search field.
+            let earlier = ui.input(|i| i.events.iter().take(index).cloned().collect::<Vec<_>>());
+            let event_layout = doc.layout();
+            for event in earlier {
+                handle_event(ui, doc, &event_layout, &mut state, canvas_id, event);
+            }
+            ui.input_mut(|i| i.events.drain(..=index).for_each(drop));
+        }
+        open_find(ui, &mut state, canvas_id, replacement);
+        ui.input_mut(|i| i.events.retain(|event| find_shortcut(event).is_none()));
+    }
     toolbar(ui, doc, &mut state, canvas_id);
     if state.show_find {
-        find_bar(ui, doc, &mut state);
+        find_bar(ui, doc, &mut state, canvas_id);
     }
     if state.pending_image.is_some() {
         ui.label("Загрузка изображения…");
@@ -153,9 +196,9 @@ pub fn show(ui: &mut egui::Ui, doc: &mut Doc) -> bool {
     if let Some(message) = &state.message {
         ui.colored_label(Color32::from_rgb(160, 40, 40), message);
     }
-    table_panels(ui, doc);
-    ui.separator();
-    if ui.memory(|m| m.has_focus(canvas_id)) {
+    object_panels(ui, doc, &mut state);
+    ui.add_space(4.0);
+    if canvas_was_focused && ui.memory(|m| m.has_focus(canvas_id)) {
         ui.memory_mut(|m| {
             m.set_focus_lock_filter(
                 canvas_id,
@@ -173,7 +216,10 @@ pub fn show(ui: &mut egui::Ui, doc: &mut Doc) -> bool {
             .unwrap_or_else(|| std::sync::Arc::new(doc.layout()));
         let events = ui.input(|i| i.events.clone());
         for event in events {
-            handle_event(ui, doc, &event_layout, &mut state, event);
+            if !ui.memory(|m| m.has_focus(canvas_id)) {
+                break;
+            }
+            handle_event(ui, doc, &event_layout, &mut state, canvas_id, event);
         }
     }
     let layout = if state.previous.as_deref() == Some(doc) {
@@ -194,14 +240,28 @@ pub fn show(ui: &mut egui::Ui, doc: &mut Doc) -> bool {
     );
     let mut cursor_rect = None;
     egui::ScrollArea::both()
+        .max_height((ui.available_height() - 32.0).max(80.0))
+        .auto_shrink([false, false])
         .id_salt("docs-scroll")
         .show_viewport(ui, |ui, viewport| {
-            let (canvas, _) = ui.allocate_exact_size(total, Sense::hover());
+            let size = Vec2::new(total.x.max(viewport.width()), total.y);
+            let (canvas, _) = ui.allocate_exact_size(size, Sense::hover());
+            let page_left = ((canvas.width() - page_width) / 2.0).max(24.0);
+            let page_origin = canvas.min + egui::vec2(page_left, 12.0);
+            ui.painter()
+                .rect_filled(canvas, 0.0, crate::chrome::workspace(ui));
             let response = ui.interact(canvas, canvas_id, Sense::click_and_drag());
+            #[cfg(test)]
+            ui.ctx().data_mut(|data| {
+                data.insert_temp(
+                    egui::Id::new("docs-test-canvas"),
+                    (canvas.intersect(ui.clip_rect()), canvas_id),
+                )
+            });
             if response.clicked() || response.drag_started() {
                 response.request_focus();
                 if let Some(pointer) = response.interact_pointer_pos() {
-                    let pos = hit_test(&layout, pointer, canvas.min, scale, page_height, gap);
+                    let pos = hit_test(&layout, pointer, page_origin, scale, page_height, gap);
                     let shift = ui.input(|i| i.modifiers.shift);
                     if response.triple_clicked() {
                         state.anchor = Position {
@@ -233,7 +293,7 @@ pub fn show(ui: &mut egui::Ui, doc: &mut Doc) -> bool {
             if response.dragged()
                 && let Some(pointer) = response.interact_pointer_pos()
             {
-                state.cursor = hit_test(&layout, pointer, canvas.min, scale, page_height, gap);
+                state.cursor = hit_test(&layout, pointer, page_origin, scale, page_height, gap);
                 state.scroll_to_cursor = false;
             }
             let focused = response.has_focus();
@@ -252,7 +312,7 @@ pub fn show(ui: &mut egui::Ui, doc: &mut Doc) -> bool {
                 })
                 .map(|row| {
                     let origin =
-                        canvas.min + egui::vec2(24.0, 12.0 + row.page as f32 * (page_height + gap));
+                        page_origin + egui::vec2(0.0, row.page as f32 * (page_height + gap));
                     Rect::from_min_size(
                         origin + egui::vec2(row_x(row, state.cursor.offset) * scale, row.y * scale),
                         egui::vec2(1.5, row.height * scale),
@@ -261,17 +321,21 @@ pub fn show(ui: &mut egui::Ui, doc: &mut Doc) -> bool {
             let visible = Rect::from_min_size(canvas.min + viewport.min.to_vec2(), viewport.size())
                 .expand(80.0);
             for (page_index, page) in layout.pages.iter().enumerate() {
-                let origin =
-                    canvas.min + egui::vec2(24.0, 12.0 + page_index as f32 * (page_height + gap));
+                let origin = page_origin + egui::vec2(0.0, page_index as f32 * (page_height + gap));
                 let rect = Rect::from_min_size(origin, egui::vec2(page_width, page_height));
                 if !rect.intersects(visible) {
                     continue;
                 }
+                ui.painter().rect_filled(
+                    rect.translate(egui::vec2(0.0, 3.0)),
+                    3.0,
+                    Color32::from_black_alpha(14),
+                );
                 ui.painter().rect_filled(rect, 2.0, Color32::WHITE);
                 ui.painter().rect_stroke(
                     rect,
                     2.0,
-                    Stroke::new(1.0, Color32::from_gray(190)),
+                    Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
                     egui::StrokeKind::Outside,
                 );
                 crate::render::paint(ui, page, origin, scale);
@@ -379,305 +443,566 @@ pub fn show(ui: &mut egui::Ui, doc: &mut Doc) -> bool {
     changed
 }
 fn toolbar(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id: egui::Id) {
-    ui.horizontal_wrapped(|ui| {
-        let current_style = doc
-            .paragraphs
-            .get(state.cursor.paragraph)
-            .map(|p| p.style.as_str())
-            .unwrap_or("Normal")
-            .to_string();
-        egui::ComboBox::from_id_salt("docs-style")
-            .selected_text(style_label(&current_style))
-            .show_ui(ui, |ui| {
-                for style in [
-                    "Normal", "Title", "Heading1", "Heading2", "Heading3", "Quote",
-                ] {
+    crate::chrome::tabs(
+        ui,
+        &mut state.ribbon_tab,
+        &["Главная", "Вставка", "Макет", "Вид"],
+    );
+    crate::chrome::ribbon(ui, |ui| match state.ribbon_tab {
+        1 => {
+            crate::chrome::group(ui, "Таблицы", 100.0, |ui| {
+                ui.menu_button("Таблица", |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Строки");
+                        ui.add(egui::DragValue::new(&mut state.table_rows).range(1..=100));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Столбцы");
+                        ui.add(egui::DragValue::new(&mut state.table_columns).range(1..=32));
+                    });
+                    if ui.button("Вставить таблицу").clicked() {
+                        insert_table(doc, state);
+                        ui.close();
+                    }
                     if ui
-                        .selectable_label(current_style == style, style_label(style))
+                        .add_enabled(
+                            !doc.tables.is_empty(),
+                            egui::Button::new("Редактор таблиц…"),
+                        )
                         .clicked()
                     {
-                        let (a, b) = state.range();
-                        for p in doc
-                            .paragraphs
-                            .iter_mut()
-                            .skip(a.paragraph)
-                            .take(b.paragraph.saturating_sub(a.paragraph) + 1)
+                        state.show_tables = true;
+                        ui.close();
+                    }
+                });
+            });
+            crate::chrome::group(ui, "Изображения", 140.0, |ui| {
+                ui.menu_button("Изображение", |ui| {
+                    if ui
+                        .add_enabled(
+                            state.pending_image.is_none(),
+                            egui::Button::new("Вставить из файла…"),
+                        )
+                        .clicked()
+                    {
+                        start_image_load(ui, doc, state);
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(
+                            !doc.images.is_empty(),
+                            egui::Button::new("Размер и описание…"),
+                        )
+                        .clicked()
+                    {
+                        state.show_objects = true;
+                        ui.close();
+                    }
+                });
+            });
+            crate::chrome::group(ui, "Текст", 255.0, |ui| {
+                ui.horizontal(|ui| {
+                    ui.menu_button("Ссылка…", |ui| {
+                        ui.label("Адрес ссылки");
+                        ui.text_edit_singleline(&mut state.link);
+                        if ui
+                            .add_enabled(
+                                !state.link.trim().is_empty(),
+                                egui::Button::new("Применить"),
+                            )
+                            .clicked()
                         {
-                            p.set_style(style);
+                            let link = state.link.trim().to_string();
+                            if !state.selected() {
+                                let start = state.cursor;
+                                if state.insert(doc, &link) {
+                                    state.anchor = start;
+                                }
+                            }
+                            state.apply_format(doc, |f| {
+                                f.link = Some(link.clone());
+                                f.underline = true;
+                            });
+                            ui.memory_mut(|m| m.request_focus(canvas_id));
+                            ui.close();
                         }
-                        state.typing = doc
-                            .paragraphs
-                            .get(state.cursor.paragraph)
-                            .map(|p| p.format_at(state.cursor.offset))
-                            .unwrap_or_default();
+                    });
+                    ui.menu_button("Символ", |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            for ch in [
+                                "©", "®", "™", "€", "₽", "°", "±", "×", "÷", "—", "…", "§", "✓",
+                            ] {
+                                if ui.button(ch).clicked() {
+                                    state.insert(doc, ch);
+                                    ui.memory_mut(|m| m.request_focus(canvas_id));
+                                    ui.close();
+                                }
+                            }
+                        });
+                    });
+                    if ui
+                        .button("Дата")
+                        .on_hover_text("Вставить дату YYYY-MM-DD")
+                        .clicked()
+                    {
+                        state.insert(doc, &today());
                         ui.memory_mut(|m| m.request_focus(canvas_id));
                     }
-                }
-            });
-        let mut font = state.typing.font.clone();
-        egui::ComboBox::from_id_salt("docs-font")
-            .selected_text(&font)
-            .show_ui(ui, |ui| {
-                for name in [
-                    "Calibri",
-                    "Arial",
-                    "Times New Roman",
-                    "Cambria",
-                    "Consolas",
-                    "Segoe UI",
-                ] {
-                    ui.selectable_value(&mut font, name.into(), name);
-                }
-            });
-        if font != state.typing.font {
-            state.apply_format(doc, |f| f.font = font.clone());
-        }
-        let mut size = state.typing.size;
-        if ui
-            .add(
-                egui::DragValue::new(&mut size)
-                    .range(4.0..=144.0)
-                    .speed(0.5)
-                    .suffix(" pt"),
-            )
-            .changed()
-        {
-            state.apply_format(doc, |f| f.size = size);
-        }
-        for (label, on, which) in [
-            ("B", state.typing.bold, 0),
-            ("I", state.typing.italic, 1),
-            ("U", state.typing.underline, 2),
-            ("S", state.typing.strike, 3),
-        ] {
-            if ui.selectable_label(on, label).clicked() {
-                state.apply_format(doc, |f| match which {
-                    0 => f.bold = !on,
-                    1 => f.italic = !on,
-                    2 => f.underline = !on,
-                    _ => f.strike = !on,
                 });
-                ui.memory_mut(|m| m.request_focus(canvas_id));
-            }
+            });
+            crate::chrome::group(ui, "Страницы", 270.0, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("Разрыв страницы").clicked() {
+                        if state.insert(doc, "\n")
+                            && let Some(p) = doc.paragraphs.get_mut(state.cursor.paragraph)
+                        {
+                            p.page_break_before = true;
+                        }
+                        ui.memory_mut(|m| m.request_focus(canvas_id));
+                    }
+                    ui.menu_button("Колонтитулы…", |ui| page_headers(ui, doc));
+                });
+            });
         }
-        if ui.button("x²").clicked() {
-            let on = state.typing.script == 1;
-            state.apply_format(doc, |f| f.script = if on { 0 } else { 1 });
+        2 => {
+            crate::chrome::group(ui, "Страница", 280.0, |ui| {
+                ui.horizontal(|ui| {
+                    ui.menu_button("Размер", |ui| {
+                        for (name, width, height) in [
+                            ("A4", 595.28, 841.89),
+                            ("Letter", 612.0, 792.0),
+                            ("A3", 841.89, 1190.55),
+                            ("Legal", 612.0, 1008.0),
+                        ] {
+                            if ui.button(name).clicked() {
+                                let landscape = doc.page.width > doc.page.height;
+                                (doc.page.width, doc.page.height) = if landscape {
+                                    (height, width)
+                                } else {
+                                    (width, height)
+                                };
+                                ui.close();
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text(format!("{:.0} × {:.0} pt", doc.page.width, doc.page.height));
+                    ui.menu_button("Ориентация", |ui| {
+                        for (name, landscape) in [("Книжная", false), ("Альбомная", true)]
+                        {
+                            if ui.button(name).clicked() {
+                                if (doc.page.width > doc.page.height) != landscape {
+                                    std::mem::swap(&mut doc.page.width, &mut doc.page.height);
+                                }
+                                ui.close();
+                            }
+                        }
+                    });
+                    ui.menu_button("Поля", |ui| {
+                        for (label, value) in [
+                            ("Слева", &mut doc.page.margin_left),
+                            ("Справа", &mut doc.page.margin_right),
+                            ("Сверху", &mut doc.page.margin_top),
+                            ("Снизу", &mut doc.page.margin_bottom),
+                        ] {
+                            ui.horizontal(|ui| {
+                                ui.label(label);
+                                ui.add(
+                                    egui::DragValue::new(value).range(0.0..=200.0).suffix(" pt"),
+                                );
+                            });
+                        }
+                    });
+                });
+            });
+            crate::chrome::group(ui, "Абзац", 125.0, |ui| paragraph_menu(ui, doc, state));
+            crate::chrome::group(ui, "Колонтитулы", 285.0, |ui| {
+                ui.horizontal(|ui| {
+                    ui.menu_button("Текст…", |ui| page_headers(ui, doc));
+                    ui.checkbox(&mut doc.page.page_numbers, "Номера страниц");
+                });
+            });
         }
-        if ui.button("x₂").clicked() {
-            let on = state.typing.script == -1;
-            state.apply_format(doc, |f| f.script = if on { 0 } else { -1 });
+        3 => {
+            crate::chrome::group(ui, "Масштаб", 355.0, |ui| {
+                ui.horizontal(|ui| {
+                    for (label, zoom) in [("75%", 0.75), ("100%", 1.0), ("125%", 1.25)] {
+                        if ui
+                            .selectable_label((state.zoom - zoom).abs() < 0.01, label)
+                            .clicked()
+                        {
+                            state.zoom = zoom;
+                        }
+                    }
+                    if ui
+                        .button("По ширине")
+                        .on_hover_text("По ширине страницы")
+                        .clicked()
+                    {
+                        state.zoom = ((ui.ctx().content_rect().width() - 100.0) / doc.page.width)
+                            .clamp(0.5, 2.5);
+                    }
+                });
+            });
+            crate::chrome::group(ui, "Навигация", 245.0, |ui| {
+                ui.horizontal(|ui| {
+                    outline_menu(ui, doc, state);
+                    if ui
+                        .button("Поиск")
+                        .on_hover_text("Найти / заменить · Ctrl+F / Ctrl+H")
+                        .clicked()
+                    {
+                        toggle_find(ui, state, canvas_id);
+                    }
+                });
+            });
+            crate::chrome::group(ui, "Содержимое", 135.0, |ui| {
+                ui.menu_button("Редакторы", |ui| {
+                    if ui
+                        .add_enabled(!doc.tables.is_empty(), egui::Button::new("Таблицы…"))
+                        .clicked()
+                    {
+                        state.show_tables = true;
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(!doc.images.is_empty(), egui::Button::new("Изображения…"))
+                        .clicked()
+                    {
+                        state.show_objects = true;
+                        ui.close();
+                    }
+                });
+            });
         }
+        _ => {
+            crate::chrome::group(ui, "Стили", 145.0, |ui| {
+                let current = doc
+                    .paragraphs
+                    .get(state.cursor.paragraph)
+                    .map(|p| p.style.as_str())
+                    .unwrap_or("Normal")
+                    .to_string();
+                egui::ComboBox::from_id_salt("docs-style")
+                    .width(135.0)
+                    .selected_text(style_label(&current))
+                    .show_ui(ui, |ui| {
+                        for style in [
+                            "Normal", "Title", "Heading1", "Heading2", "Heading3", "Quote",
+                        ] {
+                            if ui
+                                .selectable_label(current == style, style_label(style))
+                                .clicked()
+                            {
+                                apply_style(doc, state, style);
+                                ui.memory_mut(|m| m.request_focus(canvas_id));
+                            }
+                        }
+                    });
+            });
+            crate::chrome::group(ui, "Шрифт", 215.0, |ui| {
+                ui.horizontal(|ui| {
+                    let mut font = state.typing.font.clone();
+                    egui::ComboBox::from_id_salt("docs-font")
+                        .width(130.0)
+                        .selected_text(&font)
+                        .show_ui(ui, |ui| {
+                            for name in [
+                                "Calibri",
+                                "Arial",
+                                "Times New Roman",
+                                "Cambria",
+                                "Consolas",
+                                "Segoe UI",
+                            ] {
+                                ui.selectable_value(&mut font, name.into(), name);
+                            }
+                        });
+                    if font != state.typing.font {
+                        state.apply_format(doc, |f| f.font = font.clone());
+                        ui.memory_mut(|m| m.request_focus(canvas_id));
+                    }
+                    let mut size = state.typing.size;
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut size)
+                                .range(4.0..=144.0)
+                                .speed(0.5)
+                                .suffix(" pt"),
+                        )
+                        .changed()
+                    {
+                        state.apply_format(doc, |f| f.size = size);
+                    }
+                });
+            });
+            crate::chrome::group(ui, "Начертание", 170.0, |ui| {
+                ui.horizontal(|ui| {
+                    for (label, tip, on, which) in [
+                        ("Ж", "Полужирный · Ctrl+B", state.typing.bold, 0),
+                        ("К", "Курсив · Ctrl+I", state.typing.italic, 1),
+                        ("Ч", "Подчёркнутый · Ctrl+U", state.typing.underline, 2),
+                    ] {
+                        if ui.selectable_label(on, label).on_hover_text(tip).clicked() {
+                            state.apply_format(doc, |f| match which {
+                                0 => f.bold = !on,
+                                1 => f.italic = !on,
+                                _ => f.underline = !on,
+                            });
+                            ui.memory_mut(|m| m.request_focus(canvas_id));
+                        }
+                    }
+                    ui.menu_button("Формат", |ui| {
+                        text_format_menu(ui, doc, state, canvas_id)
+                    });
+                });
+            });
+            crate::chrome::group(ui, "Абзац", 235.0, |ui| {
+                ui.horizontal(|ui| {
+                    let current = doc
+                        .paragraphs
+                        .get(state.cursor.paragraph)
+                        .map(|p| p.align)
+                        .unwrap_or_default();
+                    for (index, (tip, align)) in [
+                        ("По левому краю", Align::Left),
+                        ("По центру", Align::Center),
+                        ("По правому краю", Align::Right),
+                        ("По ширине", Align::Justify),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        if crate::chrome::alignment_button(ui, index, tip, current == align)
+                            .clicked()
+                        {
+                            selected_paragraphs(doc, state, |p| p.align = align);
+                            ui.memory_mut(|m| m.request_focus(canvas_id));
+                        }
+                    }
+                    ui.menu_button("Ещё", |ui| {
+                        for (label, list) in [
+                            ("Маркированный список", List::Bullet),
+                            ("Нумерованный список", List::Number),
+                        ] {
+                            if ui.button(label).clicked() {
+                                selected_paragraphs(doc, state, |p| {
+                                    p.list = if p.list == list { List::None } else { list }
+                                });
+                                ui.memory_mut(|m| m.request_focus(canvas_id));
+                                ui.close();
+                            }
+                        }
+                        ui.separator();
+                        for (label, delta) in
+                            [("Уменьшить отступ", -18.0), ("Увеличить отступ", 18.0)]
+                        {
+                            if ui.button(label).clicked() {
+                                selected_paragraphs(doc, state, |p| {
+                                    p.indent = (p.indent + delta).clamp(0.0, 250.0)
+                                });
+                                ui.memory_mut(|m| m.request_focus(canvas_id));
+                                ui.close();
+                            }
+                        }
+                        paragraph_menu(ui, doc, state);
+                    });
+                });
+            });
+            crate::chrome::group(ui, "Редактирование", 100.0, |ui| {
+                ui.menu_button("Правка", |ui| {
+                    for (label, command, enabled) in [
+                        (
+                            "Вставить · Ctrl+V",
+                            egui::ViewportCommand::RequestPaste,
+                            true,
+                        ),
+                        (
+                            "Вырезать · Ctrl+X",
+                            egui::ViewportCommand::RequestCut,
+                            state.selected(),
+                        ),
+                        (
+                            "Копировать · Ctrl+C",
+                            egui::ViewportCommand::RequestCopy,
+                            state.selected(),
+                        ),
+                    ] {
+                        if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                            ui.memory_mut(|m| m.request_focus(canvas_id));
+                            ui.ctx().send_viewport_cmd(command);
+                            ui.close();
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("Найти / заменить · Ctrl+F / Ctrl+H").clicked() {
+                        toggle_find(ui, state, canvas_id);
+                        ui.close();
+                    }
+                    outline_menu(ui, doc, state);
+                    if ui
+                        .add_enabled(
+                            !doc.tables.is_empty(),
+                            egui::Button::new("Редактор таблиц…"),
+                        )
+                        .clicked()
+                    {
+                        state.show_tables = true;
+                        ui.close();
+                    }
+                });
+            });
+        }
+    });
+}
+fn text_format_menu(
+    ui: &mut egui::Ui,
+    doc: &mut Doc,
+    state: &mut EditorState,
+    canvas_id: egui::Id,
+) {
+    for (label, on, which) in [
+        ("Зачёркнутый", state.typing.strike, 0),
+        ("Надстрочный", state.typing.script == 1, 1),
+        ("Подстрочный", state.typing.script == -1, 2),
+    ] {
+        if ui.selectable_label(on, label).clicked() {
+            state.apply_format(doc, |f| match which {
+                0 => f.strike = !on,
+                1 => f.script = if on { 0 } else { 1 },
+                _ => f.script = if on { 0 } else { -1 },
+            });
+            ui.memory_mut(|m| m.request_focus(canvas_id));
+            ui.close();
+        }
+    }
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.label("Цвет текста");
         let mut color = state.typing.color;
         if ui.color_edit_button_srgb(&mut color).changed() {
             state.apply_format(doc, |f| f.color = color);
         }
-        ui.menu_button("Выделение", |ui| {
-            for (label, color) in [
-                ("Жёлтый", Some([255, 245, 80])),
-                ("Зелёный", Some([150, 240, 160])),
-                ("Голубой", Some([145, 220, 250])),
-                ("Без цвета", None),
-            ] {
-                if ui.button(label).clicked() {
-                    state.apply_format(doc, |f| f.highlight = color);
-                    ui.close();
-                }
-            }
-        });
-        ui.menu_button("Формат", |ui| {
-            if ui.button("Очистить").clicked() {
-                state.apply_format(doc, |f| *f = TextFormat::default());
-                ui.close();
-            }
-            if ui.button("Копировать образец").clicked() {
-                state.format_painter = Some(state.typing.clone());
-                ui.close();
-            }
-            if ui
-                .add_enabled(
-                    state.format_painter.is_some(),
-                    egui::Button::new("Применить образец"),
-                )
-                .clicked()
-            {
-                if let Some(format) = state.format_painter.take() {
-                    state.apply_format(doc, |f| *f = format.clone());
-                }
-                ui.close();
-            }
-        });
-        for (label, align) in [
-            ("≡", Align::Left),
-            ("☰", Align::Center),
-            ("⇥", Align::Right),
+    });
+    ui.menu_button("Маркер", |ui| {
+        for (label, color) in [
+            ("Жёлтый", Some([255, 245, 80])),
+            ("Зелёный", Some([150, 240, 160])),
+            ("Голубой", Some([145, 220, 250])),
+            ("Без цвета", None),
         ] {
-            if ui
-                .button(label)
-                .on_hover_text(match align {
-                    Align::Left => "По левому краю",
-                    Align::Center => "По центру",
-                    _ => "По правому краю",
-                })
-                .clicked()
-            {
-                let (a, b) = state.range();
-                for p in doc
-                    .paragraphs
-                    .iter_mut()
-                    .skip(a.paragraph)
-                    .take(b.paragraph - a.paragraph + 1)
-                {
-                    p.align = align;
-                }
-            }
-        }
-        for (label, list) in [("• Список", List::Bullet), ("1. Список", List::Number)]
-        {
             if ui.button(label).clicked() {
-                let (a, b) = state.range();
-                for p in doc
-                    .paragraphs
-                    .iter_mut()
-                    .skip(a.paragraph)
-                    .take(b.paragraph - a.paragraph + 1)
-                {
-                    p.list = if p.list == list { List::None } else { list };
-                }
+                state.apply_format(doc, |f| f.highlight = color);
+                ui.memory_mut(|m| m.request_focus(canvas_id));
+                ui.close();
             }
         }
-        ui.menu_button("Абзац", |ui| {
-            if let Some(p) = doc.paragraphs.get_mut(state.cursor.paragraph) {
-                ui.label("Отступ, pt");
-                ui.add(egui::DragValue::new(&mut p.indent).range(0.0..=250.0));
-                ui.label("Первая строка, pt");
-                ui.add(egui::DragValue::new(&mut p.first_indent).range(-100.0..=100.0));
-                ui.label("Интервал");
-                ui.add(
-                    egui::DragValue::new(&mut p.line_spacing)
-                        .range(0.5..=5.0)
-                        .speed(0.05),
-                );
-                ui.label("До / после, pt");
-                ui.add(egui::DragValue::new(&mut p.spacing_before).range(0.0..=100.0));
-                ui.add(egui::DragValue::new(&mut p.spacing_after).range(0.0..=100.0));
-                ui.checkbox(&mut p.page_break_before, "С новой страницы");
-            }
-        });
-        ui.menu_button("Вставка", |ui| {
-            ui.label("Таблица: строки × столбцы");
-            ui.horizontal(|ui| {
-                ui.add(egui::DragValue::new(&mut state.table_rows).range(1..=100));
-                ui.add(egui::DragValue::new(&mut state.table_columns).range(1..=32));
-            });
-            if ui.button("Вставить таблицу").clicked() {
-                if let Some(id) = doc.paragraphs.get(state.cursor.paragraph).map(|p| p.id) {
-                    let _ = doc.add_table(id, state.table_rows, state.table_columns);
-                }
-                ui.close();
-            }
-            if ui
-                .add_enabled(
-                    state.pending_image.is_none(),
-                    egui::Button::new("Изображение…"),
-                )
-                .clicked()
-            {
-                start_image_load(ui, doc, state);
-                ui.close();
-            }
-            if ui.button("Разрыв страницы").clicked() {
-                if state.insert(doc, "\n")
-                    && let Some(p) = doc.paragraphs.get_mut(state.cursor.paragraph)
-                {
-                    p.page_break_before = true;
-                }
-                ui.close();
-            }
-            ui.separator();
-            ui.label("Ссылка:");
-            ui.text_edit_singleline(&mut state.link);
-            if ui.button("Применить ссылку").clicked() {
-                let link = state.link.clone();
-                if !state.selected() {
-                    let start = state.cursor;
-                    if state.insert(doc, &link) {
-                        state.anchor = start;
-                    }
-                }
-                state.apply_format(doc, |f| {
-                    f.link = Some(link.clone());
-                    f.underline = true;
-                });
-                ui.close();
-            }
-            if ui.button("Дата YYYY-MM-DD").clicked() {
-                state.insert(doc, &today());
-                ui.close();
-            }
-            ui.horizontal_wrapped(|ui| {
-                for ch in [
-                    "©", "®", "™", "€", "₽", "°", "±", "×", "÷", "—", "…", "§", "✓",
-                ] {
-                    if ui.button(ch).clicked() {
-                        state.insert(doc, ch);
-                        ui.close();
-                    }
-                }
-            });
-        });
-        ui.menu_button("Страница", |ui| {
-            for (name, width, height) in [
-                ("A4", 595.28, 841.89),
-                ("Letter", 612.0, 792.0),
-                ("A3", 841.89, 1190.55),
-                ("Legal", 612.0, 1008.0),
-            ] {
-                if ui.button(name).clicked() {
-                    doc.page.width = width;
-                    doc.page.height = height;
-                }
-            }
-            if ui.button("Повернуть страницу").clicked() {
-                std::mem::swap(&mut doc.page.width, &mut doc.page.height);
-            }
-            for (label, value) in [
-                ("Слева", &mut doc.page.margin_left),
-                ("Справа", &mut doc.page.margin_right),
-                ("Сверху", &mut doc.page.margin_top),
-                ("Снизу", &mut doc.page.margin_bottom),
-            ] {
-                ui.horizontal(|ui| {
-                    ui.label(label);
-                    ui.add(egui::DragValue::new(value).range(0.0..=200.0).suffix(" pt"));
-                });
-            }
-            ui.label("Верхний колонтитул");
-            ui.text_edit_singleline(&mut doc.page.header);
-            ui.label("Нижний колонтитул");
-            ui.text_edit_singleline(&mut doc.page.footer);
-            ui.checkbox(&mut doc.page.page_numbers, "Номера страниц");
-        });
-        if ui.button("Найти / заменить").clicked() {
-            state.show_find = !state.show_find;
+    });
+    ui.separator();
+    if ui.button("Очистить форматирование").clicked() {
+        state.apply_format(doc, |f| *f = TextFormat::default());
+        ui.memory_mut(|m| m.request_focus(canvas_id));
+        ui.close();
+    }
+    if ui.button("Копировать образец").clicked() {
+        state.format_painter = Some(state.typing.clone());
+        ui.memory_mut(|m| m.request_focus(canvas_id));
+        ui.close();
+    }
+    if ui
+        .add_enabled(
+            state.format_painter.is_some(),
+            egui::Button::new("Применить образец"),
+        )
+        .clicked()
+    {
+        if let Some(format) = state.format_painter.take() {
+            state.apply_format(doc, |f| *f = format.clone());
         }
-        ui.menu_button("Заголовки", |ui| {
-            for (id, _, text) in doc.outline() {
-                if ui.button(&text).clicked() {
-                    if let Some(paragraph) = doc.paragraphs.iter().position(|p| p.id == id) {
-                        state.move_to(
-                            doc,
-                            Position {
-                                paragraph,
-                                offset: 0,
-                            },
-                            false,
-                        );
-                    }
-                    ui.close();
+        ui.memory_mut(|m| m.request_focus(canvas_id));
+        ui.close();
+    }
+}
+fn selected_paragraphs(doc: &mut Doc, state: &EditorState, apply: impl Fn(&mut Paragraph)) {
+    let (a, b) = state.range();
+    let end = if b.paragraph > a.paragraph && b.offset == 0 {
+        b.paragraph - 1
+    } else {
+        b.paragraph
+    };
+    for p in doc
+        .paragraphs
+        .iter_mut()
+        .skip(a.paragraph)
+        .take(end.saturating_sub(a.paragraph) + 1)
+    {
+        apply(p);
+    }
+}
+fn apply_style(doc: &mut Doc, state: &mut EditorState, style: &str) {
+    selected_paragraphs(doc, state, |p| p.set_style(style));
+    state.typing = doc
+        .paragraphs
+        .get(state.cursor.paragraph)
+        .map(|p| p.format_at(state.cursor.offset))
+        .unwrap_or_default();
+}
+fn insert_table(doc: &mut Doc, state: &mut EditorState) {
+    if let Some(id) = doc.paragraphs.get(state.cursor.paragraph).map(|p| p.id) {
+        match doc.add_table(id, state.table_rows, state.table_columns) {
+            Ok(_) => state.show_tables = true,
+            Err(error) => state.message = Some(error),
+        }
+    }
+}
+fn paragraph_menu(ui: &mut egui::Ui, doc: &mut Doc, state: &EditorState) {
+    ui.menu_button("Интервалы…", |ui| {
+        if let Some(p) = doc.paragraphs.get_mut(state.cursor.paragraph) {
+            ui.label("Отступ, pt");
+            ui.add(egui::DragValue::new(&mut p.indent).range(0.0..=250.0));
+            ui.label("Первая строка, pt");
+            ui.add(egui::DragValue::new(&mut p.first_indent).range(-100.0..=100.0));
+            ui.label("Межстрочный интервал");
+            ui.add(
+                egui::DragValue::new(&mut p.line_spacing)
+                    .range(0.5..=5.0)
+                    .speed(0.05),
+            );
+            ui.label("До / после, pt");
+            ui.add(egui::DragValue::new(&mut p.spacing_before).range(0.0..=100.0));
+            ui.add(egui::DragValue::new(&mut p.spacing_after).range(0.0..=100.0));
+            ui.checkbox(&mut p.page_break_before, "С новой страницы");
+        }
+    });
+}
+fn page_headers(ui: &mut egui::Ui, doc: &mut Doc) {
+    ui.label("Верхний колонтитул");
+    ui.text_edit_singleline(&mut doc.page.header);
+    ui.label("Нижний колонтитул");
+    ui.text_edit_singleline(&mut doc.page.footer);
+    ui.checkbox(&mut doc.page.page_numbers, "Номера страниц");
+}
+fn outline_menu(ui: &mut egui::Ui, doc: &Doc, state: &mut EditorState) {
+    ui.menu_button("Заголовки", |ui| {
+        let outline = doc.outline();
+        if outline.is_empty() {
+            ui.weak("Добавьте стиль заголовка, чтобы перейти к нему.");
+        }
+        for (id, _, text) in outline {
+            if ui.button(&text).clicked() {
+                if let Some(paragraph) = doc.paragraphs.iter().position(|p| p.id == id) {
+                    state.move_to(
+                        doc,
+                        Position {
+                            paragraph,
+                            offset: 0,
+                        },
+                        false,
+                    );
                 }
+                ui.close();
             }
-        });
+        }
     });
 }
 fn start_image_load(ui: &egui::Ui, doc: &Doc, state: &mut EditorState) {
@@ -763,12 +1088,65 @@ fn style_label(style: &str) -> &str {
         _ => "Обычный",
     }
 }
-fn find_bar(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState) {
+fn clipboard_id() -> egui::Id {
+    egui::Id::new("trinedocs-docs-rich-clipboard")
+}
+fn find_field_id(canvas_id: egui::Id, replacement: bool) -> egui::Id {
+    canvas_id.with(if replacement {
+        "find-replacement"
+    } else {
+        "find-query"
+    })
+}
+fn find_shortcut(event: &Event) -> Option<bool> {
+    if let Event::Key {
+        key,
+        pressed: true,
+        modifiers,
+        ..
+    } = event
+        && (modifiers.command || modifiers.ctrl)
+        && matches!(key, Key::F | Key::H)
+    {
+        Some(*key == Key::H)
+    } else {
+        None
+    }
+}
+fn open_find(ui: &mut egui::Ui, state: &mut EditorState, canvas_id: egui::Id, replacement: bool) {
+    state.show_find = true;
+    state.find_focus = Some(replacement);
+    state.preedit.clear();
+    ui.memory_mut(|m| m.request_focus(find_field_id(canvas_id, replacement)));
+}
+fn toggle_find(ui: &mut egui::Ui, state: &mut EditorState, canvas_id: egui::Id) {
+    if state.show_find {
+        state.show_find = false;
+        state.find_focus = None;
+        ui.memory_mut(|m| m.request_focus(canvas_id));
+    } else {
+        open_find(ui, state, canvas_id, false);
+    }
+}
+fn find_bar(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id: egui::Id) {
+    let query_id = find_field_id(canvas_id, false);
+    let replacement_id = find_field_id(canvas_id, true);
+    if let Some(replacement) = state.find_focus.take() {
+        ui.memory_mut(|m| m.request_focus(find_field_id(canvas_id, replacement)));
+    }
     ui.horizontal_wrapped(|ui| {
         ui.label("Найти:");
-        ui.add(egui::TextEdit::singleline(&mut state.search).desired_width(170.0));
+        ui.add(
+            egui::TextEdit::singleline(&mut state.search)
+                .id(query_id)
+                .desired_width(170.0),
+        );
         ui.label("Заменить:");
-        ui.add(egui::TextEdit::singleline(&mut state.replacement).desired_width(170.0));
+        ui.add(
+            egui::TextEdit::singleline(&mut state.replacement)
+                .id(replacement_id)
+                .desired_width(170.0),
+        );
         ui.checkbox(&mut state.case_sensitive, "Регистр");
         let matches = doc.find(&state.search, state.case_sensitive);
         ui.label(format!("{} совпадений", matches.len()));
@@ -785,11 +1163,13 @@ fn find_bar(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState) {
             state.match_index = index + 1;
         }
         if ui
-            .add_enabled(state.selected(), egui::Button::new("Заменить"))
+            .add_enabled(
+                matches.contains(&state.range()),
+                egui::Button::new("Заменить"),
+            )
             .clicked()
         {
-            let replacement = state.replacement.clone();
-            state.insert(doc, &replacement);
+            replace_current_match(doc, state);
         }
         if ui
             .add_enabled(!matches.is_empty(), egui::Button::new("Заменить все"))
@@ -799,66 +1179,163 @@ fn find_bar(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState) {
             state.cursor = doc.clamp_position(state.cursor);
             state.anchor = state.cursor;
         }
-        if ui.button("×").clicked() {
+        if ui.button("×").on_hover_text("Закрыть поиск").clicked() {
             state.show_find = false;
+            state.find_focus = None;
+            ui.memory_mut(|m| m.request_focus(canvas_id));
         }
     });
+}
+fn replace_current_match(doc: &mut Doc, state: &mut EditorState) -> bool {
+    if !state.selected()
+        || !doc
+            .find(&state.search, state.case_sensitive)
+            .contains(&state.range())
+    {
+        return false;
+    }
+    let replacement = state.replacement.clone();
+    state.insert(doc, &replacement)
+}
+fn object_panels(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState) {
+    let enabled = ui.is_enabled();
+    if state.show_tables {
+        let window_id = ui.id().with("docs-tables-window");
+        egui::Window::new("Редактор таблиц")
+            .id(window_id)
+            .open(&mut state.show_tables)
+            .default_size(egui::vec2(800.0, 470.0))
+            .vscroll(true)
+            .show(ui.ctx(), |ui| {
+                ui.add_enabled_ui(enabled, |ui| {
+                    ui.weak("Текст, формат и размеры меняются сразу. Ctrl+Z отменяет правку.");
+                    table_panels(ui, doc);
+                });
+            });
+    }
+    if state.show_objects {
+        egui::Window::new("Изображения")
+            .id(ui.id().with("docs-images-window"))
+            .open(&mut state.show_objects)
+            .default_width(540.0)
+            .vscroll(true)
+            .show(ui.ctx(), |ui| {
+                ui.add_enabled_ui(enabled, |ui| {
+                    for image in &mut doc.images {
+                        ui.push_id(image.id, |ui| {
+                            ui.label(format!("Изображение {}", image.alt));
+                            ui.horizontal(|ui| {
+                                ui.label("Ширина / высота");
+                                ui.add(
+                                    egui::DragValue::new(&mut image.width)
+                                        .range(1.0..=2000.0)
+                                        .suffix(" pt"),
+                                );
+                                ui.add(
+                                    egui::DragValue::new(&mut image.height)
+                                        .range(1.0..=2000.0)
+                                        .suffix(" pt"),
+                                );
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Описание");
+                                ui.text_edit_singleline(&mut image.alt);
+                            });
+                            ui.separator();
+                        });
+                    }
+                });
+            });
+    }
 }
 fn table_panels(ui: &mut egui::Ui, doc: &mut Doc) {
     let mut remove = None;
     let mut next = doc.next_id;
+    if doc.tables.is_empty() {
+        ui.label("Таблиц пока нет. Вставка → Таблица → Вставить таблицу.");
+    }
+    let single_table = doc.tables.len() == 1;
     for (ti, table) in doc.tables.iter_mut().enumerate() {
-        egui::CollapsingHeader::new(format!("Таблица {} — редактировать ячейки", ti + 1))
-            .id_salt(table.id)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    if ui.button("+ Строка").clicked() {
-                        let columns = table.rows.first().map(Vec::len).unwrap_or(1);
-                        let mut row = Vec::new();
-                        for _ in 0..columns {
-                            row.push(new_cell(&mut next));
-                        }
-                        table.rows.push(row);
+        let columns = table.rows.iter().map(Vec::len).max().unwrap_or(1);
+        egui::CollapsingHeader::new(format!(
+            "Таблица {} · {} × {}",
+            ti + 1,
+            table.rows.len(),
+            columns
+        ))
+        .id_salt(table.id)
+        .default_open(single_table)
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add_enabled(table.rows.len() < 1000, egui::Button::new("+ Строка"))
+                    .clicked()
+                {
+                    table
+                        .rows
+                        .push((0..columns).map(|_| new_cell(&mut next)).collect());
+                }
+                if ui
+                    .add_enabled(columns < 64, egui::Button::new("+ Столбец"))
+                    .clicked()
+                {
+                    add_table_column(table, &mut next);
+                }
+                if ui
+                    .add_enabled(
+                        table.rows.len() > 1,
+                        egui::Button::new("− Последняя строка"),
+                    )
+                    .clicked()
+                {
+                    table.rows.pop();
+                }
+                if ui
+                    .add_enabled(columns > 1, egui::Button::new("− Последний столбец"))
+                    .clicked()
+                {
+                    remove_table_column(table);
+                }
+                if ui.button("Удалить таблицу").clicked() {
+                    remove = Some(ti);
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Цвет границ");
+                ui.color_edit_button_srgb(&mut table.border_color);
+                ui.menu_button("Ширины столбцов…", |ui| {
+                    let columns = table.rows.iter().map(Vec::len).max().unwrap_or(1);
+                    table.column_widths.resize(columns, 80.0);
+                    for (column, width) in table.column_widths.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("Столбец {}", column + 1));
+                            ui.add(
+                                egui::DragValue::new(width)
+                                    .range(12.0..=2000.0)
+                                    .suffix(" pt"),
+                            );
+                        });
                     }
-                    if ui.button("+ Столбец").clicked() {
-                        for row in &mut table.rows {
-                            row.push(new_cell(&mut next));
-                        }
-                        table.column_widths.push(80.0);
-                    }
-                    if ui
-                        .add_enabled(table.rows.len() > 1, egui::Button::new("− Строка"))
-                        .clicked()
-                    {
-                        table.rows.pop();
-                    }
-                    if ui
-                        .add_enabled(
-                            table.rows.first().is_some_and(|r| r.len() > 1),
-                            egui::Button::new("− Столбец"),
-                        )
-                        .clicked()
-                    {
-                        for row in &mut table.rows {
-                            row.pop();
-                        }
-                        table.column_widths.pop();
-                    }
-                    if ui.button("Удалить таблицу").clicked() {
-                        remove = Some(ti);
-                    }
-                    ui.label("Границы");
-                    ui.color_edit_button_srgb(&mut table.border_color);
                 });
-                egui::ScrollArea::horizontal()
-                    .id_salt(table.id)
-                    .show(ui, |ui| {
-                        egui::Grid::new(("docs-table", table.id))
-                            .striped(true)
-                            .show(ui, |ui| {
-                                for row in &mut table.rows {
-                                    for cell in row {
+            });
+            egui::ScrollArea::horizontal()
+                .id_salt(("table-cells", table.id))
+                .show(ui, |ui| {
+                    egui::Grid::new(("docs-table", table.id))
+                        .spacing(egui::vec2(10.0, 10.0))
+                        .show(ui, |ui| {
+                            for (ri, row) in table.rows.iter_mut().enumerate() {
+                                for (ci, cell) in row.iter_mut().enumerate() {
+                                    ui.push_id(cell.id, |ui| {
                                         ui.vertical(|ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.weak(format!("{}:{}", ri + 1, ci + 1));
+                                                ui.menu_button("Формат", |ui| {
+                                                    cell_format(ui, cell)
+                                                });
+                                                ui.color_edit_button_srgb(&mut cell.fill)
+                                                    .on_hover_text("Заливка ячейки");
+                                            });
                                             let mut text = cell
                                                 .paragraphs
                                                 .iter()
@@ -868,39 +1345,107 @@ fn table_panels(ui: &mut egui::Ui, doc: &mut Doc) {
                                             if ui
                                                 .add(
                                                     egui::TextEdit::multiline(&mut text)
-                                                        .desired_width(120.0)
-                                                        .desired_rows(2),
+                                                        .desired_width(150.0)
+                                                        .desired_rows(3),
                                                 )
                                                 .changed()
                                             {
                                                 edit_cell_text(cell, &text, &mut next);
                                             }
-                                            ui.color_edit_button_srgb(&mut cell.fill);
                                         });
-                                    }
-                                    ui.end_row();
+                                    });
                                 }
-                            });
-                    });
-            });
+                                ui.end_row();
+                            }
+                        });
+                });
+        });
     }
     if let Some(index) = remove {
         doc.tables.remove(index);
     }
     doc.next_id = next;
-    for image in &mut doc.images {
-        egui::CollapsingHeader::new(format!("Изображение {}", image.id))
-            .id_salt(image.id)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Ширина / высота, pt");
-                    ui.add(egui::DragValue::new(&mut image.width).range(1.0..=2000.0));
-                    ui.add(egui::DragValue::new(&mut image.height).range(1.0..=2000.0));
-                    ui.label("Описание");
-                    ui.text_edit_singleline(&mut image.alt);
-                });
-            });
+}
+fn add_table_column(table: &mut Table, next: &mut u64) {
+    let columns = table.rows.iter().map(Vec::len).max().unwrap_or_default();
+    for row in &mut table.rows {
+        while row.len() <= columns {
+            row.push(new_cell(next));
+        }
     }
+    table.column_widths.resize(columns, 80.0);
+    table.column_widths.push(80.0);
+}
+fn remove_table_column(table: &mut Table) {
+    let columns = table.rows.iter().map(Vec::len).max().unwrap_or_default();
+    if columns <= 1 {
+        return;
+    }
+    for row in &mut table.rows {
+        row.truncate(columns - 1);
+    }
+    table.column_widths.truncate(columns - 1);
+}
+fn format_cell(cell: &mut Cell, apply: impl Fn(&mut TextFormat)) {
+    for paragraph in &mut cell.paragraphs {
+        for run in &mut paragraph.runs {
+            apply(&mut run.format);
+        }
+    }
+}
+fn cell_format(ui: &mut egui::Ui, cell: &mut Cell) {
+    ui.weak("Формат всей ячейки");
+    let current = cell
+        .paragraphs
+        .first()
+        .map(|p| p.format_at(0))
+        .unwrap_or_default();
+    ui.horizontal(|ui| {
+        for (label, on, which) in [
+            ("Ж", current.bold, 0),
+            ("К", current.italic, 1),
+            ("Ч", current.underline, 2),
+        ] {
+            if ui.selectable_label(on, label).clicked() {
+                format_cell(cell, |f| match which {
+                    0 => f.bold = !on,
+                    1 => f.italic = !on,
+                    _ => f.underline = !on,
+                });
+            }
+        }
+        let mut size = current.size;
+        if ui
+            .add(
+                egui::DragValue::new(&mut size)
+                    .range(4.0..=144.0)
+                    .suffix(" pt"),
+            )
+            .changed()
+        {
+            format_cell(cell, |f| f.size = size);
+        }
+    });
+    let mut color = current.color;
+    ui.horizontal(|ui| {
+        ui.label("Цвет текста");
+        if ui.color_edit_button_srgb(&mut color).changed() {
+            format_cell(cell, |f| f.color = color);
+        }
+    });
+    ui.horizontal(|ui| {
+        for (label, align) in [
+            ("Слева", Align::Left),
+            ("Центр", Align::Center),
+            ("Справа", Align::Right),
+        ] {
+            if ui.button(label).clicked() {
+                for p in &mut cell.paragraphs {
+                    p.align = align;
+                }
+            }
+        }
+    });
 }
 fn edit_cell_text(cell: &mut Cell, text: &str, next_id: &mut u64) {
     let mut nested = Doc {
@@ -969,8 +1514,19 @@ fn handle_event(
     doc: &mut Doc,
     layout: &Layout,
     state: &mut EditorState,
+    canvas_id: egui::Id,
     event: Event,
 ) {
+    if !ui.is_enabled() {
+        return;
+    }
+    if let Some(replacement) = find_shortcut(&event) {
+        open_find(ui, state, canvas_id, replacement);
+        return;
+    }
+    if !ui.memory(|m| m.has_focus(canvas_id)) {
+        return;
+    }
     match event {
         Event::Text(text) => {
             if text == " " && !state.selected() && markdown_input(doc, state) {
@@ -981,7 +1537,10 @@ fn handle_event(
             }
         }
         Event::Paste(text) => {
-            let copied = state.clipboard.as_ref().filter(|c| c.text == text).cloned();
+            let copied = ui
+                .ctx()
+                .data_mut(|d| d.get_temp::<Clipboard>(clipboard_id()))
+                .filter(|c| c.text == text);
             let (a, _) = state.range();
             state.insert(doc, &text);
             if let Some(copy) = copied {
@@ -1025,7 +1584,8 @@ fn handle_event(
                     paragraphs.push(selected);
                 }
             }
-            state.clipboard = Some(Clipboard { text, paragraphs });
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(clipboard_id(), Clipboard { text, paragraphs }));
             if cut && state.selected() {
                 state.insert(doc, "");
             }
@@ -1083,10 +1643,6 @@ fn handle_event(
                     Key::U => {
                         let on = state.typing.underline;
                         state.apply_format(doc, |f| f.underline = !on);
-                        return;
-                    }
-                    Key::F | Key::H => {
-                        state.show_find = true;
                         return;
                     }
                     Key::Z | Key::Y | Key::S | Key::W | Key::K | Key::O | Key::N => return,
@@ -1188,6 +1744,7 @@ fn handle_event(
                 Key::Escape => {
                     state.preedit.clear();
                     state.show_find = false;
+                    state.find_focus = None;
                     state.anchor = state.cursor;
                 }
                 _ => {}
@@ -1360,9 +1917,9 @@ fn hit_test(
     gap: f32,
 ) -> Position {
     let relative = pointer - origin;
-    let page = ((relative.y - 12.0) / (page_height + gap)).floor().max(0.0) as usize;
-    let y = (relative.y - 12.0 - page as f32 * (page_height + gap)) / scale;
-    let x = (relative.x - 24.0) / scale;
+    let page = (relative.y / (page_height + gap)).floor().max(0.0) as usize;
+    let y = (relative.y - page as f32 * (page_height + gap)) / scale;
+    let x = relative.x / scale;
     let row = layout
         .rows
         .iter()
@@ -1435,6 +1992,19 @@ fn rebase_position(old: &Doc, new: &Doc, pos: Position) -> Position {
     if old.paragraphs == new.paragraphs {
         return new.clamp_position(pos);
     }
+    if let Some(paragraph) = old.paragraphs.get(pos.paragraph)
+        && let Some((index, unchanged)) = new
+            .paragraphs
+            .iter()
+            .enumerate()
+            .find(|(_, p)| p.id == paragraph.id)
+        && paragraph.text() == unchanged.text()
+    {
+        return new.clamp_position(Position {
+            paragraph: index,
+            offset: pos.offset,
+        });
+    }
     let flatten = |doc: &Doc| {
         doc.paragraphs
             .iter()
@@ -1487,6 +2057,475 @@ fn today() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disabled_editor_preserves_document_against_canvas_events() -> Result<(), String> {
+        for event in [
+            Event::Text("new".into()),
+            Event::Paste("pasted".into()),
+            Event::Key {
+                key: Key::Delete,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ] {
+            let ctx = egui::Context::default();
+            crate::fonts::install(&ctx)?;
+            let mut doc = Doc::from_text("original");
+            let before = doc.clone();
+            let seed = EditorState {
+                anchor: Position {
+                    paragraph: 0,
+                    offset: 1,
+                },
+                cursor: Position {
+                    paragraph: 0,
+                    offset: 4,
+                },
+                ..Default::default()
+            };
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1100.0, 900.0))),
+                events: vec![event],
+                ..Default::default()
+            };
+            let mut changed = false;
+            let mut output = ctx.run_ui(input, |ui| {
+                ui.add_enabled_ui(false, |ui| {
+                    let canvas_id = ui.id().with("docs-canvas");
+                    let state_id = ui.id().with("docs-state");
+                    ui.ctx().data_mut(|d| d.insert_temp(state_id, seed.clone()));
+                    ui.memory_mut(|m| m.request_focus(canvas_id));
+                    changed = show(ui, &mut doc);
+                });
+            });
+            output.textures_delta.clear();
+            assert!(!changed);
+            assert_eq!(doc, before);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn replace_does_not_delete_a_previous_unrelated_selection() {
+        let mut doc = Doc::from_text("keep target");
+        let mut state = EditorState {
+            anchor: Position::default(),
+            cursor: Position {
+                paragraph: 0,
+                offset: 4,
+            },
+            search: "target".into(),
+            replacement: "new".into(),
+            ..Default::default()
+        };
+        assert!(!replace_current_match(&mut doc, &mut state));
+        assert_eq!(doc.plain_text(), "keep target");
+        state.anchor = Position {
+            paragraph: 0,
+            offset: 5,
+        };
+        state.cursor = Position {
+            paragraph: 0,
+            offset: 11,
+        };
+        assert!(replace_current_match(&mut doc, &mut state));
+        assert_eq!(doc.plain_text(), "keep new");
+    }
+
+    #[test]
+    fn rich_clipboard_crosses_document_tabs_and_does_not_reuse_ids() -> Result<(), String> {
+        let ctx = egui::Context::default();
+        let mut source = Doc::from_text("bold\nitalic");
+        source.format_range(
+            Position::default(),
+            Position {
+                paragraph: 0,
+                offset: 4,
+            },
+            |f| f.bold = true,
+        );
+        source.format_range(
+            Position {
+                paragraph: 1,
+                offset: 0,
+            },
+            Position {
+                paragraph: 1,
+                offset: 6,
+            },
+            |f| f.italic = true,
+        );
+        let mut from = EditorState {
+            anchor: Position::default(),
+            cursor: Position {
+                paragraph: 1,
+                offset: 6,
+            },
+            ..Default::default()
+        };
+        let source_layout = source.layout();
+        let mut target = Doc::from_text("start");
+        let existing_id = target.paragraphs.first().ok_or("paragraph")?.id;
+        let old_next = target.next_id;
+        let mut to = EditorState {
+            cursor: Position {
+                paragraph: 0,
+                offset: 5,
+            },
+            anchor: Position {
+                paragraph: 0,
+                offset: 5,
+            },
+            ..Default::default()
+        };
+        let target_layout = target.layout();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let source_canvas = ui.id().with("source");
+            ui.memory_mut(|m| m.request_focus(source_canvas));
+            handle_event(
+                ui,
+                &mut source,
+                &source_layout,
+                &mut from,
+                source_canvas,
+                Event::Copy,
+            );
+            let target_canvas = ui.id().with("target");
+            ui.memory_mut(|m| m.request_focus(target_canvas));
+            handle_event(
+                ui,
+                &mut target,
+                &target_layout,
+                &mut to,
+                target_canvas,
+                Event::Paste("bold\nitalic".into()),
+            );
+        });
+        output.textures_delta.clear();
+        assert_eq!(target.plain_text(), "startbold\nitalic");
+        assert_eq!(target.paragraphs.first().map(|p| p.id), Some(existing_id));
+        assert!(
+            target
+                .paragraphs
+                .first()
+                .is_some_and(|p| p.runs.iter().any(|r| r.text == "bold" && r.format.bold))
+        );
+        assert!(
+            target.paragraphs.get(1).is_some_and(|p| p.id >= old_next
+                && p.runs.iter().any(|r| r.text == "italic" && r.format.italic))
+        );
+        target.validate()?;
+        // A later clipboard change with other text must not inherit rich formatting.
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let canvas = ui.id().with("target");
+            ui.memory_mut(|m| m.request_focus(canvas));
+            to.move_to(
+                &target,
+                Position {
+                    paragraph: 1,
+                    offset: 6,
+                },
+                false,
+            );
+            to.typing = TextFormat::default();
+            let layout = target.layout();
+            handle_event(
+                ui,
+                &mut target,
+                &layout,
+                &mut to,
+                canvas,
+                Event::Paste("plain".into()),
+            );
+        });
+        output.textures_delta.clear();
+        assert!(target.paragraphs.get(1).is_some_and(|p| {
+            p.runs
+                .last()
+                .is_some_and(|r| r.text == "plain" && !r.format.bold && !r.format.italic)
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn text_before_find_shortcut_stays_in_document_and_later_text_enters_query()
+    -> Result<(), String> {
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx)?;
+        let mut doc = Doc::from_text("keep");
+        let raw = |events| egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1250.0, 820.0))),
+            events,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(raw(Vec::new()), |ui| {
+            ui.memory_mut(|m| m.request_focus(ui.id().with("docs-canvas")));
+            show_with_edits(ui, &mut doc, Some(&[]));
+        });
+        output.textures_delta.clear();
+        let mut observed = None;
+        let mut output = ctx.run_ui(
+            raw(vec![
+                Event::Text("x".into()),
+                find_hotkey(Key::F),
+                Event::Text("needle".into()),
+            ]),
+            |ui| {
+                show_with_edits(ui, &mut doc, Some(&[]));
+                observed = ui
+                    .ctx()
+                    .data_mut(|d| d.get_temp::<EditorState>(ui.id().with("docs-state")));
+            },
+        );
+        output.textures_delta.clear();
+        assert_eq!(doc.plain_text(), "xkeep");
+        assert_eq!(observed.ok_or("editor")?.search, "needle");
+        Ok(())
+    }
+
+    fn find_hotkey(key: Key) -> Event {
+        Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers {
+                ctrl: true,
+                command: true,
+                ..Default::default()
+            },
+        }
+    }
+    #[test]
+    fn find_and_replace_hotkeys_focus_fields_without_editing_document() -> Result<(), String> {
+        for (key, text, replacement) in [(Key::F, "needle", false), (Key::H, "замена", true)]
+        {
+            let ctx = egui::Context::default();
+            crate::fonts::install(&ctx)?;
+            let mut doc = Doc::from_text("keep document");
+            let original = doc.clone();
+            let raw = |events| egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1250.0, 820.0))),
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(raw(Vec::new()), |ui| {
+                let state = EditorState {
+                    search: if replacement {
+                        "keep".into()
+                    } else {
+                        String::new()
+                    },
+                    ..Default::default()
+                };
+                ui.ctx()
+                    .data_mut(|d| d.insert_temp(ui.id().with("docs-state"), state));
+                ui.memory_mut(|m| m.request_focus(ui.id().with("docs-canvas")));
+                show_with_edits(ui, &mut doc, Some(&[]));
+            });
+            output.textures_delta.clear();
+            let mut observed = None;
+            let mut output = ctx.run_ui(
+                raw(vec![find_hotkey(key), Event::Text(text.into())]),
+                |ui| {
+                    show_with_edits(ui, &mut doc, Some(&[]));
+                    assert!(ui.memory(|m| {
+                        m.has_focus(find_field_id(ui.id().with("docs-canvas"), replacement))
+                    }));
+                    observed = ui
+                        .ctx()
+                        .data_mut(|d| d.get_temp::<EditorState>(ui.id().with("docs-state")));
+                },
+            );
+            output.textures_delta.clear();
+            let state = observed.ok_or("editor state")?;
+            assert!(state.show_find);
+            assert_eq!(
+                if replacement {
+                    state.replacement.as_str()
+                } else {
+                    state.search.as_str()
+                },
+                text
+            );
+            if replacement {
+                assert_eq!(state.search, "keep");
+            }
+            assert_eq!(doc, original);
+        }
+        Ok(())
+    }
+    #[test]
+    fn opening_find_during_event_dispatch_stops_canvas_text_and_paste() {
+        let ctx = egui::Context::default();
+        let mut doc = Doc::from_text("unchanged");
+        let original = doc.clone();
+        let layout = doc.layout();
+        let mut state = EditorState::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let canvas_id = ui.id().with("docs-canvas");
+            ui.memory_mut(|m| m.request_focus(canvas_id));
+            handle_event(
+                ui,
+                &mut doc,
+                &layout,
+                &mut state,
+                canvas_id,
+                find_hotkey(Key::F),
+            );
+            assert!(ui.memory(|m| m.has_focus(find_field_id(canvas_id, false))));
+            handle_event(
+                ui,
+                &mut doc,
+                &layout,
+                &mut state,
+                canvas_id,
+                Event::Text("wrong".into()),
+            );
+            handle_event(
+                ui,
+                &mut doc,
+                &layout,
+                &mut state,
+                canvas_id,
+                Event::Paste("wrong".into()),
+            );
+        });
+        output.textures_delta.clear();
+        assert_eq!(doc, original);
+        assert_eq!(state.find_focus, Some(false));
+    }
+    #[test]
+    fn canvas_copy_paste_cut_keep_formatted_text() -> Result<(), String> {
+        let ctx = egui::Context::default();
+        let mut doc = Doc::from_text("bold plain");
+        doc.format_range(
+            Position::default(),
+            Position {
+                paragraph: 0,
+                offset: 4,
+            },
+            |f| f.bold = true,
+        );
+        let mut state = EditorState {
+            anchor: Position::default(),
+            cursor: Position {
+                paragraph: 0,
+                offset: 4,
+            },
+            ..Default::default()
+        };
+        let layout = doc.layout();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let canvas_id = ui.id().with("docs-canvas");
+            ui.memory_mut(|m| m.request_focus(canvas_id));
+            handle_event(ui, &mut doc, &layout, &mut state, canvas_id, Event::Copy);
+            state.move_to(
+                &doc,
+                Position {
+                    paragraph: 0,
+                    offset: 10,
+                },
+                false,
+            );
+            handle_event(
+                ui,
+                &mut doc,
+                &layout,
+                &mut state,
+                canvas_id,
+                Event::Paste("bold".into()),
+            );
+            state.anchor = Position::default();
+            state.cursor = Position {
+                paragraph: 0,
+                offset: 4,
+            };
+            handle_event(ui, &mut doc, &layout, &mut state, canvas_id, Event::Cut);
+        });
+        output.textures_delta.clear();
+        assert_eq!(doc.plain_text(), " plainbold");
+        assert!(doc.paragraphs.first().is_some_and(|p| {
+            p.runs
+                .last()
+                .is_some_and(|r| r.text == "bold" && r.format.bold)
+        }));
+        assert_eq!(
+            ctx.data_mut(|d| d.get_temp::<Clipboard>(clipboard_id()))
+                .map(|c| c.text),
+            Some("bold".into())
+        );
+        doc.validate()?;
+        Ok(())
+    }
+
+    #[test]
+    fn centered_page_hit_test_uses_the_same_origin_as_paint() -> Result<(), String> {
+        let doc = Doc::from_text("Привет мир\nsecond");
+        let layout = doc.layout();
+        let row = layout.rows.first().ok_or("row")?;
+        let origin = Pos2::new(300.0, 120.0);
+        let scale = 1.25;
+        let pointer =
+            origin + egui::vec2(row_x(row, 3) * scale, (row.y + row.height / 2.0) * scale);
+        assert_eq!(
+            hit_test(
+                &layout,
+                pointer,
+                origin,
+                scale,
+                doc.page.height * scale,
+                24.0
+            ),
+            Position {
+                paragraph: 0,
+                offset: 3
+            }
+        );
+        Ok(())
+    }
+    #[test]
+    fn paragraph_format_does_not_include_unselected_next_paragraph() {
+        let mut doc = Doc::from_text("first\nsecond");
+        let state = EditorState {
+            anchor: Position::default(),
+            cursor: Position {
+                paragraph: 1,
+                offset: 0,
+            },
+            ..Default::default()
+        };
+        selected_paragraphs(&mut doc, &state, |p| p.align = Align::Center);
+        assert_eq!(doc.paragraphs.first().map(|p| p.align), Some(Align::Center));
+        assert_eq!(doc.paragraphs.get(1).map(|p| p.align), Some(Align::Left));
+    }
+    #[test]
+    fn table_column_changes_preserve_ids_and_rectangularize_ragged_import() -> Result<(), String> {
+        let mut doc = Doc::from_text("table");
+        let anchor = doc.paragraphs.first().ok_or("paragraph")?.id;
+        doc.add_table(anchor, 2, 2)?;
+        let mut next = doc.next_id;
+        let table = doc.tables.first_mut().ok_or("table")?;
+        let keep = table.rows.first().and_then(|r| r.first()).ok_or("cell")?.id;
+        table.rows.get_mut(1).ok_or("row")?.pop();
+        add_table_column(table, &mut next);
+        assert!(table.rows.iter().all(|r| r.len() == 3));
+        assert_eq!(table.column_widths.len(), 3);
+        remove_table_column(table);
+        assert!(table.rows.iter().all(|r| r.len() == 2));
+        assert_eq!(table.column_widths.len(), 2);
+        assert_eq!(
+            table.rows.first().and_then(|r| r.first()).map(|c| c.id),
+            Some(keep)
+        );
+        doc.next_id = next;
+        doc.validate()?;
+        Ok(())
+    }
+
     #[test]
     fn empty_ime_commit_preserves_user_selection() {
         let mut doc = Doc::from_text("selected text");
@@ -1643,6 +2682,326 @@ mod tests {
             }
         );
     }
+    #[test]
+    fn unchanged_identical_paragraph_follows_stable_id() -> Result<(), String> {
+        let old = Doc::from_text("same\nsame");
+        let mut new = old.clone();
+        let first = old.paragraphs.first().ok_or("paragraph")?.id;
+        new.insert_text(first, 0, "same\n")?;
+        assert_eq!(
+            rebase_position(
+                &old,
+                &new,
+                Position {
+                    paragraph: 1,
+                    offset: 2
+                }
+            ),
+            Position {
+                paragraph: 2,
+                offset: 2
+            }
+        );
+        Ok(())
+    }
+    #[test]
+    fn explicit_identical_insert_start_and_end_have_different_cursor_transforms()
+    -> Result<(), String> {
+        let old = Doc::from_text("same");
+        let mut at_start = old.clone();
+        let mut at_end = old.clone();
+        let start = Position {
+            paragraph: 0,
+            offset: 0,
+        };
+        let end = Position {
+            paragraph: 0,
+            offset: 4,
+        };
+        let start_delta = TextEditDelta::capture(&at_start, start, start)?;
+        let after = at_start.replace_range(start, start, "same\n", None)?;
+        let start_delta = start_delta.finish(&at_start, after)?;
+        let end_delta = TextEditDelta::capture(&at_end, end, end)?;
+        let after = at_end.replace_range(end, end, "\nsame", None)?;
+        let end_delta = end_delta.finish(&at_end, after)?;
+        assert_eq!(at_start.plain_text(), at_end.plain_text());
+        assert_eq!(
+            start_delta.transform(Position {
+                paragraph: 0,
+                offset: 2
+            }),
+            Position {
+                paragraph: 1,
+                offset: 2
+            }
+        );
+        assert_eq!(
+            end_delta.transform(Position {
+                paragraph: 0,
+                offset: 2
+            }),
+            Position {
+                paragraph: 0,
+                offset: 2
+            }
+        );
+        Ok(())
+    }
+    #[test]
+    fn sequential_exact_deltas_transform_both_selection_ends_and_inverse() -> Result<(), String> {
+        let mut doc = Doc::from_text("abcdef");
+        let mut cursor = Position {
+            paragraph: 0,
+            offset: 5,
+        };
+        let mut anchor = Position {
+            paragraph: 0,
+            offset: 2,
+        };
+        let before = (cursor, anchor);
+        let a = Position {
+            paragraph: 0,
+            offset: 0,
+        };
+        let delta = TextEditDelta::capture(&doc, a, a)?;
+        let after = doc.replace_range(a, a, "xy\n", None)?;
+        let first = delta.finish(&doc, after)?;
+        cursor = first.transform(cursor);
+        anchor = first.transform(anchor);
+        let a = Position {
+            paragraph: 1,
+            offset: 1,
+        };
+        let b = Position {
+            paragraph: 1,
+            offset: 2,
+        };
+        let delta = TextEditDelta::capture(&doc, a, b)?;
+        let after = doc.replace_range(a, b, "LONG", None)?;
+        let second = delta.finish(&doc, after)?;
+        cursor = second.transform(cursor);
+        anchor = second.transform(anchor);
+        assert_eq!(
+            (cursor, anchor),
+            (
+                Position {
+                    paragraph: 1,
+                    offset: 8
+                },
+                Position {
+                    paragraph: 1,
+                    offset: 5
+                }
+            )
+        );
+        cursor = first
+            .inverse()
+            .transform(second.inverse().transform(cursor));
+        anchor = first
+            .inverse()
+            .transform(second.inverse().transform(anchor));
+        assert_eq!((cursor, anchor), before);
+        Ok(())
+    }
+    #[test]
+    fn mcp_multicall_editor_selection_rebases_once() -> Result<(), String> {
+        use crate::{native::Document, ops::Tab};
+        use serde_json::json;
+        let original = Doc::from_text("same\nsame");
+        let first_id = original.paragraphs.first().ok_or("first")?.id;
+        let second_id = original.paragraphs.get(1).ok_or("second")?.id;
+        let mut tabs = vec![Tab::new(
+            1,
+            Document::Docs(original.clone()),
+            "test".into(),
+            None,
+        )];
+        let mut next_id = 2;
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx)?;
+        let seed = EditorState {
+            cursor: Position {
+                paragraph: 1,
+                offset: 3,
+            },
+            anchor: Position {
+                paragraph: 1,
+                offset: 1,
+            },
+            previous: Some(std::sync::Arc::new(original.clone())),
+            ..EditorState::default()
+        };
+        let mut doc = original;
+        let input = || egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1100.0, 900.0))),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input(), |ui| {
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(ui.id().with("docs-state"), seed.clone()));
+            show_with_edits(ui, &mut doc, Some(&[]));
+        });
+        output.textures_delta.clear();
+        for (name, args) in [
+            (
+                "docs_insert_text",
+                json!({"document_id":1,"paragraph_id":first_id,"offset":0,"text":"same\n"}),
+            ),
+            (
+                "docs_insert_text",
+                json!({"document_id":1,"paragraph_id":second_id,"offset":0,"text":"x"}),
+            ),
+            (
+                "docs_delete_range",
+                json!({"document_id":1,"start_paragraph_id":second_id,"start_offset":0,"end_offset":1}),
+            ),
+        ] {
+            crate::mcp::tools::dispatch(&mut tabs, &mut next_id, name, &args, "agent")?;
+        }
+        let edits = tabs
+            .first_mut()
+            .and_then(|t| t.pending_docs_edits.take())
+            .ok_or("missing deltas")?;
+        doc = match &tabs.first().ok_or("tab")?.document {
+            Document::Docs(d) => d.clone(),
+            _ => return Err("kind".into()),
+        };
+        let mut observed = None;
+        let mut output = ctx.run_ui(input(), |ui| {
+            show_with_edits(ui, &mut doc, Some(&edits));
+            observed = ui
+                .ctx()
+                .data_mut(|d| d.get_temp::<EditorState>(ui.id().with("docs-state")));
+        });
+        output.textures_delta.clear();
+        let state = observed.take().ok_or("editor")?;
+        assert_eq!(
+            state.cursor,
+            Position {
+                paragraph: 2,
+                offset: 3
+            }
+        );
+        assert_eq!(
+            state.anchor,
+            Position {
+                paragraph: 2,
+                offset: 1
+            }
+        );
+        let mut output = ctx.run_ui(input(), |ui| {
+            show_with_edits(ui, &mut doc, Some(&[]));
+            observed = ui
+                .ctx()
+                .data_mut(|d| d.get_temp::<EditorState>(ui.id().with("docs-state")));
+        });
+        output.textures_delta.clear();
+        let state = observed.take().ok_or("editor")?;
+        assert_eq!(
+            state.cursor,
+            Position {
+                paragraph: 2,
+                offset: 3
+            }
+        );
+        assert_eq!(
+            state.anchor,
+            Position {
+                paragraph: 2,
+                offset: 1
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mcp_replace_all_undo_redo_emit_ordered_exact_deltas() -> Result<(), String> {
+        use crate::{native::Document, ops::Tab};
+        use serde_json::json;
+        let doc = Doc::from_text("aa aa aa");
+        let mut tabs = vec![Tab::new(1, Document::Docs(doc), "test".into(), None)];
+        let mut next_id = 2;
+        crate::mcp::tools::dispatch(
+            &mut tabs,
+            &mut next_id,
+            "docs_replace_all",
+            &json!({
+                "document_id":1,"query":"aa","replacement":"aa\n","case_sensitive":true
+            }),
+            "agent",
+        )?;
+        let original = Position {
+            paragraph: 0,
+            offset: 7,
+        };
+        let mut cursor = original;
+        let edits = tabs
+            .first_mut()
+            .and_then(|t| t.pending_docs_edits.take())
+            .ok_or("deltas")?;
+        assert_eq!(edits.len(), 3);
+        for edit in &edits {
+            cursor = edit.transform(cursor);
+        }
+        assert_eq!(
+            cursor,
+            Position {
+                paragraph: 3,
+                offset: 0
+            }
+        );
+        if let Some(t) = tabs.first_mut() {
+            t.pending_docs_edits = Some(Vec::new());
+        }
+        crate::mcp::tools::dispatch(
+            &mut tabs,
+            &mut next_id,
+            "undo",
+            &json!({"document_id":1}),
+            "agent",
+        )?;
+        let edits = tabs
+            .first_mut()
+            .and_then(|t| t.pending_docs_edits.take())
+            .ok_or("inverse")?;
+        for edit in &edits {
+            cursor = edit.transform(cursor);
+        }
+        // The caret was inside replaced text; Undo restores it to the range boundary.
+        assert_eq!(
+            cursor,
+            Position {
+                paragraph: 0,
+                offset: 8
+            }
+        );
+        if let Some(t) = tabs.first_mut() {
+            t.pending_docs_edits = Some(Vec::new());
+        }
+        crate::mcp::tools::dispatch(
+            &mut tabs,
+            &mut next_id,
+            "redo",
+            &json!({"document_id":1}),
+            "agent",
+        )?;
+        let edits = tabs
+            .first_mut()
+            .and_then(|t| t.pending_docs_edits.take())
+            .ok_or("redo")?;
+        for edit in &edits {
+            cursor = edit.transform(cursor);
+        }
+        assert_eq!(
+            cursor,
+            Position {
+                paragraph: 3,
+                offset: 0
+            }
+        );
+        Ok(())
+    }
+
     #[test]
     fn word_navigation_unicode() {
         let doc = Doc::from_text("Привет мир");

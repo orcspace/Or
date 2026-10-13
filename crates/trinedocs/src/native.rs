@@ -157,6 +157,7 @@ pub fn open(path: &Path) -> Result<Document, String> {
     let bytes = crate::util::read_file(path)?;
     let doc = match ext.as_str() {
         "trinedoc" | "trinesheet" | "trineslide" => decode(&bytes)?,
+        "lock" => Document::Docs(crate::docs::io::read(&bytes, "txt")?),
         "docx" | "dotx" | "docm" | "txt" | "md" | "html" | "htm" => {
             Document::Docs(crate::docs::io::read(&bytes, &ext)?)
         }
@@ -188,6 +189,7 @@ pub fn export(doc: &Document, ext: &str) -> Result<Vec<u8>, String> {
             let slide = deck.slides.first().ok_or("Презентация пуста")?;
             crate::png::write(&deck.page(slide), 2.0)
         }
+        (Document::Docs(d), "lock") => crate::docs::io::write(d, "txt"),
         (Document::Docs(d), _) => crate::docs::io::write(d, ext),
         (Document::Sheets(b), _) => crate::sheets::io::write(b, ext),
         (Document::Slides(d), _) => crate::slides::io::write(d, ext),
@@ -217,6 +219,23 @@ mod tests {
             br#"{"version":999,"document":{"kind":"docs","data":{}}}"#.to_vec(),
         )])?;
         assert!(decode(&b).is_err());
+        Ok(())
+    }
+    #[test]
+    fn text_lock_files_can_be_opened_edited_and_saved() -> Result<(), String> {
+        let path = std::env::temp_dir().join(format!("trinedocs-text-{}.lock", std::process::id()));
+        crate::util::atomic_write(&path, b"version = 4\nname = example", false)?;
+        let mut doc = open(&path)?;
+        if let Document::Docs(d) = &mut doc {
+            let pid = d.paragraphs.first().ok_or("Нет абзаца")?.id;
+            d.insert_text(pid, 0, "# editable\n")?;
+        }
+        crate::util::atomic_write(&path, &export(&doc, "lock")?, false)?;
+        let roundtrip = open(&path)?;
+        assert!(
+            matches!(roundtrip, Document::Docs(d) if d.plain_text().contains("# editable") && d.plain_text().contains("version = 4"))
+        );
+        std::fs::remove_file(path).map_err(|e| e.to_string())?;
         Ok(())
     }
 }
