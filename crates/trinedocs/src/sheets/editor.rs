@@ -1958,12 +1958,14 @@ fn paint_image(
         Some(handle)
     });
     match texture {
-        Some(texture) => painter.image(
-            texture.id(),
-            rect,
-            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-            Color32::WHITE,
-        ),
+        Some(texture) => {
+            painter.image(
+                texture.id(),
+                rect,
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
         None => {
             painter.rect_stroke(
                 rect,

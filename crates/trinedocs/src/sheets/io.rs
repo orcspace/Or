@@ -1392,8 +1392,8 @@ fn drawing_pictures(text: &str) -> Result<Vec<PictureAnchor>, String> {
             }
             Event::Empty(e) => picture_attrs(&e, &reader, &local(&e), current.as_mut())?,
             Event::End(e) => match e.local_name().as_ref() {
-                b"from" => in_from = false,
-                b"oneCellAnchor" | b"twoCellAnchor" | b"absoluteAnchor" => {
+                "from" => in_from = false,
+                "oneCellAnchor" | "twoCellAnchor" | "absoluteAnchor" => {
                     if let Some(anchor) = current.take()
                         && !anchor.embed.is_empty()
                     {
