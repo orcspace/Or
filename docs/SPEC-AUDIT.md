@@ -51,7 +51,7 @@
 
 **[ВЛАДЕЛЕЦ]**: варианты, плюсы/минусы, стоимость, рекомендация, статус «ждёт владельца»; продолжать независимую работу. <!-- REQ-A03-014 -->
 
-1. v1: предложение Docs P0 → Sheets P0 → MCP/AI → collaboration → export/print; Slides/animations/Google/P1 позже. **[ВЛАДЕЛЕЦ]** Slides и следующие только после подтверждения. <!-- REQ-A03-015 -->
+1. v1: предложение Docs P0 → Sheets P0 → MCP/AI → collaboration → export/print; Slides/animations/Google/P1 позже. **[ВЛАДЕЛЕЦ]** Slides и следующие только после подтверждения. Подтверждение продолжать до последней фазы получено2026-10-13; номерные критерии приёмки сохраняются (ADR-0005). <!-- REQ-A03-015 -->
 2. Бесплатно/subscription/open source → Qt license/Store/server cost. **[ВЛАДЕЛЕЦ]** <!-- REQ-A03-016 -->
 3. SkParagraph только paragraph; pagination/wrapping/footnotes/columns/table split — наш Word-layer. Спайк 4.1 до решения. <!-- REQ-A03-017 -->
 4. IronCalc gaps: fork/custom/alternative; CalcEngine trait сохраняется. <!-- REQ-A03-018 -->

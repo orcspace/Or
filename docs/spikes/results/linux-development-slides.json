@@ -1,0 +1,14 @@
+{
+  "case": "slides",
+  "os": "linux",
+  "architecture": "x86_64",
+  "create_ms": 5.913277,
+  "snapshot_ms": 1.9165020000000001,
+  "import_ms": 0.24700600000000003,
+  "open_ms": 3.006851,
+  "snapshot_bytes": 23933,
+  "shallow_bytes": 13534,
+  "shallow_ms": 1.34341,
+  "operations": 10500,
+  "changes": 4
+}

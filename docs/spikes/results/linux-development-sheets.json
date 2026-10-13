@@ -1,0 +1,14 @@
+{
+  "case": "sheets",
+  "os": "linux",
+  "architecture": "x86_64",
+  "create_ms": 304.83106799999996,
+  "snapshot_ms": 134.30650899999998,
+  "import_ms": 1.661259,
+  "open_ms": 290.086885,
+  "snapshot_bytes": 2540646,
+  "shallow_bytes": 1594190,
+  "shallow_ms": 81.07448600000001,
+  "operations": 101100,
+  "changes": 75
+}

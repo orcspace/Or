@@ -24,6 +24,8 @@ jobs:
         run: python tools/spec_registry.py check
       - name: Test detection of specification defects
         run: python -m unittest discover -s tools/tests -v
+      - name: Check audited fonts and passive themeable icons
+        run: python tools/check_assets.py
       - name: Install pinned aged stable Rust toolchain
         run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy
       - name: Check formatting

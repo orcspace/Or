@@ -11,6 +11,8 @@
 - [Реестр требований](docs/traceability.md), [паритет](docs/parity.md), [проверки приёмки](docs/testing/acceptance.md), [модель угроз](docs/security/threat-model.md).
 - Dependency-free Rust workspace: политика версий Windows и выбора темы, тесты контраста/высокого контраста/уменьшения движения. Это логика для будущего GUI, не приложение.
 - Проверка целостности спецификации: Python stdlib, без сторонних пакетов.
+- Полный набор семантических токенов темы в Rust; 8 файлов Inter/JetBrains Mono и 36 Lucide SVG с закреплёнными источниками, лицензиями и проверкой SHA-256. Регистрация в Qt ещё не реализована.
+- [Изолированный CRDT-спайк](spikes/crdt/README.md): Loro, три реплики, rich text, локальный undo, 100k ячеек, миллион записей истории. Это эксперимент модели, а не готовый редактор.
 - CI для документации и Rust core на Windows runner. Успех этого CI **не** доказывает приёмку GUI, Windows 11 на реальной машине или macOS.
 
 ## Проверки
@@ -18,6 +20,7 @@
 ```sh
 python tools/spec_registry.py check
 python -m unittest discover -s tools/tests -v
+python tools/check_assets.py
 cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace
@@ -33,7 +36,7 @@ Toolchain закреплён в `rust-toolchain.toml`. Сейчас у core не
 2. QML-привязки используют JavaScript, а JavaScript полностью запрещён: [ADR-0003](docs/decisions/0003-qml-javascript.md). Толкование запрета меняет только владелец.
 3. Документированный Mica API требует build 22621 при минимуме 22000: [ADR-0007](docs/decisions/0007-mica-minimum-build.md).
 
-Ни один редактор, импорт/экспорт, MCP-транспорт, sync-сервер или спайк пока не считается реализованным. Результаты тестов/спайков фиксируются отдельно, без выдуманных замеров.
+Ни один редактор, импорт/экспорт, MCP-транспорт или sync-сервер пока не считается реализованным. CRDT-спайк запущен в Linux development-среде; Windows CI измеряется отдельно и не заменяет Windows 11 GUI-приёмку. Остальные обязательные спайки остаются планами.
 
 ## Лицензия проекта
 

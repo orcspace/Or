@@ -1,0 +1,101 @@
+{
+  "checked_at": "2026-10-13",
+  "fonts": [
+    {
+      "path": "assets/fonts/Inter/Inter-Regular.ttf",
+      "family": "Inter",
+      "font_names": [
+        "Inter"
+      ],
+      "version": "4.1",
+      "license": "OFL-1.1",
+      "sha256": "40d692fce188e4471e2b3cba937be967878f631ad3ebbbdcd587687c7ebe0c82",
+      "size_bytes": 411640,
+      "archive_sha256": "9883fdd4a49d4fb66bd8177ba6625ef9a64aa45899767dde3d36aa425756b11e"
+    },
+    {
+      "path": "assets/fonts/Inter/Inter-Bold.ttf",
+      "family": "Inter",
+      "font_names": [
+        "Inter"
+      ],
+      "version": "4.1",
+      "license": "OFL-1.1",
+      "sha256": "288316099b1e0a47a4716d159098005eef7c0066921f34e3200393dbdb01947f",
+      "size_bytes": 420428,
+      "archive_sha256": "9883fdd4a49d4fb66bd8177ba6625ef9a64aa45899767dde3d36aa425756b11e"
+    },
+    {
+      "path": "assets/fonts/Inter/Inter-Italic.ttf",
+      "family": "Inter",
+      "font_names": [
+        "Inter"
+      ],
+      "version": "4.1",
+      "license": "OFL-1.1",
+      "sha256": "bbc051dd204b5019a1aa0bc0ae2aa8a05ab13e7a3f979fa357631dc7feb6833a",
+      "size_bytes": 417388,
+      "archive_sha256": "9883fdd4a49d4fb66bd8177ba6625ef9a64aa45899767dde3d36aa425756b11e"
+    },
+    {
+      "path": "assets/fonts/Inter/Inter-BoldItalic.ttf",
+      "family": "Inter",
+      "font_names": [
+        "Inter"
+      ],
+      "version": "4.1",
+      "license": "OFL-1.1",
+      "sha256": "948405a16cdc62701da5f4005ed068ca5f4d27061d98f7974ccfc37831d9581d",
+      "size_bytes": 425296,
+      "archive_sha256": "9883fdd4a49d4fb66bd8177ba6625ef9a64aa45899767dde3d36aa425756b11e"
+    },
+    {
+      "path": "assets/fonts/JetBrainsMono/JetBrainsMono-Regular.ttf",
+      "family": "JetBrainsMono",
+      "font_names": [
+        "JetBrains Mono"
+      ],
+      "version": "2.304",
+      "license": "OFL-1.1",
+      "sha256": "a0bf60ef0f83c5ed4d7a75d45838548b1f6873372dfac88f71804491898d138f",
+      "size_bytes": 273900,
+      "archive_sha256": "6f6376c6ed2960ea8a963cd7387ec9d76e3f629125bc33d1fdcd7eb7012f7bbf"
+    },
+    {
+      "path": "assets/fonts/JetBrainsMono/JetBrainsMono-Bold.ttf",
+      "family": "JetBrainsMono",
+      "font_names": [
+        "JetBrains Mono"
+      ],
+      "version": "2.304",
+      "license": "OFL-1.1",
+      "sha256": "5590990c82e097397517f275f430af4546e1c45cff408bde4255dad142479dcb",
+      "size_bytes": 277828,
+      "archive_sha256": "6f6376c6ed2960ea8a963cd7387ec9d76e3f629125bc33d1fdcd7eb7012f7bbf"
+    },
+    {
+      "path": "assets/fonts/JetBrainsMono/JetBrainsMono-Italic.ttf",
+      "family": "JetBrainsMono",
+      "font_names": [
+        "JetBrains Mono"
+      ],
+      "version": "2.304",
+      "license": "OFL-1.1",
+      "sha256": "9d0a1f7a708e6af183f1193b7e81d40da294f5c67682c085d8401c60aac8ded4",
+      "size_bytes": 276840,
+      "archive_sha256": "6f6376c6ed2960ea8a963cd7387ec9d76e3f629125bc33d1fdcd7eb7012f7bbf"
+    },
+    {
+      "path": "assets/fonts/JetBrainsMono/JetBrainsMono-BoldItalic.ttf",
+      "family": "JetBrainsMono",
+      "font_names": [
+        "JetBrains Mono"
+      ],
+      "version": "2.304",
+      "license": "OFL-1.1",
+      "sha256": "4039d5ce0ed225bf9c8b2c8c6436290ae2f356b7e90d70fa666227238324aa3b",
+      "size_bytes": 279832,
+      "archive_sha256": "6f6376c6ed2960ea8a963cd7387ec9d76e3f629125bc33d1fdcd7eb7012f7bbf"
+    }
+  ]
+}

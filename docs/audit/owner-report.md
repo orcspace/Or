@@ -1,15 +1,15 @@
-# Краткий отчёт владельцу — 2026-10-13 Бишкек
+# Отчёт владельцу — 2026-10-13
 
-Начат Windows11x64-проект в orcspace/Or. Сохранены три спецификации, Rust core, stable IDs/traceability/parity и первичный аудит. **Окна/EXE ещё нет, фазa0 не принята.** Mac отложен по твоему указанию.
+В orcspace/Or есть спецификация, 442 требования, матрица 350 функций, аудит/ADR, Rust workspace, токены темы, 8 шрифтов и 36 SVG с лицензиями и SHA-256. Локально прошли 13 Rust core tests, 4 теста реестра и 4 CRDT tests: **21 тест**. Окна/EXE нет, фаза 0 не принята. Mac отложен; работа до фазы 9 разрешена, критерии приёмки сохранены.
 
-Блокеры окна:
+CRDT-спайк частично выполнен: три реплики, форматирование, local-only undo; измерены 100k ячеек и миллион Map-правок в development Linux. Windows CI запускается отдельно. Go/no-go не объявлен: нужны целевые измерения, история rich text, compaction/offline и спайк вёрстки. Фаза 1 закрыта.
 
-- Qt6.12.0 вышел30сентября и пока нарушает правило14дней. Без исключения ждём age gate, продолжая независимый core.
-- QML bindings используют JavaScript, а JS запрещён. ADR-0003 предлагает разрешить только декларативные QML expressions/тонкие обращения в Rust, сохранив запрет JS/TS-файлов и business logic. Это меняет hard ban, нужно решение владельца.
-- DWMSBT Mica API minimum22621 при supported22000. ADR-0007: либо solid fallback на22000, либо поднятие минимума, либо исследование поддержанного альтернативного пути. Владелец выбирает, требования не ослаблены.
+Три решения для окна:
 
-Исправлено по первоисточникам: macOSminimum14.4; MCPcurrent2026-07-28 и opt-in Tasks. Проверены Qt/CXX-Qt release dates, Google drive.file scope и10MBexportlimit, IronCalc0.8 feature announcement, Loro shallow restrictions, Excel limits; это не доказательство рабочего паритета.
+- [ADR-0002](../decisions/0002-qt-release-age.md): Qt 6.12.0 вышел 30 сентября, сегодня младше 14 полных суток. Для ускорения требуется явное временное исключение для этой версии. Без него допуск с 15 октября UTC (14 октября при подтверждённом времени публикации).
+- [ADR-0003](../decisions/0003-qml-javascript.md): QML bindings — JavaScript expressions. Рекомендация: разрешить декларативные expressions и одиночные обращения к Rust; сохранить запрет JS/TS-файлов и бизнес-логики в QML.
+- [ADR-0007](../decisions/0007-mica-minimum-build.md): документированный Mica API требует 22621. Рекомендация: минимум 22000 сохранить, solid background на 22000, Mica на 22621+.
 
-Локально4теста spec-integrity прошли. Rust unit/format/clippy — ещё проверить в CI; native UI tests/performance/spikes отсутствуют. Семь файлов spikes являются планами, не результатами. Полный фактологический/ribbon/license аудит не завершён, неизвестное явно перечислено в facts.md.
+SPEC-AUDIT §0: жёсткие ограничения меняет только владелец через ADR. Команда «до конца» разрешила поздние фазы, но не выбирает эти исключения. Независимая работа продолжалась.
 
-Следующие owner decisions (не блокируют текущий pure core): границы v1/порядок фаз, distribution/license/signing, brand/extensions, E2EE/cloud budget. Slides/следующие не начнутся без твоего подтверждения. Собственный AI proxy не создавался.
+Не завершены полный фактологический/ribbon аудит, native GUI/IME/accessibility, импорты/экспорты, MCP, sync и остальные спайки. Distribution/license/signing, бренд/расширения и облачная стоимость остаются owner ADR; собственного платного AI proxy нет.

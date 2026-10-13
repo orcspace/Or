@@ -48,3 +48,15 @@
 
 Если URL не прочитан, он не становится доказательством. До подключения зависимости необходим exact pin и проверенный license entry; дата повторной проверки ≤30 дней для зависимой фазы.
 
+
+## Повторная проверка2026-10-13 UTC
+
+| ID | Утверждение | Статус | Источник |
+|---|---|---|---|
+| FACT-019 | Loro1.16.2 release2026-09-21,MIT; Rust insert/mark positions вUnicode scalars, separate UTF8/UTF16 APIs |✔подтверждено|[exact crate](https://crates.io/api/v1/crates/loro/1.16.2), downloaded source+LICENSE+checksum; Rust smoke tests passed|
+| FACT-020 | Inter latest4.1 release2024-11-16, OFL-1.1; exactTTF family Inter |✔подтверждено|[release](https://github.com/rsms/inter/releases/tag/v4.1), releaseZIP/license/name tables|
+| FACT-021 | JetBrainsMono latest2.304 release2023-01-14,OFL-1.1; family JetBrainsMono |✔подтверждено|[release](https://github.com/JetBrains/JetBrainsMono/releases/tag/v2.304), releaseZIP/OFL/name tables|
+| FACT-022 | Lucide1.48.0 release2026-09-24 ISC; newer tags younger14days |✔подтверждено|[release](https://github.com/lucide-icons/lucide/releases/tag/1.48.0), exacttag/source/LICENSE|
+| FACT-023 | Windows11 contrast colors include COLOR_3DFACE/BTNTEXT, WINDOW/WINDOWTEXT, HIGHLIGHT/HIGHLIGHTTEXT,HOTLIGHT |✔подтверждено|[GetSysColor supported contrast table](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getsyscolor); same page marks aliasBTNFACE unsupported but table explicitly supports3DFACE, choose documented contrast table alias|
+
+rmcp metadata current3.5.1 is younger14days; candidate3.5.0(2026-09-28) aged but features/protocol/client build not yet investigated. Ironcalc_base metadata0.8.3(2026-07-31) andskia-safe0.153.3(2026-09-04) eligible; not linked or claimed working. Primary metadata source: crates.io/api/v1/crates/{name}; read2026-10-13.

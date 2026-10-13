@@ -23,3 +23,11 @@ Runtime core сейчас **без внешних Cargo dependencies**, внеш
 
 AGPL запрещён. Dynamic Qt DLL должны оставаться заменяемыми; THIRD-PARTY-NOTICES, GPL/LGPL texts, source offer/source access, EULA/reverse-engineering clause и installer information проверяются до релиза владельцем/юристом. Здесь не делаются юридические выводы о достаточности мер.
 
+
+## Дополнения2026-10-13
+
+- Loro1.16.2:MIT; original crate/LICENSE прочитан, crateSHA256 сверена с официальным registry. Все156experimental pins с declared SPDX/sourceURLs — [полный реестр](dependencies/crdt-spike.md), [machine data](dependencies/crdt-spike.json). НетAGPL, checksums/stability/age validated. Source notices/правовой анализ всех транзитивных компонентов ещё не завершён; production library graph не принят автоматически.
+- Inter4.1:OFL-1.1, copyright2016TheInterProjectAuthors; exact official [release](https://github.com/rsms/inter/releases/tag/v4.1).8font-file bundle включает4Inter и4JetBrainsMono; fonts не изменены.
+- JetBrainsMono2.304:OFL-1.1,copyright2020JetBrainsMonoProjectAuthors; exact [release](https://github.com/JetBrains/JetBrainsMono/releases/tag/v2.304).OFL notices включены рядом с fonts.
+- Lucide1.48.0:ISC,commitf53e5bfff0f909f3f451933538744330650d3ce0,[release](https://github.com/lucide-icons/lucide/releases/tag/1.48.0).36SVGs modified only stroke-width→1.75/XML normalization; LICENSE retained. Source and derivative SHA256 вmanifest.
+- Font/icon assets уже включены вsource tree, но Qt font registration/native render ещё не реализованы. Предыдущая таблица описывает состояние первого прохода12октября, обновления перечислены здесь.

@@ -1,0 +1,38 @@
+name: Experimental CRDT invariants and measurements
+
+on:
+  push:
+    paths:
+      - 'spikes/crdt/**'
+      - 'tools/audit_crdt_dependencies.py'
+      - 'docs/dependencies/crdt-spike.json'
+      - '.github/workflows/crdt-spike.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  crdt-spike:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - name: Check frozen audited dependency graph
+        run: |
+          python -c "import hashlib,json,pathlib; a=json.loads(pathlib.Path('docs/dependencies/crdt-spike.json').read_text(encoding='utf-8')); assert a['lock_sha256']==hashlib.sha256(pathlib.Path('spikes/crdt/Cargo.lock').read_bytes()).hexdigest(); assert all(not p['errors'] for p in a['packages'])"
+      - name: Install pinned aged stable Rust
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy
+      - name: Check experimental formatting and lints
+        run: |
+          cargo fmt --manifest-path spikes/crdt/Cargo.toml -- --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo clippy --locked --manifest-path spikes/crdt/Cargo.toml --all-targets -- -D warnings
+      - name: Test replication, rich text and local undo invariants
+        run: cargo test --locked --manifest-path spikes/crdt/Cargo.toml
+      - name: Build optimized isolated experiment
+        run: cargo build --locked --release --manifest-path spikes/crdt/Cargo.toml
+      - name: Measure model workloads and history on the reported host
+        run: ./spikes/crdt/measure.ps1

@@ -3,7 +3,7 @@
 Офисный пакет «три в одном» для **Windows 11** и **macOS (Apple Silicon)**: **Docs** (документы), **Sheets** (таблицы), **Slides** (презентации). <!-- REQ-00-001 -->
 Функциональность уровня Word / Excel / PowerPoint, свои фичи сверху, real-time совместная работа и встроенный AI-агент через MCP, который редактирует документ вживую с видимым курсором. <!-- REQ-00-002 -->
 
-Ты — ведущий инженер проекта. Этот файл — главная спецификация. Детальная спецификация MCP — в `docs/MCP.md` (обязательна к реализации так же, как этот файл). Дополнение `docs/SPEC-AUDIT.md` имеет равный приоритет и при расхождении применяется первым, кроме жёстких ограничений раздела 1. Указание владельца от 2026-10-13: сейчас реализация и проверка только Windows 11 x64; macOS arm64 позже, без исключения из конечной поддержки (ADR-0001). <!-- REQ-00-003 -->
+Ты — ведущий инженер проекта. Этот файл — главная спецификация. Детальная спецификация MCP — в `docs/MCP.md` (обязательна к реализации так же, как этот файл). Дополнение `docs/SPEC-AUDIT.md` имеет равный приоритет и при расхождении применяется первым, кроме жёстких ограничений раздела 1. Указание владельца от 2026-10-13: сейчас реализация и проверка только Windows 11 x64; macOS arm64 позже, без исключения из конечной поддержки (ADR-0001). Владелец разрешил продолжать все фазы до9 включительно; приёмка текущей фазы и жёсткие ограничения сохраняются (ADR-0005). <!-- REQ-00-003 -->
 
 **Правило полноты:** если функция есть в Word / Excel / PowerPoint или очевидно ожидается пользователем офисного пакета, но не упомянута здесь, — она всё равно в объёме проекта. Внеси её в матрицу паритета (`docs/parity.md`) с приоритетом и реализуй по плану. «Не написано» ≠ «не нужно». <!-- REQ-00-004 -->
 
@@ -379,10 +379,10 @@ P2: recording voice; video export; live captions. <!-- REQ-11-012 -->
 |<!-- REQ-20-004 --> 3. MCP/AI | full MCP/autostart/shim/registration/chat/cursor/streaming/review | внешний агент правит live; чат переписывает при вводе рядом |
 |<!-- REQ-20-005 --> 4. Collaboration | sync/presence/sharing/roles/comments/offline | 2 клиента + AI, offline merge, 50 participants |
 |<!-- REQ-20-006 --> 5. Sheets | P0, grid/formulas/charts/xlsx/csv/print | 100k cells 60fps, real xlsx round-trip |
-|<!-- REQ-20-007 --> 6. Slides | P0, show/presenter/pptx/notes/handouts, then P1 anim/transitions | 100 slides; anim 60fps; anim pptx round-trip; старт ждёт владельца ADR-0005 |
-|<!-- REQ-20-008 --> 7. Legacy/Google | LO; Drive всех режимов | doc/xls/ppt open/save; Google export; старт ждёт владельца ADR-0005 |
-|<!-- REQ-20-009 --> 8. P1/свои | track changes/TOC/OMML/pivot/conditional/commands/links/time machine | P1 закрыты или перенесены ADR; старт ждёт владельца ADR-0005 |
-|<!-- REQ-20-010 --> 9. Выпуск | installers/notarization/updates/opt-in crashes/a11y/i18n | clean install/update обеих ОС; старт ждёт владельца ADR-0005 |
+|<!-- REQ-20-007 --> 6. Slides | P0, show/presenter/pptx/notes/handouts, then P1 anim/transitions | 100 slides; anim 60fps; anim pptx round-trip; старт разрешён владельцем после приёмки предыдущих фаз (ADR-0005) |
+|<!-- REQ-20-008 --> 7. Legacy/Google | LO; Drive всех режимов | doc/xls/ppt open/save; Google export; старт разрешён владельцем после приёмки предыдущих фаз (ADR-0005) |
+|<!-- REQ-20-009 --> 8. P1/свои | track changes/TOC/OMML/pivot/conditional/commands/links/time machine | P1 закрыты или перенесены ADR; старт разрешён владельцем после приёмки предыдущих фаз (ADR-0005) |
+|<!-- REQ-20-010 --> 9. Выпуск | installers/notarization/updates/opt-in crashes/a11y/i18n | clean install/update обеих ОС; старт разрешён владельцем после приёмки предыдущих фаз (ADR-0005) |
 
 Перестановка Docs → Sheets → MCP/AI → collaboration → export/print из SPEC-AUDIT — **предложение**, не принято без владельца. Пока сохраняется базовая нумерация фаз. <!-- REQ-20-011 -->
 

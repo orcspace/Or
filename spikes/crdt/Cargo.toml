@@ -1,0 +1,38 @@
+[package]
+name = "trinedocs-crdt-spike"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+publish = false
+
+# Isolated experiment; production phase-1 workspace is not started.
+[workspace]
+
+[dependencies]
+loro = { version = "=1.16.2", default-features = false }
+# Explicit experiment constraints keep transitive releases at least 14 days old.
+arbitrary = { version = "=1.4.2", default-features = false }
+cc = { version = "=1.5.1", default-features = false }
+derive_arbitrary = { version = "=1.4.2", default-features = false }
+either = { version = "=1.18.0", default-features = false }
+lazy_static = { version = "=1.5.0", default-features = false }
+libc = { version = "=0.2.189", default-features = false }
+pest = { version = "=2.9.2", default-features = false }
+pest_derive = { version = "=2.9.2", default-features = false }
+pest_generator = { version = "=2.9.2", default-features = false }
+pest_meta = { version = "=2.9.2", default-features = false }
+serde_json = { version = "=1.0.151", default-features = false }
+smallvec = { version = "=1.16.2", default-features = false }
+syn = { version = "=3.0.6", default-features = false }
+twox-hash = { version = "=2.1.4", default-features = false }
+unicode-ident = { version = "=1.0.26", default-features = false }
+zerocopy = { version = "=0.8.59", default-features = false }
+zerocopy-derive = { version = "=0.8.59", default-features = false }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+

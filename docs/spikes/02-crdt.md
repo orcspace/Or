@@ -1,27 +1,28 @@
-# Спайк 4.2 CRDT
+# Спайк 4.2 CRDT — промежуточные результаты
 
-Статус: **не запущен**, go/no-go **не вынесен**. Это план эксперимента, не результат.
+Дата: 2026-10-13. Статус: **частично выполнен**, итоговый go/no-go **не вынесен**. Фаза 1 не разблокирована: нет результатов вёрстки и целевой Windows 11 приёмки.
 
-## Метод
+## Метод и стенд
 
-Loro100pages richtext/100kcells/100slides, 1m edit history; RSS/open/merge/snapshot size/local undo/replay/shallow;3peers/offline long gap; compare Yrs if no-go.
+[Прототип](../../spikes/crdt/README.md), Rust 1.98.1, release, exact Loro 1.16.2. Граф из 156 внешних Cargo-пакетов закреплён и проверен по crates.io: ≥14 полных суток, stable, не yanked, checksum и заявленная лицензия. Проверка всех notices перед распространением ещё требуется.
 
-## Стенды
+Development-стенд: Linux 6.18.44 x86_64, glibc 2.39, виртуализированная среда. Это не Windows 11 или macOS приёмка. Один прогон, без percentile claims; raw JSON — в [results](results/). Windows CI измеряется отдельно; Windows Server runner тоже не заменяет Windows 11 GUI-приёмку. Mac отложен владельцем.
 
-Windows11x64 minimum22000/current: CPU/GPU/RAM/display/DPI/build/toolchain/fixture hashes будут записаны при запуске. Локальная среда сейчас Linux, без rustc/cargo/Qt/CMake/pwsh; она не является Windows стендом. macOSarm64 отложена владельцем ADR-0001.
+Docs: 100 групп страниц, 200 rich-text блоков, смешанные письменности, bold/italic marks; не реальная пагинация. Sheets: 1000×100 строковых ячеек со стабильными IDs, без формул. Slides: 100×5 синтетических фигур, без рендера. History: миллион committed Map-записей, объединённых Loro в 735 changes; не миллион независимых undo-групп.
 
-## Критерии и ограничение времени
+open_ms включает import и первый полный обход восстановленного содержимого, для Docs — все delta/marks. import_ms показывает lazy import без чтения. Сравнение с оригиналом идёт после измеряемого обхода. Размеры — байты экспорта, не RSS.
 
-Convergence/cursor correctness/no lost offline edits; undo only own; history/retention budgets после данных. Блокирует phase1.
+| Workload | Создание, мс | Import, мс | Открытие с чтением, мс | Snapshot, байт | Shallow, байт |
+|---|---:|---:|---:|---:|---:|
+| Docs | 6.098 | 0.566 | 19.998 | 80051 | 46956 |
+| Sheets 100k | 304.831 | 1.661 | 290.087 | 2540646 | 1594190 |
+| Slides 100 | 5.913 | 0.247 | 3.007 | 23933 | 13534 |
+| History 1m | 1990.507 | 6.913 | 7.004 | 4073477 | 320 |
 
-Плановый timebox: один изолированный prototype cycle; для layout/CRDT сначала согласовать licensed fixtures и executable measurement harness. Это организационный план, не обещание числовых трудозатрат. После timebox зафиксировать результат, даже если no-go.
+Три реплики, concurrent text/cell edits и marks, разный порядок доставки и дубликаты: одинаковое состояние. Merge + local undo: 17.415 мс, remote edit сохранён. Четыре теста проходят: convergence, snapshot/marks restore, local-only undo, Unicode scalar/UTF-16/UTF-8. Grapheme-safe MCP не реализован.
 
-## Таблица результатов
+## Решение и ограничения
 
-| Метрика | Windows11x64 | macOSarm64 | Данные/артефакт |
-|---|---|---|---|
-| Производительность/корректность |не измерено|отложено владельцем|нет|
-| Размер/RSS/buildtime |не измерено|отложено владельцем|нет|
-| Решение |BLOCKED/NOT_RUN|DEFERRED|нет оснований для go|
+Можно продолжать исследование Loro; полноценный go не доказан. Не измерены целевой RSS, распределение задержек, старые offline peers после shallow compaction, случайные property-based правки и длинная история undo. Map history требует второго сценария rich-text editing. Shallow 320 байт не означает сохранение машины времени.
 
-Провал/отсутствие измерений не заменять оценкой на глаз; если цель не достигнута — raw numbers и ADR альтернативы.
+Windows workflow записывает host/CPU/OS и sampled peak working set каждые 10 мс; последний короткий пик может быть пропущен. После целевых Windows 11 и history/compaction данных обновить ADR-0011; сравнивать Yrs при no-go. Отсутствие данных не заменять оценками.

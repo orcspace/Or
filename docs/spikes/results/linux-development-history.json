@@ -1,0 +1,14 @@
+{
+  "case": "history",
+  "os": "linux",
+  "architecture": "x86_64",
+  "create_ms": 1990.506659,
+  "snapshot_ms": 233.445805,
+  "import_ms": 6.913039,
+  "open_ms": 7.003575,
+  "snapshot_bytes": 4073477,
+  "shallow_bytes": 320,
+  "shallow_ms": 0.276689,
+  "operations": 1000000,
+  "changes": 735
+}

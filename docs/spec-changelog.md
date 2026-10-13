@@ -15,3 +15,13 @@
 
 Высокорисковые предложения в ADR-0010 (transactions/Unicode/rights) ещё не приняты. Фазы не перенумерованы, mandatory функции/производительность не снижены. Qt/GUI stack не заменён.
 
+
+## Дополнения2026-10-13
+
+| ID | Дата UTC | Что/почему | Источник/решение |
+|---|---|---|---|
+| CHANGE-011 |2026-10-13|Владелец разрешил продолжать все фазы до9; late-phase scope-gate снят, критерии приёмки и жёсткие ограничения сохранены. Исходная нумерация остаётся.|Текущая сессия, ADR-0005|
+| CHANGE-012 |2026-10-13|Полные Rust theme tokens,8cursor colors,mode accents,system highcontrast+selection/button text,motion;4REQ частично реализованы, GUI остаётся pending.|crates/shell-core/src/theme.rs,13local Rust tests|
+| CHANGE-013 |2026-10-13|Inter4.1/JBM2.304 OFL-1.1 иLucide1.48.0 ISC pinned assets; hashes/notices, passive SVG validation.|assets manifests, official release URLs|
+| CHANGE-014 |2026-10-13|Isolated CRDT experiment Loro1.16.2;156exact pins audited via crates.io;17younger dependencies constrained to aged versions. SemVer build metadata (+wasi-...) не prerelease: validator исправлен.|docs/dependencies/crdt-spike.json,spikes/crdt/Cargo.lock|
+| CHANGE-015 |2026-10-13|Bench import-only latency отделена от open+first text/style materialization; original-state comparison не включается в measured open. Development Linux results не target acceptance.|spikes/crdt/src/main.rs|

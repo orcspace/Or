@@ -38,7 +38,7 @@
     "source": "AGENTS.md",
     "section": 0,
     "heading": "AGENTS.md — TrineDocs",
-    "clause": "Ты — ведущий инженер проекта. Этот файл — главная спецификация. Детальная спецификация MCP — в `docs/MCP.md` (обязательна к реализации так же, как этот файл). Дополнение `docs/SPEC-AUDIT.md` имеет равный приоритет и при расхождении применяется первым, кроме жёстких ограничений раздела 1. Указание владельца от 2026-10-13: сейчас реализация и проверка только Windows 11 x64; macOS arm64 позже, без исключения из конечной поддержки (ADR-0001).",
+    "clause": "Ты — ведущий инженер проекта. Этот файл — главная спецификация. Детальная спецификация MCP — в `docs/MCP.md` (обязательна к реализации так же, как этот файл). Дополнение `docs/SPEC-AUDIT.md` имеет равный приоритет и при расхождении применяется первым, кроме жёстких ограничений раздела 1. Указание владельца от 2026-10-13: сейчас реализация и проверка только Windows 11 x64; macOS arm64 позже, без исключения из конечной поддержки (ADR-0001). Владелец разрешил продолжать все фазы до9 включительно; приёмка текущей фазы и жёсткие ограничения сохраняются (ADR-0005).",
     "phases": [
       0
     ],
@@ -1235,10 +1235,13 @@
     "tests": [
       "T-00-SPEC",
       "T-00-BUILD",
-      "T-00-UI"
+      "T-00-UI",
+      "T-00-POLICY"
     ],
-    "status": "planned",
-    "evidence": []
+    "status": "partial",
+    "evidence": [
+      "crates/shell-core/src/theme.rs (Rust policy only; QML/native UI pending)"
+    ]
   },
   {
     "id": "REQ-05-007",
@@ -1252,10 +1255,13 @@
     "tests": [
       "T-00-SPEC",
       "T-00-BUILD",
-      "T-00-UI"
+      "T-00-UI",
+      "T-00-POLICY"
     ],
-    "status": "planned",
-    "evidence": []
+    "status": "partial",
+    "evidence": [
+      "crates/shell-core/src/theme.rs (Rust policy only; QML/native UI pending)"
+    ]
   },
   {
     "id": "REQ-05-008",
@@ -1286,10 +1292,13 @@
     "tests": [
       "T-00-SPEC",
       "T-00-BUILD",
-      "T-00-UI"
+      "T-00-UI",
+      "T-00-POLICY"
     ],
-    "status": "planned",
-    "evidence": []
+    "status": "partial",
+    "evidence": [
+      "crates/shell-core/src/theme.rs (Rust policy only; QML/native UI pending)"
+    ]
   },
   {
     "id": "REQ-05-010",
@@ -1388,10 +1397,13 @@
     "tests": [
       "T-00-SPEC",
       "T-00-BUILD",
-      "T-00-UI"
+      "T-00-UI",
+      "T-00-POLICY"
     ],
-    "status": "planned",
-    "evidence": []
+    "status": "partial",
+    "evidence": [
+      "crates/shell-core/src/theme.rs (Rust policy only; QML/native UI pending)"
+    ]
   },
   {
     "id": "REQ-06-001",
@@ -3734,7 +3746,7 @@
     "source": "AGENTS.md",
     "section": 20,
     "heading": "20. План по фазам",
-    "clause": "| 6. Slides | P0, show/presenter/pptx/notes/handouts, then P1 anim/transitions | 100 slides; anim 60fps; anim pptx round-trip; старт ждёт владельца ADR-0005 |",
+    "clause": "| 6. Slides | P0, show/presenter/pptx/notes/handouts, then P1 anim/transitions | 100 slides; anim 60fps; anim pptx round-trip; старт разрешён владельцем после приёмки предыдущих фаз (ADR-0005) |",
     "phases": [
       6
     ],
@@ -3751,7 +3763,7 @@
     "source": "AGENTS.md",
     "section": 20,
     "heading": "20. План по фазам",
-    "clause": "| 7. Legacy/Google | LO; Drive всех режимов | doc/xls/ppt open/save; Google export; старт ждёт владельца ADR-0005 |",
+    "clause": "| 7. Legacy/Google | LO; Drive всех режимов | doc/xls/ppt open/save; Google export; старт разрешён владельцем после приёмки предыдущих фаз (ADR-0005) |",
     "phases": [
       7
     ],
@@ -3768,7 +3780,7 @@
     "source": "AGENTS.md",
     "section": 20,
     "heading": "20. План по фазам",
-    "clause": "| 8. P1/свои | track changes/TOC/OMML/pivot/conditional/commands/links/time machine | P1 закрыты или перенесены ADR; старт ждёт владельца ADR-0005 |",
+    "clause": "| 8. P1/свои | track changes/TOC/OMML/pivot/conditional/commands/links/time machine | P1 закрыты или перенесены ADR; старт разрешён владельцем после приёмки предыдущих фаз (ADR-0005) |",
     "phases": [
       8
     ],
@@ -3783,7 +3795,7 @@
     "source": "AGENTS.md",
     "section": 20,
     "heading": "20. План по фазам",
-    "clause": "| 9. Выпуск | installers/notarization/updates/opt-in crashes/a11y/i18n | clean install/update обеих ОС; старт ждёт владельца ADR-0005 |",
+    "clause": "| 9. Выпуск | installers/notarization/updates/opt-in crashes/a11y/i18n | clean install/update обеих ОС; старт разрешён владельцем после приёмки предыдущих фаз (ADR-0005) |",
     "phases": [
       9
     ],
@@ -6694,7 +6706,7 @@
     "source": "docs/SPEC-AUDIT.md",
     "section": 3,
     "heading": "C. Известные пробелы — каждый получает факты/ADR",
-    "clause": "1. v1: предложение Docs P0 → Sheets P0 → MCP/AI → collaboration → export/print; Slides/animations/Google/P1 позже. **[ВЛАДЕЛЕЦ]** Slides и следующие только после подтверждения.",
+    "clause": "1. v1: предложение Docs P0 → Sheets P0 → MCP/AI → collaboration → export/print; Slides/animations/Google/P1 позже. **[ВЛАДЕЛЕЦ]** Slides и следующие только после подтверждения. Подтверждение продолжать до последней фазы получено2026-10-13; номерные критерии приёмки сохраняются (ADR-0005).",
     "phases": [
       0
     ],
