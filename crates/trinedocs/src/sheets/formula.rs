@@ -1,0 +1,2621 @@
+use super::model::{Book, MAX_COLS, MAX_ROWS, Range, Value, address, parse_address};
+use chrono::{Datelike, Timelike};
+use std::collections::{HashMap, HashSet};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+type CalcResult<T> = Result<T, String>;
+#[derive(Clone, Debug, PartialEq)]
+enum TokenKind {
+    Number(f64),
+    Text(String),
+    Word(String),
+    Quoted(String),
+    Op(String),
+    End,
+}
+#[derive(Clone, Debug)]
+struct Token {
+    kind: TokenKind,
+    start: usize,
+    end: usize,
+}
+fn lexer(input: &str) -> CalcResult<Vec<Token>> {
+    let mut out = Vec::new();
+    let mut i = usize::from(input.starts_with('='));
+    while i < input.len() {
+        let ch = input
+            .get(i..)
+            .and_then(|s| s.chars().next())
+            .ok_or("#VALUE!")?;
+        if ch.is_whitespace() {
+            i += ch.len_utf8();
+            continue;
+        }
+        let start = i;
+        let kind = if ch == '"' || ch == '\'' {
+            let quote = ch;
+            let mut text = String::new();
+            let mut closed = false;
+            i += 1;
+            while i < input.len() {
+                let c = input
+                    .get(i..)
+                    .and_then(|s| s.chars().next())
+                    .ok_or("#VALUE!")?;
+                i += c.len_utf8();
+                if c == quote {
+                    if input.get(i..).is_some_and(|s| s.starts_with(quote)) {
+                        text.push(c);
+                        i += 1;
+                    } else {
+                        closed = true;
+                        break;
+                    }
+                } else {
+                    text.push(c);
+                }
+            }
+            if !closed {
+                return Err("#VALUE!".into());
+            }
+            if quote == '"' {
+                TokenKind::Text(text)
+            } else {
+                TokenKind::Quoted(text)
+            }
+        } else if ch.is_ascii_digit()
+            || (ch == '.'
+                && input
+                    .get(i + 1..)
+                    .and_then(|s| s.chars().next())
+                    .is_some_and(|c| c.is_ascii_digit()))
+        {
+            i += ch.len_utf8();
+            while input
+                .as_bytes()
+                .get(i)
+                .is_some_and(|c| c.is_ascii_digit() || *c == b'.')
+            {
+                i += 1;
+            }
+            if input
+                .as_bytes()
+                .get(i)
+                .is_some_and(|c| *c == b'e' || *c == b'E')
+            {
+                i += 1;
+                if input
+                    .as_bytes()
+                    .get(i)
+                    .is_some_and(|c| *c == b'+' || *c == b'-')
+                {
+                    i += 1;
+                }
+                while input.as_bytes().get(i).is_some_and(u8::is_ascii_digit) {
+                    i += 1;
+                }
+            }
+            let n = input
+                .get(start..i)
+                .ok_or("#VALUE!")?
+                .parse::<f64>()
+                .map_err(|_| "#VALUE!")?;
+            if !n.is_finite() {
+                return Err("#NUM!".into());
+            }
+            TokenKind::Number(n)
+        } else if ch.is_alphabetic() || ch == '_' || ch == '$' || ch == '#' {
+            i += ch.len_utf8();
+            while i < input.len() {
+                let c = input
+                    .get(i..)
+                    .and_then(|s| s.chars().next())
+                    .ok_or("#VALUE!")?;
+                if c.is_alphanumeric()
+                    || c == '_'
+                    || c == '.'
+                    || c == '$'
+                    || (ch == '#' && (c == '!' || c == '/' || c == '?'))
+                {
+                    i += c.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            TokenKind::Word(input.get(start..i).ok_or("#VALUE!")?.into())
+        } else {
+            i += ch.len_utf8();
+            let mut op = ch.to_string();
+            if (ch == '<' || ch == '>') && input.as_bytes().get(i) == Some(&b'=') {
+                op.push('=');
+                i += 1;
+            } else if ch == '<' && input.as_bytes().get(i) == Some(&b'>') {
+                op.push('>');
+                i += 1;
+            }
+            if !matches!(
+                op.as_str(),
+                "+" | "-"
+                    | "*"
+                    | "/"
+                    | "^"
+                    | "&"
+                    | "%"
+                    | "="
+                    | "<"
+                    | ">"
+                    | "<="
+                    | ">="
+                    | "<>"
+                    | "("
+                    | ")"
+                    | ","
+                    | ";"
+                    | ":"
+                    | "!"
+            ) {
+                return Err("#VALUE!".into());
+            }
+            TokenKind::Op(op)
+        };
+        out.push(Token {
+            kind,
+            start,
+            end: i,
+        });
+        if out.len() > 1024 {
+            return Err("#NUM!".into());
+        }
+    }
+    out.push(Token {
+        kind: TokenKind::End,
+        start: input.len(),
+        end: input.len(),
+    });
+    Ok(out)
+}
+fn alias(name: &str) -> String {
+    match name.to_uppercase().as_str() {
+        "СУММ" => "SUM",
+        "СРЗНАЧ" => "AVERAGE",
+        "МИН" => "MIN",
+        "МАКС" => "MAX",
+        "СЧЁТ" | "СЧЕТ" => "COUNT",
+        "СЧЁТЗ" | "СЧЕТЗ" => "COUNTA",
+        "СЧИТАТЬПУСТОТЫ" => "COUNTBLANK",
+        "ЕСЛИ" => "IF",
+        "ЕСЛИОШИБКА" => "IFERROR",
+        "ЕСНД" => "IFNA",
+        "И" => "AND",
+        "ИЛИ" => "OR",
+        "НЕ" => "NOT",
+        "ИСКЛИЛИ" => "XOR",
+        "ВПР" => "VLOOKUP",
+        "ГПР" => "HLOOKUP",
+        "ПРОСМОТРX" | "ПРОСМОТРХ" => "XLOOKUP",
+        "ИНДЕКС" => "INDEX",
+        "ПОИСКПОЗ" => "MATCH",
+        "ПОИСКПОЗX" | "ПОИСКПОЗХ" => "XMATCH",
+        "СУММЕСЛИ" => "SUMIF",
+        "СУММЕСЛИМН" => "SUMIFS",
+        "СЧЁТЕСЛИ" | "СЧЕТЕСЛИ" => "COUNTIF",
+        "СЧЁТЕСЛИМН" | "СЧЕТЕСЛИМН" => "COUNTIFS",
+        "СРЗНАЧЕСЛИ" => "AVERAGEIF",
+        "СРЗНАЧЕСЛИМН" => "AVERAGEIFS",
+        "ОКРУГЛ" => "ROUND",
+        "ОКРУГЛВВЕРХ" => "ROUNDUP",
+        "ОКРУГЛВНИЗ" => "ROUNDDOWN",
+        "ЦЕЛОЕ" => "INT",
+        "ОСТАТ" => "MOD",
+        "СТЕПЕНЬ" => "POWER",
+        "КОРЕНЬ" => "SQRT",
+        "ПИ" => "PI",
+        "СЛЧИС" => "RAND",
+        "СЛУЧМЕЖДУ" => "RANDBETWEEN",
+        "ПРОИЗВЕД" => "PRODUCT",
+        "СУММПРОИЗВ" => "SUMPRODUCT",
+        "СЦЕПИТЬ" => "CONCATENATE",
+        "СЦЕП" => "CONCAT",
+        "ОБЪЕДИНИТЬ" => "TEXTJOIN",
+        "ЛЕВСИМВ" => "LEFT",
+        "ПРАВСИМВ" => "RIGHT",
+        "ПСТР" => "MID",
+        "ДЛСТР" => "LEN",
+        "СТРОЧН" => "LOWER",
+        "ПРОПИСН" => "UPPER",
+        "ПРОПНАЧ" => "PROPER",
+        "СЖПРОБЕЛЫ" => "TRIM",
+        "ПОДСТАВИТЬ" => "SUBSTITUTE",
+        "ЗАМЕНИТЬ" => "REPLACE",
+        "НАЙТИ" => "FIND",
+        "ПОИСК" => "SEARCH",
+        "ТЕКСТ" => "TEXT",
+        "ЗНАЧЕН" => "VALUE",
+        "ПОВТОР" => "REPT",
+        "СОВПАД" => "EXACT",
+        "СЕГОДНЯ" => "TODAY",
+        "ТДАТА" => "NOW",
+        "ДАТА" => "DATE",
+        "ВРЕМЯ" => "TIME",
+        "ГОД" => "YEAR",
+        "МЕСЯЦ" => "MONTH",
+        "ДЕНЬ" => "DAY",
+        "ЧАС" => "HOUR",
+        "МИНУТЫ" => "MINUTE",
+        "СЕКУНДЫ" => "SECOND",
+        "ДЕНЬНЕД" => "WEEKDAY",
+        "ДАТАМЕС" => "EDATE",
+        "КОНМЕСЯЦА" => "EOMONTH",
+        "РАЗНДАТ" => "DATEDIF",
+        "ЧИСТРАБДНИ" => "NETWORKDAYS",
+        "РАБДЕНЬ" => "WORKDAY",
+        "ПЛТ" => "PMT",
+        "БС" => "FV",
+        "ПС" => "PV",
+        "ЧПС" => "NPV",
+        "ВСД" => "IRR",
+        "ЕЧИСЛО" => "ISNUMBER",
+        "ЕТЕКСТ" => "ISTEXT",
+        "ЕПУСТО" => "ISBLANK",
+        "ЕОШИБКА" => "ISERROR",
+        "ЕНД" => "ISNA",
+        "ЕОШ" => "ISERR",
+        "ЕЛОГИЧ" => "ISLOGICAL",
+        "СТРОКА" => "ROW",
+        "СТОЛБЕЦ" => "COLUMN",
+        "ЧСТРОК" => "ROWS",
+        "ЧИСЛСТОЛБ" => "COLUMNS",
+        "МЕДИАНА" => "MEDIAN",
+        "МОДА" => "MODE",
+        "СТАНДОТКЛОН" => "STDEV",
+        "ДИСП" => "VAR",
+        "ВЫБОР" => "CHOOSE",
+        "ПЕРЕКЛЮЧ" => "SWITCH",
+        "ИСТИНА" => "TRUE",
+        "ЛОЖЬ" => "FALSE",
+        "НД" => "NA",
+        _ => return name.to_uppercase(),
+    }
+    .into()
+}
+pub fn canonicalize(input: &str) -> String {
+    if !input.starts_with('=') {
+        return input.into();
+    }
+    let Ok(tokens) = lexer(input) else {
+        return input.into();
+    };
+    let mut changes = Vec::new();
+    for (i, t) in tokens.iter().enumerate() {
+        if let TokenKind::Word(w) = &t.kind
+            && tokens
+                .get(i + 1)
+                .is_some_and(|t| t.kind == TokenKind::Op("(".into()))
+        {
+            changes.push((t.start, t.end, alias(w)));
+        }
+        if t.kind == TokenKind::Op(";".into()) {
+            changes.push((t.start, t.end, ",".into()));
+        }
+    }
+    replace_spans(input, changes)
+}
+fn replace_spans(input: &str, changes: Vec<(usize, usize, String)>) -> String {
+    let mut result = input.to_string();
+    for (start, end, replacement) in changes.into_iter().rev() {
+        if start <= end && result.is_char_boundary(start) && result.is_char_boundary(end) {
+            result.replace_range(start..end, &replacement);
+        }
+    }
+    result
+}
+fn token_reference(
+    tokens: &[Token],
+    index: usize,
+) -> Option<(u32, u32, bool, bool, Option<String>)> {
+    let t = tokens.get(index)?;
+    let TokenKind::Word(w) = &t.kind else {
+        return None;
+    };
+    if tokens
+        .get(index + 1)
+        .is_some_and(|t| matches!(&t.kind,TokenKind::Op(o)if o=="("||o=="!"))
+    {
+        return None;
+    }
+    let (r, c) = parse_address(w)?;
+    let ca = w.starts_with('$');
+    let ra = w.chars().skip(1).any(|c| c == '$');
+    let sheet = if index >= 2
+        && tokens
+            .get(index - 1)
+            .is_some_and(|t| t.kind == TokenKind::Op("!".into()))
+    {
+        match &tokens.get(index - 2)?.kind {
+            TokenKind::Word(s) | TokenKind::Quoted(s) => Some(s.clone()),
+            _ => None,
+        }
+    } else if index >= 2
+        && tokens
+            .get(index - 1)
+            .is_some_and(|t| t.kind == TokenKind::Op(":".into()))
+    {
+        token_reference(tokens, index - 2).and_then(|x| x.4)
+    } else {
+        None
+    };
+    Some((r, c, ra, ca, sheet))
+}
+fn reference_text(r: i64, c: i64, ra: bool, ca: bool) -> String {
+    if r < 0 || c < 0 || r >= i64::from(MAX_ROWS) || c >= i64::from(MAX_COLS) {
+        return "#REF!".into();
+    }
+    let a = address(r as u32, c as u32);
+    let split = a.find(|ch: char| ch.is_ascii_digit()).unwrap_or(a.len());
+    format!(
+        "{}{}{}{}",
+        if ca { "$" } else { "" },
+        a.get(..split).unwrap_or(""),
+        if ra { "$" } else { "" },
+        a.get(split..).unwrap_or("")
+    )
+}
+pub fn shift_references(input: &str, rows: i64, cols: i64) -> String {
+    if !input.starts_with('=') {
+        return input.into();
+    }
+    let Ok(tokens) = lexer(input) else {
+        return input.into();
+    };
+    let mut changes = Vec::new();
+    for (i, t) in tokens.iter().enumerate() {
+        if let Some((r, c, ra, ca, _)) = token_reference(&tokens, i) {
+            changes.push((
+                t.start,
+                t.end,
+                i64::from(r)
+                    .checked_add(if ra { 0 } else { rows })
+                    .zip(i64::from(c).checked_add(if ca { 0 } else { cols }))
+                    .map(|(r, c)| reference_text(r, c, ra, ca))
+                    .unwrap_or_else(|| "#REF!".into()),
+            ));
+        }
+    }
+    replace_spans(input, changes)
+}
+pub(super) fn shift_bounds(
+    start: u32,
+    end: u32,
+    index: u32,
+    count: u32,
+    delete: bool,
+) -> Option<(u32, u32)> {
+    let stop = index.checked_add(count)?;
+    if !delete {
+        return Some((
+            if start >= index {
+                start.checked_add(count)?
+            } else {
+                start
+            },
+            if end >= index {
+                end.checked_add(count)?
+            } else {
+                end
+            },
+        ));
+    }
+    if start >= index && end < stop {
+        return None;
+    }
+    let first = if start >= stop {
+        start - count
+    } else if start >= index {
+        index
+    } else {
+        start
+    };
+    let last = if end >= stop {
+        end - count
+    } else if end >= index {
+        index.checked_sub(1)?
+    } else {
+        end
+    };
+    Some((first, last))
+}
+pub fn shift_structural(
+    input: &str,
+    current: &str,
+    changed: &str,
+    index: u32,
+    count: u32,
+    rows: bool,
+    delete: bool,
+) -> String {
+    let Ok(tokens) = lexer(input) else {
+        return input.into();
+    };
+    let mut changes = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        if let Some((r, c, ra, ca, sheet)) = token_reference(&tokens, i) {
+            if sheet.as_deref().unwrap_or(current).to_lowercase() != changed.to_lowercase() {
+                i += 1;
+                continue;
+            }
+            let ranged = tokens
+                .get(i + 1)
+                .is_some_and(|t| t.kind == TokenKind::Op(":".into()));
+            if ranged && let Some((r2, c2, ra2, ca2, _)) = token_reference(&tokens, i + 2) {
+                let (a, b) = if rows {
+                    (r.min(r2), r.max(r2))
+                } else {
+                    (c.min(c2), c.max(c2))
+                };
+                let replacement = match shift_bounds(a, b, index, count, delete) {
+                    Some((first, last)) => {
+                        let (v1, v2) = if (if rows { r } else { c }) <= (if rows { r2 } else { c2 })
+                        {
+                            (first, last)
+                        } else {
+                            (last, first)
+                        };
+                        let one = reference_text(
+                            if rows { i64::from(v1) } else { i64::from(r) },
+                            if rows { i64::from(c) } else { i64::from(v1) },
+                            ra,
+                            ca,
+                        );
+                        let two = reference_text(
+                            if rows { i64::from(v2) } else { i64::from(r2) },
+                            if rows { i64::from(c2) } else { i64::from(v2) },
+                            ra2,
+                            ca2,
+                        );
+                        if one == "#REF!" || two == "#REF!" {
+                            "#REF!".into()
+                        } else {
+                            format!("{one}:{two}")
+                        }
+                    }
+                    None => "#REF!".into(),
+                };
+                changes.push((tokens[i].start, tokens[i + 2].end, replacement));
+                i += 3;
+                continue;
+            }
+            let n = if rows { r } else { c };
+            let replacement = shift_bounds(n, n, index, count, delete)
+                .map(|(v, _)| {
+                    reference_text(
+                        if rows { i64::from(v) } else { i64::from(r) },
+                        if rows { i64::from(c) } else { i64::from(v) },
+                        ra,
+                        ca,
+                    )
+                })
+                .unwrap_or_else(|| "#REF!".into());
+            changes.push((tokens[i].start, tokens[i].end, replacement));
+        }
+        i += 1;
+    }
+    replace_spans(input, changes)
+}
+pub fn invalidate_sheet(input: &str, deleted: &str) -> String {
+    let Ok(tokens) = lexer(input) else {
+        return input.into();
+    };
+    let mut changes = Vec::new();
+    for (i, t) in tokens.iter().enumerate() {
+        if !tokens
+            .get(i + 1)
+            .is_some_and(|t| t.kind == TokenKind::Op("!".into()))
+        {
+            continue;
+        }
+        if let TokenKind::Word(name) | TokenKind::Quoted(name) = &t.kind
+            && name.to_lowercase() == deleted.to_lowercase()
+            && token_reference(&tokens, i + 2).is_some()
+        {
+            let end = if tokens
+                .get(i + 3)
+                .is_some_and(|t| t.kind == TokenKind::Op(":".into()))
+                && token_reference(&tokens, i + 4).is_some()
+            {
+                i + 4
+            } else {
+                i + 2
+            };
+            changes.push((t.start, tokens[end].end, "#REF!".into()));
+        }
+    }
+    replace_spans(input, changes)
+}
+pub fn rename_sheet(input: &str, old: &str, new: &str) -> String {
+    let Ok(tokens) = lexer(input) else {
+        return input.into();
+    };
+    let mut changes = Vec::new();
+    for (i, t) in tokens.iter().enumerate() {
+        if tokens
+            .get(i + 1)
+            .is_some_and(|t| t.kind == TokenKind::Op("!".into()))
+            && let TokenKind::Word(name) | TokenKind::Quoted(name) = &t.kind
+            && name.to_lowercase() == old.to_lowercase()
+        {
+            changes.push((t.start, t.end, format!("'{}'", new.replace('\'', "''"))));
+        }
+    }
+    replace_spans(input, changes)
+}
+#[derive(Clone, Debug)]
+enum Expr {
+    Literal(Value),
+    Reference(Option<String>, Range),
+    Name(String),
+    Unary(String, Box<Expr>),
+    Binary(String, Box<Expr>, Box<Expr>),
+    Call(String, Vec<Expr>),
+}
+struct Parser {
+    tokens: Vec<Token>,
+    index: usize,
+    depth: usize,
+}
+impl Parser {
+    fn peek(&self) -> TokenKind {
+        self.tokens
+            .get(self.index)
+            .map(|t| t.kind.clone())
+            .unwrap_or(TokenKind::End)
+    }
+    fn next(&mut self) -> TokenKind {
+        let t = self.peek();
+        self.index += 1;
+        t
+    }
+    fn eat(&mut self, op: &str) -> bool {
+        if self.peek() == TokenKind::Op(op.into()) {
+            self.index += 1;
+            true
+        } else {
+            false
+        }
+    }
+    fn expression(&mut self, min: u8) -> CalcResult<Expr> {
+        self.depth += 1;
+        if self.depth > 128 {
+            return Err("#NUM!".into());
+        }
+        let mut left = self.primary()?;
+        loop {
+            if self.peek() == TokenKind::Op("%".into()) {
+                self.index += 1;
+                left = Expr::Unary("%".into(), Box::new(left));
+                continue;
+            }
+            let TokenKind::Op(op) = self.peek() else {
+                break;
+            };
+            let precedence = match op.as_str() {
+                "=" | "<>" | "<" | ">" | "<=" | ">=" => 1,
+                "&" => 2,
+                "+" | "-" => 3,
+                "*" | "/" => 4,
+                "^" => 5,
+                _ => 0,
+            };
+            if precedence == 0 || precedence < min {
+                break;
+            }
+            self.index += 1;
+            let right = self.expression(precedence + 1)?;
+            left = Expr::Binary(op, Box::new(left), Box::new(right));
+        }
+        self.depth -= 1;
+        Ok(left)
+    }
+    fn primary(&mut self) -> CalcResult<Expr> {
+        match self.next() {
+            TokenKind::Number(n) => Ok(Expr::Literal(Value::Number(n))),
+            TokenKind::Text(s) => Ok(Expr::Literal(Value::Text(s))),
+            TokenKind::Op(o) if o == "+" || o == "-" => {
+                Ok(Expr::Unary(o, Box::new(self.expression(6)?)))
+            }
+            TokenKind::Op(o) if o == "(" => {
+                let result = self.expression(1)?;
+                if !self.eat(")") {
+                    return Err("#VALUE!".into());
+                }
+                Ok(result)
+            }
+            TokenKind::Word(w) | TokenKind::Quoted(w) => {
+                if self.eat("(") {
+                    let mut args = Vec::new();
+                    if !self.eat(")") {
+                        loop {
+                            if matches!(self.peek(),TokenKind::Op(ref o)if o==","||o==";"||o==")") {
+                                args.push(Expr::Literal(Value::Empty));
+                            } else {
+                                args.push(self.expression(1)?);
+                            }
+                            if self.eat(")") {
+                                break;
+                            }
+                            if !self.eat(",") && !self.eat(";") {
+                                return Err("#VALUE!".into());
+                            }
+                            if args.len() > 255 {
+                                return Err("#VALUE!".into());
+                            }
+                        }
+                    }
+                    return Ok(Expr::Call(alias(&w), args));
+                }
+                let (sheet, word) = if self.eat("!") {
+                    let next = self.next();
+                    let TokenKind::Word(a) = next else {
+                        return Err("#REF!".into());
+                    };
+                    (Some(w), a)
+                } else {
+                    (None, w)
+                };
+                if let Some((r, c)) = parse_address(&word) {
+                    let end = if self.eat(":") {
+                        match self.next() {
+                            TokenKind::Word(a) => parse_address(&a).ok_or("#REF!")?,
+                            _ => return Err("#REF!".into()),
+                        }
+                    } else {
+                        (r, c)
+                    };
+                    let range = Range::new(r, c, end.0, end.1);
+                    range.validate().map_err(|_| "#NUM!")?;
+                    return Ok(Expr::Reference(sheet, range));
+                }
+                if sheet.is_some() {
+                    return Err("#REF!".into());
+                }
+                match word.to_uppercase().as_str() {
+                    "TRUE" | "ИСТИНА" => Ok(Expr::Literal(Value::Bool(true))),
+                    "FALSE" | "ЛОЖЬ" => Ok(Expr::Literal(Value::Bool(false))),
+                    s if s.starts_with('#') => Ok(Expr::Literal(Value::Error(s.into()))),
+                    _ => Ok(Expr::Name(word)),
+                }
+            }
+            _ => Err("#VALUE!".into()),
+        }
+    }
+}
+fn parse(input: &str) -> CalcResult<Expr> {
+    if input.len() > 32767 {
+        return Err("#NUM!".into());
+    }
+    let mut p = Parser {
+        tokens: lexer(input)?,
+        index: 0,
+        depth: 0,
+    };
+    let expr = p.expression(1)?;
+    if p.peek() != TokenKind::End {
+        return Err("#VALUE!".into());
+    }
+    Ok(expr)
+}
+#[derive(Clone)]
+struct Grid {
+    values: Vec<Value>,
+    rows: usize,
+    cols: usize,
+    reference: bool,
+}
+impl Grid {
+    fn scalar(value: Value) -> Self {
+        Self {
+            values: vec![value],
+            rows: 1,
+            cols: 1,
+            reference: false,
+        }
+    }
+    fn first(&self) -> Value {
+        self.values.first().cloned().unwrap_or_default()
+    }
+    fn number(&self) -> CalcResult<f64> {
+        self.first().number()
+    }
+    fn text(&self) -> String {
+        self.first().display()
+    }
+    fn boolean(&self) -> CalcResult<bool> {
+        self.first().boolean()
+    }
+    fn at(&self, row: usize, col: usize) -> CalcResult<Value> {
+        if row >= self.rows || col >= self.cols {
+            return Err("#REF!".into());
+        }
+        self.values
+            .get(row * self.cols + col)
+            .cloned()
+            .ok_or("#REF!".into())
+    }
+}
+struct Engine<'a> {
+    book: &'a Book,
+    cache: HashMap<(usize, u32, u32), Value>,
+    visiting: HashSet<(usize, u32, u32)>,
+    depth: usize,
+    now: f64,
+    random: u64,
+    work: usize,
+    materialized: usize,
+}
+impl<'a> Engine<'a> {
+    fn new(book: &'a Book) -> Self {
+        let elapsed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        Self {
+            book,
+            cache: HashMap::new(),
+            visiting: HashSet::new(),
+            depth: 0,
+            now: calendar_serial(chrono::Local::now().naive_local()),
+            random: elapsed.as_nanos() as u64 | 1,
+            work: 0,
+            materialized: 0,
+        }
+    }
+    fn cell(&mut self, sheet: usize, row: u32, col: u32) -> Value {
+        let key = (sheet, row, col);
+        if let Some(value) = self.cache.get(&key) {
+            return value.clone();
+        }
+        if self.depth >= 256 || !self.visiting.insert(key) {
+            return Value::Error("#REF!".into());
+        }
+        self.depth += 1;
+        let input = self
+            .book
+            .sheets
+            .get(sheet)
+            .and_then(|s| s.cell(row, col))
+            .map(|c| c.input.clone())
+            .unwrap_or_default();
+        let value = if input.starts_with('=') {
+            match parse(&input).and_then(|e| self.eval(&e, sheet, row, col)) {
+                Ok(grid) => grid.first(),
+                Err(e) => Value::Error(e),
+            }
+        } else {
+            literal(&input)
+        };
+        self.depth -= 1;
+        self.visiting.remove(&key);
+        self.cache.insert(key, value.clone());
+        value
+    }
+    fn eval(&mut self, expr: &Expr, sheet: usize, row: u32, col: u32) -> CalcResult<Grid> {
+        self.work += 1;
+        if self.depth >= 128 || self.work > 1_000_000 {
+            return Err("#NUM!".into());
+        }
+        self.depth += 1;
+        let result = self.eval_inner(expr, sheet, row, col);
+        self.depth -= 1;
+        result
+    }
+    fn eval_inner(&mut self, expr: &Expr, sheet: usize, row: u32, col: u32) -> CalcResult<Grid> {
+        match expr {
+            Expr::Literal(v) => Ok(Grid::scalar(v.clone())),
+            Expr::Reference(name, range) => {
+                let target = match name {
+                    Some(n) => self
+                        .book
+                        .sheets
+                        .iter()
+                        .position(|s| s.name.to_lowercase() == n.to_lowercase())
+                        .ok_or("#REF!")?,
+                    None => sheet,
+                };
+                let mut values = Vec::new();
+                for r in range.r0..=range.r1 {
+                    for c in range.c0..=range.c1 {
+                        let value = self.cell(target, r, c);
+                        self.work += 1;
+                        let bytes = match &value {
+                            Value::Text(t) | Value::Error(t) => t.len() + 32,
+                            _ => 32,
+                        };
+                        self.materialized = self.materialized.saturating_add(bytes);
+                        if self.work > 1_000_000 || self.materialized > 64 * 1024 * 1024 {
+                            return Err("#NUM!".into());
+                        }
+                        values.push(value);
+                    }
+                }
+                Ok(Grid {
+                    values,
+                    rows: (range.r1 - range.r0 + 1) as usize,
+                    cols: (range.c1 - range.c0 + 1) as usize,
+                    reference: true,
+                })
+            }
+            Expr::Name(n) => {
+                let formula = self
+                    .book
+                    .names
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(n))
+                    .map(|(_, v)| v.clone())
+                    .ok_or("#NAME?")?;
+                if self.depth >= 256 {
+                    return Err("#REF!".into());
+                }
+                self.depth += 1;
+                let result = parse(&formula).and_then(|e| self.eval(&e, sheet, row, col));
+                self.depth -= 1;
+                result
+            }
+            Expr::Unary(op, e) => {
+                let n = self.eval(e, sheet, row, col)?.number()?;
+                finite(match op.as_str() {
+                    "-" => -n,
+                    "%" => n / 100.0,
+                    _ => n,
+                })
+                .map(|v| Grid::scalar(Value::Number(v)))
+            }
+            Expr::Binary(op, a, b) => {
+                let a = self.eval(a, sheet, row, col)?.first();
+                let b = self.eval(b, sheet, row, col)?.first();
+                if let Value::Error(e) = &a {
+                    return Err(e.clone());
+                }
+                if let Value::Error(e) = &b {
+                    return Err(e.clone());
+                }
+                if op == "&" {
+                    let left = a.display();
+                    let right = b.display();
+                    if left.len().saturating_add(right.len()) > 32767 {
+                        return Err("#VALUE!".into());
+                    }
+                    return Ok(Grid::scalar(Value::Text(format!("{left}{right}"))));
+                }
+                if matches!(op.as_str(), "=" | "<>" | "<" | ">" | "<=" | ">=") {
+                    let order = compare(&a, &b);
+                    let result = match op.as_str() {
+                        "=" => order.is_eq(),
+                        "<>" => !order.is_eq(),
+                        "<" => order.is_lt(),
+                        ">" => order.is_gt(),
+                        "<=" => !order.is_gt(),
+                        _ => !order.is_lt(),
+                    };
+                    return Ok(Grid::scalar(Value::Bool(result)));
+                }
+                let x = a.number()?;
+                let y = b.number()?;
+                if op == "/" && y == 0.0 {
+                    return Err("#DIV/0!".into());
+                }
+                let n = match op.as_str() {
+                    "+" => x + y,
+                    "-" => x - y,
+                    "*" => x * y,
+                    "/" => x / y,
+                    "^" => x.powf(y),
+                    _ => return Err("#VALUE!".into()),
+                };
+                Ok(Grid::scalar(Value::Number(finite(n)?)))
+            }
+            Expr::Call(name, args) => self.call(name, args, sheet, row, col),
+        }
+    }
+    fn call(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        sheet: usize,
+        row: u32,
+        col: u32,
+    ) -> CalcResult<Grid> {
+        if name == "IF" {
+            if !(2..=3).contains(&args.len()) {
+                return Err("#VALUE!".into());
+            }
+            let condition = self.eval(&args[0], sheet, row, col)?.boolean()?;
+            return if condition {
+                self.eval(&args[1], sheet, row, col)
+            } else if let Some(no) = args.get(2) {
+                self.eval(no, sheet, row, col)
+            } else {
+                Ok(Grid::scalar(Value::Bool(false)))
+            };
+        }
+        if name == "IFERROR" || name == "IFNA" {
+            if args.len() != 2 {
+                return Err("#VALUE!".into());
+            }
+            let value = self.eval(&args[0], sheet, row, col);
+            let error = match &value {
+                Err(e) => Some(e.as_str()),
+                Ok(g) => match g.values.first() {
+                    Some(Value::Error(e)) => Some(e.as_str()),
+                    _ => None,
+                },
+            };
+            if error.is_some_and(|e| name == "IFERROR" || e == "#N/A") {
+                return self.eval(&args[1], sheet, row, col);
+            }
+            return value;
+        }
+        if name == "IFS" {
+            if args.is_empty() || !args.len().is_multiple_of(2) {
+                return Err("#VALUE!".into());
+            }
+            for pair in args.as_chunks::<2>().0 {
+                if self.eval(&pair[0], sheet, row, col)?.boolean()? {
+                    return self.eval(&pair[1], sheet, row, col);
+                }
+            }
+            return Err("#N/A".into());
+        }
+        if name == "CHOOSE" {
+            if args.len() < 2 {
+                return Err("#VALUE!".into());
+            }
+            let n = self.eval(&args[0], sheet, row, col)?.number()?.trunc();
+            if n < 1.0 || n >= args.len() as f64 {
+                return Err("#VALUE!".into());
+            }
+            return self.eval(&args[n as usize], sheet, row, col);
+        }
+        if name == "SWITCH" {
+            if args.len() < 3 {
+                return Err("#VALUE!".into());
+            }
+            let v = self.eval(&args[0], sheet, row, col)?.first();
+            for pair in args[1..].as_chunks::<2>().0 {
+                if compare(&v, &self.eval(&pair[0], sheet, row, col)?.first()).is_eq() {
+                    return self.eval(&pair[1], sheet, row, col);
+                }
+            }
+            return if args.len().is_multiple_of(2) {
+                self.eval(args.last().ok_or("#VALUE!")?, sheet, row, col)
+            } else {
+                Err("#N/A".into())
+            };
+        }
+        if name == "ROW" || name == "COLUMN" {
+            if args.is_empty() {
+                return Ok(Grid::scalar(Value::Number(f64::from(if name == "ROW" {
+                    row + 1
+                } else {
+                    col + 1
+                }))));
+            }
+            if args.len() != 1 {
+                return Err("#VALUE!".into());
+            }
+            if let Expr::Reference(_, range) = &args[0] {
+                return Ok(Grid::scalar(Value::Number(f64::from(if name == "ROW" {
+                    range.r0 + 1
+                } else {
+                    range.c0 + 1
+                }))));
+            }
+            return Err("#VALUE!".into());
+        }
+        let mut evaluated = Vec::new();
+        for (index, expr) in args.iter().enumerate() {
+            if name == "XLOOKUP" && index == 3 {
+                evaluated.push(Grid::scalar(Value::Empty));
+                continue;
+            }
+            let value = self.eval(expr, sheet, row, col);
+            evaluated.push(if name.starts_with("IS") || name == "TYPE" {
+                value.unwrap_or_else(|e| Grid::scalar(Value::Error(e)))
+            } else {
+                value?
+            });
+        }
+        let a = evaluated.as_slice();
+        let n = |i: usize| -> CalcResult<f64> { a.get(i).ok_or("#VALUE!")?.number() };
+        let default_n = |i: usize, v: f64| -> CalcResult<f64> {
+            if let Some(g) = a.get(i) {
+                if g.first() == Value::Empty {
+                    Ok(v)
+                } else {
+                    g.number()
+                }
+            } else {
+                Ok(v)
+            }
+        };
+        let text = |i: usize| -> CalcResult<String> {
+            let g = a.get(i).ok_or("#VALUE!")?;
+            if let Value::Error(e) = g.first() {
+                Err(e)
+            } else {
+                Ok(g.text())
+            }
+        };
+        let boolv = |i: usize| -> CalcResult<bool> { a.get(i).ok_or("#VALUE!")?.boolean() };
+        let num = |v: f64| -> CalcResult<Grid> { Ok(Grid::scalar(Value::Number(finite(v)?))) };
+        let string = |v: String| -> CalcResult<Grid> {
+            if v.len() > 32767 {
+                Err("#VALUE!".into())
+            } else {
+                Ok(Grid::scalar(Value::Text(v)))
+            }
+        };
+        let boolean = |v: bool| -> CalcResult<Grid> { Ok(Grid::scalar(Value::Bool(v))) };
+        let arity = |min: usize, max: usize| -> CalcResult<()> {
+            if a.len() < min || a.len() > max {
+                Err("#VALUE!".into())
+            } else {
+                Ok(())
+            }
+        };
+        match name {
+            "TRUE" | "FALSE" => {
+                arity(0, 0)?;
+                boolean(name == "TRUE")
+            }
+            "NA" => {
+                arity(0, 0)?;
+                Err("#N/A".into())
+            }
+            "PI" => {
+                arity(0, 0)?;
+                num(std::f64::consts::PI)
+            }
+            "RAND" => {
+                arity(0, 0)?;
+                self.random ^= self.random << 13;
+                self.random ^= self.random >> 7;
+                self.random ^= self.random << 17;
+                num((self.random >> 11) as f64 / (1u64 << 53) as f64)
+            }
+            "RANDBETWEEN" => {
+                arity(2, 2)?;
+                let low = n(0)?.ceil();
+                let high = n(1)?.floor();
+                if low > high {
+                    return Err("#NUM!".into());
+                }
+                self.random = self
+                    .random
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1);
+                num(low
+                    + ((self.random >> 11) as f64 / (1u64 << 53) as f64 * (high - low + 1.0))
+                        .floor())
+            }
+            "TODAY" | "NOW" => {
+                arity(0, 0)?;
+                num(if name == "TODAY" {
+                    self.now.floor()
+                } else {
+                    self.now
+                })
+            }
+            "SUM" | "AVERAGE" | "AVERAGEA" | "MIN" | "MAX" | "PRODUCT" | "COUNT" | "COUNTA"
+            | "COUNTBLANK" | "MEDIAN" | "MODE" | "MODE.SNGL" | "STDEV" | "STDEV.S" | "STDEVP"
+            | "STDEV.P" | "VAR" | "VAR.S" | "VARP" | "VAR.P" | "DEVSQ" | "AVEDEV" | "GEOMEAN"
+            | "HARMEAN" | "SUMSQ" => {
+                arity(1, 255)?;
+                if name == "COUNTA" {
+                    return num(a
+                        .iter()
+                        .flat_map(|g| &g.values)
+                        .filter(|v| **v != Value::Empty)
+                        .count() as f64);
+                }
+                if name == "COUNTBLANK" {
+                    return num(a
+                        .iter()
+                        .flat_map(|g| &g.values)
+                        .filter(|v| **v == Value::Empty || **v == Value::Text(String::new()))
+                        .count() as f64);
+                }
+                if name == "COUNT" {
+                    return num(a
+                        .iter()
+                        .flat_map(|g| g.values.iter().map(move |v| (g.reference, v)))
+                        .filter(|(reference, v)| {
+                            matches!(v, Value::Number(_))
+                                || (!reference && v.number().is_ok() && **v != Value::Empty)
+                        })
+                        .count() as f64);
+                }
+                let mut vals = numbers(a, name == "AVERAGEA")?;
+                let sum = vals.iter().sum::<f64>();
+                let count = vals.len() as f64;
+                if name == "SUM" {
+                    return num(sum);
+                }
+                if name == "PRODUCT" {
+                    return num(if vals.is_empty() {
+                        0.0
+                    } else {
+                        vals.iter().product()
+                    });
+                }
+                if name == "MIN" {
+                    return num(vals.iter().copied().reduce(f64::min).unwrap_or(0.0));
+                }
+                if name == "MAX" {
+                    return num(vals.iter().copied().reduce(f64::max).unwrap_or(0.0));
+                }
+                if name == "SUMSQ" {
+                    return num(vals.iter().map(|x| x * x).sum());
+                }
+                if vals.is_empty() {
+                    return Err("#DIV/0!".into());
+                }
+                let mean = sum / count;
+                let dev = vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>();
+                match name {
+                    "AVERAGE" | "AVERAGEA" => num(mean),
+                    "MEDIAN" => {
+                        vals.sort_by(f64::total_cmp);
+                        let i = vals.len() / 2;
+                        num(if vals.len().is_multiple_of(2) {
+                            (vals[i - 1] + vals[i]) / 2.0
+                        } else {
+                            vals[i]
+                        })
+                    }
+                    "MODE" | "MODE.SNGL" => {
+                        vals.sort_by(f64::total_cmp);
+                        let mut best = 0usize;
+                        let mut result = 0.0;
+                        let mut count = 0;
+                        let mut last = f64::NAN;
+                        for v in vals {
+                            if v == last {
+                                count += 1;
+                            } else {
+                                count = 1;
+                                last = v;
+                            }
+                            if count > best {
+                                best = count;
+                                result = v;
+                            }
+                        }
+                        if best < 2 {
+                            Err("#N/A".into())
+                        } else {
+                            num(result)
+                        }
+                    }
+                    "DEVSQ" => num(dev),
+                    "AVEDEV" => num(vals.iter().map(|v| (v - mean).abs()).sum::<f64>() / count),
+                    "GEOMEAN" => {
+                        if vals.iter().any(|v| *v <= 0.0) {
+                            Err("#NUM!".into())
+                        } else {
+                            num((vals.iter().map(|v| v.ln()).sum::<f64>() / count).exp())
+                        }
+                    }
+                    "HARMEAN" => {
+                        if vals.iter().any(|v| *v <= 0.0) {
+                            Err("#NUM!".into())
+                        } else {
+                            num(count / vals.iter().map(|v| 1.0 / v).sum::<f64>())
+                        }
+                    }
+                    _ => {
+                        let sample = !matches!(name, "VARP" | "VAR.P" | "STDEVP" | "STDEV.P");
+                        if sample && vals.len() < 2 {
+                            return Err("#DIV/0!".into());
+                        }
+                        let variance = dev / (count - f64::from(u8::from(sample)));
+                        num(if name.starts_with("STDEV") {
+                            variance.sqrt()
+                        } else {
+                            variance
+                        })
+                    }
+                }
+            }
+            "AND" | "OR" | "XOR" => {
+                arity(1, 255)?;
+                let mut vals = Vec::new();
+                for g in a {
+                    for v in &g.values {
+                        if !g.reference
+                            || matches!(v, Value::Number(_) | Value::Bool(_) | Value::Error(_))
+                        {
+                            vals.push(v.boolean()?);
+                        }
+                    }
+                }
+                if vals.is_empty() {
+                    return Err("#VALUE!".into());
+                }
+                boolean(if name == "AND" {
+                    vals.iter().all(|v| *v)
+                } else if name == "OR" {
+                    vals.iter().any(|v| *v)
+                } else {
+                    vals.iter().filter(|v| **v).count() % 2 == 1
+                })
+            }
+            "NOT" => {
+                arity(1, 1)?;
+                boolean(!boolv(0)?)
+            }
+            "ISNUMBER" | "ISTEXT" | "ISNONTEXT" | "ISBLANK" | "ISLOGICAL" | "ISERROR" | "ISERR"
+            | "ISNA" | "ISEVEN" | "ISODD" | "ISFORMULA" | "N" | "T" | "TYPE" => {
+                arity(1, 1)?;
+                let value = a[0].first();
+                match name {
+                    "ISNUMBER" => boolean(matches!(value, Value::Number(_))),
+                    "ISTEXT" => boolean(matches!(value, Value::Text(_))),
+                    "ISNONTEXT" => boolean(!matches!(value, Value::Text(_))),
+                    "ISBLANK" => boolean(value == Value::Empty),
+                    "ISLOGICAL" => boolean(matches!(value, Value::Bool(_))),
+                    "ISERROR" => boolean(matches!(value, Value::Error(_))),
+                    "ISERR" => boolean(matches!(&value,Value::Error(e)if e!="#N/A")),
+                    "ISNA" => boolean(matches!(&value,Value::Error(e)if e=="#N/A")),
+                    "ISEVEN" | "ISODD" => {
+                        boolean((n(0)?.trunc().abs() % 2.0 == 0.0) == (name == "ISEVEN"))
+                    }
+                    "ISFORMULA" => {
+                        if let Some(Expr::Reference(target, r)) = args.first() {
+                            let si = target
+                                .as_ref()
+                                .and_then(|name| {
+                                    self.book
+                                        .sheets
+                                        .iter()
+                                        .position(|s| s.name.to_lowercase() == name.to_lowercase())
+                                })
+                                .unwrap_or(sheet);
+                            boolean(
+                                self.book
+                                    .sheets
+                                    .get(si)
+                                    .and_then(|s| s.cell(r.r0, r.c0))
+                                    .is_some_and(|c| c.input.starts_with('=')),
+                            )
+                        } else {
+                            boolean(false)
+                        }
+                    }
+                    "N" => num(match value {
+                        Value::Number(v) => v,
+                        Value::Bool(v) => f64::from(u8::from(v)),
+                        Value::Error(e) => return Err(e),
+                        _ => 0.0,
+                    }),
+                    "T" => string(if let Value::Text(s) = value {
+                        s
+                    } else if let Value::Error(e) = value {
+                        return Err(e);
+                    } else {
+                        String::new()
+                    }),
+                    _ => num(match value {
+                        Value::Number(_) | Value::Empty => 1.0,
+                        Value::Text(_) => 2.0,
+                        Value::Bool(_) => 4.0,
+                        Value::Error(_) => 16.0,
+                    }),
+                }
+            }
+            "ABS" | "INT" | "SIGN" | "SQRT" | "EXP" | "LN" | "LOG10" | "SIN" | "COS" | "TAN"
+            | "ASIN" | "ACOS" | "ATAN" | "SINH" | "COSH" | "TANH" | "ASINH" | "ACOSH" | "ATANH"
+            | "DEGREES" | "RADIANS" | "FACT" | "FACTDOUBLE" | "EVEN" | "ODD" => {
+                arity(1, 1)?;
+                let x = n(0)?;
+                num(match name {
+                    "ABS" => x.abs(),
+                    "INT" => x.floor(),
+                    "SIGN" => {
+                        if x == 0.0 {
+                            0.0
+                        } else {
+                            x.signum()
+                        }
+                    }
+                    "SQRT" => x.sqrt(),
+                    "EXP" => x.exp(),
+                    "LN" => x.ln(),
+                    "LOG10" => x.log10(),
+                    "SIN" => x.sin(),
+                    "COS" => x.cos(),
+                    "TAN" => x.tan(),
+                    "ASIN" => x.asin(),
+                    "ACOS" => x.acos(),
+                    "ATAN" => x.atan(),
+                    "SINH" => x.sinh(),
+                    "COSH" => x.cosh(),
+                    "TANH" => x.tanh(),
+                    "ASINH" => x.asinh(),
+                    "ACOSH" => x.acosh(),
+                    "ATANH" => x.atanh(),
+                    "DEGREES" => x.to_degrees(),
+                    "RADIANS" => x.to_radians(),
+                    "FACT" | "FACTDOUBLE" => {
+                        if !(0.0..=170.0).contains(&x) {
+                            return Err("#NUM!".into());
+                        }
+                        (1..=x.trunc() as u32)
+                            .filter(|i| name == "FACT" || i % 2 == x.trunc() as u32 % 2)
+                            .map(f64::from)
+                            .product()
+                    }
+                    "EVEN" | "ODD" => {
+                        let mut v = x.abs().ceil();
+                        let parity = if name == "EVEN" { 0.0 } else { 1.0 };
+                        if v % 2.0 != parity {
+                            v += 1.0;
+                        }
+                        if x < 0.0 { -v } else { v }
+                    }
+                    _ => 0.0,
+                })
+            }
+            "ROUND" | "ROUNDUP" | "ROUNDDOWN" | "TRUNC" => {
+                arity(if name == "TRUNC" { 1 } else { 2 }, 2)?;
+                let digits = default_n(1, 0.0)?.trunc();
+                if !(-308.0..=308.0).contains(&digits) {
+                    return Err("#NUM!".into());
+                }
+                let scale = 10f64.powf(digits);
+                let x = n(0)? * scale;
+                num(match name {
+                    "ROUND" => x.round() / scale,
+                    "ROUNDUP" => x.signum() * x.abs().ceil() / scale,
+                    _ => x.trunc() / scale,
+                })
+            }
+            "MOD" | "POWER" | "LOG" | "ATAN2" | "QUOTIENT" | "MROUND" | "CEILING"
+            | "CEILING.MATH" | "CEILING.PRECISE" | "FLOOR" | "FLOOR.MATH" | "FLOOR.PRECISE" => {
+                arity(
+                    if matches!(
+                        name,
+                        "LOG" | "CEILING.MATH" | "CEILING.PRECISE" | "FLOOR.MATH" | "FLOOR.PRECISE"
+                    ) {
+                        1
+                    } else {
+                        2
+                    },
+                    if name.ends_with(".MATH") { 3 } else { 2 },
+                )?;
+                let x = n(0)?;
+                let y = default_n(1, if name == "LOG" { 10.0 } else { 1.0 })?;
+                match name {
+                    "POWER" => num(x.powf(y)),
+                    "LOG" => num(x.log(y)),
+                    "ATAN2" => {
+                        if x == 0.0 && y == 0.0 {
+                            Err("#DIV/0!".into())
+                        } else {
+                            num(y.atan2(x))
+                        }
+                    }
+                    "MOD" => {
+                        if y == 0.0 {
+                            Err("#DIV/0!".into())
+                        } else {
+                            num(x - y * (x / y).floor())
+                        }
+                    }
+                    "QUOTIENT" => {
+                        if y == 0.0 {
+                            Err("#DIV/0!".into())
+                        } else {
+                            num((x / y).trunc())
+                        }
+                    }
+                    "MROUND" => {
+                        if x * y < 0.0 {
+                            Err("#NUM!".into())
+                        } else if y == 0.0 {
+                            num(0.0)
+                        } else {
+                            num((x / y).round() * y)
+                        }
+                    }
+                    _ => {
+                        if y == 0.0 {
+                            return num(0.0);
+                        }
+                        let sig = y.abs();
+                        let ratio = x / sig;
+                        let away = default_n(2, 0.0)? != 0.0 && x < 0.0;
+                        num(if name.starts_with("CEILING") {
+                            if away {
+                                ratio.floor() * sig
+                            } else {
+                                ratio.ceil() * sig
+                            }
+                        } else if away {
+                            ratio.ceil() * sig
+                        } else {
+                            ratio.floor() * sig
+                        })
+                    }
+                }
+            }
+            "GCD" | "LCM" => {
+                arity(1, 255)?;
+                let vals = numbers(a, false)?;
+                let mut result = if name == "GCD" { 0u64 } else { 1 };
+                for x in vals {
+                    if !(0.0..=9e15).contains(&x) {
+                        return Err("#NUM!".into());
+                    }
+                    let v = x.trunc() as u64;
+                    let d = gcd(result, v);
+                    result = if name == "GCD" {
+                        d
+                    } else if d == 0 {
+                        0
+                    } else {
+                        result
+                            .checked_div(d)
+                            .and_then(|n| n.checked_mul(v))
+                            .ok_or("#NUM!")?
+                    };
+                }
+                num(result as f64)
+            }
+            "COMBIN" | "COMBINA" | "PERMUT" => {
+                arity(2, 2)?;
+                let mut total = n(0)?.trunc();
+                let pick = n(1)?.trunc();
+                if name == "COMBINA" {
+                    total += pick - 1.0;
+                }
+                if total < 0.0 || pick < 0.0 || pick > total || total > 170.0 {
+                    return Err("#NUM!".into());
+                }
+                let mut result = 1.0;
+                for i in 0..pick as u32 {
+                    result *= total - f64::from(i);
+                    if name != "PERMUT" {
+                        result /= f64::from(i + 1);
+                    }
+                }
+                num(result)
+            }
+            "SUMPRODUCT" => {
+                arity(1, 255)?;
+                let count = a[0].values.len();
+                if a.iter().any(|g| g.values.len() != count) {
+                    return Err("#VALUE!".into());
+                }
+                let mut sum = 0.0;
+                for i in 0..count {
+                    let mut p = 1.0;
+                    for g in a {
+                        p *= match g.values.get(i) {
+                            Some(Value::Number(n)) => *n,
+                            Some(Value::Error(e)) => return Err(e.clone()),
+                            _ => 0.0,
+                        };
+                    }
+                    sum += p;
+                }
+                num(sum)
+            }
+            "LARGE" | "SMALL" | "PERCENTILE" | "PERCENTILE.INC" | "QUARTILE" | "QUARTILE.INC"
+            | "RANK" | "RANK.EQ" => {
+                arity(2, 3)?;
+                if name.starts_with("RANK") {
+                    let target = n(0)?;
+                    let mut vals = numbers(&a[1..2], false)?;
+                    vals.sort_by(f64::total_cmp);
+                    if default_n(2, 0.0)? == 0.0 {
+                        vals.reverse();
+                    }
+                    return num(vals.iter().position(|v| *v == target).ok_or("#N/A")? as f64 + 1.0);
+                }
+                let mut vals = numbers(&a[..1], false)?;
+                if vals.is_empty() {
+                    return Err("#NUM!".into());
+                }
+                vals.sort_by(f64::total_cmp);
+                let k = n(1)?;
+                if name == "LARGE" || name == "SMALL" {
+                    if k < 1.0 || k.trunc() > vals.len() as f64 {
+                        return Err("#NUM!".into());
+                    }
+                    return num(vals[if name == "SMALL" {
+                        k.trunc() as usize - 1
+                    } else {
+                        vals.len() - k.trunc() as usize
+                    }]);
+                }
+                let p = if name.starts_with("QUARTILE") {
+                    k.trunc() / 4.0
+                } else {
+                    k
+                };
+                if !(0.0..=1.0).contains(&p) {
+                    return Err("#NUM!".into());
+                }
+                let pos = p * (vals.len() - 1) as f64;
+                let low = pos.floor() as usize;
+                let high = pos.ceil() as usize;
+                num(vals[low] + (vals[high] - vals[low]) * pos.fract())
+            }
+            "SUMIF" | "COUNTIF" | "AVERAGEIF" | "SUMIFS" | "COUNTIFS" | "AVERAGEIFS" => {
+                conditional(name, a).and_then(num)
+            }
+            "CONCAT" | "CONCATENATE" => {
+                arity(1, 255)?;
+                let mut out = String::new();
+                for v in a.iter().flat_map(|g| &g.values) {
+                    if let Value::Error(e) = v {
+                        return Err(e.clone());
+                    }
+                    out.push_str(&v.display());
+                    if out.len() > 32767 {
+                        return Err("#VALUE!".into());
+                    }
+                }
+                string(out)
+            }
+            "TEXTJOIN" => {
+                arity(3, 255)?;
+                let delimiter = text(0)?;
+                let ignore = boolv(1)?;
+                let mut out = String::new();
+                let mut first = true;
+                for v in a[2..].iter().flat_map(|g| &g.values) {
+                    if let Value::Error(e) = v {
+                        return Err(e.clone());
+                    }
+                    let s = v.display();
+                    if !ignore || !s.is_empty() {
+                        let separator = if first { "" } else { &delimiter };
+                        if out
+                            .len()
+                            .saturating_add(separator.len())
+                            .saturating_add(s.len())
+                            > 32767
+                        {
+                            return Err("#VALUE!".into());
+                        }
+                        out.push_str(separator);
+                        out.push_str(&s);
+                        first = false;
+                    }
+                }
+                string(out)
+            }
+            "LEN" => {
+                arity(1, 1)?;
+                num(text(0)?.chars().count() as f64)
+            }
+            "LOWER" | "UPPER" | "PROPER" | "TRIM" | "CLEAN" => {
+                arity(1, 1)?;
+                let s = text(0)?;
+                string(match name {
+                    "LOWER" => s.to_lowercase(),
+                    "UPPER" => s.to_uppercase(),
+                    "TRIM" => s
+                        .split(' ')
+                        .filter(|p| !p.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    "CLEAN" => s.chars().filter(|c| u32::from(*c) >= 32).collect(),
+                    _ => {
+                        let mut start = true;
+                        let mut out = String::new();
+                        for c in s.chars() {
+                            if start {
+                                out.extend(c.to_uppercase());
+                            } else {
+                                out.extend(c.to_lowercase());
+                            }
+                            start = !c.is_alphabetic();
+                        }
+                        out
+                    }
+                })
+            }
+            "LEFT" | "RIGHT" | "MID" => {
+                arity(
+                    if name == "MID" { 3 } else { 1 },
+                    if name == "MID" { 3 } else { 2 },
+                )?;
+                let s: Vec<_> = text(0)?.chars().collect();
+                let count = if name == "MID" {
+                    n(2)?
+                } else {
+                    default_n(1, 1.0)?
+                }
+                .trunc();
+                if count < 0.0 {
+                    return Err("#VALUE!".into());
+                }
+                let start = if name == "MID" {
+                    let x = n(1)?.trunc();
+                    if x < 1.0 {
+                        return Err("#VALUE!".into());
+                    }
+                    x as usize - 1
+                } else if name == "RIGHT" {
+                    s.len().saturating_sub(count as usize)
+                } else {
+                    0
+                };
+                string(s.into_iter().skip(start).take(count as usize).collect())
+            }
+            "REPT" => {
+                arity(2, 2)?;
+                let s = text(0)?;
+                let count = n(1)?.trunc();
+                if count < 0.0 || count > 32767.0 || s.len().saturating_mul(count as usize) > 32767
+                {
+                    return Err("#VALUE!".into());
+                }
+                string(s.repeat(count as usize))
+            }
+            "EXACT" => {
+                arity(2, 2)?;
+                boolean(text(0)? == text(1)?)
+            }
+            "SUBSTITUTE" => {
+                arity(3, 4)?;
+                let original = text(0)?;
+                let old = text(1)?;
+                let new = text(2)?;
+                if old.is_empty() {
+                    return string(original);
+                }
+                if a.len() == 3 {
+                    let count = original.matches(&old).count();
+                    let remaining = original
+                        .len()
+                        .saturating_sub(count.saturating_mul(old.len()));
+                    if remaining.saturating_add(count.saturating_mul(new.len())) > 32767 {
+                        return Err("#VALUE!".into());
+                    }
+                    return string(original.replace(&old, &new));
+                }
+                let instance = n(3)?.trunc();
+                if instance < 1.0 {
+                    return Err("#VALUE!".into());
+                }
+                let mut result = String::new();
+                let mut start = 0;
+                let mut count = 0;
+                for (pos, _) in original.match_indices(&old) {
+                    count += 1;
+                    if count == instance as usize {
+                        result.push_str(&original[..pos]);
+                        result.push_str(&new);
+                        start = pos + old.len();
+                        break;
+                    }
+                }
+                if start == 0 {
+                    string(original)
+                } else {
+                    result.push_str(&original[start..]);
+                    string(result)
+                }
+            }
+            "REPLACE" => {
+                arity(4, 4)?;
+                let chars: Vec<_> = text(0)?.chars().collect();
+                let start = n(1)?.trunc();
+                let count = n(2)?.trunc();
+                if start < 1.0 || count < 0.0 {
+                    return Err("#VALUE!".into());
+                }
+                let pos = (start as usize - 1).min(chars.len());
+                string(format!(
+                    "{}{}{}",
+                    chars[..pos].iter().collect::<String>(),
+                    text(3)?,
+                    chars[pos.saturating_add(count as usize).min(chars.len())..]
+                        .iter()
+                        .collect::<String>()
+                ))
+            }
+            "FIND" | "SEARCH" => {
+                arity(2, 3)?;
+                let needle = text(0)?;
+                let hay = text(1)?;
+                let start = default_n(2, 1.0)?.trunc();
+                if start < 1.0 || start > hay.chars().count() as f64 + 1.0 {
+                    return Err("#VALUE!".into());
+                }
+                let chars: Vec<_> = hay.chars().collect();
+                let offset = start as usize - 1;
+                let pos = if name == "FIND" {
+                    chars[offset..]
+                        .iter()
+                        .collect::<String>()
+                        .find(&needle)
+                        .map(|byte| {
+                            chars[offset..].iter().collect::<String>()[..byte]
+                                .chars()
+                                .count()
+                        })
+                } else {
+                    let pattern = needle.to_lowercase();
+                    (offset..=chars.len())
+                        .find(|i| {
+                            wildcard_prefix(
+                                &pattern,
+                                &chars[*i..].iter().collect::<String>().to_lowercase(),
+                            )
+                        })
+                        .map(|i| i - offset)
+                };
+                num((offset + pos.ok_or("#VALUE!")? + 1) as f64)
+            }
+            "VALUE" | "NUMBERVALUE" => {
+                arity(1, if name == "VALUE" { 1 } else { 3 })?;
+                let mut s = text(0)?.trim().to_string();
+                let mut divisor = 1.0;
+                while s.ends_with('%') {
+                    s.pop();
+                    divisor *= 100.0;
+                }
+                if name == "NUMBERVALUE" {
+                    let decimal = a.get(1).map(Grid::text).unwrap_or(".".into());
+                    let group = a.get(2).map(Grid::text).unwrap_or(",".into());
+                    s = s.replace(&group, "").replace(&decimal, ".");
+                } else {
+                    s = s.replace(' ', "").replace(',', ".");
+                }
+                num(s.parse::<f64>().map_err(|_| "#VALUE!")? / divisor)
+            }
+            "TEXT" => {
+                arity(2, 2)?;
+                string(super::format::display(&a[0].first(), &text(1)?, false))
+            }
+            "CHAR" | "UNICHAR" => {
+                arity(1, 1)?;
+                let code = n(0)?.trunc();
+                if code < 1.0
+                    || code
+                        > if name == "CHAR" {
+                            255.0
+                        } else {
+                            0x10ffff as f64
+                        }
+                {
+                    return Err("#VALUE!".into());
+                }
+                string(char::from_u32(code as u32).ok_or("#VALUE!")?.to_string())
+            }
+            "CODE" | "UNICODE" => {
+                arity(1, 1)?;
+                num(u32::from(text(0)?.chars().next().ok_or("#VALUE!")?) as f64)
+            }
+            "ROWS" | "COLUMNS" => {
+                arity(1, 1)?;
+                num(if name == "ROWS" { a[0].rows } else { a[0].cols } as f64)
+            }
+            "INDEX" => {
+                arity(2, 3)?;
+                let r = n(1)?.trunc();
+                let c = default_n(2, 1.0)?.trunc();
+                if r < 1.0 || c < 1.0 {
+                    return Err("#REF!".into());
+                }
+                Ok(Grid::scalar(a[0].at(r as usize - 1, c as usize - 1)?))
+            }
+            "MATCH" | "XMATCH" => {
+                arity(2, if name == "MATCH" { 3 } else { 4 })?;
+                let needle = a[0].first();
+                let mode_value = default_n(2, if name == "MATCH" { 1.0 } else { 0.0 })?;
+                let search_value = default_n(3, 1.0)?;
+                if a[1].rows > 1 && a[1].cols > 1
+                    || !matches!(mode_value, -1.0 | 0.0 | 1.0 | 2.0)
+                    || name == "MATCH" && mode_value == 2.0
+                    || !matches!(search_value, -1.0 | 1.0)
+                {
+                    return Err("#VALUE!".into());
+                }
+                let mode = mode_value as i32;
+                let search = search_value as i32;
+                let vals = &a[1].values;
+                let mut best = None;
+                let mut indices: Vec<_> = (0..vals.len()).collect();
+                if search < 0 {
+                    indices.reverse();
+                }
+                for i in indices {
+                    let v = &vals[i];
+                    if lookup_equal(
+                        v,
+                        &needle,
+                        (name == "XMATCH" && mode == 2) || (name == "MATCH" && mode == 0),
+                    ) {
+                        return num(i as f64 + 1.0);
+                    }
+                    let eligible = if name == "MATCH" {
+                        (mode > 0 && compare(v, &needle).is_le())
+                            || (mode < 0 && compare(v, &needle).is_ge())
+                    } else {
+                        (mode == -1 && compare(v, &needle).is_le())
+                            || (mode == 1 && compare(v, &needle).is_ge())
+                    };
+                    if eligible
+                        && best.is_none_or(|b: usize| {
+                            if (name == "MATCH" && mode > 0) || (name == "XMATCH" && mode == -1) {
+                                compare(v, &vals[b]).is_gt()
+                            } else {
+                                compare(v, &vals[b]).is_lt()
+                            }
+                        })
+                    {
+                        best = Some(i);
+                    }
+                }
+                num(best.ok_or("#N/A")? as f64 + 1.0)
+            }
+            "VLOOKUP" | "HLOOKUP" => {
+                arity(3, 4)?;
+                let needle = a[0].first();
+                let index = n(2)?.trunc();
+                let vertical = name == "VLOOKUP";
+                let table = &a[1];
+                if index < 1.0 || index > if vertical { table.cols } else { table.rows } as f64 {
+                    return Err("#REF!".into());
+                }
+                let approximate = a.get(3).map(Grid::boolean).transpose()?.unwrap_or(true);
+                let count = if vertical { table.rows } else { table.cols };
+                let mut chosen = None;
+                for i in 0..count {
+                    let v = if vertical {
+                        table.at(i, 0)?
+                    } else {
+                        table.at(0, i)?
+                    };
+                    if lookup_equal(&v, &needle, !approximate) {
+                        chosen = Some(i);
+                        break;
+                    }
+                    if approximate && compare(&v, &needle).is_le() {
+                        chosen = Some(i);
+                    }
+                }
+                let i = chosen.ok_or("#N/A")?;
+                Ok(Grid::scalar(if vertical {
+                    table.at(i, index as usize - 1)?
+                } else {
+                    table.at(index as usize - 1, i)?
+                }))
+            }
+            "XLOOKUP" => {
+                arity(3, 6)?;
+                if a[1].values.len() != a[2].values.len() {
+                    return Err("#VALUE!".into());
+                }
+                let mode_value = default_n(4, 0.0)?;
+                let search_value = default_n(5, 1.0)?;
+                if a[1].rows > 1 && a[1].cols > 1
+                    || a[1].rows != a[2].rows
+                    || a[1].cols != a[2].cols
+                    || !matches!(mode_value, -1.0 | 0.0 | 1.0 | 2.0)
+                    || !matches!(search_value, -1.0 | 1.0)
+                {
+                    return Err("#VALUE!".into());
+                }
+                let mode = mode_value as i32;
+                let search = search_value as i32;
+                let needle = a[0].first();
+                let mut indices: Vec<_> = (0..a[1].values.len()).collect();
+                if search < 0 {
+                    indices.reverse();
+                }
+                let mut best = None;
+                for i in indices {
+                    let v = &a[1].values[i];
+                    if lookup_equal(v, &needle, mode == 2) {
+                        return Ok(Grid::scalar(a[2].values[i].clone()));
+                    }
+                    let eligible = (mode == -1 && compare(v, &needle).is_le())
+                        || (mode == 1 && compare(v, &needle).is_ge());
+                    if eligible
+                        && best.is_none_or(|b: usize| {
+                            if mode == -1 {
+                                compare(v, &a[1].values[b]).is_gt()
+                            } else {
+                                compare(v, &a[1].values[b]).is_lt()
+                            }
+                        })
+                    {
+                        best = Some(i);
+                    }
+                }
+                if let Some(i) = best {
+                    Ok(Grid::scalar(a[2].values[i].clone()))
+                } else if let Some(fallback) = args.get(3) {
+                    self.eval(fallback, sheet, row, col)
+                } else {
+                    Err("#N/A".into())
+                }
+            }
+            "DATE" => {
+                arity(3, 3)?;
+                let yr = n(0)?.trunc();
+                let mo = n(1)?.trunc();
+                let da = n(2)?.trunc();
+                if !(0.0..=9999.0).contains(&yr) || mo.abs() > 120000.0 || da.abs() > 3700000.0 {
+                    return Err("#NUM!".into());
+                }
+                let mut year = yr as i64;
+                if (0..1900).contains(&year) {
+                    year += 1900;
+                }
+                let month = mo as i64;
+                let day = da as i64;
+                let year = year + (month - 1).div_euclid(12);
+                let month = (month - 1).rem_euclid(12) + 1;
+                if !(1900..=9999).contains(&year) {
+                    return Err("#NUM!".into());
+                }
+                let result = date_serial(year, month, 1) + (day - 1) as f64;
+                if !(0.0..=2958465.0).contains(&result) {
+                    return Err("#NUM!".into());
+                }
+                num(result)
+            }
+            "TIME" => {
+                arity(3, 3)?;
+                let seconds = n(0)?.trunc() * 3600.0 + n(1)?.trunc() * 60.0 + n(2)?.trunc();
+                if seconds < 0.0 {
+                    return Err("#NUM!".into());
+                }
+                num(seconds.rem_euclid(86400.0) / 86400.0)
+            }
+            "YEAR" | "MONTH" | "DAY" | "HOUR" | "MINUTE" | "SECOND" => {
+                arity(1, 1)?;
+                let serial = n(0)?;
+                if !(0.0..=2958465.99999).contains(&serial) {
+                    return Err("#NUM!".into());
+                }
+                let (y, m, d) = serial_date(serial);
+                let sec = (serial.fract() * 86400.0).round() as i64;
+                num(match name {
+                    "YEAR" => y as f64,
+                    "MONTH" => m as f64,
+                    "DAY" => d as f64,
+                    "HOUR" => ((sec / 3600) % 24) as f64,
+                    "MINUTE" => ((sec / 60) % 60) as f64,
+                    _ => (sec % 60) as f64,
+                })
+            }
+            "DAYS" => {
+                arity(2, 2)?;
+                num(n(0)?.floor() - n(1)?.floor())
+            }
+            "WEEKDAY" => {
+                arity(1, 2)?;
+                let serial = n(0)?.floor();
+                if !(0.0..=2958465.0).contains(&serial) {
+                    return Err("#NUM!".into());
+                }
+                let mode = default_n(1, 1.0)? as i64;
+                let dow = (serial as i64 - 1).rem_euclid(7);
+                num(match mode {
+                    1 => (dow + 1) as f64,
+                    2 => (dow + 6).rem_euclid(7) as f64 + 1.0,
+                    3 => (dow + 6).rem_euclid(7) as f64,
+                    11..=17 => (dow - (mode - 10)).rem_euclid(7) as f64 + 1.0,
+                    _ => return Err("#NUM!".into()),
+                })
+            }
+            "EDATE" | "EOMONTH" => {
+                arity(2, 2)?;
+                let serial = n(0)?;
+                let offset = n(1)?.trunc();
+                if !(0.0..=2958465.0).contains(&serial) || offset.abs() > 120000.0 {
+                    return Err("#NUM!".into());
+                }
+                let (y, m, d) = serial_date(serial);
+                let delta = offset as i64;
+                let new = y * 12 + m - 1 + delta;
+                let year = new.div_euclid(12);
+                let month = new.rem_euclid(12) + 1;
+                if !(1900..=9999).contains(&year) {
+                    return Err("#NUM!".into());
+                }
+                let end = days_in_month(year, month);
+                num(date_serial(
+                    year,
+                    month,
+                    if name == "EDATE" { d.min(end) } else { end },
+                ))
+            }
+            "DATEVALUE" => {
+                arity(1, 1)?;
+                let s = text(0)?;
+                let pieces: Vec<_> = s.split(['-', '/', '.']).collect();
+                if pieces.len() != 3 {
+                    return Err("#VALUE!".into());
+                }
+                let v: Vec<i64> = pieces
+                    .iter()
+                    .map(|p| p.parse::<i64>().map_err(|_| "#VALUE!".to_string()))
+                    .collect::<CalcResult<_>>()?;
+                let (y, m, d) = if pieces[0].len() == 4 {
+                    (v[0], v[1], v[2])
+                } else {
+                    (v[2], v[1], v[0])
+                };
+                if !(1900..=9999).contains(&y)
+                    || !(1..=12).contains(&m)
+                    || d < 1
+                    || d > days_in_month(y, m)
+                {
+                    return Err("#VALUE!".into());
+                }
+                num(date_serial(y, m, d))
+            }
+            "TIMEVALUE" => {
+                arity(1, 1)?;
+                let s = text(0)?;
+                let parts: Vec<_> = s.split(':').map(|p| p.parse::<u32>()).collect();
+                if !(2..=3).contains(&parts.len()) {
+                    return Err("#VALUE!".into());
+                }
+                let vals = parts
+                    .into_iter()
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| "#VALUE!")?;
+                if vals[0] > 23 || vals[1] > 59 || vals.get(2).is_some_and(|n| *n > 59) {
+                    return Err("#VALUE!".into());
+                }
+                num(
+                    f64::from(vals[0] * 3600 + vals[1] * 60 + vals.get(2).copied().unwrap_or(0))
+                        / 86400.0,
+                )
+            }
+            "DATEDIF" => {
+                arity(3, 3)?;
+                let start = n(0)?.floor();
+                let end = n(1)?.floor();
+                if !(0.0..=2958465.0).contains(&start)
+                    || !(0.0..=2958465.0).contains(&end)
+                    || start > end
+                {
+                    return Err("#NUM!".into());
+                }
+                let (y1, m1, d1) = serial_date(start);
+                let (y2, m2, d2) = serial_date(end);
+                let months = (y2 - y1) * 12 + m2 - m1 - i64::from(d2 < d1);
+                num(match text(2)?.to_uppercase().as_str() {
+                    "D" => end - start,
+                    "M" => months as f64,
+                    "Y" => months.div_euclid(12) as f64,
+                    "YM" => months.rem_euclid(12) as f64,
+                    "YD" => {
+                        let mut candidate = date_serial(y2, m1, d1);
+                        if candidate > end {
+                            candidate = date_serial(y2 - 1, m1, d1);
+                        }
+                        end - candidate
+                    }
+                    "MD" => {
+                        if d2 >= d1 {
+                            (d2 - d1) as f64
+                        } else {
+                            let previous = if m2 == 1 {
+                                days_in_month(y2 - 1, 12)
+                            } else {
+                                days_in_month(y2, m2 - 1)
+                            };
+                            (previous - d1 + d2) as f64
+                        }
+                    }
+                    _ => return Err("#NUM!".into()),
+                })
+            }
+            "NETWORKDAYS" | "WORKDAY" => {
+                arity(2, 3)?;
+                let initial = n(0)?.floor();
+                let offset = n(1)?.trunc();
+                if !(0.0..=2958465.0).contains(&initial)
+                    || offset.abs()
+                        > if name == "WORKDAY" {
+                            100000.0
+                        } else {
+                            2958465.0
+                        }
+                {
+                    return Err("#NUM!".into());
+                }
+                let start = initial as i64;
+                let holidays: HashSet<i64> = a
+                    .get(2)
+                    .map(|g| numbers(std::slice::from_ref(g), false))
+                    .transpose()?
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|v| v.floor() as i64)
+                    .collect();
+                let is_work = |d: i64| {
+                    let dow = (d - 2).rem_euclid(7);
+                    dow < 5 && !holidays.contains(&d)
+                };
+                if name == "NETWORKDAYS" {
+                    let end = offset as i64;
+                    if end < 0 {
+                        return Err("#NUM!".into());
+                    }
+                    let lo = start.min(end);
+                    let hi = start.max(end);
+                    if hi - lo > 1_000_000 {
+                        return Err("#NUM!".into());
+                    }
+                    num((lo..=hi).filter(|d| is_work(*d)).count() as f64
+                        * if end < start { -1.0 } else { 1.0 })
+                } else {
+                    let days = offset as i64;
+                    let mut d = start;
+                    let mut remaining = days.abs();
+                    while remaining > 0 {
+                        d += if days < 0 { -1 } else { 1 };
+                        if is_work(d) {
+                            remaining -= 1;
+                        }
+                    }
+                    if !(0..=2958465).contains(&d) {
+                        return Err("#NUM!".into());
+                    }
+                    num(d as f64)
+                }
+            }
+            "PMT" | "PV" | "FV" => {
+                arity(3, 5)?;
+                let rate = n(0)?;
+                let periods = n(1)?;
+                let third = n(2)?;
+                let fourth = default_n(3, 0.0)?;
+                let kind = default_n(4, 0.0)?;
+                if periods == 0.0 && (name == "PMT") {
+                    return Err("#DIV/0!".into());
+                }
+                let growth = (1.0 + rate).powf(periods);
+                let annuity = if rate == 0.0 {
+                    periods
+                } else {
+                    (growth - 1.0) / rate * (1.0 + rate * kind)
+                };
+                num(match name {
+                    "PMT" => {
+                        if annuity == 0.0 {
+                            return Err("#DIV/0!".into());
+                        } else {
+                            -(third * growth + fourth) / annuity
+                        }
+                    }
+                    "PV" => {
+                        if growth == 0.0 {
+                            return Err("#DIV/0!".into());
+                        } else {
+                            -(third * annuity + fourth) / growth
+                        }
+                    }
+                    _ => (-fourth) * growth - third * annuity,
+                })
+            }
+            "NPV" => {
+                arity(2, 255)?;
+                let rate = n(0)?;
+                let vals = numbers(&a[1..], false)?;
+                if rate == -1.0 {
+                    return Err("#DIV/0!".into());
+                }
+                num(vals
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| v / (1.0 + rate).powf((i + 1) as f64))
+                    .sum())
+            }
+            "IRR" => {
+                arity(1, 2)?;
+                let vals = numbers(&a[..1], false)?;
+                if !vals.iter().any(|v| *v < 0.0) || !vals.iter().any(|v| *v > 0.0) {
+                    return Err("#NUM!".into());
+                }
+                let mut rate = default_n(1, 0.1)?;
+                for _ in 0..100 {
+                    let f = vals
+                        .iter()
+                        .enumerate()
+                        .map(|(i, v)| v / (1.0 + rate).powf(i as f64))
+                        .sum::<f64>();
+                    let df = vals
+                        .iter()
+                        .enumerate()
+                        .skip(1)
+                        .map(|(i, v)| -(i as f64) * v / (1.0 + rate).powf(i as f64 + 1.0))
+                        .sum::<f64>();
+                    if df == 0.0 {
+                        break;
+                    }
+                    let next = rate - f / df;
+                    if !next.is_finite() || next <= -1.0 {
+                        break;
+                    }
+                    if (next - rate).abs() < 1e-10 {
+                        return num(next);
+                    }
+                    rate = next;
+                }
+                Err("#NUM!".into())
+            }
+            "SLN" => {
+                arity(3, 3)?;
+                let life = n(2)?;
+                if life == 0.0 {
+                    Err("#DIV/0!".into())
+                } else {
+                    num((n(0)? - n(1)?) / life)
+                }
+            }
+            "SYD" => {
+                arity(4, 4)?;
+                let life = n(2)?;
+                let period = n(3)?;
+                if life <= 0.0 || period <= 0.0 || period > life {
+                    Err("#NUM!".into())
+                } else {
+                    num((n(0)? - n(1)?) * (life - period + 1.0) * 2.0 / (life * (life + 1.0)))
+                }
+            }
+            _ => Err("#NAME?".into()),
+        }
+    }
+}
+fn finite(value: f64) -> CalcResult<f64> {
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err("#NUM!".into())
+    }
+}
+fn literal(input: &str) -> Value {
+    if input.is_empty() {
+        return Value::Empty;
+    }
+    if let Some(s) = input.strip_prefix('\'') {
+        return Value::Text(s.into());
+    }
+    if input.eq_ignore_ascii_case("TRUE") || input.eq_ignore_ascii_case("ИСТИНА") {
+        return Value::Bool(true);
+    }
+    if input.eq_ignore_ascii_case("FALSE") || input.eq_ignore_ascii_case("ЛОЖЬ") {
+        return Value::Bool(false);
+    }
+    if matches!(
+        input,
+        "#REF!" | "#DIV/0!" | "#VALUE!" | "#NAME?" | "#N/A" | "#NUM!" | "#NULL!"
+    ) {
+        return Value::Error(input.into());
+    }
+    let s = input.trim();
+    let (s, mult) = if let Some(s) = s.strip_suffix('%') {
+        (s, 0.01)
+    } else {
+        (s, 1.0)
+    };
+    if let Ok(n) = s.replace(',', ".").parse::<f64>()
+        && n.is_finite()
+    {
+        return Value::Number(n * mult);
+    }
+    Value::Text(input.into())
+}
+fn numbers(grids: &[Grid], text_zero: bool) -> CalcResult<Vec<f64>> {
+    let mut vals = Vec::new();
+    for g in grids {
+        for value in &g.values {
+            match value {
+                Value::Number(n) => vals.push(*n),
+                Value::Error(e) => return Err(e.clone()),
+                Value::Bool(b) if text_zero || !g.reference => vals.push(f64::from(u8::from(*b))),
+                Value::Text(s) if text_zero => {
+                    if s.is_empty() {
+                        continue;
+                    }
+                    vals.push(0.0);
+                }
+                Value::Text(_) if !g.reference => vals.push(value.number()?),
+                _ => (),
+            }
+        }
+    }
+    Ok(vals)
+}
+fn compare(a: &Value, b: &Value) -> std::cmp::Ordering {
+    match (a, b) {
+        (Value::Number(a), Value::Number(b)) => a.total_cmp(b),
+        (Value::Empty, Value::Number(b)) => 0f64.total_cmp(b),
+        (Value::Number(a), Value::Empty) => a.total_cmp(&0.0),
+        (Value::Text(a), Value::Text(b)) => a.to_lowercase().cmp(&b.to_lowercase()),
+        (Value::Empty, Value::Text(b)) => String::new().cmp(&b.to_lowercase()),
+        (Value::Text(a), Value::Empty) => a.to_lowercase().cmp(&String::new()),
+        (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
+        (Value::Empty, Value::Empty) => std::cmp::Ordering::Equal,
+        _ => {
+            let kind = |v: &Value| match v {
+                Value::Empty | Value::Number(_) => 0,
+                Value::Text(_) => 1,
+                Value::Bool(_) => 2,
+                Value::Error(_) => 3,
+            };
+            kind(a).cmp(&kind(b))
+        }
+    }
+}
+
+fn lookup_equal(value: &Value, needle: &Value, wildcards: bool) -> bool {
+    if wildcards && let (Value::Text(value), Value::Text(pattern)) = (value, needle) {
+        return wildcard(
+            &pattern.to_lowercase().chars().collect::<Vec<_>>(),
+            &value.to_lowercase().chars().collect::<Vec<_>>(),
+        );
+    }
+    compare(value, needle).is_eq()
+}
+fn wildcard_prefix(pattern: &str, text: &str) -> bool {
+    let mut p: Vec<char> = pattern.chars().collect();
+    p.push('*');
+    wildcard(&p, &text.chars().collect::<Vec<_>>())
+}
+fn wildcard(pattern: &[char], text: &[char]) -> bool {
+    let mut pi = 0;
+    let mut ti = 0;
+    let mut star = None;
+    let mut mark = 0;
+    while ti < text.len() {
+        if pattern.get(pi) == Some(&'~') && pattern.get(pi + 1) == text.get(ti) {
+            pi += 2;
+            ti += 1;
+        } else if pattern.get(pi) == Some(&'?') || pattern.get(pi) == text.get(ti) {
+            pi += 1;
+            ti += 1;
+        } else if pattern.get(pi) == Some(&'*') {
+            star = Some(pi);
+            pi += 1;
+            mark = ti;
+        } else if let Some(s) = star {
+            mark += 1;
+            ti = mark;
+            pi = s + 1;
+        } else {
+            return false;
+        }
+    }
+    while pattern.get(pi) == Some(&'*') {
+        pi += 1;
+    }
+    pi == pattern.len()
+}
+fn criterion(value: &Value, criteria: &Value) -> bool {
+    let raw = criteria.display();
+    let (op, rest) = ["<>", ">=", "<=", "=", ">", "<"]
+        .iter()
+        .find_map(|op| raw.strip_prefix(op).map(|rest| (*op, rest)))
+        .unwrap_or(("=", raw.as_str()));
+    if rest.is_empty() && matches!(op, "=" | "<>") {
+        let empty = matches!(value, Value::Empty) || matches!(value,Value::Text(s)if s.is_empty());
+        return if op == "=" { empty } else { !empty };
+    }
+    let target = literal(rest);
+    if matches!(op, "=" | "<>") && matches!(target, Value::Text(_)) {
+        let matches = wildcard(
+            &rest.to_lowercase().chars().collect::<Vec<_>>(),
+            &value.display().to_lowercase().chars().collect::<Vec<_>>(),
+        );
+        return if op == "=" { matches } else { !matches };
+    }
+    let order = compare(value, &target);
+    match op {
+        "=" => order.is_eq(),
+        "<>" => !order.is_eq(),
+        ">" => order.is_gt(),
+        "<" => order.is_lt(),
+        ">=" => !order.is_lt(),
+        "<=" => !order.is_gt(),
+        _ => false,
+    }
+}
+fn conditional(name: &str, a: &[Grid]) -> CalcResult<f64> {
+    let plural = name.ends_with("IFS");
+    let count = name.starts_with("COUNT");
+    let average = name.starts_with("AVERAGE");
+    let (sum, conditions): (&Grid, Vec<(&Grid, &Grid)>) = if plural {
+        let offset = usize::from(!count);
+        if a.len() < offset + 2 || !(a.len() - offset).is_multiple_of(2) {
+            return Err("#VALUE!".into());
+        }
+        (
+            &a[0],
+            a[offset..]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|p| (&p[0], &p[1]))
+                .collect(),
+        )
+    } else {
+        if !(2..=if count { 2 } else { 3 }).contains(&a.len()) {
+            return Err("#VALUE!".into());
+        }
+        (a.get(2).unwrap_or(&a[0]), vec![(&a[0], &a[1])])
+    };
+    if conditions
+        .iter()
+        .any(|(range, _)| range.values.len() != sum.values.len())
+    {
+        return Err("#VALUE!".into());
+    }
+    let mut result = 0.0;
+    let mut matched = 0;
+    for i in 0..sum.values.len() {
+        if conditions
+            .iter()
+            .all(|(g, c)| g.values.get(i).is_some_and(|v| criterion(v, &c.first())))
+        {
+            if count {
+                result += 1.0;
+            } else if let Some(Value::Number(v)) = sum.values.get(i) {
+                result += v;
+                matched += 1;
+            } else if let Some(Value::Error(e)) = sum.values.get(i) {
+                return Err(e.clone());
+            }
+        }
+    }
+    if average {
+        if matched == 0 {
+            Err("#DIV/0!".into())
+        } else {
+            Ok(result / f64::from(matched))
+        }
+    } else {
+        Ok(result)
+    }
+}
+fn gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a
+}
+pub(super) fn calendar_serial(now: chrono::NaiveDateTime) -> f64 {
+    date_serial(
+        i64::from(now.year()),
+        i64::from(now.month()),
+        i64::from(now.day()),
+    ) + (f64::from(now.num_seconds_from_midnight()) + f64::from(now.nanosecond()) / 1_000_000_000.0)
+        / 86400.0
+}
+pub fn date_serial(year: i64, month: i64, day: i64) -> f64 {
+    if year == 1900 && month == 2 && day == 29 {
+        return 60.0;
+    }
+    let days = days_from_civil(year, month, day) - days_from_civil(1899, 12, 31);
+    (days + if days >= 60 { 1 } else { 0 }) as f64
+}
+pub fn serial_date(serial: f64) -> (i64, i64, i64) {
+    let day = serial.floor() as i64;
+    if day == 60 {
+        return (1900, 2, 29);
+    }
+    civil_from_days(days_from_civil(1899, 12, 31) + day - if day > 60 { 1 } else { 0 })
+}
+pub fn days_in_month(year: i64, month: i64) -> i64 {
+    match month {
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if year == 1900 || year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 31,
+    }
+}
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = y - i64::from(m <= 2);
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = m + if m > 2 { -3 } else { 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468
+}
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let mut y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = mp + if mp < 10 { 3 } else { -9 };
+    y += i64::from(m <= 2);
+    (y, m, d)
+}
+pub fn validate(input: &str) -> CalcResult<()> {
+    if !input.starts_with('=') {
+        return Ok(());
+    }
+    parse(input).map(|_| ())
+}
+pub fn evaluate(book: &Book, sheet: u64, input: &str) -> Value {
+    let Some(si) = book.sheets.iter().position(|s| s.id == sheet) else {
+        return Value::Error("#REF!".into());
+    };
+    if !input.starts_with('=') {
+        return literal(input);
+    }
+    match parse(input).and_then(|expr| Engine::new(book).eval(&expr, si, 0, 0)) {
+        Ok(g) => g.first(),
+        Err(e) => Value::Error(e),
+    }
+}
+pub fn recalculate(book: &mut Book) {
+    let keys: Vec<_> = book
+        .sheets
+        .iter()
+        .enumerate()
+        .flat_map(|(i, s)| {
+            s.cells
+                .keys()
+                .filter_map(move |key| parse_address(key).map(|(r, c)| (i, r, c)))
+        })
+        .collect();
+    let values = {
+        let mut engine = Engine::new(book);
+        keys.iter()
+            .map(|&(s, r, c)| engine.cell(s, r, c))
+            .collect::<Vec<_>>()
+    };
+    for ((si, r, c), value) in keys.into_iter().zip(values) {
+        if let Some(cell) = book.sheets.get_mut(si).and_then(|s| s.cell_mut(r, c)) {
+            cell.value = value;
+        }
+    }
+}
+pub fn dependencies(input: &str) -> Vec<(Option<String>, Range)> {
+    fn visit(e: &Expr, out: &mut Vec<(Option<String>, Range)>) {
+        match e {
+            Expr::Reference(s, r) => out.push((s.clone(), *r)),
+            Expr::Unary(_, e) => visit(e, out),
+            Expr::Binary(_, a, b) => {
+                visit(a, out);
+                visit(b, out);
+            }
+            Expr::Call(_, args) => {
+                for e in args {
+                    visit(e, out);
+                }
+            }
+            _ => (),
+        }
+    }
+    let mut result = Vec::new();
+    if let Ok(expr) = parse(input) {
+        visit(&expr, &mut result);
+    }
+    result
+}

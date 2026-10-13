@@ -1,6 +1,7 @@
 //! Version policy evaluated after native OS probing in the thin platform layer.
 
-pub const MIN_WINDOWS_BUILD: u32 = 22_000;
+/// Windows 10 RTM. Accepted by policy; runtime compatibility still needs target-OS QA.
+pub const MIN_WINDOWS_BUILD: u32 = 10_240;
 pub const MIN_DOCUMENTED_BACKDROP_BUILD: u32 = 22_621;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,7 +29,8 @@ pub enum PlatformError {
 }
 
 impl WindowsHost {
-    /// Windows 11 reports NT major version 10. Build and product type matter.
+    /// Windows 10 and Windows 11 both report NT major version 10.
+    /// Build, product type, and architecture determine the supported policy.
     /// This does not probe the OS or implement an installer requirement.
     pub fn validate(self) -> Result<(), PlatformError> {
         if self.major != 10 || self.build < MIN_WINDOWS_BUILD {
@@ -67,16 +69,33 @@ mod tests {
     }
 
     #[test]
-    fn rejects_windows_10_and_accepts_minimum_windows_11() {
+    fn accepts_windows_10_and_windows_11_x64_workstations() {
+        for build in [10_240, 14_393, 17_763, 19_045, 22_000, 22_621, 26_100] {
+            assert_eq!(
+                host(build).validate(),
+                Ok(()),
+                "supported policy build {build}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_pre_windows_10_builds_and_different_nt_major() {
         assert_eq!(
-            host(19_045).validate(),
+            host(MIN_WINDOWS_BUILD - 1).validate(),
             Err(PlatformError::UnsupportedWindowsVersion)
         );
+        let mut older = host(26_100);
+        older.major = 6;
         assert_eq!(
-            host(21_999).validate(),
+            older.validate(),
             Err(PlatformError::UnsupportedWindowsVersion)
         );
-        assert_eq!(host(22_000).validate(), Ok(()));
+        older.major = 11;
+        assert_eq!(
+            older.validate(),
+            Err(PlatformError::UnsupportedWindowsVersion)
+        );
     }
 
     #[test]
@@ -100,8 +119,16 @@ mod tests {
 
     #[test]
     fn backdrop_capability_has_its_own_minimum() {
+        assert!(!host(10_240).supports_documented_backdrop());
+        assert!(!host(19_045).supports_documented_backdrop());
         assert!(!host(22_000).supports_documented_backdrop());
         assert!(!host(22_620).supports_documented_backdrop());
         assert!(host(22_621).supports_documented_backdrop());
+        let mut server = host(26_100);
+        server.workstation = false;
+        assert!(!server.supports_documented_backdrop());
+        let mut emulated = host(26_100);
+        emulated.native_architecture = Architecture::Arm64;
+        assert!(!emulated.supports_documented_backdrop());
     }
 }

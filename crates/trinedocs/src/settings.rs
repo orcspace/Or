@@ -1,0 +1,93 @@
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    pub language: String,
+    pub theme: String,
+    pub scale: f32,
+    pub mcp: bool,
+    pub dark_paper: bool,
+    pub reduced_motion: bool,
+    pub backup: bool,
+    pub recent: Vec<PathBuf>,
+    pub pinned: Vec<PathBuf>,
+}
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            language: "ru".into(),
+            theme: "system".into(),
+            scale: 1.0,
+            mcp: true,
+            dark_paper: false,
+            reduced_motion: false,
+            backup: true,
+            recent: Vec::new(),
+            pinned: Vec::new(),
+        }
+    }
+}
+impl Settings {
+    pub fn load() -> Self {
+        crate::util::read_limited(&crate::util::app_dir().join("settings.json"), 1024 * 1024)
+            .ok()
+            .filter(|b| b.len() <= 1024 * 1024)
+            .and_then(|b| serde_json::from_slice::<Self>(&b).ok())
+            .map(Self::normalized)
+            .unwrap_or_default()
+    }
+    fn normalized(mut self) -> Self {
+        if !self.scale.is_finite() {
+            self.scale = 1.0;
+        }
+        self.scale = self.scale.clamp(0.75, 2.0);
+        if !matches!(self.language.as_str(), "ru" | "en") {
+            self.language = "ru".into();
+        }
+        if !matches!(self.theme.as_str(), "light" | "dark" | "system") {
+            self.theme = "system".into();
+        }
+        self.recent.truncate(50);
+        self.pinned.truncate(50);
+        self
+    }
+    pub fn save(&self) -> Result<(), String> {
+        crate::util::atomic_write(
+            &crate::util::app_dir().join("settings.json"),
+            &serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?,
+            true,
+        )
+    }
+    pub fn remember(&mut self, path: PathBuf) {
+        self.recent.retain(|p| p != &path);
+        self.recent.insert(0, path);
+        self.recent.truncate(50);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn settings_bounds() {
+        let s = super::Settings {
+            scale: 0.0,
+            language: "bad".into(),
+            theme: "bad".into(),
+            ..Default::default()
+        }
+        .normalized();
+        assert_eq!(s.scale, 0.75);
+        assert_eq!(s.language, "ru");
+        assert_eq!(s.theme, "system");
+        assert_eq!(
+            super::Settings {
+                scale: f32::NAN,
+                ..Default::default()
+            }
+            .normalized()
+            .scale,
+            1.0
+        );
+    }
+}

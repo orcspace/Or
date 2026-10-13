@@ -1,0 +1,252 @@
+use serde::{Deserialize, Serialize};
+use std::path::Path;
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data", rename_all = "lowercase")]
+pub enum Document {
+    Docs(crate::docs::model::Doc),
+    Sheets(crate::sheets::model::Book),
+    Slides(crate::slides::model::Deck),
+}
+impl Document {
+    pub fn create(kind: &str) -> Result<Self, String> {
+        match kind {
+            "docs" => Ok(Self::Docs(Default::default())),
+            "sheets" => Ok(Self::Sheets(Default::default())),
+            "slides" => Ok(Self::Slides(Default::default())),
+            _ => Err("Неизвестный тип документа".into()),
+        }
+    }
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Docs(_) => "docs",
+            Self::Sheets(_) => "sheets",
+            Self::Slides(_) => "slides",
+        }
+    }
+    pub fn extension(&self) -> &'static str {
+        match self {
+            Self::Docs(_) => "trinedoc",
+            Self::Sheets(_) => "trinesheet",
+            Self::Slides(_) => "trineslide",
+        }
+    }
+    pub fn office_extension(&self) -> &'static str {
+        match self {
+            Self::Docs(_) => "docx",
+            Self::Sheets(_) => "xlsx",
+            Self::Slides(_) => "pptx",
+        }
+    }
+    pub fn pages(&self) -> Vec<crate::render::Page> {
+        match self {
+            Self::Docs(d) => d.pages(),
+            Self::Sheets(b) => b.pages(),
+            Self::Slides(d) => d.pages(),
+        }
+    }
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::Docs(d) => {
+                d.validate()?;
+            }
+            Self::Sheets(b) => {
+                b.validate()?;
+            }
+            Self::Slides(d) => {
+                d.validate()?;
+            }
+        }
+        Ok(())
+    }
+}
+#[derive(Serialize, Deserialize)]
+struct Envelope {
+    version: u32,
+    document: Document,
+    #[serde(default)]
+    assets: std::collections::BTreeMap<u64, String>,
+}
+pub fn encode(doc: &Document) -> Result<Vec<u8>, String> {
+    doc.validate()?;
+    let mut document = doc.clone();
+    let mut assets = std::collections::BTreeMap::new();
+    let mut parts = Vec::new();
+    let mut add = |id: u64, bytes: &mut Vec<u8>| {
+        let path = format!("assets/{id}.bin");
+        assets.insert(id, path.clone());
+        parts.push((path, std::mem::take(bytes)));
+    };
+    match &mut document {
+        Document::Docs(d) => {
+            for image in &mut d.images {
+                add(image.id, &mut image.bytes);
+            }
+        }
+        Document::Slides(d) => {
+            for slide in &mut d.slides {
+                for element in &mut slide.elements {
+                    if let crate::slides::model::ElementKind::Image { bytes } = &mut element.kind {
+                        add(element.id, bytes);
+                    }
+                }
+            }
+        }
+        Document::Sheets(_) => {}
+    }
+    parts.push((
+        "document.json".into(),
+        serde_json::to_vec(&Envelope {
+            version: 2,
+            document,
+            assets,
+        })
+        .map_err(|e| e.to_string())?,
+    ));
+    crate::package::write_zip(parts)
+}
+pub fn decode(bytes: &[u8]) -> Result<Document, String> {
+    let mut parts = crate::package::read_zip(bytes)?;
+    let data = parts
+        .remove("document.json")
+        .ok_or("В архиве нет document.json")?;
+    let mut env: Envelope =
+        serde_json::from_slice(&data).map_err(|e| format!("Повреждённый документ: {e}"))?;
+    if !matches!(env.version, 1 | 2) || env.version == 1 && !env.assets.is_empty() {
+        return Err("Версия документа не поддерживается".into());
+    }
+    if env.version == 2 {
+        let mut restore = |id: u64, bytes: &mut Vec<u8>| -> Result<(), String> {
+            let path = env
+                .assets
+                .remove(&id)
+                .ok_or("Нет записи изображения в manifest")?;
+            if path != format!("assets/{id}.bin") {
+                return Err("Неверный путь asset".into());
+            }
+            *bytes = parts.remove(&path).ok_or("Нет части изображения")?;
+            Ok(())
+        };
+        match &mut env.document {
+            Document::Docs(d) => {
+                for image in &mut d.images {
+                    restore(image.id, &mut image.bytes)?;
+                }
+            }
+            Document::Slides(d) => {
+                for slide in &mut d.slides {
+                    for element in &mut slide.elements {
+                        if let crate::slides::model::ElementKind::Image { bytes } =
+                            &mut element.kind
+                        {
+                            restore(element.id, bytes)?;
+                        }
+                    }
+                }
+            }
+            Document::Sheets(_) => {}
+        }
+        if !env.assets.is_empty() {
+            return Err("Неизвестный ID в asset manifest".into());
+        }
+    }
+    env.document.validate()?;
+    Ok(env.document)
+}
+pub fn open(path: &Path) -> Result<Document, String> {
+    let ext = extension(path);
+    let bytes = crate::util::read_file(path)?;
+    let doc = match ext.as_str() {
+        "trinedoc" | "trinesheet" | "trineslide" => decode(&bytes)?,
+        "docx" | "dotx" | "docm" | "txt" | "md" | "html" | "htm" => {
+            Document::Docs(crate::docs::io::read(&bytes, &ext)?)
+        }
+        "xlsx" | "xlsm" | "xltx" | "xls" | "xlsb" | "ods" | "csv" | "tsv" => {
+            Document::Sheets(crate::sheets::io::read(&bytes, &ext)?)
+        }
+        "pptx" | "ppsx" | "potx" => Document::Slides(crate::slides::io::read(&bytes, &ext)?),
+        _ => return Err(format!("Формат .{ext} пока не поддерживается")),
+    };
+    doc.validate()?;
+    Ok(doc)
+}
+pub fn export(doc: &Document, ext: &str) -> Result<Vec<u8>, String> {
+    doc.validate()?;
+    if ext == doc.extension() {
+        return encode(doc);
+    }
+    match (doc, ext) {
+        (_, "pdf") => {
+            doc.validate()?;
+            if let Document::Sheets(b) = doc
+                && b.print_page_count() > 10000
+            {
+                return Err("PDF превышает 10 000 страниц".into());
+            }
+            crate::pdf::write(&doc.pages())
+        }
+        (Document::Slides(deck), "png") => {
+            let slide = deck.slides.first().ok_or("Презентация пуста")?;
+            crate::png::write(&deck.page(slide), 2.0)
+        }
+        (Document::Docs(d), _) => crate::docs::io::write(d, ext),
+        (Document::Sheets(b), _) => crate::sheets::io::write(b, ext),
+        (Document::Slides(d), _) => crate::slides::io::write(d, ext),
+    }
+}
+pub fn extension(path: &Path) -> String {
+    path.extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn three_native_roundtrips() -> Result<(), String> {
+        for kind in ["docs", "sheets", "slides"] {
+            let d = Document::create(kind)?;
+            assert_eq!(decode(&encode(&d)?)?, d);
+        }
+        Ok(())
+    }
+    #[test]
+    fn future_version_rejected() -> Result<(), String> {
+        let b = crate::package::write_zip(vec![(
+            "document.json".into(),
+            br#"{"version":999,"document":{"kind":"docs","data":{}}}"#.to_vec(),
+        )])?;
+        assert!(decode(&b).is_err());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod asset_tests {
+    use super::*;
+    #[test]
+    fn native_images_are_binary_assets() -> Result<(), String> {
+        let image = image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255]));
+        let mut png = std::io::Cursor::new(Vec::new());
+        image
+            .write_to(&mut png, image::ImageFormat::Png)
+            .map_err(|e| e.to_string())?;
+        let bytes = png.into_inner();
+        let mut d = crate::docs::model::Doc::default();
+        let id = d.alloc_id();
+        d.images.push(crate::docs::model::AnchoredImage {
+            id,
+            after_paragraph_id: d.paragraphs[0].id,
+            bytes,
+            width: 10.0,
+            height: 10.0,
+            alt: "test".into(),
+        });
+        let doc = Document::Docs(d);
+        let zip = encode(&doc)?;
+        let p = crate::package::read_zip(&zip)?;
+        assert!(p.contains_key(&format!("assets/{id}.bin")));
+        assert_eq!(decode(&zip)?, doc);
+        Ok(())
+    }
+}
