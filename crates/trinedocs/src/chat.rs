@@ -85,13 +85,112 @@ struct Turn {
     draft: String,
     started: std::time::Instant,
 }
-/// Claude models offered in the chat; an empty id keeps the CLI default.
-const CLAUDE_MODELS: [(&str, &str); 4] = [
+/// Claude Code model aliases (`claude --model`, latest model of each family); an empty id
+/// keeps the CLI default.
+const CLAUDE_MODELS: [(&str, &str); 5] = [
     ("", "По умолчанию"),
-    ("sonnet", "Sonnet"),
+    ("fable", "Fable"),
     ("opus", "Opus"),
+    ("sonnet", "Sonnet"),
     ("haiku", "Haiku"),
 ];
+/// Effort levels of `claude --effort` and Codex `model_reasoning_effort`; empty = CLI default.
+const EFFORTS: [(&str, &str); 6] = [
+    ("", "По умолчанию"),
+    ("low", "Низкое"),
+    ("medium", "Среднее"),
+    ("high", "Высокое"),
+    ("xhigh", "Очень высокое"),
+    ("max", "Максимальное"),
+];
+/// A Codex model from the CLI's own model cache, with the effort levels it accepts.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CodexModel {
+    pub slug: String,
+    pub label: String,
+    pub efforts: Vec<String>,
+}
+/// Model ids go to the CLI as one argument; refuse anything that could read as a flag.
+pub fn clean_model(value: &str) -> String {
+    let value = value.trim();
+    let ok = value.len() <= 80
+        && !value.starts_with('-')
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-._:/[]".contains(c));
+    if ok { value.into() } else { String::new() }
+}
+pub fn clean_effort(value: &str) -> String {
+    let value = value.trim();
+    let known = EFFORTS.iter().any(|(id, _)| *id == value) || matches!(value, "minimal" | "ultra");
+    if known { value.into() } else { String::new() }
+}
+fn effort_label(id: &str) -> String {
+    EFFORTS
+        .iter()
+        .find(|(known, _)| *known == id)
+        .map_or_else(|| id.to_string(), |(_, label)| (*label).to_string())
+}
+/// Listed models of `~/.codex/models_cache.json` (hidden ones are skipped).
+pub fn parse_codex_models(bytes: &[u8]) -> Vec<CodexModel> {
+    let Ok(value) = serde_json::from_slice::<Value>(bytes) else {
+        return Vec::new();
+    };
+    let list = value
+        .get("models")
+        .and_then(Value::as_array)
+        .or_else(|| value.as_array());
+    let mut models = Vec::new();
+    for model in list.into_iter().flatten().take(100) {
+        let slug = clean_model(model.get("slug").and_then(Value::as_str).unwrap_or(""));
+        let visible = model
+            .get("visibility")
+            .and_then(Value::as_str)
+            .is_none_or(|v| v == "list");
+        if slug.is_empty() || !visible {
+            continue;
+        }
+        let label = model
+            .get("display_name")
+            .and_then(Value::as_str)
+            .filter(|l| !l.trim().is_empty() && l.len() <= 80)
+            .unwrap_or(&slug)
+            .to_string();
+        let efforts = model
+            .get("supported_reasoning_levels")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| {
+                e.get("effort")
+                    .and_then(Value::as_str)
+                    .or_else(|| e.as_str())
+            })
+            .map(clean_effort)
+            .filter(|e| !e.is_empty())
+            .collect();
+        models.push(CodexModel {
+            slug,
+            label,
+            efforts,
+        });
+    }
+    models
+}
+fn codex_models() -> Vec<CodexModel> {
+    let home = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .or_else(|| std::env::var_os("HOME"))
+                .map(|home| PathBuf::from(home).join(".codex"))
+        });
+    home.and_then(|dir| {
+        crate::util::read_limited(&dir.join("models_cache.json"), 4 * 1024 * 1024).ok()
+    })
+    .map(|bytes| parse_codex_models(&bytes))
+    .unwrap_or_default()
+}
 const SUGGESTIONS: [&str; 4] = [
     "Кратко перескажи документ",
     "Исправь орфографию и пунктуацию",
@@ -106,11 +205,16 @@ pub struct Chat {
     session: [Option<String>; 2],
     access: [Access; 2],
     paths: [Option<PathBuf>; 2],
-    probe: Option<Receiver<(Provider, Option<PathBuf>, Access)>>,
+    probe: Option<Receiver<(Provider, Option<PathBuf>, Access, Vec<CodexModel>)>>,
     client: String,
     needs_login: bool,
     /// Model per provider; empty means the CLI default.
     model: [String; 2],
+    /// Effort (reasoning depth) per provider; empty means the CLI default.
+    effort: [String; 2],
+    codex_models: Vec<CodexModel>,
+    /// Model or effort changed since the last `show` — the app saves them to settings.
+    prefs_changed: bool,
     /// Send the document selection with the next message.
     attach_selection: bool,
     /// Last message sent, for «Повторить».
@@ -140,9 +244,23 @@ impl Chat {
             client: format!("TrineDocs Chat {nonce}"),
             needs_login: false,
             model: [String::new(), String::new()],
+            effort: [String::new(), String::new()],
+            codex_models: Vec::new(),
+            prefs_changed: false,
             attach_selection: true,
             last_sent: None,
         }
+    }
+    /// A chat with the model and effort saved in settings (`[claude, codex]`).
+    pub fn with_prefs(models: &[String; 2], efforts: &[String; 2]) -> Self {
+        let mut chat = Self::new();
+        chat.model = [clean_model(&models[0]), clean_model(&models[1])];
+        chat.effort = [clean_effort(&efforts[0]), clean_effort(&efforts[1])];
+        chat
+    }
+    /// Model and effort per provider (`[claude, codex]`) for saving in settings.
+    pub fn prefs(&self) -> ([String; 2], [String; 2]) {
+        (self.model.clone(), self.effort.clone())
     }
     /// True for MCP requests coming from this chat's own CLI process.
     pub fn owns(&self, client: &str) -> bool {
@@ -168,7 +286,12 @@ impl Chat {
                     None => Access::Missing,
                     Some(path) => login_state(provider, path),
                 };
-                if tx.send((provider, path, access)).is_err() {
+                let models = if provider == Provider::Codex {
+                    codex_models()
+                } else {
+                    Vec::new()
+                };
+                if tx.send((provider, path, access, models)).is_err() {
                     return;
                 }
                 ctx.request_repaint();
@@ -180,9 +303,12 @@ impl Chat {
         if let Some(rx) = &self.probe {
             loop {
                 match rx.try_recv() {
-                    Ok((provider, path, access)) => {
+                    Ok((provider, path, access, models)) => {
                         self.paths[provider.index()] = path;
                         self.access[provider.index()] = access;
+                        if provider == Provider::Codex {
+                            self.codex_models = models;
+                        }
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -294,13 +420,15 @@ impl Chat {
             },
             &text,
         );
-        let model = self.model[provider.index()].trim().to_string();
+        let model = clean_model(&self.model[provider.index()]);
+        let effort = clean_effort(&self.effort[provider.index()]);
         match start(
             provider,
             &exe,
             &self.client,
             session.as_deref(),
             &model,
+            &effort,
             prompt,
             ctx,
         ) {
@@ -346,8 +474,104 @@ impl Chat {
             });
         }
     }
-    /// The chat panel body.
-    pub fn show(&mut self, ui: &mut Ui, document: Option<Context>, mcp_enabled: bool) {
+    /// The chat panel body. Returns true when the model or effort changed and should be saved.
+    pub fn show(&mut self, ui: &mut Ui, document: Option<Context>, mcp_enabled: bool) -> bool {
+        self.show_panel(ui, document, mcp_enabled);
+        std::mem::take(&mut self.prefs_changed)
+    }
+    /// Model and effort pickers of the current provider.
+    fn model_row(&mut self, ui: &mut Ui) {
+        let index = self.provider.index();
+        let muted = crate::chrome::muted(ui);
+        let enabled = self.turn.is_none();
+        let current = self.model[index].clone();
+        let mut model = current.clone();
+        let model_text = match self.provider {
+            Provider::Claude => CLAUDE_MODELS
+                .iter()
+                .find(|(id, _)| *id == current)
+                .map(|(_, label)| (*label).to_string()),
+            Provider::Codex => self
+                .codex_models
+                .iter()
+                .find(|m| m.slug == current)
+                .map(|m| m.label.clone())
+                .or_else(|| current.is_empty().then(|| "По умолчанию".to_string())),
+        }
+        .unwrap_or_else(|| current.clone());
+        let efforts: Vec<String> = match self.provider {
+            Provider::Codex => self
+                .codex_models
+                .iter()
+                .find(|m| m.slug == current && !m.efforts.is_empty())
+                .map(|m| m.efforts.clone()),
+            Provider::Claude => None,
+        }
+        .unwrap_or_else(|| {
+            EFFORTS
+                .iter()
+                .skip(1)
+                .map(|(id, _)| (*id).to_string())
+                .collect()
+        });
+        let mut effort = self.effort[index].clone();
+        ui.add_enabled_ui(enabled, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.label(RichText::new("Модель").small().color(muted));
+                egui::ComboBox::from_id_salt(("chat-model", index))
+                    .selected_text(RichText::new(model_text).small())
+                    .width(118.0)
+                    .show_ui(ui, |ui| match self.provider {
+                        Provider::Claude => {
+                            for (id, label) in CLAUDE_MODELS {
+                                ui.selectable_value(&mut model, id.to_string(), label);
+                            }
+                        }
+                        Provider::Codex => {
+                            ui.selectable_value(&mut model, String::new(), "По умолчанию");
+                            for m in &self.codex_models {
+                                ui.selectable_value(&mut model, m.slug.clone(), &m.label)
+                                    .on_hover_text(&m.slug);
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text("Модель для следующих сообщений");
+                ui.label(RichText::new("Усилие").small().color(muted));
+                egui::ComboBox::from_id_salt(("chat-effort", index))
+                    .selected_text(RichText::new(effort_label(&effort)).small())
+                    .width(104.0)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut effort, String::new(), "По умолчанию");
+                        for id in &efforts {
+                            ui.selectable_value(&mut effort, id.clone(), effort_label(id));
+                        }
+                    })
+                    .response
+                    .on_hover_text(
+                        "Глубина рассуждений: выше — точнее, но дольше и расходует больше лимита подписки",
+                    );
+            });
+        });
+        if model != current {
+            // A Codex model may not accept the old effort level.
+            if self.provider == Provider::Codex
+                && let Some(m) = self.codex_models.iter().find(|m| m.slug == model)
+                && !m.efforts.is_empty()
+                && !m.efforts.contains(&effort)
+            {
+                effort.clear();
+            }
+            self.model[index] = model;
+            self.prefs_changed = true;
+        }
+        if effort != self.effort[index] {
+            self.effort[index] = effort;
+            self.prefs_changed = true;
+        }
+    }
+    fn show_panel(&mut self, ui: &mut Ui, document: Option<Context>, mcp_enabled: bool) {
         if self.probe.is_none() && self.access.contains(&Access::Checking) {
             self.refresh(ui.ctx());
         }
@@ -402,22 +626,23 @@ impl Chat {
                         ui.close();
                     }
                     ui.separator();
-                    ui.label(RichText::new("Модель").small().color(muted));
+                    ui.label(
+                        RichText::new("Своя модель (полный ID)")
+                            .small()
+                            .color(muted),
+                    );
                     let index = self.provider.index();
-                    match self.provider {
-                        Provider::Claude => {
-                            for (id, label) in CLAUDE_MODELS {
-                                if ui.radio(self.model[index] == id, label).clicked() {
-                                    self.model[index] = id.into();
-                                }
-                            }
-                        }
-                        Provider::Codex => {
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.model[index])
-                                    .hint_text("по умолчанию")
-                                    .desired_width(160.0),
-                            );
+                    let mut custom = self.model[index].clone();
+                    let edit = ui.add(
+                        egui::TextEdit::singleline(&mut custom)
+                            .hint_text("например, claude-opus-5-5")
+                            .desired_width(180.0),
+                    );
+                    if edit.changed() {
+                        let cleaned = clean_model(&custom);
+                        if cleaned == custom.trim() && cleaned != self.model[index] {
+                            self.model[index] = cleaned;
+                            self.prefs_changed = true;
                         }
                     }
                     ui.separator();
@@ -439,6 +664,7 @@ impl Chat {
                 });
             });
         });
+        self.model_row(ui);
         ui.add_space(4.0);
         let access = self.access[self.provider.index()];
         let mut send = false;
@@ -998,6 +1224,7 @@ fn start(
     client: &str,
     session: Option<&str>,
     model: &str,
+    effort: &str,
     prompt: String,
     ctx: &egui::Context,
 ) -> Result<Turn, String> {
@@ -1037,6 +1264,9 @@ fn start(
             if !model.is_empty() {
                 command.args(["--model", model]);
             }
+            if !effort.is_empty() {
+                command.args(["--effort", effort]);
+            }
             command
                 .arg("--mcp-config")
                 .arg(&config)
@@ -1065,6 +1295,11 @@ fn start(
             ));
             if !model.is_empty() {
                 command.args(["-m", model]);
+            }
+            if !effort.is_empty() {
+                command
+                    .arg("-c")
+                    .arg(format!("model_reasoning_effort={}", toml_string(effort)));
             }
             command.arg("-");
         }
@@ -1373,6 +1608,42 @@ mod tests {
             parse_codex(&json!({"id":"0","msg":{"type":"agent_message","message":"Old"}})),
             vec![Event::Text("Old".into())]
         );
+    }
+    #[test]
+    fn model_and_effort_are_validated() {
+        assert_eq!(clean_model(" opus "), "opus");
+        assert_eq!(clean_model("claude-opus-5-5[1m]"), "claude-opus-5-5[1m]");
+        assert_eq!(clean_model("--dangerously-skip-permissions"), "");
+        assert_eq!(clean_model("opus; rm"), "");
+        assert_eq!(clean_effort("xhigh"), "xhigh");
+        assert_eq!(clean_effort("turbo"), "");
+        let chat = Chat::with_prefs(
+            &["-x".into(), "gpt-5.6-terra".into()],
+            &["max".into(), "bogus".into()],
+        );
+        assert_eq!(
+            chat.prefs(),
+            (
+                [String::new(), "gpt-5.6-terra".into()],
+                ["max".into(), String::new()]
+            )
+        );
+    }
+    #[test]
+    fn codex_model_cache_lists_visible_models() {
+        let json = br#"{"models":[
+            {"slug":"gpt-a","display_name":"GPT-A","visibility":"list","supported_reasoning_levels":[{"effort":"low"},{"effort":"high"}]},
+            {"slug":"gpt-hidden","visibility":"hide"},
+            {"slug":"-bad","visibility":"list"}]}"#;
+        assert_eq!(
+            parse_codex_models(json),
+            vec![CodexModel {
+                slug: "gpt-a".into(),
+                label: "GPT-A".into(),
+                efforts: vec!["low".into(), "high".into()],
+            }]
+        );
+        assert!(parse_codex_models(b"not json").is_empty());
     }
     #[test]
     fn chat_owns_only_its_nonce() {

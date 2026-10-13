@@ -178,6 +178,7 @@ impl App {
         } else {
             Settings::load()
         };
+        let chat = crate::chat::Chat::with_prefs(&settings.chat_models, &settings.chat_efforts);
         let ctx = &cc.egui_ctx;
         if std::env::args().any(|a| a == "--background") {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
@@ -226,7 +227,7 @@ impl App {
             show_settings: false,
             show_ai: std::env::args().any(|a| a == "--ui-smoke-compact"),
             ai_tab: 0,
-            chat: crate::chat::Chat::new(),
+            chat,
             palette: false,
             query: String::new(),
             palette_query: String::new(),
@@ -1993,7 +1994,13 @@ impl eframe::App for App {
                     crate::chrome::tabs(ui, &mut self.ai_tab, &["Чат", &changes]);
                     ui.add_space(6.0);
                     if self.ai_tab == 0 {
-                        self.chat.show(ui, document, self.settings.mcp);
+                        if self.chat.show(ui, document, self.settings.mcp) {
+                            (self.settings.chat_models, self.settings.chat_efforts) =
+                                self.chat.prefs();
+                            if let Err(e) = self.settings.save() {
+                                self.error = e;
+                            }
+                        }
                         return;
                     }
                     if let Some(t) = self.tabs.iter_mut().find(|t| Some(t.id) == self.active) {

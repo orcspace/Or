@@ -12,6 +12,9 @@ pub struct Settings {
     pub backup: bool,
     pub recent: Vec<PathBuf>,
     pub pinned: Vec<PathBuf>,
+    /// AI chat model and effort per CLI (`[claude, codex]`); empty = the CLI default.
+    pub chat_models: [String; 2],
+    pub chat_efforts: [String; 2],
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -25,6 +28,8 @@ impl Default for Settings {
             backup: true,
             recent: Vec::new(),
             pinned: Vec::new(),
+            chat_models: Default::default(),
+            chat_efforts: Default::default(),
         }
     }
 }
@@ -50,6 +55,8 @@ impl Settings {
         }
         self.recent.truncate(50);
         self.pinned.truncate(50);
+        self.chat_models = self.chat_models.map(|m| crate::chat::clean_model(&m));
+        self.chat_efforts = self.chat_efforts.map(|e| crate::chat::clean_effort(&e));
         self
     }
     pub fn save(&self) -> Result<(), String> {
