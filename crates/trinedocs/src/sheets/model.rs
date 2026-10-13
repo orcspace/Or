@@ -21,13 +21,8 @@ impl Value {
     pub fn display(&self) -> String {
         match self {
             Self::Empty => String::new(),
-            Self::Number(n) => {
-                if n.is_finite() {
-                    format!("{n}")
-                } else {
-                    "#NUM!".into()
-                }
-            }
+            // As text a number keeps 15 significant digits, so 0.1+0.2 joins as "0.3".
+            Self::Number(n) => super::format::general_number(*n, 15),
             Self::Text(s) | Self::Error(s) => s.clone(),
             Self::Bool(b) => if *b { "TRUE" } else { "FALSE" }.into(),
         }

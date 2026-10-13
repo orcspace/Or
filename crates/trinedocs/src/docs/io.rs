@@ -300,16 +300,26 @@ fn apply_rpr(format: &mut TextFormat, node: &Node) {
         format.highlight = Some(n);
     }
     if let Some(n) = node.child("highlight").and_then(Node::value) {
-        format.highlight = Some(match n {
-            "yellow" => [255, 255, 0],
-            "green" => [0, 255, 0],
-            "cyan" => [0, 255, 255],
-            "magenta" => [255, 0, 255],
-            "blue" => [0, 0, 255],
-            "red" => [255, 0, 0],
-            "darkYellow" => [128, 128, 0],
-            _ => [230, 230, 230],
-        });
+        format.highlight = match n {
+            "none" => None,
+            "yellow" => Some([255, 255, 0]),
+            "green" => Some([0, 255, 0]),
+            "cyan" => Some([0, 255, 255]),
+            "magenta" => Some([255, 0, 255]),
+            "blue" => Some([0, 0, 255]),
+            "red" => Some([255, 0, 0]),
+            "black" => Some([0, 0, 0]),
+            "white" => Some([255, 255, 255]),
+            "darkBlue" => Some([0, 0, 128]),
+            "darkCyan" => Some([0, 128, 128]),
+            "darkGreen" => Some([0, 128, 0]),
+            "darkMagenta" => Some([128, 0, 128]),
+            "darkRed" => Some([128, 0, 0]),
+            "darkYellow" => Some([128, 128, 0]),
+            "darkGray" => Some([128, 128, 128]),
+            "lightGray" => Some([192, 192, 192]),
+            _ => Some([230, 230, 230]),
+        };
     }
 }
 fn apply_ppr(p: &mut Paragraph, node: &Node, num_formats: &BTreeMap<String, List>) {
@@ -350,9 +360,14 @@ fn apply_ppr(p: &mut Paragraph, node: &Node, num_formats: &BTreeMap<String, List
             }
         }
     }
+    // Attributes missing from `w:ind` keep the value inherited from the style.
     if let Some(n) = node.child("ind") {
-        p.indent = number(n.attr("left").or_else(|| n.attr("start")), 0.0) / 20.0;
-        p.first_indent = (number(n.attr("firstLine"), 0.0) - number(n.attr("hanging"), 0.0)) / 20.0;
+        p.indent = number(n.attr("left").or_else(|| n.attr("start")), p.indent * 20.0) / 20.0;
+        if n.attr("hanging").is_some() {
+            p.first_indent = -number(n.attr("hanging"), 0.0) / 20.0;
+        } else if n.attr("firstLine").is_some() {
+            p.first_indent = number(n.attr("firstLine"), 0.0) / 20.0;
+        }
     }
     if let Some(v) = bool_prop(node, "pageBreakBefore") {
         p.page_break_before = v;
@@ -537,7 +552,8 @@ fn collect_runs<'a>(
     out: &mut Vec<(&'a Node, Option<String>)>,
 ) {
     for child in &node.children {
-        if child.name == "del" {
+        // Deleted and moved-away revisions are not part of the visible text.
+        if child.name == "del" || child.name == "moveFrom" {
             continue;
         }
         if child.name == "r" {
@@ -959,21 +975,31 @@ fn read_section(
         doc.page.margin_bottom = number(n.attr("bottom"), 1134.0) / 20.0;
     }
     for (tag, header) in [("headerReference", true), ("footerReference", false)] {
-        if let Some(target) = node
-            .child(tag)
+        // The default header is shown on most pages; first/even ones are not modelled yet.
+        let references = node.children.iter().filter(|n| n.name == tag);
+        let reference = references
+            .clone()
+            .find(|n| n.attr("type").is_none_or(|t| t == "default"))
+            .or_else(|| references.clone().next());
+        if let Some(target) = reference
             .and_then(|n| n.attr("id"))
             .and_then(|id| rels.get(id))
             .and_then(|s| resolve_part(s))
             && let Some(bytes) = parts.get(&target)
         {
             let n = xml(bytes)?;
-            let mut text_nodes = Vec::new();
-            n.descendants("t", &mut text_nodes);
             let mut depth = 0usize;
             let mut text = String::new();
             fn visible_header(n: &Node, depth: &mut usize, out: &mut String) {
-                if n.name == "fldSimple" {
+                if matches!(
+                    n.name.as_str(),
+                    "fldSimple" | "del" | "moveFrom" | "pPr" | "rPr"
+                ) {
                     return;
+                }
+                // Paragraphs and tabs keep words apart on the single header line.
+                if (n.name == "p" || n.name == "tab") && !out.is_empty() && !out.ends_with(' ') {
+                    out.push_str(if n.name == "tab" { "    " } else { "  " });
                 }
                 if n.name == "fldChar" {
                     match n.attr("fldCharType") {
@@ -990,6 +1016,7 @@ fn read_section(
                 }
             }
             visible_header(&n, &mut depth, &mut text);
+            let text = text.trim().to_string();
             if header {
                 doc.page.header = text;
             } else {
@@ -1899,6 +1926,47 @@ mod tests {
         check(&doc)?;
         assert!(!doc.losses.iter().any(|l| l.contains("управления")));
         check(&read(&write(&doc, "docx")?, "docx")?)
+    }
+    #[test]
+    fn docx_partial_indent_highlight_revisions_and_default_header() -> Result<(), String> {
+        let styles = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Body"><w:name w:val="Body"/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr><w:rPr><w:highlight w:val="yellow"/></w:rPr></w:style></w:styles>"#;
+        let xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:pPr><w:pStyle w:val="Body"/><w:ind w:firstLine="200"/></w:pPr><w:r><w:rPr><w:highlight w:val="none"/></w:rPr><w:t>a</w:t></w:r><w:moveFrom><w:r><w:t>old</w:t></w:r></w:moveFrom></w:p><w:p><w:pPr><w:pStyle w:val="Body"/><w:ind w:left="1440"/></w:pPr><w:r><w:t>b</w:t></w:r></w:p><w:sectPr><w:headerReference w:type="first" r:id="h1"/><w:headerReference w:type="default" r:id="h2"/></w:sectPr></w:body></w:document>"#;
+        let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="h1" Target="header1.xml"/><Relationship Id="h2" Target="header2.xml"/></Relationships>"#;
+        let header = |text: &str| {
+            format!(
+                r#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{text}</w:hdr>"#
+            )
+        };
+        let bytes = crate::package::write_zip(vec![
+            ("word/document.xml".into(), xml.as_bytes().to_vec()),
+            ("word/styles.xml".into(), styles.as_bytes().to_vec()),
+            ("word/_rels/document.xml.rels".into(), rels.as_bytes().to_vec()),
+            (
+                "word/header1.xml".into(),
+                header(r#"<w:p><w:r><w:t>Title page</w:t></w:r></w:p>"#).into_bytes(),
+            ),
+            (
+                "word/header2.xml".into(),
+                header(r#"<w:p><w:pPr><w:tabs><w:tab w:val="center" w:pos="4677"/></w:tabs></w:pPr><w:r><w:t>Acme</w:t></w:r><w:r><w:tab/><w:t>Report</w:t></w:r></w:p><w:p><w:r><w:t>Draft</w:t></w:r></w:p>"#).into_bytes(),
+            ),
+        ])?;
+        let doc = read(&bytes, "docx")?;
+        let first = doc.paragraphs.first().ok_or("p")?;
+        // Only firstLine is overridden: the style's left indent stays.
+        assert_eq!((first.indent, first.first_indent), (36.0, 10.0));
+        assert_eq!(first.text(), "a");
+        assert!(first.runs.iter().all(|r| r.format.highlight.is_none()));
+        let second = doc.paragraphs.get(1).ok_or("p")?;
+        // Only left is overridden: the style's hanging indent stays.
+        assert_eq!((second.indent, second.first_indent), (72.0, -18.0));
+        assert!(
+            second
+                .runs
+                .iter()
+                .all(|r| r.format.highlight == Some([255, 255, 0]))
+        );
+        assert_eq!(doc.page.header, "Acme    Report  Draft");
+        Ok(())
     }
     #[test]
     fn docx_line_rules_round_trip() -> Result<(), String> {

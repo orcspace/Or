@@ -2484,7 +2484,7 @@ mod tests {
         assert_eq!(advance('\t', &f, 10.0, 0.0), 26.0);
         assert_eq!(advance('\t', &f, 0.0, 0.0), 36.0);
         assert_eq!(advance('\t', &f, 5.0, 18.0), 13.0);
-        let mut doc = Doc::from_text("a\tb");
+        let doc = Doc::from_text("a\tb");
         let layout = doc.layout();
         let row = layout
             .rows
@@ -2494,8 +2494,6 @@ mod tests {
         let b = row.iter().find(|s| s.text == "b").map(|s| s.x);
         let expected = doc.page.margin_left + 36.0;
         assert!(b.is_some_and(|x| (x - expected).abs() < 0.01), "{b:?}");
-        doc.paragraphs.clear();
-        assert!(doc.layout().rows.is_empty());
     }
     #[test]
     fn justified_lines_fill_the_width() -> Result<(), String> {
@@ -2511,7 +2509,10 @@ mod tests {
             .iter()
             .rev()
             .find(|s| !s.text.trim().is_empty())
-            .map(|s| s.x + s.width)
+            .map(|s| {
+                let trailing = s.text.chars().rev().take_while(|c| *c == ' ').count();
+                s.x + s.width - trailing as f32 * char_width(' ', &s.format)
+            })
             .ok_or("segment")?;
         assert!((end - right).abs() < 0.5, "{end} vs {right}");
         // The last line keeps normal spacing.

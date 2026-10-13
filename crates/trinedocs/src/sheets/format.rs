@@ -29,7 +29,7 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
         return "#NUM!".into();
     }
     if code.eq_ignore_ascii_case("General") || code == "@" || code.is_empty() {
-        return localize(&format!("{number}"), ru);
+        return localize(&general_number(*number, 10), ru);
     }
     let sections = split_sections(code);
     let negative = *number < 0.0;
@@ -114,12 +114,19 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
         })
         .unwrap_or(0)
         .min(15);
-    let rendered = if pattern.to_uppercase().contains('E') {
-        format!("{n:.decimals$E}")
+    let rendered = if let Some(exponent) = pattern.to_uppercase().find('E') {
+        let digits = pattern
+            .get(exponent..)
+            .unwrap_or("")
+            .chars()
+            .filter(|c| *c == '0')
+            .count()
+            .max(1);
+        localize(&scientific(n, decimals, digits), ru)
     } else if pattern.split('.').next().is_some_and(|s| s.contains(',')) {
-        group(&format!("{n:.decimals$}"), ru)
+        group(&fixed(n, decimals), ru)
     } else {
-        localize(&format!("{n:.decimals$}"), ru)
+        localize(&fixed(n, decimals), ru)
     };
     format!(
         "{}{}{}",
@@ -127,6 +134,62 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
         rendered,
         unquote(tail.trim_start_matches(','))
     )
+}
+/// Rounds half away from zero like Excel (Rust's formatter rounds ties to even, and binary
+/// fractions such as 1.005 sit just below the tie).
+fn round_half_away(n: f64, decimals: usize) -> f64 {
+    let scale = 10f64.powi(decimals.min(15) as i32);
+    let scaled = n * scale;
+    let tie = (scaled.fract().abs() - 0.5).abs() <= 8.0 * f64::EPSILON * scaled.abs().max(1.0);
+    let rounded = if tie {
+        scaled.trunc() + scaled.signum()
+    } else {
+        scaled.round()
+    };
+    rounded / scale
+}
+fn fixed(n: f64, decimals: usize) -> String {
+    format!("{:.decimals$}", round_half_away(n, decimals))
+}
+/// `1.23E+03`: Excel always signs the exponent and pads it to the pattern's digit count.
+fn scientific(n: f64, decimals: usize, exponent_digits: usize) -> String {
+    let text = format!("{n:.decimals$E}");
+    let (mantissa, exponent) = text.split_once('E').unwrap_or((&text, "0"));
+    let exponent: i32 = exponent.parse().unwrap_or(0);
+    let sign = if exponent < 0 { '-' } else { '+' };
+    format!(
+        "{mantissa}E{sign}{:0exponent_digits$}",
+        exponent.unsigned_abs()
+    )
+}
+/// Excel's General rendering with at most `digits` significant digits: 10 for a cell (what
+/// fits a standard column), 15 when a number becomes text in a formula.
+pub fn general_number(n: f64, digits: usize) -> String {
+    if !n.is_finite() {
+        return "#NUM!".into();
+    }
+    if n == 0.0 {
+        return "0".into();
+    }
+    let exponent = n.abs().log10().floor() as i32;
+    if exponent >= (digits as i32).max(11) || exponent < -9 {
+        let mantissa = if digits <= 10 { 5 } else { digits - 1 };
+        let text = scientific(n, mantissa, 2);
+        let (m, e) = text.split_once('E').unwrap_or((&text, ""));
+        let m = if m.contains('.') {
+            m.trim_end_matches('0').trim_end_matches('.')
+        } else {
+            m
+        };
+        return format!("{m}E{e}");
+    }
+    let decimals = (digits as i32 - 1 - exponent).clamp(0, 15) as usize;
+    let text = fixed(n, decimals);
+    if text.contains('.') {
+        text.trim_end_matches('0').trim_end_matches('.').to_string()
+    } else {
+        text
+    }
 }
 fn localize(input: &str, ru: bool) -> String {
     if ru {
@@ -217,7 +280,15 @@ fn strip_brackets(code: &str) -> String {
             bracket.clear();
         } else if c == ']' {
             inside = false;
-            if matches!(
+            // `[$€-407]` is a currency symbol with a locale; `[$-F800]` has no symbol.
+            if let Some(currency) = bracket.strip_prefix('$') {
+                let symbol = currency.split('-').next().unwrap_or("");
+                if !symbol.is_empty() {
+                    out.push('"');
+                    out.push_str(symbol);
+                    out.push('"');
+                }
+            } else if matches!(
                 bracket.to_ascii_lowercase().as_str(),
                 "h" | "hh" | "m" | "mm" | "s" | "ss"
             ) {
@@ -389,6 +460,16 @@ mod tests {
             (12.34, "0.00", true, "12,34"),
             (0.0, "0;0;", false, ""),
             (1.5, "# ?/?", false, "1 1/2"),
+            (2.5, "0", false, "3"),
+            (1.005, "0.00", false, "1.01"),
+            (1234.5, "0.00E+00", false, "1.23E+03"),
+            (0.00012, "0.0E+00", true, "1,2E-04"),
+            (1234.5, "#,##0.00 [$€-407]", false, "1,234.50 €"),
+            (0.1 + 0.2, "General", false, "0.3"),
+            (std::f64::consts::PI, "General", true, "3,141592654"),
+            (123456789012.0, "General", false, "1.23457E+11"),
+            (12345678901.0, "General", false, "12345678901"),
+            (1e-10, "General", false, "1E-10"),
         ];
         for (n, fmt, ru, want) in cases {
             assert_eq!(display(&Value::Number(n), fmt, ru), want, "{fmt}");
