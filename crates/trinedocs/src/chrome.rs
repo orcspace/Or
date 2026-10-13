@@ -495,6 +495,11 @@ pub fn icon_button(ui: &mut Ui, icon: Icon, label: &str, enabled: bool) -> egui:
             .min_size(egui::vec2(28.0, 28.0)),
     );
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+    let response = if enabled {
+        response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        response
+    };
     let center = response.rect.center();
     let point = |x: f32, y: f32| center + egui::vec2(x, y);
     let color = if enabled {

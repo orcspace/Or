@@ -2401,7 +2401,7 @@ fn new_card(
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
-    response
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 /// Coloured letter badge of a recent file, by extension.
 fn file_badge(path: &std::path::Path) -> (&'static str, egui::Color32) {
