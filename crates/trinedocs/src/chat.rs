@@ -197,6 +197,8 @@ const SUGGESTIONS: [&str; 4] = [
     "Сделай стиль более деловым",
     "Предложи заголовки для разделов",
 ];
+/// Result of probing one CLI: its path, login state and (Codex) model list.
+type Probe = (Provider, Option<PathBuf>, Access, Vec<CodexModel>);
 pub struct Chat {
     pub provider: Provider,
     pub messages: Vec<Message>,
@@ -205,7 +207,7 @@ pub struct Chat {
     session: [Option<String>; 2],
     access: [Access; 2],
     paths: [Option<PathBuf>; 2],
-    probe: Option<Receiver<(Provider, Option<PathBuf>, Access, Vec<CodexModel>)>>,
+    probe: Option<Receiver<Probe>>,
     client: String,
     needs_login: bool,
     /// Model per provider; empty means the CLI default.
@@ -427,8 +429,7 @@ impl Chat {
             &exe,
             &self.client,
             session.as_deref(),
-            &model,
-            &effort,
+            (&model, &effort),
             prompt,
             ctx,
         ) {
@@ -1223,8 +1224,7 @@ fn start(
     exe: &Path,
     client: &str,
     session: Option<&str>,
-    model: &str,
-    effort: &str,
+    (model, effort): (&str, &str),
     prompt: String,
     ctx: &egui::Context,
 ) -> Result<Turn, String> {
