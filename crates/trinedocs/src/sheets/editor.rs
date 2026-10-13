@@ -6,6 +6,8 @@ use eframe::egui::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+type ImageJob =
+    std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<Result<Option<Vec<u8>>, String>>>>;
 #[derive(Clone, Default)]
 struct State {
     editing: bool,
@@ -20,6 +22,8 @@ struct State {
     location: String,
     scroll_to_selection: bool,
     rename_sheet_id: Option<u64>,
+    selected_image: Option<u64>,
+    image_job: Option<ImageJob>,
     #[cfg(test)]
     formula_rect: Option<Rect>,
     #[cfg(test)]
@@ -437,6 +441,15 @@ fn toolbar(
                         }
                     }
                 });
+            });
+            crate::chrome::group(ui, "Иллюстрации", 96.0, |ui| {
+                if ui
+                    .add_enabled(state.image_job.is_none(), egui::Button::new("🖼 Рисунок…"))
+                    .on_hover_text("Вставить рисунок из файла поверх ячеек · или Ctrl+V")
+                    .clicked()
+                {
+                    start_image_job(ui.ctx(), state);
+                }
             });
             crate::chrome::group(ui, "Лист", 244.0, |ui| {
                 ui.horizontal(|ui| {
@@ -971,6 +984,48 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
             }
         });
     }
+    let loaded = state.image_job.as_ref().and_then(|job| match job.lock() {
+        Ok(receiver) => match receiver.try_recv() {
+            Ok(result) => Some(result),
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Some(Err("Загрузка изображения прервана".into()))
+            }
+        },
+        Err(_) => Some(Err("Ошибка загрузки изображения".into())),
+    });
+    if state.image_job.is_some() {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(50));
+    }
+    let pasted = if ui.is_enabled() {
+        crate::clipboard::take_image(ui.ctx()).map(|png| png.to_vec())
+    } else {
+        None
+    };
+    let picture = match loaded {
+        Some(result) => {
+            state.image_job = None;
+            match result {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    state.error = error;
+                    None
+                }
+            }
+        }
+        None => pasted,
+    };
+    if let Some(bytes) = picture {
+        let (sheet, row, col) = (book.active_id(), book.selection.row, book.selection.col);
+        match book.add_image(sheet, row, col, bytes) {
+            Ok(image) => {
+                state.selected_image = Some(image);
+                changed = true;
+            }
+            Err(error) => state.error = error,
+        }
+    }
     if let Some(sheet) = book.active_sheet()
         && !sheet.charts.is_empty()
     {
@@ -1229,6 +1284,82 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                     }
                 }
             }
+            if response.clicked() {
+                state.selected_image = None;
+            }
+            let mut image_edit = None;
+            for image in &sheet.images {
+                let image_rect = Rect::from_min_size(
+                    origin
+                        + Vec2::new(
+                            48.0 + axis_pos(image.col, 96.0, &sheet.widths, &sheet.hidden_cols)
+                                + image.x_offset,
+                            28.0 + axis_pos(
+                                image.row,
+                                26.0,
+                                &sheet.row_heights,
+                                &sheet.hidden_rows,
+                            ) + image.y_offset,
+                        ),
+                    Vec2::new(image.width, image.height),
+                );
+                if !ui.clip_rect().intersects(image_rect) {
+                    continue;
+                }
+                paint_image(ui, &painter, sheet.id, image, image_rect);
+                let image_response = ui.interact(
+                    image_rect,
+                    state_id.with(("image", image.id)),
+                    Sense::click_and_drag(),
+                );
+                if image_response.clicked() || image_response.drag_started() {
+                    state.selected_image = Some(image.id);
+                    response.request_focus();
+                }
+                if image_response.dragged() {
+                    image_edit =
+                        Some((image.id, image_rect.translate(image_response.drag_delta())));
+                }
+                if state.selected_image == Some(image.id) {
+                    let accent = crate::chrome::accent(ui);
+                    painter.rect_stroke(
+                        image_rect,
+                        0.0,
+                        Stroke::new(1.5, accent),
+                        StrokeKind::Outside,
+                    );
+                    let handle = Rect::from_center_size(image_rect.max, Vec2::splat(10.0));
+                    painter.rect_filled(handle, 2.0, accent);
+                    let handle_response = ui
+                        .interact(
+                            handle,
+                            state_id.with(("image-size", image.id)),
+                            Sense::drag(),
+                        )
+                        .on_hover_cursor(egui::CursorIcon::ResizeNwSe);
+                    if handle_response.dragged() {
+                        let size = (image_rect.size() + handle_response.drag_delta())
+                            .max(Vec2::splat(16.0));
+                        // Shift keeps the original proportions, as in Excel.
+                        let size = if ui.input(|i| i.modifiers.shift) {
+                            let ratio = image.height / image.width.max(1.0);
+                            Vec2::new(size.x, size.x * ratio)
+                        } else {
+                            size
+                        };
+                        image_edit = Some((image.id, Rect::from_min_size(image_rect.min, size)));
+                    }
+                }
+            }
+            if let Some((image, target)) = image_edit
+                && let Some(s) = book.active_sheet_mut()
+            {
+                place_image(s, image, target.min - origin, target.size());
+                changed = true;
+            }
+            let Some(sheet) = book.active_sheet() else {
+                return;
+            };
             let header_y = origin.y + viewport.min.y;
             let headers: Vec<_> = (c0..c1)
                 .filter(|c| !sheet.hidden_cols.contains(c))
@@ -1482,7 +1613,11 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                                 continue;
                             }
                             if key == Key::Delete || key == Key::Backspace {
-                                changed |= clear(book, &mut state);
+                                if let Some(image) = state.selected_image.take() {
+                                    changed |= result(&mut state, book.delete_image(id, image));
+                                } else {
+                                    changed |= clear(book, &mut state);
+                                }
                                 continue;
                             }
                             if key == Key::F2 {
@@ -1778,6 +1913,89 @@ fn clear(book: &mut Book, state: &mut State) -> bool {
     }
     book.recalculate();
     changed
+}
+/// Moves/resizes a picture; `local` is its top-left corner relative to the grid origin.
+fn place_image(sheet: &mut Sheet, image: u64, local: Vec2, size: Vec2) {
+    let x = (local.x - 48.0).max(0.0);
+    let y = (local.y - 28.0).max(0.0);
+    let col = axis_index(x, MAX_COLS, 96.0, &sheet.widths, &sheet.hidden_cols);
+    let row = axis_index(y, MAX_ROWS, 26.0, &sheet.row_heights, &sheet.hidden_rows);
+    let x_offset = (x - axis_pos(col, 96.0, &sheet.widths, &sheet.hidden_cols)).clamp(0.0, 4000.0);
+    let y_offset =
+        (y - axis_pos(row, 26.0, &sheet.row_heights, &sheet.hidden_rows)).clamp(0.0, 4000.0);
+    if let Some(picture) = sheet.images.iter_mut().find(|i| i.id == image) {
+        picture.row = row;
+        picture.col = col;
+        picture.x_offset = x_offset;
+        picture.y_offset = y_offset;
+        picture.width = size.x.clamp(1.0, 8000.0);
+        picture.height = size.y.clamp(1.0, 8000.0);
+    }
+}
+fn paint_image(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    sheet: u64,
+    image: &super::model::SheetImage,
+    rect: Rect,
+) {
+    let key = egui::Id::new(("sheet_image", sheet, image.id, image.bytes.len()));
+    let ctx = ui.ctx();
+    let texture = ctx.data_mut(|d| d.get_temp::<egui::TextureHandle>(key));
+    let texture = texture.or_else(|| {
+        let decoded = crate::util::decode_image(&image.bytes).ok()?.to_rgba8();
+        if decoded.width() > 8192 || decoded.height() > 8192 {
+            return None;
+        }
+        let size = [decoded.width() as usize, decoded.height() as usize];
+        let color = egui::ColorImage::from_rgba_unmultiplied(size, decoded.as_raw());
+        let handle = ctx.load_texture(
+            format!("sheet_image_{}", image.id),
+            color,
+            egui::TextureOptions::LINEAR,
+        );
+        ctx.data_mut(|d| d.insert_temp(key, handle.clone()));
+        Some(handle)
+    });
+    match texture {
+        Some(texture) => painter.image(
+            texture.id(),
+            rect,
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            Color32::WHITE,
+        ),
+        None => {
+            painter.rect_stroke(
+                rect,
+                0.0,
+                Stroke::new(1.0, Color32::RED),
+                StrokeKind::Inside,
+            );
+        }
+    }
+}
+fn start_image_job(ctx: &egui::Context, state: &mut State) {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let ctx = ctx.clone();
+    state.image_job = Some(std::sync::Arc::new(std::sync::Mutex::new(receiver)));
+    std::thread::spawn(move || {
+        let result = (|| {
+            let Some(path) = rfd::FileDialog::new()
+                .add_filter("Изображения", &["png", "jpg", "jpeg"])
+                .pick_file()
+            else {
+                return Ok(None);
+            };
+            let bytes = crate::util::read_file(&path)?;
+            if bytes.len() > 32 * 1024 * 1024 {
+                return Err("Изображение превышает 32 МБ".into());
+            }
+            crate::util::decode_image(&bytes)?;
+            Ok(Some(bytes))
+        })();
+        let _ = sender.send(result);
+        ctx.request_repaint();
+    });
 }
 fn axis_pos(index: u32, base: f32, sizes: &BTreeMap<u32, f32>, hidden: &BTreeSet<u32>) -> f32 {
     (index as f32 * base

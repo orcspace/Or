@@ -63,6 +63,9 @@ pub fn names() -> Vec<&'static str> {
         "sheets_update_chart",
         "sheets_delete_chart",
         "sheets_set_names",
+        "sheets_add_image",
+        "sheets_update_image",
+        "sheets_delete_image",
         "slides_list",
         "slides_read",
         "slides_add_slide",
@@ -161,6 +164,13 @@ fn hint(name: &str) -> Option<&'static str> {
             "Patch the chart element_id on sheet_id with object chart: title, kind, range, row, col, width, height."
         }
         "sheets_delete_chart" => "Delete the chart element_id on sheet_id.",
+        "sheets_add_image" => {
+            "Insert a PNG/JPEG picture over the grid of sheet_id at cell row/col: bytes (array of byte values), optional alt, width and height in px (default: fit 480×320)."
+        }
+        "sheets_update_image" => {
+            "Patch the picture element_id on sheet_id with object image: row, col, x_offset, y_offset, width, height, alt."
+        }
+        "sheets_delete_image" => "Delete the picture element_id on sheet_id.",
         "sheets_set_names" => {
             "Set named ranges: object names {\"Name\": \"Sheet1!A1:B5\"}; a null value deletes the name."
         }
@@ -200,8 +210,8 @@ pub fn definitions() -> Vec<rmcp::model::Tool> {
     names().into_iter().map(|name|{
         let mut props=serde_json::Map::new();
         for key in ["document_id","base_version","paragraph_id","start_paragraph_id","end_paragraph_id","offset","start_offset","end_offset","sheet_id","row","col","r0","c0","r1","c1","index","count","rows","columns","slide_id","element_id","table_id"]{props.insert(key.into(),json!({"type":"integer","minimum":0}));}
-        for key in ["kind","path","text","replacement","query","style","name","title","layout","notes","effect","mode","format_extension"]{props.insert(key.into(),json!({"type":"string","maxLength":1000000}));}
-        for key in ["format","range","source","target","element","theme","transition","animation","model","paragraph","page","cell","sheet","chart","names","slide"]{props.insert(key.into(),json!({"type":"object"}));}
+        for key in ["kind","path","text","replacement","query","style","name","title","layout","notes","effect","mode","format_extension","alt"]{props.insert(key.into(),json!({"type":"string","maxLength":1000000}));}
+        for key in ["format","range","source","target","element","theme","transition","animation","model","paragraph","page","cell","sheet","chart","names","slide","image"]{props.insert(key.into(),json!({"type":"object"}));}
         for key in ["width","height"]{props.insert(key.into(),json!({"type":"number","minimum":1}));}
         for key in ["contents","formats","front"]{props.insert(key.into(),json!({"type":"boolean"}));}
         props.insert("edit".into(),json!({"type":"string","enum":["insert_row","insert_column","delete_row","delete_column"]}));
@@ -648,6 +658,17 @@ pub fn dispatch(
                 "hidden": sh.hidden,
                 "tab_color": sh.tab_color,
                 "charts": sh.charts,
+                "images": sh.images.iter().map(|i| json!({
+                    "id": i.id,
+                    "row": i.row,
+                    "col": i.col,
+                    "x_offset": i.x_offset,
+                    "y_offset": i.y_offset,
+                    "width": i.width,
+                    "height": i.height,
+                    "alt": i.alt,
+                    "byte_len": i.bytes.len(),
+                })).collect::<Vec<_>>(),
                 "names": b.names,
                 "version": t.version,
             }));
@@ -1061,7 +1082,7 @@ pub fn dispatch(
             *sheet = patched(
                 &*sheet,
                 object(a, "sheet")?,
-                &["id", "name", "cells", "charts"],
+                &["id", "name", "cells", "charts", "images"],
             )?;
             changed_ids.push(sid);
         }
@@ -1082,6 +1103,52 @@ pub fn dispatch(
                 chart.range.validate()?;
             }
             changed_ids.push(cid);
+        }
+        (Document::Sheets(b), "sheets_add_image") => {
+            let sheet = id(a, "sheet_id")?;
+            let image = b.add_image(
+                sheet,
+                u32::try_from(n(a, "row", 0)?).map_err(|e| e.to_string())?,
+                u32::try_from(n(a, "col", 0)?).map_err(|e| e.to_string())?,
+                parse(a, "bytes")?,
+            )?;
+            if let Some(picture) = b
+                .sheet_by_id_mut(sheet)
+                .and_then(|s| s.images.iter_mut().find(|i| i.id == image))
+            {
+                let ratio = picture.height / picture.width.max(1.0);
+                let width = a.get("width").and_then(Value::as_f64).map(|w| w as f32);
+                let height = a.get("height").and_then(Value::as_f64).map(|h| h as f32);
+                match (width, height) {
+                    (Some(w), Some(h)) => (picture.width, picture.height) = (w, h),
+                    (Some(w), None) => (picture.width, picture.height) = (w, w * ratio),
+                    (None, Some(h)) => (picture.width, picture.height) = (h / ratio.max(1e-6), h),
+                    (None, None) => {}
+                }
+                picture.width = picture.width.clamp(1.0, 8000.0);
+                picture.height = picture.height.clamp(1.0, 8000.0);
+                if let Some(alt) = a.get("alt").and_then(Value::as_str) {
+                    picture.alt = alt.chars().take(32767).collect();
+                }
+            }
+            changed_ids.push(image);
+        }
+        (Document::Sheets(b), "sheets_update_image" | "sheets_delete_image") => {
+            let sheet = id(a, "sheet_id")?;
+            let image = id(a, "element_id")?;
+            if name == "sheets_delete_image" {
+                b.delete_image(sheet, image)?;
+            } else {
+                let picture = b
+                    .sheet_by_id_mut(sheet)
+                    .ok_or("Лист не найден")?
+                    .images
+                    .iter_mut()
+                    .find(|i| i.id == image)
+                    .ok_or("not_found: рисунок не найден")?;
+                *picture = patched(&*picture, object(a, "image")?, &["id", "bytes"])?;
+            }
+            changed_ids.push(image);
         }
         (Document::Sheets(b), "sheets_set_names") => {
             for (key, value) in object(a, "names")? {
@@ -2209,6 +2276,41 @@ mod selection_view_tests {
             json!({"document_id":1,"sheet_id":sheet,"row":0,"col":0}),
         )?;
         assert!(cleared["cell"].is_null());
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(10, 5)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .map_err(|e| e.to_string())?;
+        let picture = call(
+            &mut tabs,
+            "sheets_add_image",
+            json!({"document_id":1,"sheet_id":sheet,"row":2,"col":1,"bytes":png.into_inner(),"width":200.0,"alt":"Фото"}),
+        )?["changed_ids"][0]
+            .as_u64()
+            .ok_or("image")?;
+        call(
+            &mut tabs,
+            "sheets_update_image",
+            json!({"document_id":1,"sheet_id":sheet,"element_id":picture,"image":{"row":5,"x_offset":4.0}}),
+        )?;
+        let objects = call(
+            &mut tabs,
+            "sheets_read_objects",
+            json!({"document_id":1,"sheet_id":sheet}),
+        )?;
+        assert_eq!(objects["images"][0]["row"], 5);
+        assert_eq!(objects["images"][0]["height"], 100.0);
+        assert_eq!(objects["images"][0]["alt"], "Фото");
+        call(
+            &mut tabs,
+            "sheets_delete_image",
+            json!({"document_id":1,"sheet_id":sheet,"element_id":picture}),
+        )?;
+        let objects = call(
+            &mut tabs,
+            "sheets_read_objects",
+            json!({"document_id":1,"sheet_id":sheet}),
+        )?;
+        assert_eq!(objects["images"].as_array().map(Vec::len), Some(0));
         Ok(())
     }
     #[test]

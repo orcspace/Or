@@ -7,7 +7,8 @@ use quick_xml::{
     events::{BytesStart, Event},
 };
 use rust_xlsxwriter::{
-    Chart, ChartType, Color, Format, FormatAlign, FormatBorder, FormatUnderline, Formula, Workbook,
+    Chart, ChartType, Color, Format, FormatAlign, FormatBorder, FormatUnderline, Formula, Image,
+    Workbook,
 };
 use std::{collections::BTreeMap, io::Cursor};
 
@@ -1080,6 +1081,7 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
         if let Some(s) = book.sheet_by_id_mut(id) {
             s.hidden = hidden;
         }
+        read_sheet_images(book, id, &path, parts);
         let Some(bytes) = parts.get(&path) else {
             continue;
         };
@@ -1258,6 +1260,184 @@ fn read_charts(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(),
     }
     Ok(())
 }
+/// `xl/worksheets/sheet1.xml` → `xl/worksheets/_rels/sheet1.xml.rels`.
+fn rels_path(part: &str) -> String {
+    match part.rsplit_once('/') {
+        Some((dir, file)) => format!("{dir}/_rels/{file}.rels"),
+        None => format!("_rels/{part}.rels"),
+    }
+}
+/// Resolves a relationship target relative to the part that owns it.
+fn resolve_target(part: &str, target: &str) -> String {
+    if let Some(absolute) = target.strip_prefix('/') {
+        return absolute.into();
+    }
+    let mut segments: Vec<&str> = part.split('/').collect();
+    segments.pop();
+    for segment in target.split('/') {
+        match segment {
+            ".." => {
+                segments.pop();
+            }
+            "." | "" => {}
+            other => segments.push(other),
+        }
+    }
+    segments.join("/")
+}
+fn relationships(
+    part: &str,
+    parts: &BTreeMap<String, Vec<u8>>,
+) -> BTreeMap<String, (String, String)> {
+    let mut rels = BTreeMap::new();
+    if let Some(bytes) = parts.get(&rels_path(part)) {
+        let _ = each_tag(bytes, |tag, a| {
+            if tag == "Relationship"
+                && let (Some(id), Some(target)) = (a.get("Id"), a.get("Target"))
+            {
+                rels.insert(
+                    id.clone(),
+                    (
+                        a.get("Type").cloned().unwrap_or_default(),
+                        resolve_target(part, target),
+                    ),
+                );
+            }
+            Ok(())
+        });
+    }
+    rels
+}
+/// Pictures from the sheet's drawing part. Best effort: a broken drawing never blocks opening.
+fn read_sheet_images(
+    book: &mut Book,
+    id: u64,
+    sheet_path: &str,
+    parts: &BTreeMap<String, Vec<u8>>,
+) {
+    for (kind, drawing) in relationships(sheet_path, parts).into_values() {
+        if !kind.ends_with("/drawing") {
+            continue;
+        }
+        let media = relationships(&drawing, parts);
+        let Some(Ok(text)) = parts.get(&drawing).map(|b| std::str::from_utf8(b)) else {
+            continue;
+        };
+        for anchor in drawing_pictures(text).unwrap_or_default() {
+            let Some(bytes) = media
+                .get(&anchor.embed)
+                .and_then(|(_, target)| parts.get(target))
+            else {
+                continue;
+            };
+            if let Ok(image_id) = book.add_image(id, anchor.row, anchor.col, bytes.clone())
+                && let Some(image) = book
+                    .sheet_by_id_mut(id)
+                    .and_then(|s| s.images.iter_mut().find(|i| i.id == image_id))
+            {
+                image.x_offset = (anchor.col_off as f32 / 9525.0).clamp(0.0, 4000.0);
+                image.y_offset = (anchor.row_off as f32 / 9525.0).clamp(0.0, 4000.0);
+                if anchor.cx > 0 && anchor.cy > 0 {
+                    image.width = (anchor.cx as f32 / 9525.0).clamp(1.0, 8000.0);
+                    image.height = (anchor.cy as f32 / 9525.0).clamp(1.0, 8000.0);
+                }
+                image.alt = anchor.alt;
+            }
+        }
+    }
+}
+#[derive(Default)]
+struct PictureAnchor {
+    row: u32,
+    col: u32,
+    row_off: u64,
+    col_off: u64,
+    cx: u64,
+    cy: u64,
+    embed: String,
+    alt: String,
+}
+fn drawing_pictures(text: &str) -> Result<Vec<PictureAnchor>, String> {
+    let mut reader = Reader::from_str(text);
+    let mut pictures = Vec::new();
+    let mut current: Option<PictureAnchor> = None;
+    let mut in_from = false;
+    loop {
+        match reader.read_event().map_err(|e| e.to_string())? {
+            Event::Start(e) => {
+                let tag = local(&e);
+                match tag.as_str() {
+                    "oneCellAnchor" | "twoCellAnchor" | "absoluteAnchor" => {
+                        current = Some(PictureAnchor::default());
+                    }
+                    "from" => in_from = true,
+                    "row" | "col" | "rowOff" | "colOff" if in_from => {
+                        let value = reader
+                            .read_text(e.name())
+                            .map_err(|e| e.to_string())?
+                            .trim()
+                            .parse::<u64>()
+                            .unwrap_or(0);
+                        if let Some(anchor) = current.as_mut() {
+                            match tag.as_str() {
+                                "row" => anchor.row = u32::try_from(value).unwrap_or(0),
+                                "col" => anchor.col = u32::try_from(value).unwrap_or(0),
+                                "rowOff" => anchor.row_off = value,
+                                _ => anchor.col_off = value,
+                            }
+                        }
+                    }
+                    _ => picture_attrs(&e, &reader, &tag, current.as_mut())?,
+                }
+            }
+            Event::Empty(e) => picture_attrs(&e, &reader, &local(&e), current.as_mut())?,
+            Event::End(e) => match e.local_name().as_ref() {
+                b"from" => in_from = false,
+                b"oneCellAnchor" | b"twoCellAnchor" | b"absoluteAnchor" => {
+                    if let Some(anchor) = current.take()
+                        && !anchor.embed.is_empty()
+                    {
+                        pictures.push(anchor);
+                    }
+                }
+                _ => {}
+            },
+            Event::DocType(_) => return Err("DTD запрещён".into()),
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(pictures)
+}
+fn picture_attrs(
+    e: &BytesStart<'_>,
+    reader: &Reader<&[u8]>,
+    tag: &str,
+    anchor: Option<&mut PictureAnchor>,
+) -> Result<(), String> {
+    let Some(anchor) = anchor else {
+        return Ok(());
+    };
+    match tag {
+        "ext" if anchor.cx == 0 => {
+            let a = attrs(e, reader)?;
+            anchor.cx = a.get("cx").and_then(|v| v.parse().ok()).unwrap_or(0);
+            anchor.cy = a.get("cy").and_then(|v| v.parse().ok()).unwrap_or(0);
+        }
+        "blip" => {
+            if let Some(embed) = attrs(e, reader)?.get("r:embed") {
+                anchor.embed = embed.clone();
+            }
+        }
+        "cNvPr" => {
+            if let Some(descr) = attrs(e, reader)?.get("descr") {
+                anchor.alt = descr.clone();
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
 fn xlsx_format(fmt: &CellFormat) -> Format {
     let mut f = Format::new()
         .set_font_name(&fmt.font)
@@ -1431,6 +1611,24 @@ fn write_xlsx(book: &Book) -> Result<Vec<u8>, String> {
             ws.insert_chart(model.row, model.col as u16, &chart)
                 .map_err(|e| e.to_string())?;
         }
+        for model in &sheet.images {
+            let mut image = Image::new_from_buffer(&model.bytes).map_err(|e| e.to_string())?;
+            let (w, h) = (image.width().max(1.0), image.height().max(1.0));
+            image = image
+                .set_scale_width(f64::from(model.width) / w)
+                .set_scale_height(f64::from(model.height) / h);
+            if !model.alt.is_empty() {
+                image = image.set_alt_text(&model.alt);
+            }
+            ws.insert_image_with_offset(
+                model.row,
+                model.col as u16,
+                &image,
+                model.x_offset.max(0.0) as u32,
+                model.y_offset.max(0.0) as u32,
+            )
+            .map_err(|e| e.to_string())?;
+        }
     }
     workbook.save_to_buffer().map_err(|e| e.to_string())
 }
@@ -1495,6 +1693,34 @@ mod tests {
         );
         assert_eq!(a.cells, b.cells, "второе поколение xlsx отличается");
         assert_eq!(a.charts.len(), b.charts.len());
+        Ok(())
+    }
+    #[test]
+    fn xlsx_pictures_round_trip_with_position_and_size() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(40, 20)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .map_err(|e| e.to_string())?;
+        let image = book.add_image(id, 3, 2, png.into_inner())?;
+        if let Some(i) = book
+            .sheet_by_id_mut(id)
+            .and_then(|s| s.images.iter_mut().find(|i| i.id == image))
+        {
+            i.width = 160.0;
+            i.height = 80.0;
+            i.x_offset = 10.0;
+            i.alt = "Логотип".into();
+        }
+        let restored = read(&write(&book, "xlsx")?, "xlsx")?;
+        let sheet = restored.active_sheet().ok_or("Нет листа")?;
+        assert_eq!(sheet.images.len(), 1);
+        let i = sheet.images.first().ok_or("Нет рисунка")?;
+        assert_eq!((i.row, i.col), (3, 2));
+        assert_eq!((i.width.round(), i.height.round()), (160.0, 80.0));
+        assert_eq!(i.x_offset.round(), 10.0);
+        assert_eq!(i.alt, "Логотип");
         Ok(())
     }
     #[test]

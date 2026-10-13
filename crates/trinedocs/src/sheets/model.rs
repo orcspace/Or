@@ -177,6 +177,22 @@ pub struct Chart {
     pub width: f32,
     pub height: f32,
 }
+/// A picture floating over the grid, anchored to a cell with a pixel offset (like Excel).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct SheetImage {
+    pub id: u64,
+    pub row: u32,
+    pub col: u32,
+    #[serde(default)]
+    pub x_offset: f32,
+    #[serde(default)]
+    pub y_offset: f32,
+    pub width: f32,
+    pub height: f32,
+    pub bytes: Vec<u8>,
+    #[serde(default)]
+    pub alt: String,
+}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ConditionalRule {
     pub range: Range,
@@ -198,6 +214,7 @@ pub struct Sheet {
     pub frozen_rows: u32,
     pub frozen_cols: u32,
     pub charts: Vec<Chart>,
+    pub images: Vec<SheetImage>,
     pub conditional: Vec<ConditionalRule>,
     pub hidden: bool,
     pub tab_color: Option<[u8; 3]>,
@@ -217,6 +234,7 @@ impl Default for Sheet {
             frozen_rows: 0,
             frozen_cols: 0,
             charts: Vec::new(),
+            images: Vec::new(),
             conditional: Vec::new(),
             hidden: false,
             tab_color: None,
@@ -347,6 +365,27 @@ impl Book {
                     || chart.title.len() > 32767
                 {
                     return Err("Недопустимая диаграмма".into());
+                }
+            }
+            if s.images.len() > 1000 {
+                return Err("Слишком много рисунков на листе".into());
+            }
+            for image in &s.images {
+                take(image.id)?;
+                if image.row >= MAX_ROWS
+                    || image.col >= MAX_COLS
+                    || ![image.x_offset, image.y_offset, image.width, image.height]
+                        .iter()
+                        .all(|v| v.is_finite())
+                    || !(0.0..=4000.0).contains(&image.x_offset)
+                    || !(0.0..=4000.0).contains(&image.y_offset)
+                    || !(1.0..=8000.0).contains(&image.width)
+                    || !(1.0..=8000.0).contains(&image.height)
+                    || image.bytes.is_empty()
+                    || image.bytes.len() > 32 * 1024 * 1024
+                    || image.alt.len() > 32767
+                {
+                    return Err("Недопустимый рисунок".into());
                 }
             }
             for rule in &s.conditional {
@@ -961,6 +1000,52 @@ impl Book {
             height: 280.0,
         });
         Ok(id)
+    }
+    /// Adds a PNG/JPEG picture at a cell, scaled down to fit 480×320 px.
+    pub fn add_image(
+        &mut self,
+        sheet: u64,
+        row: u32,
+        col: u32,
+        bytes: Vec<u8>,
+    ) -> Result<u64, String> {
+        if row >= MAX_ROWS || col >= MAX_COLS {
+            return Err("Ячейка вне листа".into());
+        }
+        if bytes.len() > 32 * 1024 * 1024 {
+            return Err("Изображение превышает 32 МБ".into());
+        }
+        let image = crate::util::decode_image(&bytes)?;
+        let (w, h) = (image.width().max(1) as f32, image.height().max(1) as f32);
+        let factor = (480.0 / w).min(320.0 / h).min(1.0);
+        let s = self.sheet_by_id(sheet).ok_or("Лист не найден")?;
+        if s.images.len() >= 1000 {
+            return Err("Слишком много рисунков на листе".into());
+        }
+        let id = self.allocate_id();
+        let s = self.sheet_by_id_mut(sheet).ok_or("Лист не найден")?;
+        s.images.push(SheetImage {
+            id,
+            row,
+            col,
+            x_offset: 0.0,
+            y_offset: 0.0,
+            width: (w * factor).max(1.0),
+            height: (h * factor).max(1.0),
+            bytes,
+            alt: String::new(),
+        });
+        Ok(id)
+    }
+    pub fn delete_image(&mut self, sheet: u64, image: u64) -> Result<(), String> {
+        let s = self.sheet_by_id_mut(sheet).ok_or("Лист не найден")?;
+        let index = s
+            .images
+            .iter()
+            .position(|i| i.id == image)
+            .ok_or("Рисунок не найден")?;
+        s.images.remove(index);
+        Ok(())
     }
     pub fn print_page_count(&self) -> usize {
         let mut keys = BTreeSet::new();
