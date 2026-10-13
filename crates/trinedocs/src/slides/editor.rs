@@ -26,6 +26,10 @@ struct State {
     clipboard: std::sync::Arc<Vec<Element>>,
     drag_original: Vec<(u64, f32, f32, f32, f32)>,
     edit_text: Option<u64>,
+    /// Table cell (row, column) edited in place when `edit_text` is a table.
+    edit_cell: Option<(usize, usize)>,
+    /// Focus the in-place editor on the next frame.
+    edit_focus: bool,
     grid: bool,
     zoom: f32,
     error: String,
@@ -134,29 +138,21 @@ pub fn show(ui: &mut egui::Ui, deck: &mut Deck) -> bool {
         state.image_job = None;
         match result {
             Ok(Some(bytes)) => {
-                match super::model::image_dimensions(&bytes).and_then(|size| {
-                    deck.add_element(slide_id, ElementKind::Image { bytes })
-                        .map(|id| (id, size))
-                }) {
-                    Ok((id, (width, height))) => {
-                        if let Some(element) = deck
-                            .slide_mut(slide_id)
-                            .and_then(|slide| slide.element_mut(id))
-                        {
-                            let factor = (480.0 / width as f32).min(280.0 / height as f32);
-                            element.w = width as f32 * factor;
-                            element.h = height as f32 * factor;
-                        }
-                        if state.slide_id == slide_id {
-                            state.selected = vec![id];
-                        }
-                        changed = true;
-                    }
-                    Err(error) => state.error = error,
-                }
+                changed |= insert_image(deck, &mut state, slide_id, bytes);
             }
             Ok(None) => {}
             Err(error) => state.error = error,
+        }
+    }
+    if ui.is_enabled()
+        && let Some(png) = crate::clipboard::take_image(ui.ctx())
+    {
+        // Copied TrineDocs objects without text leave no text on the clipboard: paste them.
+        if !state.clipboard.is_empty() && state.clipboard.iter().all(|e| e.text.is_empty()) {
+            changed |= paste_selection(deck, &mut state);
+        } else {
+            let slide_id = state.slide_id;
+            changed |= insert_image(deck, &mut state, slide_id, png.to_vec());
         }
     }
     if state.image_job.is_some() {
@@ -361,33 +357,6 @@ pub fn show(ui: &mut egui::Ui, deck: &mut Deck) -> bool {
                     .desired_rows(3),
             )
             .changed();
-    }
-    if let Some(id) = state.edit_text {
-        let mut open = true;
-        let editor_enabled = ui.is_enabled();
-        egui::Window::new("Текст объекта")
-            .id(memory_id.with("text"))
-            .open(&mut open)
-            .default_width(500.0)
-            .show(ui.ctx(), |ui| {
-                ui.add_enabled_ui(ui.is_enabled() && editor_enabled, |ui| {
-                    if let Some(element) = deck
-                        .slide_mut(state.slide_id)
-                        .and_then(|s| s.element_mut(id))
-                    {
-                        changed |= ui
-                            .add(
-                                egui::TextEdit::multiline(&mut element.text)
-                                    .desired_width(480.0)
-                                    .desired_rows(8),
-                            )
-                            .changed();
-                    }
-                });
-            });
-        if !open {
-            state.edit_text = None;
-        }
     }
     if ui.is_enabled()
         && !ui.ctx().text_edit_focused()
@@ -687,11 +656,15 @@ fn ribbon(ui: &mut egui::Ui, deck: &mut Deck, state: &mut State) -> bool {
             crate::chrome::group(ui, "Буфер обмена", 150.0, |ui| {
                 ui.horizontal(|ui| {
                     if ui
-                        .add_enabled(!state.clipboard.is_empty(), egui::Button::new("Вставить"))
-                        .on_hover_text("Объекты TrineDocs · Ctrl+V")
+                        .button("Вставить")
+                        .on_hover_text("Вставить объекты, текст или рисунок · Ctrl+V")
                         .clicked()
                     {
-                        changed |= paste_selection(deck, state);
+                        if state.clipboard.is_empty() {
+                            crate::clipboard::paste(ui.ctx());
+                        } else {
+                            changed |= paste_selection(deck, state);
+                        }
                     }
                     ui.add_enabled_ui(has_selection, |ui| {
                         if crate::chrome::tool(ui, "⧉", "Копировать · Ctrl+C", false).clicked()
@@ -890,7 +863,9 @@ fn ribbon(ui: &mut egui::Ui, deck: &mut Deck, state: &mut State) -> bool {
                         });
                         if crate::chrome::tool(ui, "✎", "Редактировать текст", false).clicked()
                         {
-                            state.edit_text = state.selected.first().copied();
+                            if let Some(id) = state.selected.first().copied() {
+                                begin_edit(state, id, Some((0, 0)));
+                            }
                         }
                         if crate::chrome::tool(ui, "🗑", "Удалить объект · Delete", false).clicked()
                         {
@@ -1190,6 +1165,35 @@ fn theme_menu(ui: &mut egui::Ui, deck: &mut Deck) -> bool {
         }
     });
     changed
+}
+/// Adds a picture to a slide, fitted into 480×280 and centred, and selects it.
+fn insert_image(deck: &mut Deck, state: &mut State, slide_id: u64, bytes: Vec<u8>) -> bool {
+    let (width, height) = (deck.width, deck.height);
+    match super::model::image_dimensions(&bytes).and_then(|size| {
+        deck.add_element(slide_id, ElementKind::Image { bytes })
+            .map(|id| (id, size))
+    }) {
+        Ok((id, (w, h))) => {
+            if let Some(element) = deck
+                .slide_mut(slide_id)
+                .and_then(|slide| slide.element_mut(id))
+            {
+                let factor = (480.0 / w.max(1) as f32).min(280.0 / h.max(1) as f32);
+                element.w = w as f32 * factor;
+                element.h = h as f32 * factor;
+                element.x = ((width - element.w) / 2.0).max(0.0);
+                element.y = ((height - element.h) / 2.0).max(0.0);
+            }
+            if state.slide_id == slide_id {
+                state.selected = vec![id];
+            }
+            true
+        }
+        Err(error) => {
+            state.error = error;
+            false
+        }
+    }
 }
 fn start_image_job(ctx: &egui::Context, state: &mut State) {
     let (sender, receiver) = std::sync::mpsc::channel();
@@ -1590,6 +1594,150 @@ fn properties(ui: &mut egui::Ui, e: &mut Element) -> bool {
         .changed();
     changed
 }
+fn begin_edit(state: &mut State, id: u64, cell: Option<(usize, usize)>) {
+    state.edit_text = Some(id);
+    state.edit_cell = cell;
+    state.edit_focus = true;
+    if !state.selected.contains(&id) {
+        state.selected = vec![id];
+    }
+}
+/// Table cell under `pos` for a table element drawn in `object`.
+fn table_cell_at(element: &Element, object: Rect, pos: Pos2) -> Option<(usize, usize)> {
+    let ElementKind::Table { cells } = &element.kind else {
+        return None;
+    };
+    let columns = cells.iter().map(Vec::len).max().unwrap_or(1).max(1);
+    let rows = cells.len().max(1);
+    let x = ((pos.x - object.left()) / object.width() * columns as f32).floor();
+    let y = ((pos.y - object.top()) / object.height() * rows as f32).floor();
+    Some((
+        (y.max(0.0) as usize).min(rows - 1),
+        (x.max(0.0) as usize).min(columns - 1),
+    ))
+}
+/// Edits the text of a slide object, or one table cell, directly on the canvas.
+fn inline_editor(
+    ui: &mut egui::Ui,
+    origin: Pos2,
+    scale: f32,
+    e: &mut Element,
+    state: &mut State,
+) -> bool {
+    let object = Rect::from_min_size(
+        origin + Vec2::new(e.x, e.y) * scale,
+        Vec2::new(e.w, e.h) * scale,
+    );
+    let family = crate::fonts::egui_family(ui.ctx(), &e.font, e.bold, e.italic);
+    let color = rgb(e.color);
+    let font_size = e.font_size;
+    let editor_id = ui.id().with(("slide_inline", e.id));
+    let mut changed = false;
+    let response = if let ElementKind::Table { cells } = &mut e.kind {
+        if cells.is_empty() {
+            cells.push(vec![String::new()]);
+            changed = true;
+        }
+        let columns = cells.iter().map(Vec::len).max().unwrap_or(1).max(1);
+        let rows = cells.len();
+        let (r, c) = state.edit_cell.unwrap_or((0, 0));
+        let (r, c) = (r.min(rows - 1), c.min(columns - 1));
+        state.edit_cell = Some((r, c));
+        let cw = object.width() / columns as f32;
+        let ch = object.height() / rows as f32;
+        let cell = Rect::from_min_size(
+            object.min + Vec2::new(c as f32 * cw, r as f32 * ch),
+            Vec2::new(cw, ch),
+        );
+        ui.painter().rect_stroke(
+            cell,
+            0.0,
+            Stroke::new(2.0, crate::chrome::accent(ui)),
+            StrokeKind::Inside,
+        );
+        let Some(row) = cells.get_mut(r) else {
+            return changed;
+        };
+        if row.len() < columns {
+            row.resize(columns, String::new());
+            changed = true;
+        }
+        let Some(value) = row.get_mut(c) else {
+            return changed;
+        };
+        let size = font_size.min(ch / scale * 0.7) * scale;
+        let response = ui.put(
+            Rect::from_min_size(
+                cell.min + Vec2::splat(5.0 * scale),
+                Vec2::new((cw - 10.0 * scale).max(8.0), size * 1.3),
+            ),
+            egui::TextEdit::singleline(value)
+                .id(editor_id.with((r, c)))
+                .frame(egui::Frame::NONE)
+                .margin(egui::Margin::ZERO)
+                .font(FontId::new(size.max(4.0), family))
+                .text_color(color)
+                .desired_width(f32::INFINITY),
+        );
+        let (tab, shift, enter, up, down) = ui.input(|i| {
+            (
+                i.key_pressed(egui::Key::Tab),
+                i.modifiers.shift,
+                i.key_pressed(egui::Key::Enter),
+                i.key_pressed(egui::Key::ArrowUp),
+                i.key_pressed(egui::Key::ArrowDown),
+            )
+        });
+        let moving = response.has_focus() && (up || down);
+        if moving || (response.lost_focus() && (tab || enter)) {
+            let index = r * columns + c;
+            let target = if tab && shift {
+                index.checked_sub(1)
+            } else if tab {
+                if index + 1 == rows * columns && rows < 1000 {
+                    cells.push(vec![String::new(); columns]);
+                    changed = true;
+                }
+                Some(index + 1).filter(|i| *i < cells.len() * columns)
+            } else if up {
+                index.checked_sub(columns)
+            } else {
+                Some(index + columns).filter(|i| *i < rows * columns)
+            };
+            match target {
+                Some(target) => {
+                    state.edit_cell = Some((target / columns, target % columns));
+                    state.edit_focus = true;
+                }
+                None if enter => state.edit_text = None,
+                None => state.edit_focus = true,
+            }
+        } else if response.lost_focus() && !state.edit_focus {
+            state.edit_text = None;
+        }
+        response
+    } else {
+        let response = ui.put(
+            object.shrink(5.0 * scale),
+            egui::TextEdit::multiline(&mut e.text)
+                .id(editor_id)
+                .frame(egui::Frame::NONE)
+                .margin(egui::Margin::ZERO)
+                .font(FontId::new((font_size * scale).max(4.0), family))
+                .text_color(color)
+                .desired_width(f32::INFINITY),
+        );
+        if response.lost_focus() && !state.edit_focus {
+            state.edit_text = None;
+        }
+        response
+    };
+    if state.edit_focus {
+        response.request_focus();
+        state.edit_focus = false;
+    }
+    changed | response.changed()
+}
 fn canvas(
     ui: &mut egui::Ui,
     slide: &mut Slide,
@@ -1624,10 +1772,26 @@ fn canvas(
         }
     }
     for element in &slide.elements {
-        paint_element(ui.ctx(), &painter, rect.min, scale, element, 1.0);
+        if state.edit_text == Some(element.id) {
+            // The in-place editor draws this text itself.
+            let mut hidden = element.clone();
+            match (&mut hidden.kind, state.edit_cell) {
+                (ElementKind::Table { cells }, Some((r, c))) => {
+                    if let Some(value) = cells.get_mut(r).and_then(|row| row.get_mut(c)) {
+                        value.clear();
+                    }
+                }
+                (ElementKind::Table { .. }, None) => {}
+                _ => hidden.text.clear(),
+            }
+            paint_element(ui.ctx(), &painter, rect.min, scale, &hidden, 1.0);
+        } else {
+            paint_element(ui.ctx(), &painter, rect.min, scale, element, 1.0);
+        }
     }
     if response.clicked() {
         state.selected.clear();
+        state.edit_text = None;
         response.request_focus();
     }
     let interactions = slide.elements.clone();
@@ -1641,6 +1805,7 @@ fn canvas(
             ui.id().with(("slide_object", element.id)),
             Sense::click_and_drag(),
         );
+        let was_selected = state.selected.contains(&element.id);
         if hit.clicked() || hit.drag_started() {
             response.request_focus();
             if !state.selected.contains(&element.id) {
@@ -1661,8 +1826,25 @@ fn canvas(
                 state.selected.dedup();
             }
         }
-        if hit.double_clicked() {
-            state.edit_text = Some(element.id);
+        if hit.clicked() && state.edit_text.is_some_and(|id| id != element.id) {
+            state.edit_text = None;
+        }
+        // Like PowerPoint: a click on an already selected text object or table places the caret.
+        let reclick = hit.clicked()
+            && was_selected
+            && !ui.input(|i| i.modifiers.ctrl || i.modifiers.shift)
+            && matches!(
+                element.kind,
+                ElementKind::Text
+                    | ElementKind::Rect
+                    | ElementKind::Ellipse
+                    | ElementKind::Table { .. }
+            );
+        if hit.double_clicked() || reclick {
+            let cell = hit
+                .interact_pointer_pos()
+                .and_then(|pos| table_cell_at(element, object, pos));
+            begin_edit(state, element.id, cell);
         }
         if hit.drag_started() {
             state.drag_original = slide
@@ -1749,6 +1931,11 @@ fn canvas(
                 changed = true;
             }
         }
+    }
+    if let Some(id) = state.edit_text
+        && let Some(element) = slide.element_mut(id)
+    {
+        changed |= inline_editor(ui, rect.min, scale, element, state);
     }
     if response.has_focus() {
         ui.memory_mut(|memory| {

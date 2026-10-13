@@ -459,6 +459,97 @@ impl Deck {
         }
         Ok(())
     }
+    fn table_cells_mut(
+        &mut self,
+        slide_id: u64,
+        element_id: u64,
+    ) -> Result<&mut Vec<Vec<String>>, String> {
+        match self
+            .slide_mut(slide_id)
+            .ok_or("Слайд не найден")?
+            .element_mut(element_id)
+            .map(|e| &mut e.kind)
+        {
+            Some(ElementKind::Table { cells }) => Ok(cells),
+            Some(_) => Err("invalid_args: объект не является таблицей".into()),
+            None => Err("Объект не найден".into()),
+        }
+    }
+    /// Writes a block of values into a slide table starting at (row, col), growing it as needed.
+    pub fn write_table(
+        &mut self,
+        slide_id: u64,
+        element_id: u64,
+        row: usize,
+        col: usize,
+        values: &[Vec<String>],
+    ) -> Result<(), String> {
+        let cells = self.table_cells_mut(slide_id, element_id)?;
+        let width = values.iter().map(Vec::len).max().unwrap_or(0);
+        let rows = cells.len().max(row.saturating_add(values.len()));
+        let columns = cells
+            .iter()
+            .map(Vec::len)
+            .max()
+            .unwrap_or(0)
+            .max(col.saturating_add(width))
+            .max(1);
+        if rows > 1000 || columns > 1000 {
+            return Err("invalid_range: таблица слайда ограничена 1000×1000".into());
+        }
+        cells.resize_with(rows, Vec::new);
+        for line in cells.iter_mut() {
+            line.resize_with(columns, String::new);
+        }
+        for (r, line) in values.iter().enumerate() {
+            for (c, value) in line.iter().enumerate() {
+                if let Some(cell) = cells.get_mut(row + r).and_then(|l| l.get_mut(col + c)) {
+                    cell.clone_from(value);
+                }
+            }
+        }
+        Ok(())
+    }
+    /// Inserts or deletes a table row (`rows`) or column at `index`; the last row or column cannot be deleted.
+    pub fn edit_table(
+        &mut self,
+        slide_id: u64,
+        element_id: u64,
+        rows: bool,
+        insert: bool,
+        index: usize,
+    ) -> Result<(), String> {
+        let cells = self.table_cells_mut(slide_id, element_id)?;
+        let columns = cells.iter().map(Vec::len).max().unwrap_or(0).max(1);
+        for line in cells.iter_mut() {
+            line.resize_with(columns, String::new);
+        }
+        let count = if rows { cells.len() } else { columns };
+        if insert {
+            if index > count || count >= 1000 {
+                return Err("invalid_range: index".into());
+            }
+            if rows {
+                cells.insert(index, vec![String::new(); columns]);
+            } else {
+                for line in cells.iter_mut() {
+                    line.insert(index, String::new());
+                }
+            }
+        } else {
+            if index >= count || count <= 1 {
+                return Err("invalid_range: нельзя удалить эту строку или столбец".into());
+            }
+            if rows {
+                cells.remove(index);
+            } else {
+                for line in cells.iter_mut() {
+                    line.remove(index);
+                }
+            }
+        }
+        Ok(())
+    }
     pub fn apply_theme(&mut self, theme: Theme) {
         let old = self.theme.clone();
         for slide in &mut self.slides {

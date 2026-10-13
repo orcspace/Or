@@ -116,8 +116,7 @@ fn toolbar(
                         state,
                         &mut changed,
                     ) {
-                        ui.ctx()
-                            .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+                        crate::clipboard::paste(ui.ctx());
                     }
                     ui.menu_button("Ещё", |ui| {
                         if command_action(
@@ -149,7 +148,7 @@ fn toolbar(
                     });
                 });
             });
-            crate::chrome::group(ui, "Шрифт", 452.0, |ui| {
+            crate::chrome::group(ui, "Шрифт", 262.0, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
                     let mut family = selected.font.clone();
@@ -186,7 +185,9 @@ fn toolbar(
                                 result(state, apply_format(book, |format| format.size = size));
                         }
                     }
-                    ui.separator();
+                });
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
                     for (index, (label, flag, tip)) in [
                         (
                             egui::RichText::new("B").strong(),
@@ -269,7 +270,7 @@ fn toolbar(
                     }
                 });
             });
-            crate::chrome::group(ui, "Выравнивание", 236.0, |ui| {
+            crate::chrome::group(ui, "Выравнивание", 124.0, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
                     for (index, label, align) in [
@@ -289,7 +290,9 @@ fn toolbar(
                                 result(state, apply_format(book, |format| format.align = align));
                         }
                     }
-                    ui.separator();
+                });
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
                     if command_action(
                         crate::chrome::tool(ui, "↵", "Перенос текста", selected.wrap),
                         book,
@@ -332,10 +335,10 @@ fn toolbar(
                     .on_hover_text("Объединить ячейки");
                 });
             });
-            crate::chrome::group(ui, "Число", 214.0, |ui| {
+            crate::chrome::group(ui, "Число", 130.0, |ui| {
+                let mut number = selected.number.clone();
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
-                    let mut number = selected.number.clone();
                     egui::ComboBox::from_id_salt(state_id.with("number-format"))
                         .width(118.0)
                         .selected_text(
@@ -350,6 +353,9 @@ fn toolbar(
                                 ui.selectable_value(&mut number, code.to_string(), *label);
                             }
                         });
+                });
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
                     for (glyph, code, tip) in [
                         ("%", "0%", "Процентный формат"),
                         ("000", "#,##0", "Формат с разделителями"),

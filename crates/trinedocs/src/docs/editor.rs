@@ -143,6 +143,11 @@ pub fn show_with_edits(ui: &mut egui::Ui, doc: &mut Doc, edits: Option<&[TextEdi
         .unwrap_or_default();
     let before = doc.clone();
     poll_image(doc, &mut state);
+    if ui.is_enabled()
+        && let Some(png) = crate::clipboard::take_image(ui.ctx())
+    {
+        paste_image(doc, &mut state, &png);
+    }
     if let Some(edits) = edits {
         for edit in edits {
             state.cursor = edit.transform(state.cursor);
@@ -797,10 +802,16 @@ fn toolbar(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id:
 fn home_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id: egui::Id) {
     use crate::chrome::{group, tool};
     group(ui, "Буфер обмена", 96.0, |ui| {
-        if tool(ui, "📋  Вставить", "Вставить · Ctrl+V", false).clicked() {
+        if tool(
+            ui,
+            "📋  Вставить",
+            "Вставить текст или рисунок · Ctrl+V",
+            false,
+        )
+        .clicked()
+        {
             refocus(ui, state, canvas_id);
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+            crate::clipboard::paste(ui.ctx());
         }
         ui.horizontal(|ui| {
             let can_copy = state.selected() || state.table_cell.is_some();
@@ -1548,6 +1559,29 @@ fn start_image_load(ui: &egui::Ui, doc: &Doc, state: &mut EditorState) {
             state.message = None;
         }
         Err(error) => state.message = Some(format!("Не удалось запустить загрузку: {error}")),
+    }
+}
+/// Inserts a picture from the clipboard after the paragraph with the caret, like Word.
+fn paste_image(doc: &mut Doc, state: &mut EditorState, png: &[u8]) {
+    let Some(anchor) = doc.paragraphs.get(state.cursor.paragraph).map(|p| p.id) else {
+        return;
+    };
+    match crate::util::decode_image(png) {
+        Ok(image) => {
+            let width = (image.width() as f32).min(450.0);
+            let height = width * image.height() as f32 / image.width().max(1) as f32;
+            let id = doc.alloc_id();
+            doc.images.push(AnchoredImage {
+                id,
+                after_paragraph_id: anchor,
+                bytes: png.to_vec(),
+                width,
+                height,
+                alt: String::new(),
+            });
+            state.message = None;
+        }
+        Err(error) => state.message = Some(error),
     }
 }
 fn poll_image(doc: &mut Doc, state: &mut EditorState) {

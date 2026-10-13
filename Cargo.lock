@@ -3638,6 +3638,7 @@ dependencies = [
 name = "trinedocs"
 version = "0.1.0"
 dependencies = [
+ "arboard",
  "axum",
  "calamine",
  "chrono",

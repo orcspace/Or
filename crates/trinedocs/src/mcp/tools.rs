@@ -53,6 +53,16 @@ pub fn names() -> Vec<&'static str> {
         "sheets_sort",
         "sheets_fill",
         "sheets_add_chart",
+        "sheets_read_objects",
+        "sheets_find",
+        "sheets_replace_all",
+        "sheets_merge",
+        "sheets_unmerge",
+        "sheets_clear_range",
+        "sheets_update_sheet",
+        "sheets_update_chart",
+        "sheets_delete_chart",
+        "sheets_set_names",
         "slides_list",
         "slides_read",
         "slides_add_slide",
@@ -62,12 +72,23 @@ pub fn names() -> Vec<&'static str> {
         "slides_add_text",
         "slides_add_shape",
         "slides_add_image",
+        "slides_add_table",
+        "slides_add_chart",
         "slides_update_element",
         "slides_delete_element",
         "slides_set_notes",
         "slides_set_theme",
         "slides_set_transition",
         "slides_set_animation",
+        "slides_update_slide",
+        "slides_write_table",
+        "slides_edit_table",
+        "slides_duplicate_element",
+        "slides_set_z_order",
+        "slides_group",
+        "slides_ungroup",
+        "slides_set_size",
+        "slides_replace_all",
         "replace_document_model",
     ]
 }
@@ -86,6 +107,8 @@ pub fn read_only(name: &str) -> bool {
             | "sheets_list"
             | "sheets_read_range"
             | "sheets_get_cell_info"
+            | "sheets_read_objects"
+            | "sheets_find"
             | "slides_list"
             | "slides_read"
     )
@@ -115,6 +138,61 @@ fn hint(name: &str) -> Option<&'static str> {
             "Patch a Docs image (element_id) with `element`: {width, height, alt, after_paragraph_id}. Bytes are locked; delete and re-insert to replace the picture."
         }
         "docs_delete_object" => "Delete a Docs table or image by element_id.",
+        "sheets_read_objects" => {
+            "Read sheet structure by sheet_id: column widths, row heights, hidden rows/columns, merges, frozen panes, filter, conditional rules, tab colour, charts and named ranges."
+        }
+        "sheets_find" => {
+            "Find cells on sheet_id whose input or shown value contains query (case_sensitive optional). Returns row, col, input and display."
+        }
+        "sheets_replace_all" => {
+            "Replace query with replacement in cell inputs (formulas included) on sheet_id, or on every sheet when sheet_id is omitted. Formulas are recalculated."
+        }
+        "sheets_merge" => {
+            "Merge the cells of range (or r0,c0,r1,c1) on sheet_id. Only the top-left cell may hold data."
+        }
+        "sheets_unmerge" => "Unmerge every merged area intersecting range on sheet_id.",
+        "sheets_clear_range" => {
+            "Clear range on sheet_id. contents=true clears values and formulas, formats=true clears formatting; both default to true."
+        }
+        "sheets_update_sheet" => {
+            "Patch sheet_id with object sheet: widths {col: px}, row_heights {row: px}, hidden_rows, hidden_cols, merges, frozen_rows, frozen_cols, filter (range or null), conditional [{range,operator,threshold,fill}], hidden, tab_color [r,g,b] or null."
+        }
+        "sheets_update_chart" => {
+            "Patch the chart element_id on sheet_id with object chart: title, kind, range, row, col, width, height."
+        }
+        "sheets_delete_chart" => "Delete the chart element_id on sheet_id.",
+        "sheets_set_names" => {
+            "Set named ranges: object names {\"Name\": \"Sheet1!A1:B5\"}; a null value deletes the name."
+        }
+        "slides_add_table" => {
+            "Add a table to slide_id with rows and columns (default 3×3, up to 1000); fill it with slides_write_table."
+        }
+        "slides_add_chart" => {
+            "Add a column chart to slide_id: values (array of numbers) and optional labels (array of strings)."
+        }
+        "slides_update_slide" => {
+            "Patch slide_id with object slide: title, background [r,g,b], hidden, layout, section, notes, transition."
+        }
+        "slides_write_table" => {
+            "Write values (array of rows of strings) into the table element_id on slide_id starting at row, col; the table grows as needed."
+        }
+        "slides_edit_table" => {
+            "Edit the table element_id on slide_id: edit = insert_row | insert_column | delete_row | delete_column at index."
+        }
+        "slides_duplicate_element" => {
+            "Duplicate element_id on slide_id; returns the new ID in changed_ids."
+        }
+        "slides_set_z_order" => {
+            "Bring element_ids (or element_id) on slide_id to front (front=true, default) or send to back (front=false)."
+        }
+        "slides_group" => "Group element_ids (two or more) on slide_id.",
+        "slides_ungroup" => "Ungroup element_ids on slide_id.",
+        "slides_set_size" => {
+            "Set the slide size in points: width and height (for example 960×540 for 16:9)."
+        }
+        "slides_replace_all" => {
+            "Replace query with replacement in all slide text, table cells and speaker notes (case_sensitive optional)."
+        }
         _ => return None,
     })
 }
@@ -123,8 +201,11 @@ pub fn definitions() -> Vec<rmcp::model::Tool> {
         let mut props=serde_json::Map::new();
         for key in ["document_id","base_version","paragraph_id","start_paragraph_id","end_paragraph_id","offset","start_offset","end_offset","sheet_id","row","col","r0","c0","r1","c1","index","count","rows","columns","slide_id","element_id","table_id"]{props.insert(key.into(),json!({"type":"integer","minimum":0}));}
         for key in ["kind","path","text","replacement","query","style","name","title","layout","notes","effect","mode","format_extension"]{props.insert(key.into(),json!({"type":"string","maxLength":1000000}));}
-        for key in ["format","range","source","target","element","theme","transition","animation","model","paragraph","page","cell"]{props.insert(key.into(),json!({"type":"object"}));}
-        for key in ["values","keys","bytes"]{props.insert(key.into(),json!({"type":"array","maxItems":100000}));}
+        for key in ["format","range","source","target","element","theme","transition","animation","model","paragraph","page","cell","sheet","chart","names","slide"]{props.insert(key.into(),json!({"type":"object"}));}
+        for key in ["width","height"]{props.insert(key.into(),json!({"type":"number","minimum":1}));}
+        for key in ["contents","formats","front"]{props.insert(key.into(),json!({"type":"boolean"}));}
+        props.insert("edit".into(),json!({"type":"string","enum":["insert_row","insert_column","delete_row","delete_column"]}));
+        for key in ["values","keys","bytes","element_ids","labels"]{props.insert(key.into(),json!({"type":"array","maxItems":100000}));}
         props.insert("case_sensitive".into(),json!({"type":"boolean"}));
         let required=if name=="replace_document_model"{vec![json!("document_id"),json!("base_version"),json!("model")]}else if matches!(name,"app_status"|"list_documents"|"create_document"|"open_document"){Vec::<Value>::new()}else{vec![json!("document_id")]};
         let schema=json!({"type":"object","properties":props,"required":required,"additionalProperties":false}).as_object().cloned().unwrap_or_default();
@@ -195,6 +276,45 @@ fn patched<T: serde::Serialize + serde::de::DeserializeOwned>(
         map.extend(patch.clone());
     }
     serde_json::from_value(merged).map_err(|e| format!("invalid_args: {e}"))
+}
+/// Replaces every non-overlapping match of `query` in `text`; returns the number of replacements.
+fn replace_text(text: &mut String, query: &str, replacement: &str, case_sensitive: bool) -> usize {
+    let needle: Vec<char> = query.chars().collect();
+    if needle.is_empty() {
+        return 0;
+    }
+    let same =
+        |a: char, b: char| a == b || (!case_sensitive && a.to_lowercase().eq(b.to_lowercase()));
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut count = 0;
+    let mut i = 0;
+    while i < chars.len() {
+        if chars
+            .get(i..i + needle.len())
+            .is_some_and(|window| window.iter().zip(&needle).all(|(a, b)| same(*a, *b)))
+        {
+            out.push_str(replacement);
+            i += needle.len();
+            count += 1;
+        } else if let Some(c) = chars.get(i) {
+            out.push(*c);
+            i += 1;
+        }
+    }
+    if count > 0 {
+        *text = out;
+    }
+    count
+}
+fn flag(a: &Value, key: &str, default: bool) -> bool {
+    a.get(key).and_then(Value::as_bool).unwrap_or(default)
+}
+fn element_ids(a: &Value) -> Result<Vec<u64>, String> {
+    match a.get("element_ids") {
+        Some(_) => parse(a, "element_ids"),
+        None => Ok(vec![id(a, "element_id")?]),
+    }
 }
 fn docs_paragraph_span(d: &crate::docs::model::Doc, a: &Value) -> Result<(usize, usize), String> {
     let first = id(a, "start_paragraph_id")?;
@@ -509,6 +629,43 @@ pub fn dispatch(
             return Ok(
                 json!({"values":b.read_range(id(a,"sheet_id")?,r.r0,r.c0,r.r1,r.c1)?,"version":t.version}),
             );
+        }
+        if name == "sheets_read_objects" {
+            let sh = b.sheet_by_id(id(a, "sheet_id")?).ok_or("Лист не найден")?;
+            return Ok(json!({
+                "sheet_id": sh.id,
+                "name": sh.name,
+                "extent": sh.extent(),
+                "widths": sh.widths,
+                "row_heights": sh.row_heights,
+                "hidden_rows": sh.hidden_rows,
+                "hidden_cols": sh.hidden_cols,
+                "merges": sh.merges,
+                "frozen_rows": sh.frozen_rows,
+                "frozen_cols": sh.frozen_cols,
+                "filter": sh.filter,
+                "conditional": sh.conditional,
+                "hidden": sh.hidden,
+                "tab_color": sh.tab_color,
+                "charts": sh.charts,
+                "names": b.names,
+                "version": t.version,
+            }));
+        }
+        if name == "sheets_find" {
+            let found = b.find(
+                id(a, "sheet_id")?,
+                s(a, "query")?,
+                flag(a, "case_sensitive", false),
+                n(a, "count", 200)?.clamp(1, 1000),
+            )?;
+            return Ok(json!({
+                "matches": found.into_iter().map(|(row, col, input, display)| json!({
+                    "row": row, "col": col, "address": crate::sheets::model::address(row, col),
+                    "input": input, "display": display,
+                })).collect::<Vec<_>>(),
+                "version": t.version,
+            }));
         }
         if name == "sheets_get_cell_info" {
             let sh = b.sheet_by_id(id(a, "sheet_id")?).ok_or("Лист не найден")?;
@@ -852,6 +1009,188 @@ pub fn dispatch(
             };
             changed_ids.push(b.add_chart(id(a, "sheet_id")?, kind, range(a)?, s(a, "title")?)?);
         }
+        (Document::Sheets(b), "sheets_replace_all") => {
+            let query = s(a, "query")?;
+            let replacement = s(a, "replacement")?;
+            let case_sensitive = flag(a, "case_sensitive", false);
+            let only = a.get("sheet_id").and_then(Value::as_u64);
+            let mut edits = Vec::new();
+            for sheet in b
+                .sheets
+                .iter()
+                .filter(|sh| only.is_none_or(|id| id == sh.id))
+            {
+                for (key, cell) in &sheet.cells {
+                    let mut input = cell.input.clone();
+                    if replace_text(&mut input, query, replacement, case_sensitive) > 0
+                        && let Some((r, c)) = crate::sheets::model::parse_address(key)
+                    {
+                        edits.push((sheet.id, r, c, input));
+                    }
+                }
+            }
+            if only.is_some_and(|id| b.sheet_by_id(id).is_none()) {
+                return Err("Лист не найден".into());
+            }
+            if edits.len() > 100_000 {
+                return Err("too_large: слишком много замен".into());
+            }
+            for (sheet, r, c, input) in edits {
+                changed_ids.push(b.set_input(sheet, r, c, &input)?);
+            }
+        }
+        (Document::Sheets(b), "sheets_merge") => {
+            b.merge(id(a, "sheet_id")?, range(a)?)?;
+        }
+        (Document::Sheets(b), "sheets_unmerge") => {
+            if b.unmerge(id(a, "sheet_id")?, range(a)?)? == 0 {
+                return Err("not_found: в диапазоне нет объединённых ячеек".into());
+            }
+        }
+        (Document::Sheets(b), "sheets_clear_range") => {
+            b.clear_range(
+                id(a, "sheet_id")?,
+                range(a)?,
+                flag(a, "contents", true),
+                flag(a, "formats", true),
+            )?;
+        }
+        (Document::Sheets(b), "sheets_update_sheet") => {
+            let sid = id(a, "sheet_id")?;
+            let sheet = b.sheet_by_id_mut(sid).ok_or("Лист не найден")?;
+            *sheet = patched(
+                &*sheet,
+                object(a, "sheet")?,
+                &["id", "name", "cells", "charts"],
+            )?;
+            changed_ids.push(sid);
+        }
+        (Document::Sheets(b), "sheets_update_chart" | "sheets_delete_chart") => {
+            let cid = id(a, "element_id")?;
+            let sheet = b
+                .sheet_by_id_mut(id(a, "sheet_id")?)
+                .ok_or("Лист не найден")?;
+            let index = sheet
+                .charts
+                .iter()
+                .position(|chart| chart.id == cid)
+                .ok_or("not_found: диаграмма не найдена")?;
+            if name == "sheets_delete_chart" {
+                sheet.charts.remove(index);
+            } else if let Some(chart) = sheet.charts.get_mut(index) {
+                *chart = patched(&*chart, object(a, "chart")?, &["id"])?;
+                chart.range.validate()?;
+            }
+            changed_ids.push(cid);
+        }
+        (Document::Sheets(b), "sheets_set_names") => {
+            for (key, value) in object(a, "names")? {
+                match value {
+                    Value::Null => {
+                        b.names.remove(key);
+                    }
+                    Value::String(target) => {
+                        if key.is_empty() || key.len() > 255 || target.len() > 8192 {
+                            return Err("invalid_args: недопустимое имя диапазона".into());
+                        }
+                        b.names.insert(key.clone(), target.clone());
+                    }
+                    _ => return Err("invalid_args: значение имени — строка или null".into()),
+                }
+            }
+            b.recalculate();
+        }
+        (Document::Slides(d), "slides_update_slide") => {
+            let sid = id(a, "slide_id")?;
+            let slide = d.slide_mut(sid).ok_or("Слайд не найден")?;
+            *slide = patched(&*slide, object(a, "slide")?, &["id", "elements"])?;
+            changed_ids.push(sid);
+        }
+        (Document::Slides(d), "slides_write_table") => {
+            let values: Vec<Vec<String>> = parse(a, "values")?;
+            let eid = id(a, "element_id")?;
+            d.write_table(
+                id(a, "slide_id")?,
+                eid,
+                n(a, "row", 0)?,
+                n(a, "col", 0)?,
+                &values,
+            )?;
+            changed_ids.push(eid);
+        }
+        (Document::Slides(d), "slides_edit_table") => {
+            let (rows, insert) = match s(a, "edit")? {
+                "insert_row" => (true, true),
+                "insert_column" => (false, true),
+                "delete_row" => (true, false),
+                "delete_column" => (false, false),
+                _ => return Err("invalid_args: edit".into()),
+            };
+            let eid = id(a, "element_id")?;
+            d.edit_table(id(a, "slide_id")?, eid, rows, insert, n(a, "index", 0)?)?;
+            changed_ids.push(eid);
+        }
+        (Document::Slides(d), "slides_duplicate_element") => {
+            changed_ids.push(d.duplicate_element(id(a, "slide_id")?, id(a, "element_id")?)?);
+        }
+        (Document::Slides(d), "slides_set_z_order") => {
+            let ids = element_ids(a)?;
+            d.set_z_order_many(id(a, "slide_id")?, &ids, flag(a, "front", true))?;
+            changed_ids.extend(ids);
+        }
+        (Document::Slides(d), "slides_group" | "slides_ungroup") => {
+            let ids: Vec<u64> = parse(a, "element_ids")?;
+            let sid = id(a, "slide_id")?;
+            if name == "slides_group" && ids.len() < 2 {
+                return Err("invalid_args: для группы нужно не меньше двух объектов".into());
+            }
+            let group = (name == "slides_group").then(|| d.allocate_id());
+            let slide = d.slide_mut(sid).ok_or("Слайд не найден")?;
+            if ids.iter().any(|eid| slide.element(*eid).is_none()) {
+                return Err("Фигура не найдена".into());
+            }
+            for element in slide.elements.iter_mut().filter(|e| ids.contains(&e.id)) {
+                element.group = group;
+            }
+            changed_ids.extend(ids);
+            changed_ids.extend(group);
+        }
+        (Document::Slides(d), "slides_set_size") => {
+            let size = |key: &str| {
+                a.get(key)
+                    .and_then(Value::as_f64)
+                    .filter(|v| v.is_finite() && (72.0..=10000.0).contains(v))
+                    .map(|v| v as f32)
+                    .ok_or_else(|| format!("invalid_args: {key} от 72 до 10000"))
+            };
+            d.width = size("width")?;
+            d.height = size("height")?;
+        }
+        (Document::Slides(d), "slides_replace_all") => {
+            let query = s(a, "query")?;
+            let replacement = s(a, "replacement")?;
+            let case_sensitive = flag(a, "case_sensitive", false);
+            let mut total = 0;
+            for slide in &mut d.slides {
+                total += replace_text(&mut slide.notes, query, replacement, case_sensitive);
+                for element in &mut slide.elements {
+                    let mut hits =
+                        replace_text(&mut element.text, query, replacement, case_sensitive);
+                    if let crate::slides::model::ElementKind::Table { cells } = &mut element.kind {
+                        for cell in cells.iter_mut().flatten() {
+                            hits += replace_text(cell, query, replacement, case_sensitive);
+                        }
+                    }
+                    if hits > 0 {
+                        changed_ids.push(element.id);
+                    }
+                    total += hits;
+                }
+            }
+            if total == 0 {
+                return Err("not_found: совпадений нет".into());
+            }
+        }
         (Document::Slides(d), "slides_add_slide") => {
             changed_ids
                 .push(d.add_slide(a.get("layout").and_then(Value::as_str).unwrap_or("blank")));
@@ -865,8 +1204,32 @@ pub fn dispatch(
         (Document::Slides(d), "slides_move_slide") => {
             d.move_slide(id(a, "slide_id")?, n(a, "index", 0)?)?;
         }
-        (Document::Slides(d), "slides_add_text" | "slides_add_shape" | "slides_add_image") => {
-            let kind = if name == "slides_add_text" {
+        (
+            Document::Slides(d),
+            "slides_add_text" | "slides_add_shape" | "slides_add_image" | "slides_add_table"
+            | "slides_add_chart",
+        ) => {
+            let kind = if name == "slides_add_table" {
+                let rows = n(a, "rows", 3)?;
+                let columns = n(a, "columns", 3)?;
+                if !(1..=1000).contains(&rows) || !(1..=1000).contains(&columns) {
+                    return Err("invalid_range: rows и columns от 1 до 1000".into());
+                }
+                crate::slides::model::ElementKind::Table {
+                    cells: vec![vec![String::new(); columns]; rows],
+                }
+            } else if name == "slides_add_chart" {
+                let values: Vec<f32> = parse(a, "values")?;
+                if values.is_empty() || values.len() > 1000 || values.iter().any(|v| !v.is_finite())
+                {
+                    return Err("invalid_args: values — от 1 до 1000 чисел".into());
+                }
+                let labels: Vec<String> = match a.get("labels") {
+                    Some(_) => parse(a, "labels")?,
+                    None => Vec::new(),
+                };
+                crate::slides::model::ElementKind::Chart { values, labels }
+            } else if name == "slides_add_text" {
                 crate::slides::model::ElementKind::Text
             } else if name == "slides_add_image" {
                 crate::slides::model::ElementKind::Image {
@@ -1740,6 +2103,198 @@ mod selection_view_tests {
             assert!(!tabs[0].dirty());
             assert!(tabs[0].undo.is_empty() && tabs[0].redo.is_empty() && tabs[0].ai.is_empty());
         }
+        Ok(())
+    }
+    #[test]
+    fn sheets_structure_find_replace_and_charts_are_editable_over_mcp() -> Result<(), String> {
+        let mut tabs = Vec::new();
+        let mut next = 1;
+        let mut call = |tabs: &mut Vec<Tab>, name: &str, args: Value| {
+            dispatch(tabs, &mut next, name, &args, "test")
+        };
+        call(&mut tabs, "create_document", json!({"kind":"sheets"}))?;
+        let listed = call(&mut tabs, "sheets_list", json!({"document_id":1}))?;
+        let sheet = listed["sheets"][0]["id"].as_u64().ok_or("sheet")?;
+        call(
+            &mut tabs,
+            "sheets_write_range",
+            json!({"document_id":1,"sheet_id":sheet,"row":0,"col":0,"values":[["Итого","2"],["итого 2","=B1*3"]]}),
+        )?;
+        let found = call(
+            &mut tabs,
+            "sheets_find",
+            json!({"document_id":1,"sheet_id":sheet,"query":"ИТОГО"}),
+        )?;
+        assert_eq!(found["matches"].as_array().map(Vec::len), Some(2));
+        call(
+            &mut tabs,
+            "sheets_replace_all",
+            json!({"document_id":1,"query":"B1","replacement":"B1+1"}),
+        )?;
+        let read = call(
+            &mut tabs,
+            "sheets_get_cell_info",
+            json!({"document_id":1,"sheet_id":sheet,"row":1,"col":1}),
+        )?;
+        assert_eq!(read["cell"]["input"], "=B1+1*3");
+        call(
+            &mut tabs,
+            "sheets_merge",
+            json!({"document_id":1,"sheet_id":sheet,"r0":3,"c0":0,"r1":3,"c1":2}),
+        )?;
+        call(
+            &mut tabs,
+            "sheets_update_sheet",
+            json!({"document_id":1,"sheet_id":sheet,"sheet":{"frozen_rows":1,"widths":{"0":140.0},"tab_color":[200,10,10]}}),
+        )?;
+        assert!(
+            call(
+                &mut tabs,
+                "sheets_update_sheet",
+                json!({"document_id":1,"sheet_id":sheet,"sheet":{"cells":{}}}),
+            )
+            .is_err()
+        );
+        let chart = call(
+            &mut tabs,
+            "sheets_add_chart",
+            json!({"document_id":1,"sheet_id":sheet,"kind":"line","r0":0,"c0":0,"r1":1,"c1":1,"title":"A"}),
+        )?["changed_ids"][0]
+            .as_u64()
+            .ok_or("chart")?;
+        call(
+            &mut tabs,
+            "sheets_update_chart",
+            json!({"document_id":1,"sheet_id":sheet,"element_id":chart,"chart":{"title":"Продажи","kind":"Pie"}}),
+        )?;
+        call(
+            &mut tabs,
+            "sheets_set_names",
+            json!({"document_id":1,"names":{"Data":"Sheet1!A1:B2"}}),
+        )?;
+        let objects = call(
+            &mut tabs,
+            "sheets_read_objects",
+            json!({"document_id":1,"sheet_id":sheet}),
+        )?;
+        assert_eq!(objects["frozen_rows"], 1);
+        assert_eq!(objects["merges"].as_array().map(Vec::len), Some(1));
+        assert_eq!(objects["charts"][0]["title"], "Продажи");
+        assert_eq!(objects["names"]["Data"], "Sheet1!A1:B2");
+        call(
+            &mut tabs,
+            "sheets_unmerge",
+            json!({"document_id":1,"sheet_id":sheet,"r0":3,"c0":1,"r1":3,"c1":1}),
+        )?;
+        call(
+            &mut tabs,
+            "sheets_clear_range",
+            json!({"document_id":1,"sheet_id":sheet,"r0":0,"c0":0,"r1":0,"c1":0}),
+        )?;
+        call(
+            &mut tabs,
+            "sheets_delete_chart",
+            json!({"document_id":1,"sheet_id":sheet,"element_id":chart}),
+        )?;
+        let objects = call(
+            &mut tabs,
+            "sheets_read_objects",
+            json!({"document_id":1,"sheet_id":sheet}),
+        )?;
+        assert_eq!(objects["merges"].as_array().map(Vec::len), Some(0));
+        assert_eq!(objects["charts"].as_array().map(Vec::len), Some(0));
+        let cleared = call(
+            &mut tabs,
+            "sheets_get_cell_info",
+            json!({"document_id":1,"sheet_id":sheet,"row":0,"col":0}),
+        )?;
+        assert!(cleared["cell"].is_null());
+        Ok(())
+    }
+    #[test]
+    fn slides_tables_charts_groups_and_slide_properties_are_editable_over_mcp() -> Result<(), String>
+    {
+        let mut tabs = Vec::new();
+        let mut next = 1;
+        let mut call = |tabs: &mut Vec<Tab>, name: &str, args: Value| {
+            dispatch(tabs, &mut next, name, &args, "test")
+        };
+        call(&mut tabs, "create_document", json!({"kind":"slides"}))?;
+        let listed = call(&mut tabs, "slides_list", json!({"document_id":1}))?;
+        let slide = listed["slides"][0]["id"].as_u64().ok_or("slide")?;
+        let table = call(
+            &mut tabs,
+            "slides_add_table",
+            json!({"document_id":1,"slide_id":slide,"rows":2,"columns":2}),
+        )?["changed_ids"][0]
+            .as_u64()
+            .ok_or("table")?;
+        call(
+            &mut tabs,
+            "slides_write_table",
+            json!({"document_id":1,"slide_id":slide,"element_id":table,"row":1,"col":1,"values":[["x","y"],["z"]]}),
+        )?;
+        call(
+            &mut tabs,
+            "slides_edit_table",
+            json!({"document_id":1,"slide_id":slide,"element_id":table,"edit":"insert_row","index":0}),
+        )?;
+        call(
+            &mut tabs,
+            "slides_replace_all",
+            json!({"document_id":1,"query":"X","replacement":"икс"}),
+        )?;
+        let chart = call(
+            &mut tabs,
+            "slides_add_chart",
+            json!({"document_id":1,"slide_id":slide,"values":[1.0,2.5],"labels":["a","b"]}),
+        )?["changed_ids"][0]
+            .as_u64()
+            .ok_or("chart")?;
+        call(
+            &mut tabs,
+            "slides_group",
+            json!({"document_id":1,"slide_id":slide,"element_ids":[table,chart]}),
+        )?;
+        call(
+            &mut tabs,
+            "slides_set_z_order",
+            json!({"document_id":1,"slide_id":slide,"element_id":table,"front":false}),
+        )?;
+        call(
+            &mut tabs,
+            "slides_update_slide",
+            json!({"document_id":1,"slide_id":slide,"slide":{"title":"Итоги","background":[0,0,0]}}),
+        )?;
+        call(
+            &mut tabs,
+            "slides_set_size",
+            json!({"document_id":1,"width":720.0,"height":540.0}),
+        )?;
+        let Some(Document::Slides(deck)) = tabs.first().map(|t| &t.document) else {
+            return Err("slides".into());
+        };
+        assert_eq!((deck.width, deck.height), (720.0, 540.0));
+        let s = deck.slide(slide).ok_or("slide")?;
+        assert_eq!(s.title, "Итоги");
+        assert_eq!(s.elements.first().map(|e| e.id), Some(table));
+        let Some(crate::slides::model::ElementKind::Table { cells }) =
+            s.element(table).map(|e| &e.kind)
+        else {
+            return Err("table kind".into());
+        };
+        assert_eq!(
+            cells,
+            &vec![
+                vec![String::new(); 3],
+                vec![String::new(); 3],
+                vec![String::new(), "икс".to_string(), "y".to_string()],
+                vec![String::new(), "z".to_string(), String::new()],
+            ]
+        );
+        let group = s.element(table).and_then(|e| e.group);
+        assert!(group.is_some());
+        assert_eq!(s.element(chart).and_then(|e| e.group), group);
         Ok(())
     }
 }

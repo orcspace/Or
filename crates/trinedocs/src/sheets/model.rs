@@ -590,6 +590,81 @@ impl Book {
         s.merges.push(range);
         Ok(())
     }
+    /// Removes every merged area that intersects `range`.
+    pub fn unmerge(&mut self, sheet: u64, range: Range) -> Result<usize, String> {
+        range.validate()?;
+        let s = self.sheet_by_id_mut(sheet).ok_or("Лист не найден")?;
+        let before = s.merges.len();
+        s.merges.retain(|m| {
+            !(m.r0 <= range.r1 && range.r0 <= m.r1 && m.c0 <= range.c1 && range.c0 <= m.c1)
+        });
+        Ok(before - s.merges.len())
+    }
+    /// Clears contents (`contents`), formats (`formats`) or both in a range.
+    pub fn clear_range(
+        &mut self,
+        sheet: u64,
+        range: Range,
+        contents: bool,
+        formats: bool,
+    ) -> Result<(), String> {
+        range.validate()?;
+        let s = self.sheet_by_id_mut(sheet).ok_or("Лист не найден")?;
+        s.cells.retain(|key, cell| {
+            let Some((r, c)) = parse_address(key) else {
+                return true;
+            };
+            if !range.contains(r, c) {
+                return true;
+            }
+            if contents {
+                cell.input.clear();
+                cell.value = Value::Empty;
+            }
+            if formats {
+                cell.fmt = CellFormat::default();
+            }
+            !(cell.input.is_empty() && cell.fmt == CellFormat::default())
+        });
+        self.recalculate();
+        Ok(())
+    }
+    /// Cells whose input or shown value contains `query`: (row, col, input, display).
+    pub fn find(
+        &self,
+        sheet: u64,
+        query: &str,
+        case_sensitive: bool,
+        limit: usize,
+    ) -> Result<Vec<(u32, u32, String, String)>, String> {
+        let s = self.sheet_by_id(sheet).ok_or("Лист не найден")?;
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+        let fold = |text: &str| {
+            if case_sensitive {
+                text.to_string()
+            } else {
+                text.to_lowercase()
+            }
+        };
+        let needle = fold(query);
+        let mut found = Vec::new();
+        for (key, cell) in &s.cells {
+            let Some((r, c)) = parse_address(key) else {
+                continue;
+            };
+            let shown = s.display(r, c, self.locale_ru);
+            if fold(&cell.input).contains(&needle) || fold(&shown).contains(&needle) {
+                found.push((r, c, cell.input.clone(), shown));
+                if found.len() >= limit {
+                    break;
+                }
+            }
+        }
+        found.sort_unstable_by_key(|(r, c, _, _)| (*r, *c));
+        Ok(found)
+    }
     pub fn recalculate(&mut self) {
         super::formula::recalculate(self);
     }

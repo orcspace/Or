@@ -1,5 +1,6 @@
 pub mod app;
 pub mod chrome;
+pub mod clipboard;
 pub mod docs;
 pub mod file_io;
 pub mod fonts;

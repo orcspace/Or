@@ -1543,6 +1543,7 @@ if ui.button("Отмена").clicked(){action=3}});}}
 }
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        crate::clipboard::observe(ctx);
         self.tick(ctx);
     }
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
