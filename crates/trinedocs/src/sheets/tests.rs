@@ -1,0 +1,653 @@
+use super::{formula, model::*};
+fn seeded() -> Result<Book, String> {
+    let mut book = Book::default();
+    let id = book.active_id();
+    book.set_range(
+        id,
+        0,
+        0,
+        &[
+            vec![
+                "1".into(),
+                "red".into(),
+                "10".into(),
+                "10".into(),
+                "20".into(),
+                "30".into(),
+            ],
+            vec![
+                "2".into(),
+                "blue".into(),
+                "20".into(),
+                "100".into(),
+                "200".into(),
+                "300".into(),
+            ],
+            vec!["3".into(), "red".into(), "30".into()],
+        ],
+    )?;
+    Ok(book)
+}
+#[test]
+fn numeric_formula_corpus() -> Result<(), String> {
+    let b = seeded()?;
+    let id = b.active_id();
+    let cases: &[(&str, f64)] = &[
+        ("=1+2*3", 7.0),
+        ("=(1+2)*3", 9.0),
+        ("=2^3^2", 64.0),
+        ("=50%", 0.5),
+        ("=100*10%", 10.0),
+        ("=SUM(A1:A3)", 6.0),
+        ("=СУММ(A1:A3)", 6.0),
+        ("=AVERAGE(A1:A3)", 2.0),
+        ("=MIN(A1:A3)", 1.0),
+        ("=MAX(A1:A3)", 3.0),
+        ("=COUNT(A1:C3)", 6.0),
+        ("=COUNTA(A1:C3)", 9.0),
+        ("=COUNTBLANK(A1:D4)", 5.0),
+        ("=MEDIAN(A1:A3)", 2.0),
+        ("=MEDIAN(1,2,3,4)", 2.5),
+        ("=MODE(1,2,2,3)", 2.0),
+        ("=MODE.SNGL(1,1,2)", 1.0),
+        ("=STDEV(A1:A3)", 1.0),
+        ("=STDEV.S(A1:A3)", 1.0),
+        ("=STDEVP(A1:A3)", 0.816496580927726),
+        ("=STDEV.P(A1:A3)", 0.816496580927726),
+        ("=VAR(A1:A3)", 1.0),
+        ("=VAR.S(A1:A3)", 1.0),
+        ("=VARP(A1:A3)", 0.666666666666667),
+        ("=VAR.P(A1:A3)", 0.666666666666667),
+        ("=DEVSQ(A1:A3)", 2.0),
+        ("=AVEDEV(A1:A3)", 0.666666666666667),
+        ("=GEOMEAN(2,8)", 4.0),
+        ("=HARMEAN(2,6)", 3.0),
+        ("=SUMSQ(A1:A3)", 14.0),
+        ("=PRODUCT(A1:A3)", 6.0),
+        ("=AVERAGEA(2,TRUE,\"text\")", 1.0),
+        ("=SUMIF(B1:B3,\"red\",C1:C3)", 40.0),
+        ("=COUNTIF(B1:B3,\"red\")", 2.0),
+        ("=COUNTIF(B1:B3,\"r*\")", 2.0),
+        ("=AVERAGEIF(B1:B3,\"red\",C1:C3)", 20.0),
+        ("=SUMIFS(C1:C3,B1:B3,\"red\",A1:A3,\">1\")", 30.0),
+        ("=COUNTIFS(B1:B3,\"red\",A1:A3,\">1\")", 1.0),
+        ("=AVERAGEIFS(C1:C3,B1:B3,\"red\",A1:A3,\">1\")", 30.0),
+        ("=SUMPRODUCT(A1:A3,C1:C3)", 140.0),
+        ("=IF(TRUE,5,1/0)", 5.0),
+        ("=IF(FALSE,1/0,6)", 6.0),
+        ("=IFERROR(1/0,7)", 7.0),
+        ("=IFNA(NA(),8)", 8.0),
+        ("=IFS(FALSE,1,TRUE,9)", 9.0),
+        ("=CHOOSE(2,10,20,30)", 20.0),
+        ("=SWITCH(2,1,10,2,20,99)", 20.0),
+        ("=SWITCH(3,1,10,2,20,99)", 99.0),
+        ("=ABS(-3)", 3.0),
+        ("=INT(-2.2)", -3.0),
+        ("=SIGN(-1)", -1.0),
+        ("=SIGN(0)", 0.0),
+        ("=SQRT(9)", 3.0),
+        ("=EXP(0)", 1.0),
+        ("=LN(1)", 0.0),
+        ("=LOG10(1000)", 3.0),
+        ("=SIN(0)", 0.0),
+        ("=COS(0)", 1.0),
+        ("=TAN(0)", 0.0),
+        ("=ASIN(0)", 0.0),
+        ("=ACOS(1)", 0.0),
+        ("=ATAN(0)", 0.0),
+        ("=SINH(0)", 0.0),
+        ("=COSH(0)", 1.0),
+        ("=TANH(0)", 0.0),
+        ("=ASINH(0)", 0.0),
+        ("=ACOSH(1)", 0.0),
+        ("=ATANH(0)", 0.0),
+        ("=DEGREES(PI())", 180.0),
+        ("=RADIANS(180)", std::f64::consts::PI),
+        ("=FACT(5)", 120.0),
+        ("=FACTDOUBLE(6)", 48.0),
+        ("=EVEN(3)", 4.0),
+        ("=ODD(4)", 5.0),
+        ("=ROUND(1.235,2)", 1.24),
+        ("=ROUNDUP(-1.231,2)", -1.24),
+        ("=ROUNDDOWN(-1.239,2)", -1.23),
+        ("=TRUNC(-1.9)", -1.0),
+        ("=ROUND(123,-1)", 120.0),
+        ("=MOD(-3,2)", 1.0),
+        ("=POWER(2,3)", 8.0),
+        ("=LOG(8,2)", 3.0),
+        ("=ATAN2(1,0)", 0.0),
+        ("=QUOTIENT(7,2)", 3.0),
+        ("=MROUND(10,3)", 9.0),
+        ("=CEILING(4.2,2)", 6.0),
+        ("=FLOOR(4.2,2)", 4.0),
+        ("=CEILING.MATH(-4.2)", -4.0),
+        ("=CEILING.PRECISE(-4.2)", -4.0),
+        ("=FLOOR.MATH(-4.2)", -5.0),
+        ("=FLOOR.PRECISE(-4.2)", -5.0),
+        ("=GCD(12,18)", 6.0),
+        ("=LCM(4,6)", 12.0),
+        ("=COMBIN(5,2)", 10.0),
+        ("=COMBINA(3,2)", 6.0),
+        ("=PERMUT(5,2)", 20.0),
+        ("=LARGE(A1:A3,2)", 2.0),
+        ("=SMALL(A1:A3,2)", 2.0),
+        ("=PERCENTILE.INC(A1:A3,0.25)", 1.5),
+        ("=PERCENTILE(A1:A3,0.75)", 2.5),
+        ("=QUARTILE(A1:A3,1)", 1.5),
+        ("=QUARTILE.INC(A1:A3,3)", 2.5),
+        ("=RANK(2,A1:A3)", 2.0),
+        ("=RANK.EQ(1,A1:A3,1)", 1.0),
+        ("=LEN(\"ёж🙂\")", 3.0),
+        ("=FIND(\"ж\",\"ёжик\")", 2.0),
+        ("=SEARCH(\"Ж*\",\"ёжик\")", 2.0),
+        ("=VALUE(\"12.5%\")", 0.125),
+        ("=NUMBERVALUE(\"1.234,5\",\",\",\".\")", 1234.5),
+        ("=CODE(\"A\")", 65.0),
+        ("=UNICODE(\"ё\")", 1105.0),
+        ("=ROWS(A1:C3)", 3.0),
+        ("=COLUMNS(A1:C3)", 3.0),
+        ("=ROW(A2)", 2.0),
+        ("=COLUMN(B2)", 2.0),
+        ("=INDEX(A1:C3,2,3)", 20.0),
+        ("=MATCH(2,A1:A3,0)", 2.0),
+        ("=XMATCH(2,A1:A3)", 2.0),
+        ("=VLOOKUP(2,A1:C3,3,FALSE)", 20.0),
+        ("=HLOOKUP(20,D1:F2,2,FALSE)", 200.0),
+        ("=XLOOKUP(2,A1:A3,C1:C3)", 20.0),
+        ("=DATE(2024,1,1)", 45292.0),
+        ("=DATE(1900,2,29)", 60.0),
+        ("=TIME(12,0,0)", 0.5),
+        ("=YEAR(45292)", 2024.0),
+        ("=MONTH(45292)", 1.0),
+        ("=DAY(45292)", 1.0),
+        ("=HOUR(0.5)", 12.0),
+        ("=MINUTE(TIME(12,34,56))", 34.0),
+        ("=SECOND(TIME(12,34,56))", 56.0),
+        ("=DAYS(45293,45292)", 1.0),
+        ("=WEEKDAY(45292)", 2.0),
+        ("=WEEKDAY(45292,2)", 1.0),
+        ("=WEEKDAY(45292,3)", 0.0),
+        ("=EDATE(45292,1)", 45323.0),
+        ("=EOMONTH(45292,0)", 45322.0),
+        ("=DATEVALUE(\"2024-01-01\")", 45292.0),
+        ("=TIMEVALUE(\"12:00:00\")", 0.5),
+        ("=DATEDIF(DATE(2020,1,1),DATE(2024,1,1),\"Y\")", 4.0),
+        ("=DATEDIF(DATE(2024,1,1),DATE(2024,2,2),\"M\")", 1.0),
+        ("=DATEDIF(DATE(2024,1,1),DATE(2024,1,3),\"D\")", 2.0),
+        ("=NETWORKDAYS(DATE(2024,1,1),DATE(2024,1,7))", 5.0),
+        ("=WORKDAY(DATE(2024,1,1),5)", 45299.0),
+        ("=PMT(0,10,100)", -10.0),
+        ("=PV(0,10,-10)", 100.0),
+        ("=FV(0,10,-10)", 100.0),
+        ("=NPV(0.1,110)", 100.0),
+        ("=ROW()", 1.0),
+        ("=SLN(100,0,10)", 10.0),
+        ("=SYD(100,0,10,1)", 18.18181818181818),
+        ("=N(TRUE)", 1.0),
+        ("=N(\"text\")", 0.0),
+        ("=TYPE(1)", 1.0),
+        ("=TYPE(\"text\")", 2.0),
+        ("=TYPE(TRUE)", 4.0),
+        ("=TYPE(NA())", 16.0),
+    ];
+    for &(input, expected) in cases {
+        let actual = formula::evaluate(&b, id, input);
+        let Value::Number(n) = actual else {
+            return Err(format!("{input}: {actual:?}, expected {expected}"));
+        };
+        assert!(
+            (n - expected).abs() <= 1e-8 * expected.abs().max(1.0),
+            "{input}: {n}, expected {expected}"
+        );
+    }
+    assert!(cases.len() >= 150);
+    Ok(())
+}
+#[test]
+fn text_boolean_and_errors() -> Result<(), String> {
+    let b = seeded()?;
+    let id = b.active_id();
+    let text = &[
+        ("=\"a\"&\"b\"", "ab"),
+        ("=CONCAT(\"a\",\"b\")", "ab"),
+        ("=CONCATENATE(\"a\",\"b\")", "ab"),
+        ("=TEXTJOIN(\"-\",TRUE,\"a\",\"\",\"b\")", "a-b"),
+        ("=LOWER(\"ABCЁ\")", "abcё"),
+        ("=UPPER(\"abcё\")", "ABCЁ"),
+        ("=PROPER(\"hello WORLD\")", "Hello World"),
+        ("=TRIM(\" a  b \")", "a b"),
+        ("=CLEAN(CHAR(10)&\"abc\")", "abc"),
+        ("=LEFT(\"ёжик\",2)", "ёж"),
+        ("=RIGHT(\"ёжик\",2)", "ик"),
+        ("=MID(\"ёжик\",2,2)", "жи"),
+        ("=REPT(\"x\",3)", "xxx"),
+        ("=SUBSTITUTE(\"abab\",\"a\",\"x\")", "xbxb"),
+        ("=SUBSTITUTE(\"abab\",\"a\",\"x\",2)", "abxb"),
+        ("=REPLACE(\"abcd\",2,2,\"XY\")", "aXYd"),
+        ("=TEXT(12.5,\"0.00\")", "12.50"),
+        ("=CHAR(65)", "A"),
+        ("=UNICHAR(1105)", "ё"),
+        ("=T(\"yes\")", "yes"),
+    ];
+    for &(input, expected) in text {
+        assert_eq!(
+            formula::evaluate(&b, id, input),
+            Value::Text(expected.into()),
+            "{input}"
+        );
+    }
+    for (input, expected) in [
+        ("=TRUE()", true),
+        ("=FALSE()", false),
+        ("=AND(TRUE,TRUE)", true),
+        ("=OR(FALSE,TRUE)", true),
+        ("=XOR(TRUE,TRUE)", false),
+        ("=NOT(FALSE)", true),
+        ("=EXACT(\"A\",\"a\")", false),
+        ("=ISNUMBER(1)", true),
+        ("=ISTEXT(\"x\")", true),
+        ("=ISNONTEXT(1)", true),
+        ("=ISBLANK(Z1)", true),
+        ("=ISLOGICAL(TRUE)", true),
+        ("=ISERROR(1/0)", true),
+        ("=ISERR(NA())", false),
+        ("=ISNA(NA())", true),
+        ("=ISEVEN(2)", true),
+        ("=ISODD(3)", true),
+        ("=1<2", true),
+        ("=2>=2", true),
+        ("=\"ABC\"=\"abc\"", true),
+    ] {
+        assert_eq!(
+            formula::evaluate(&b, id, input),
+            Value::Bool(expected),
+            "{input}"
+        );
+    }
+    for (input, expected) in [
+        ("=1/0", "#DIV/0!"),
+        ("=SQRT(-1)", "#NUM!"),
+        ("=FOOBAR(1)", "#NAME?"),
+        ("=SUM(", "#VALUE!"),
+        ("=NA()", "#N/A"),
+        ("=INDEX(A1:B2,3,1)", "#REF!"),
+        ("=IF(TRUE)", "#VALUE!"),
+        ("=ROUND(1)", "#VALUE!"),
+        ("=REPT(\"x\",-1)", "#VALUE!"),
+        ("=VLOOKUP(99,A1:C3,3,FALSE)", "#N/A"),
+        ("=LOG(1,1)", "#NUM!"),
+    ] {
+        assert_eq!(
+            formula::evaluate(&b, id, input),
+            Value::Error(expected.into()),
+            "{input}"
+        );
+    }
+    Ok(())
+}
+#[test]
+fn stable_ids_and_formula_transforms() -> Result<(), String> {
+    let mut b = seeded()?;
+    let id = b.active_id();
+    let first = b
+        .sheet_by_id(id)
+        .and_then(|s| s.cell(0, 0))
+        .map(|c| c.id)
+        .ok_or("Missing cell")?;
+    b.set_cell(id, 0, 0, "5")?;
+    assert_eq!(
+        b.sheet_by_id(id).and_then(|s| s.cell(0, 0)).map(|c| c.id),
+        Some(first)
+    );
+    b.set_cell(id, 5, 2, "=$A$1+A1+\"A1\"+LOG10(100)")?;
+    b.edit_dimension(id, 0, 1, true, false)?;
+    assert_eq!(
+        b.sheet_by_id(id).and_then(|s| s.cell(1, 0)).map(|c| c.id),
+        Some(first)
+    );
+    assert_eq!(
+        b.sheet_by_id(id)
+            .and_then(|s| s.cell(6, 2))
+            .map(|c| c.input.as_str()),
+        Some("=$A$2+A2+\"A1\"+LOG10(100)")
+    );
+    assert_eq!(
+        formula::shift_references("=$A1+A$1+$A$1+'Имя 1'!B2+\"A1\"+LOG10(10)", 1, 2),
+        "=$A2+C$1+$A$1+'Имя 1'!D3+\"A1\"+LOG10(10)"
+    );
+    assert_eq!(formula::shift_references("=A1", -1, 0), "=#REF!");
+    assert_eq!(
+        formula::canonicalize("=СУММ(1;2)&\"СУММ(\""),
+        "=SUM(1,2)&\"СУММ(\""
+    );
+    Ok(())
+}
+#[test]
+fn multisheet_cycles_and_finance() -> Result<(), String> {
+    let mut b = Book::default();
+    let id = b.active_id();
+    let other = b.add_sheet("Другой лист")?;
+    b.set_cell(other, 0, 0, "7")?;
+    b.set_cell(id, 0, 0, "='Другой лист'!A1*2")?;
+    assert_eq!(
+        b.active_sheet()
+            .and_then(|s| s.cell(0, 0))
+            .map(|c| c.value.clone()),
+        Some(Value::Number(14.0))
+    );
+    b.rename_sheet(other, "Переименован")?;
+    assert_eq!(
+        b.active_sheet()
+            .and_then(|s| s.cell(0, 0))
+            .map(|c| c.value.clone()),
+        Some(Value::Number(14.0))
+    );
+    b.set_range(id, 0, 0, &[vec!["-100".into()], vec!["110".into()]])?;
+    let v = formula::evaluate(&b, id, "=IRR(A1:A2)");
+    assert!(matches!(v,Value::Number(n)if (n-0.1).abs()<1e-8));
+    b.set_range(id, 0, 0, &[vec!["=A2".into()], vec!["=A1".into()]])?;
+    assert!(
+        b.active_sheet()
+            .and_then(|s| s.cell(0, 0))
+            .is_some_and(|c| matches!(c.value, Value::Error(_)))
+    );
+    let long = format!("={}", "1+".repeat(2000)) + "1";
+    assert!(matches!(formula::evaluate(&b, id, &long), Value::Error(_)));
+    Ok(())
+}
+
+#[test]
+fn extreme_date_arguments_return_errors() {
+    let book = Book::default();
+    let id = book.active_id();
+    for formula in [
+        "=EDATE(1,-1E308)",
+        "=WORKDAY(1,-1E308)",
+        "=DATE(2024,-1E308,1)",
+        "=NETWORKDAYS(-1E308,1E308)",
+        "=WEEKDAY(-1E308)",
+        "=YEAR(1E308)",
+        "=DATEDIF(-1E308,1E308,\"D\")",
+        "=EOMONTH(1E308,1)",
+        "=DATE(2024,1,-1E308)",
+        "=DATE(2024,1,1E308)",
+        "=NETWORKDAYS(1,1E308)",
+    ] {
+        assert!(
+            matches!(
+                super::formula::evaluate(&book, id, formula),
+                Value::Error(_)
+            ),
+            "{formula}"
+        );
+    }
+}
+
+#[test]
+fn malformed_native_book_is_rejected() -> Result<(), String> {
+    let mut b = Book::default();
+    assert!(b.validate().is_ok());
+    b.next_id = 1;
+    assert!(b.validate().is_err());
+    b.next_id = 2;
+    b.selection.row = MAX_ROWS;
+    assert!(b.validate().is_err());
+    b.selection.row = 0;
+    let id = b.active_id();
+    b.set_cell(id, 0, 0, "1")?;
+    if let Some(c) = b.active_sheet_mut().and_then(|s| s.cell_mut(0, 0)) {
+        c.fmt.size = f32::INFINITY;
+    }
+    assert!(b.validate().is_err());
+    if let Some(c) = b.active_sheet_mut().and_then(|s| s.cell_mut(0, 0)) {
+        c.fmt.size = 11.0;
+        c.id = id;
+    }
+    assert!(b.validate().is_err());
+    Ok(())
+}
+
+#[test]
+fn pdf_keeps_far_rows_and_columns() -> Result<(), String> {
+    let mut b = Book::default();
+    let id = b.active_id();
+    b.set_cell(id, 0, 0, "top-left")?;
+    b.set_cell(id, 10000, 26, "far-cell")?;
+    let pages = b.pages();
+    assert_eq!(pages.len(), 2);
+    assert!(
+        pages
+            .iter()
+            .flat_map(|p| &p.items)
+            .any(|p| matches!(p,crate::render::Primitive::TextStyled{text,..}if text=="far-cell"))
+    );
+    assert_eq!(b.print_page_count(), 2);
+    Ok(())
+}
+
+#[test]
+fn compare_types_and_empty_criteria() -> Result<(), String> {
+    let mut b = Book::default();
+    let id = b.active_id();
+    b.set_range(
+        id,
+        0,
+        0,
+        &[vec!["0".into()], vec!["'".into()], vec!["".into()]],
+    )?;
+    assert_eq!(formula::evaluate(&b, id, "=1=\"1\""), Value::Bool(false));
+    assert_eq!(
+        formula::evaluate(&b, id, "=COUNTIF(A1:A3,\"\")"),
+        Value::Number(2.0)
+    );
+    assert_eq!(
+        formula::evaluate(&b, id, "=COUNTIF(A1:A3,\"<>\")"),
+        Value::Number(1.0)
+    );
+    Ok(())
+}
+
+#[test]
+fn structural_ranges_shrink_and_deleted_sheets_stay_invalid() -> Result<(), String> {
+    let mut b = Book::default();
+    let id = b.active_id();
+    b.set_range(
+        id,
+        0,
+        0,
+        &[vec!["1".into()], vec!["2".into()], vec!["3".into()]],
+    )?;
+    b.set_cell(id, 5, 0, "=SUM(A1:A3)")?;
+    b.names.insert("Total".into(), "'Лист1'!$A$1:$A$3".into());
+    b.merge(id, Range::new(0, 1, 2, 2))?;
+    b.edit_dimension(id, 0, 1, true, true)?;
+    assert_eq!(
+        b.sheet_by_id(id)
+            .and_then(|s| s.cell(4, 0))
+            .map(|c| c.input.as_str()),
+        Some("=SUM(A1:A2)")
+    );
+    assert_eq!(
+        b.sheet_by_id(id)
+            .and_then(|s| s.cell(4, 0))
+            .map(|c| c.value.clone()),
+        Some(Value::Number(5.0))
+    );
+    assert_eq!(
+        b.names.get("Total").map(String::as_str),
+        Some("'Лист1'!$A$1:$A$2")
+    );
+    assert_eq!(
+        b.sheet_by_id(id).map(|s| s.merges.clone()),
+        Some(vec![Range::new(0, 1, 1, 2)])
+    );
+    assert_eq!(
+        formula::shift_structural("=SUM($A$3:$A$1)", "Лист1", "Лист1", 0, 1, true, true),
+        "=SUM($A$2:$A$1)"
+    );
+    assert_eq!(
+        formula::shift_structural("=SUM(A1:B2)+C1", "Лист1", "Лист1", 0, 2, true, true),
+        "=SUM(#REF!)+#REF!"
+    );
+    assert_eq!(
+        formula::shift_structural("='лист1'!A1", "Другой", "Лист1", 0, 1, true, false),
+        "='лист1'!A2"
+    );
+    let other = b.add_sheet("Другой")?;
+    b.set_cell(id, 0, 4, "='Другой'!A1")?;
+    b.delete_sheet(other)?;
+    b.add_sheet("Другой")?;
+    assert_eq!(
+        b.sheet_by_id(id)
+            .and_then(|s| s.cell(0, 4))
+            .map(|c| c.value.clone()),
+        Some(Value::Error("#REF!".into()))
+    );
+    b.validate()?;
+    Ok(())
+}
+#[test]
+fn structural_metadata_is_bounded_and_transactional() -> Result<(), String> {
+    let mut b = Book::default();
+    let id = b.active_id();
+    if let Some(s) = b.active_sheet_mut() {
+        s.row_heights.insert(MAX_ROWS - 1, 20.0);
+        s.frozen_rows = 3;
+    }
+    let before = b.clone();
+    assert!(b.edit_dimension(id, 0, 1, true, false).is_err());
+    assert_eq!(b, before);
+    if let Some(s) = b.active_sheet_mut() {
+        s.row_heights.clear();
+    }
+    b.selection.row = 2;
+    b.selection.anchor_row = 2;
+    b.merge(id, Range::new(1, 0, 2, 0))?;
+    b.edit_dimension(id, 1, 2, true, true)?;
+    assert!(
+        b.active_sheet()
+            .is_some_and(|s| s.merges.is_empty() && s.frozen_rows == 1)
+    );
+    assert_eq!(b.selection.row, 1);
+    b.validate()?;
+    let chart = b.add_chart(
+        id,
+        ChartKind::Column,
+        Range::new(MAX_ROWS - 1, 0, MAX_ROWS - 1, 0),
+        "edge",
+    )?;
+    assert!(
+        b.active_sheet()
+            .is_some_and(|s| s.charts.iter().any(|c| c.id == chart && c.row < MAX_ROWS))
+    );
+    b.validate()?;
+    Ok(())
+}
+#[test]
+fn local_clock_uses_calendar_not_utc_epoch() -> Result<(), String> {
+    let date = chrono::NaiveDate::from_ymd_opt(2026, 10, 13)
+        .and_then(|d| d.and_hms_opt(0, 30, 0))
+        .ok_or("date")?;
+    let serial = formula::calendar_serial(date);
+    assert_eq!(serial.floor(), formula::date_serial(2026, 10, 13));
+    assert!((serial.fract() - 0.5 / 24.0).abs() < 1e-10);
+    Ok(())
+}
+#[test]
+fn lookups_are_lazy_literal_and_validate_modes() -> Result<(), String> {
+    let mut b = Book::default();
+    let id = b.active_id();
+    b.set_range(
+        id,
+        0,
+        0,
+        &[
+            vec!["'<3".into(), "10".into()],
+            vec!["'cat".into(), "20".into()],
+            vec!["'car".into(), "30".into()],
+        ],
+    )?;
+    assert_eq!(
+        formula::evaluate(&b, id, "=XLOOKUP(\"cat\",A1:A3,B1:B3,NA())"),
+        Value::Number(20.0)
+    );
+    assert_eq!(
+        formula::evaluate(&b, id, "=XLOOKUP(\"missing\",A1:A3,B1:B3,\"fallback\")"),
+        Value::Text("fallback".into())
+    );
+    assert_eq!(
+        formula::evaluate(&b, id, "=VLOOKUP(\"<3\",A1:B3,2,FALSE)"),
+        Value::Number(10.0)
+    );
+    assert_eq!(
+        formula::evaluate(&b, id, "=MATCH(\"ca?\",A1:A3,0)"),
+        Value::Number(2.0)
+    );
+    assert_eq!(
+        formula::evaluate(&b, id, "=XMATCH(\"ca?\",A1:A3,2,-1)"),
+        Value::Number(3.0)
+    );
+    assert_eq!(
+        formula::evaluate(&b, id, "=XLOOKUP(\"cat\",A1:A3,B1:B3,,3)"),
+        Value::Error("#VALUE!".into())
+    );
+    assert_eq!(
+        formula::evaluate(&b, id, "=MATCH(10,A1:B3,0)"),
+        Value::Error("#VALUE!".into())
+    );
+    assert_eq!(formula::shift_references("=A2", i64::MAX, 0), "=#REF!");
+    Ok(())
+}
+#[test]
+fn text_expansion_and_nonfinite_coercion_are_bounded() -> Result<(), String> {
+    let mut b = Book::default();
+    let id = b.active_id();
+    assert_eq!(
+        formula::evaluate(&b, id, "=REPLACE(\"abc\",2,1E308,\"x\")"),
+        Value::Text("ax".into())
+    );
+    assert_eq!(
+        formula::evaluate(&b, id, "=MID(\"abc\",\"NaN\",1)"),
+        Value::Error("#NUM!".into())
+    );
+    b.set_cell(id, 0, 0, "=REPT(\"x\",20000)")?;
+    assert_eq!(
+        formula::evaluate(&b, id, "=A1&A1"),
+        Value::Error("#VALUE!".into())
+    );
+    assert_eq!(
+        formula::evaluate(&b, id, "=SUBSTITUTE(A1,\"x\",A1)"),
+        Value::Error("#VALUE!".into())
+    );
+    assert_eq!(
+        formula::evaluate(&b, id, "=TEXTJOIN(\"\",FALSE,A1,A1)"),
+        Value::Error("#VALUE!".into())
+    );
+    let cell = b
+        .active_sheet()
+        .and_then(|s| s.cell(0, 0))
+        .cloned()
+        .ok_or("cell")?;
+    if let Some(s) = b.active_sheet_mut() {
+        s.cells.clear();
+        s.cells.insert("$A$1".into(), cell);
+    }
+    assert!(b.validate().is_err());
+    Ok(())
+}
+#[test]
+fn overlapping_native_merges_are_rejected() {
+    let mut b = Book::default();
+    if let Some(s) = b.active_sheet_mut() {
+        s.merges = vec![Range::new(0, 0, 2, 2), Range::new(2, 2, 4, 4)];
+    }
+    assert!(b.validate().is_err());
+    if let Some(s) = b.active_sheet_mut() {
+        s.merges = vec![
+            Range::new(0, 0, 2, 2),
+            Range::new(3, 0, 4, 2),
+            Range::new(0, 3, 2, 4),
+        ];
+    }
+    assert!(b.validate().is_ok());
+}

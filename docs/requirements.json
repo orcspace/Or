@@ -4,7 +4,7 @@
     "source": "AGENTS.md",
     "section": 0,
     "heading": "AGENTS.md — TrineDocs",
-    "clause": "Офисный пакет «три в одном» для **Windows 11** и **macOS (Apple Silicon)**: **Docs** (документы), **Sheets** (таблицы), **Slides** (презентации).",
+    "clause": "Офисный пакет TrineDocs: Docs, Sheets, Slides. Текущие целевые ОС — Windows 10/11 x64; macOS отложена владельцем (ADR-0025).",
     "phases": [
       0
     ],
@@ -38,7 +38,7 @@
     "source": "AGENTS.md",
     "section": 0,
     "heading": "AGENTS.md — TrineDocs",
-    "clause": "Ты — ведущий инженер проекта. Этот файл — главная спецификация. Детальная спецификация MCP — в `docs/MCP.md` (обязательна к реализации так же, как этот файл). Дополнение `docs/SPEC-AUDIT.md` имеет равный приоритет и при расхождении применяется первым, кроме жёстких ограничений раздела 1. Указание владельца от 2026-10-13: сейчас реализация и проверка только Windows 11 x64; macOS arm64 позже, без исключения из конечной поддержки (ADR-0001). Владелец разрешил продолжать все фазы до9 включительно; приёмка текущей фазы и жёсткие ограничения сохраняются (ADR-0005).",
+    "clause": "Этот файл, docs/MCP.md и docs/SPEC-AUDIT.md задают требования. План владельца от 2026-10-13 в docs/plan/codex-plan.md и ADR-0025 заменяет старые решения о Qt, CRDT, платформе и порядке реализации. Полный паритет остаётся целью; частичная реализация не считается приёмкой.",
     "phases": [
       0
     ],
@@ -72,7 +72,7 @@
     "source": "AGENTS.md",
     "section": 0,
     "heading": "0. Как работать",
-    "clause": "1. Работай **по фазам** (раздел 20). Следующая фаза — только после выполнения критериев приёмки текущей.",
+    "clause": "Владелец разрешил параллельную реализацию Docs/Sheets/Slides и оболочки 2–4 агентами. Приёмочные критерии проверять отдельно; перед сборкой установщика обязательны два независимых ревью.",
     "phases": [
       0
     ],
@@ -174,7 +174,7 @@
     "source": "AGENTS.md",
     "section": 1,
     "heading": "1. Жёсткие ограничения",
-    "clause": "- Платформы: **Windows 11 x64** (build 22000+) и **macOS arm64**. Windows 10, Intel Mac, Linux, мобильные — не поддерживаются. Установщик Windows отказывает на Windows 10. Минимальная macOS — **14.4** по Supported Platforms Qt 6.12 (ADR-0004; FACT-002).",
+    "clause": "Платформы: Windows 10 и Windows 11 x64. macOS, совместная работа через сервер и Google Drive отложены по плану владельца (ADR-0025).",
     "phases": [
       0
     ],
@@ -191,7 +191,7 @@
     "source": "AGENTS.md",
     "section": 1,
     "heading": "1. Жёсткие ограничения",
-    "clause": "- Один код, один UI на обе ОС.",
+    "clause": "Один Rust workspace, общий слой операций и форматов для трёх редакторов.",
     "phases": [
       0
     ],
@@ -208,7 +208,7 @@
     "source": "AGENTS.md",
     "section": 1,
     "heading": "1. Жёсткие ограничения",
-    "clause": "- **Запрещено:** Electron, Tauri, WebView, TypeScript/JavaScript внутри приложения. ⚠ Семантика запрета JavaScript при обязательном QML: ADR-0003, ждёт владельца; запрет не ослаблен.",
+    "clause": "В приложении запрещены Electron, Tauri, WebView и JavaScript/TypeScript. GUI рисуется нативным egui.",
     "phases": [
       0
     ],
@@ -225,7 +225,7 @@
     "source": "AGENTS.md",
     "section": 1,
     "heading": "1. Жёсткие ограничения",
-    "clause": "- UI: **Qt 6.12 LTS, Qt Quick / QML**. Логика: **Rust stable, edition 2024**. Мост: **CXX-Qt** (последний стабильный релиз crates.io). C++ — только тонкий слой (canvas items, интеграция с ОС, печать).",
+    "clause": "UI: egui/eframe =0.36.2 (glow), Rust =1.98.1, edition 2024. Qt/QML/CXX-Qt заменены решением владельца ADR-0025.",
     "phases": [
       0
     ],
@@ -242,7 +242,7 @@
     "source": "AGENTS.md",
     "section": 1,
     "heading": "1. Жёсткие ограничения",
-    "clause": "- Стабильные проверенные версии, всё пинится (`Cargo.lock`, CMake). Релизы младше 2 недель не брать. ⚠ Qt 6.12.0 выпущен 2026-09-30; по текущей дате ещё не проходит это правило (ADR-0002).",
+    "clause": "Прямые зависимости пинятся =x.y.z, транзитивные — Cargo.lock; релизы младше 14 дней исключаются. Реестр версий, лицензий и непроверенных пунктов — docs/licenses.md.",
     "phases": [
       0
     ],
@@ -259,7 +259,7 @@
     "source": "AGENTS.md",
     "section": 1,
     "heading": "1. Жёсткие ограничения",
-    "clause": "- Лицензии: Qt под LGPLv3 с **динамической линковкой**. Не использовать Qt-модули, доступные в open-source только под GPL (Qt Charts, Qt Graphs и др.) — диаграммы рисуем сами. Никакого AGPL-кода.",
+    "clause": "Никакого AGPL, unsafe в коде проекта или unwrap/expect в рабочем коде. Системные шрифты не входят в установщик. Лицензии зависимостей и notices поставляются отдельно.",
     "phases": [
       0
     ],
@@ -276,7 +276,7 @@
     "source": "AGENTS.md",
     "section": 2,
     "heading": "2. Стек",
-    "clause": "| UI | Qt 6.12 LTS, Qt Quick/QML, Qt SVG, Qt Print Support, Qt Multimedia | оболочка, панели, диалоги, печать, видео в слайдах |",
+    "clause": "| UI | egui/eframe =0.36.2, glow | нативное окно и три редактора |",
     "phases": [
       0
     ],
@@ -293,7 +293,7 @@
     "source": "AGENTS.md",
     "section": 2,
     "heading": "2. Стек",
-    "clause": "| Мост | CXX-Qt | QObject-ы на Rust, сигналы/свойства в QML |",
+    "clause": "| Модель/операции | Rust, serde JSON, ops | UI владеет моделью, undo по авторам |",
     "phases": [
       0
     ],
@@ -310,7 +310,7 @@
     "source": "AGENTS.md",
     "section": 2,
     "heading": "2. Стек",
-    "clause": "| CRDT | Loro ^1 (за trait; запасной — Yrs) | совместная работа, офлайн, история, undo |",
+    "clause": "| История | авторские undo-группы и recovery snapshots | CRDT/сетевая совместная работа отложены |",
     "phases": [
       0
     ],
@@ -327,7 +327,7 @@
     "source": "AGENTS.md",
     "section": 2,
     "heading": "2. Стек",
-    "clause": "| Вёрстка текста | Skia SkParagraph (skia-safe) | шейпинг (HarfBuzz), bidi, переносы; пагинация и Word-вёрстка — отдельный слой, спайк 4.1 |",
+    "clause": "| Вёрстка текста | свои страницы/строки, egui + системные TTF метрики | точность и Unicode отдельно проверяются |",
     "phases": [
       0
     ],
@@ -344,7 +344,7 @@
     "source": "AGENTS.md",
     "section": 2,
     "heading": "2. Стек",
-    "clause": "| Рендер | skia-safe: тайлы на экран, PDF-бэкенд; QPainter-бэкенд для печати | один display list — три вывода |",
+    "clause": "| Рендер | общий Page/Primitive, egui, pdf-writer/ttf-parser/subsetter | экран/PDF, ограничения фиксируются |",
     "phases": [
       0
     ],
@@ -361,7 +361,7 @@
     "source": "AGENTS.md",
     "section": 2,
     "heading": "2. Стек",
-    "clause": "| Формулы | IronCalc за trait `CalcEngine` | функции Excel, пересчёт; покрытие проверяется спайком 4.5 |",
+    "clause": "| Формулы | собственные lexer/parser/evaluator | parity Microsoft и regression corpus |",
     "phases": [
       0
     ],
@@ -378,7 +378,7 @@
     "source": "AGENTS.md",
     "section": 2,
     "heading": "2. Стек",
-    "clause": "| OOXML | quick-xml + zip, свой маппинг | docx/xlsx/pptx без потерь; неподдержанное сохраняется непрозрачно |",
+    "clause": "| OOXML | quick-xml + zip, calamine, rust_xlsxwriter | собственные DOCX/PPTX, XLSX |",
     "phases": [
       0
     ],
@@ -395,7 +395,7 @@
     "source": "AGENTS.md",
     "section": 2,
     "heading": "2. Стек",
-    "clause": "| Legacy | LibreOffice headless, отдельный процесс | .doc/.xls/.ppt, ODF, RTF |",
+    "clause": "| Legacy | XLS/XLSB/ODS — calamine при безопасных лимитах; DOC/PPT отложены | неподдержанное честно отклоняется |",
     "phases": [
       0
     ],
@@ -412,7 +412,7 @@
     "source": "AGENTS.md",
     "section": 2,
     "heading": "2. Стек",
-    "clause": "| MCP | rmcp (официальный Rust SDK) | агент и внешние клиенты |",
+    "clause": "| MCP | rmcp =3.5.0 | официальный Rust SDK, Streamable HTTP и stdio-шим |",
     "phases": [
       0
     ],
@@ -429,7 +429,7 @@
     "source": "AGENTS.md",
     "section": 2,
     "heading": "2. Стек",
-    "clause": "| Async | tokio | сеть, MCP, фоновые задачи |",
+    "clause": "| Async | tokio =1.53.1 + bounded mpsc/oneshot | фоновые задачи, UI без ожидания сети |",
     "phases": [
       0
     ],
@@ -446,7 +446,7 @@
     "source": "AGENTS.md",
     "section": 2,
     "heading": "2. Стек",
-    "clause": "| Локальная БД | SQLite (rusqlite) + FTS5 | библиотека файлов, поиск, снапшоты |",
+    "clause": "| Настройки/файлы | JSON + zip(JSON/assets) | APPDATA, recent, атомарная запись с .bak |",
     "phases": [
       0
     ],
@@ -463,7 +463,7 @@
     "source": "AGENTS.md",
     "section": 2,
     "heading": "2. Стек",
-    "clause": "| Сервер | Rust: axum + tokio, PostgreSQL, S3-совместимое хранилище | синхронизация, шаринг |",
+    "clause": "| Сервер совместной работы | отложен владельцем | не объявлять работающим |",
     "phases": [
       0
     ],
@@ -480,7 +480,7 @@
     "source": "AGENTS.md",
     "section": 2,
     "heading": "2. Стек",
-    "clause": "| Логи | tracing | диагностика |",
+    "clause": "| Логи | локальные файлы в APPDATA/TrineDocs/logs | без токенов и текста документов |",
     "phases": [
       0
     ],
@@ -497,7 +497,7 @@
     "source": "AGENTS.md",
     "section": 2,
     "heading": "2. Стек",
-    "clause": "| Обновления | Sparkle (macOS), WinSparkle или MSIX App Installer (Windows) — выбрать в ADR | автообновление |",
+    "clause": "| Дистрибуция | NSIS LZMA solid, Windows x64 | текущий пользователь без UAC; подпись пока отсутствует |",
     "phases": [
       0
     ],
@@ -514,7 +514,7 @@
     "source": "AGENTS.md",
     "section": 2,
     "heading": "2. Стек",
-    "clause": "| Иконки/шрифты | Lucide (ISC), Inter и JetBrains Mono (OFL) | минималистичный UI; лицензии проверить до включения |",
+    "clause": "| Иконки/шрифты | свои кодовые иконки, системные Windows шрифты | встроенные Inter/JetBrains не используются приложением |",
     "phases": [
       0
     ],
@@ -549,7 +549,7 @@
     "source": "AGENTS.md",
     "section": 3,
     "heading": "3. Архитектура",
-    "clause": "- QML UI: Главная, вкладки Docs/Sheets/Slides, панели, палитра команд, AI-чат.",
+    "clause": "Rust egui UI: Главная, вкладки Docs/Sheets/Slides, панели и палитра команд.",
     "phases": [
       1
     ],
@@ -567,7 +567,7 @@
     "source": "AGENTS.md",
     "section": 3,
     "heading": "3. Архитектура",
-    "clause": "- C++ canvas items (QQuickItem): тайлы, ввод, IME, курсоры людей и AI.",
+    "clause": "Собственные canvas editors и egui input/IME; доступность пользовательского canvas проверяется отдельно.",
     "phases": [
       1
     ],
@@ -585,7 +585,7 @@
     "source": "AGENTS.md",
     "section": 3,
     "heading": "3. Архитектура",
-    "clause": "- CXX-Qt bridge.",
+    "clause": "Общий crate trinedocs; C++/QML-моста нет (ADR-0025).",
     "phases": [
       1
     ],
@@ -801,7 +801,7 @@
     "source": "AGENTS.md",
     "section": 3,
     "heading": "Принципы",
-    "clause": "- **Единый путь изменений:** пользователь, AI-агент, удалённый участник, импорт, макро-команды — всё через `ops` → CRDT. Обходных путей нет.",
+    "clause": "Единый путь изменения содержимого: UI и MCP → ops. UI-команда готовит копию модели; commit создаёт undo-группу с автором.",
     "phases": [
       1
     ],
@@ -819,7 +819,7 @@
     "source": "AGENTS.md",
     "section": 3,
     "heading": "Принципы",
-    "clause": "- **CRDT — источник истины.** Rich text — LoroText с марками; структура — MovableTree/MovableList; таблицы: строки и столбцы — MovableList стабильных ID, ячейки — Map по (rowId, colId); слайды — MovableList, фигуры — Map. Доступ только через trait-слой в `model`.",
+    "clause": "Источник истины — типизированная модель в UI-потоке. CRDT/сеть отложены; их старые требования сохраняются как будущий объём, не как выполненная возможность.",
     "phases": [
       1
     ],
@@ -855,7 +855,7 @@
     "source": "AGENTS.md",
     "section": 3,
     "heading": "Принципы",
-    "clause": "- **UI-поток только показывает готовое.** Вёрстка и растеризация — фоновые потоки Rust; тайлы 512×512 → QSGTexture. При вводе перевёрстывается только затронутый блок.",
+    "clause": "UI применяет model ops в logic перед отрисовкой; файловые операции/MCP/снимки выполняются в отдельных потоках. Производительность измеряется отдельно.",
     "phases": [
       1
     ],
@@ -873,7 +873,7 @@
     "source": "AGENTS.md",
     "section": 3,
     "heading": "Принципы",
-    "clause": "- **Один display list** (позиционированные глифы, пути, изображения) → Skia-тайлы (экран), Skia PDF (экспорт), QPainter (печать). Экран, PDF и печать совпадают.",
+    "clause": "Общий Page/Primitive → egui/PDF; неподдержанные повороты/шейпинг/сложная вёрстка в отчёте. Печать через PDF-просмотрщик с честной подписью.",
     "phases": [
       1
     ],
@@ -909,7 +909,7 @@
     "source": "AGENTS.md",
     "section": 3,
     "heading": "Принципы",
-    "clause": "- **Undo/redo локальный** (только свои правки), UndoManager Loro. Правки AI — отдельные группы undo.",
+    "clause": "Undo/redo и AI review по авторам через ops; выборочный откат с последующими правками требует сохранения данных и конфликт-проверки.",
     "phases": [
       1
     ],
@@ -1177,7 +1177,7 @@
     "source": "AGENTS.md",
     "section": 5,
     "heading": "Стиль — минимализм",
-    "clause": "- Inter (UI), JetBrains Mono (формулы, код), встроены в приложение.",
+    "clause": "UI использует системные шрифты Windows, загружаемые во время выполнения; встроенные шрифты не входят в exe (ADR-0025).",
     "phases": [
       0
     ],
@@ -3474,7 +3474,7 @@
     "source": "AGENTS.md",
     "section": 18,
     "heading": "18. Локализация и доступность",
-    "clause": "- ru/en с первого дня, Qt Linguist, строки `qsTr`, расширяемость.",
+    "clause": "Русский и английский словарь оболочки с тестом полноты. Локализация редакторов и доступность оцениваются в release-review отдельно.",
     "phases": [
       0
     ],
@@ -3845,7 +3845,7 @@
     "source": "docs/MCP.md",
     "section": 0,
     "heading": "docs/MCP.md — MCP-сервер TrineDocs",
-    "clause": "Обязательная спецификация, вместе с `../AGENTS.md` и `SPEC-AUDIT.md`. MCP даёт встроенным/внешним агентам полный доступ к чтению, правке, форматированию, экспорту, PDF, комментариям и версиям. Все изменения через `ops` → CRDT, видны участникам в реальном времени с курсором агента.",
+    "clause": "MCP предоставляет семантическое чтение и правку моделей через ops → UI-поток. CRDT/сервер совместной работы отложены владельцем ADR-0025. Реализованные инструменты и пробелы в docs/audit/release-review.md.",
     "phases": [
       3
     ],
@@ -3964,7 +3964,7 @@
     "source": "docs/MCP.md",
     "section": 1,
     "heading": "stdio через `trinedocs-mcp`",
-    "clause": "- Windows named pipe `\\\\.\\pipe\\trinedocs-mcp-<user-sid>`.",
+    "clause": "Windows stdio-шим проксирует запросы на loopback Streamable HTTP, порт/токен в APPDATA/TrineDocs/mcp.json (ADR-0025).",
     "phases": [
       3
     ],
@@ -3998,7 +3998,7 @@
     "source": "docs/MCP.md",
     "section": 1,
     "heading": "stdio через `trinedocs-mcp`",
-    "clause": "- При отсутствии приложения запуск в фоне, ожидание сокета.",
+    "clause": "При отсутствии приложения шим запускает TrineDocs --background и ждёт loopback до 10 секунд.",
     "phases": [
       3
     ],
@@ -4049,7 +4049,7 @@
     "source": "docs/MCP.md",
     "section": 1,
     "heading": "Streamable HTTP",
-    "clause": "- Bearer token при первом запуске, OS keychain; посмотреть/копировать/rotate в settings.",
+    "clause": "Bearer-токен CSPRNG при первом запуске, файл конфигурации в пользовательском APPDATA. Keychain/ротация требуют отдельной реализации; не объявлять их выполненными.",
     "phases": [
       3
     ],
@@ -4083,7 +4083,7 @@
     "source": "docs/MCP.md",
     "section": 1,
     "heading": "Streamable HTTP",
-    "clause": "- Выкл. по умолчанию, один переключатель.",
+    "clause": "Streamable HTTP запускается по умолчанию в отдельном потоке, переключатель MCP отзывает клиентский доступ (план владельца/ADR-0025).",
     "phases": [
       3
     ],
@@ -4423,7 +4423,7 @@
     "source": "docs/MCP.md",
     "section": 4,
     "heading": "4. Модель адресации",
-    "clause": "- Text `{ block_id, offset }`; Unicode, grapheme-safe; `{ start, end }`. ⚠ «Символы Unicode» неоднозначны для combining/emoji, ADR-0010 должен закрепить единицу смещения и проверку границ, до этого контракт не готов.",
+    "clause": "Текстовые offset считают Unicode scalar values, не байты UTF-8. Grapheme-safe навигация остаётся отдельным требованием и до реализации отмечается gap.",
     "phases": [
       3
     ],

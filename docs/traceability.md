@@ -6,41 +6,41 @@ ID закреплены в HTML-комментариях источников. I
 
 | ID | Источник / раздел | Требование | Фазы | Проверки (план) | Статус |
 |---|---|---|---|---|---|
-| REQ-00-001 | AGENTS.md §0 | Офисный пакет «три в одном» для **Windows 11** и **macOS (Apple Silicon)**: **Docs** (документы), **Sheets** (таблицы), **Slides** (презентации). | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
+| REQ-00-001 | AGENTS.md §0 | Офисный пакет TrineDocs: Docs, Sheets, Slides. Текущие целевые ОС — Windows 10/11 x64; macOS отложена владельцем (ADR-0025). | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
 | REQ-00-002 | AGENTS.md §0 | Функциональность уровня Word / Excel / PowerPoint, свои фичи сверху, real-time совместная работа и встроенный AI-агент через MCP, который редактирует документ вживую с видимым курсором. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
-| REQ-00-003 | AGENTS.md §0 | Ты — ведущий инженер проекта. Этот файл — главная спецификация. Детальная спецификация MCP — в `docs/MCP.md` (обязательна к реализации так же, как этот файл). Дополнение `docs/SPEC-AUDIT.md` имеет равный приоритет и при расхождении применяется первым, кроме жёстких ограничений раздела 1. Указание владельца от 2026-10-13: сейчас реализация и проверка только Windows 11 x64; macOS arm64 позже, без исключения из конечной поддержки (ADR-0001). Владелец разрешил продолжать все фазы до9 включительно; приёмка текущей фазы и жёсткие ограничения сохраняются (ADR-0005). | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
+| REQ-00-003 | AGENTS.md §0 | Этот файл, docs/MCP.md и docs/SPEC-AUDIT.md задают требования. План владельца от 2026-10-13 в docs/plan/codex-plan.md и ADR-0025 заменяет старые решения о Qt, CRDT, платформе и порядке реализации. Полный паритет остаётся целью; частичная реализация не считается приёмкой. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
 | REQ-00-004 | AGENTS.md §0 | **Правило полноты:** если функция есть в Word / Excel / PowerPoint или очевидно ожидается пользователем офисного пакета, но не упомянута здесь, — она всё равно в объёме проекта. Внеси её в матрицу паритета (`docs/parity.md`) с приоритетом и реализуй по плану. «Не написано» ≠ «не нужно». | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
-| REQ-00-005 | AGENTS.md §0 | 1. Работай **по фазам** (раздел 20). Следующая фаза — только после выполнения критериев приёмки текущей. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
+| REQ-00-005 | AGENTS.md §0 | Владелец разрешил параллельную реализацию Docs/Sheets/Slides и оболочки 2–4 агентами. Приёмочные критерии проверять отдельно; перед сборкой установщика обязательны два независимых ревью. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
 | REQ-00-006 | AGENTS.md §0 | 2. Перед фазой — план в `docs/plan/phase-N.md`; после — отчёт: что сделано, что не работает, известные баги, решения. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
 | REQ-00-007 | AGENTS.md §0 | 3. Сначала тонкий вертикальный срез, потом расширение. **Заглушки не выдавать за готовые функции**: недоделанная команда в UI помечается и отключается. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
 | REQ-00-008 | AGENTS.md §0 | 4. Конфликт требования с реальностью (производительность, лицензия, возможности библиотеки) — остановись и опиши варианты в `docs/decisions/NNNN-*.md` (ADR). Не обходи молча. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
 | REQ-00-009 | AGENTS.md §0 | 5. Стек не меняется без ADR. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
 | REQ-00-010 | AGENTS.md §0 | 6. Каждую зависимость и её лицензию — в `docs/licenses.md`. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
-| REQ-01-001 | AGENTS.md §1 | - Платформы: **Windows 11 x64** (build 22000+) и **macOS arm64**. Windows 10, Intel Mac, Linux, мобильные — не поддерживаются. Установщик Windows отказывает на Windows 10. Минимальная macOS — **14.4** по Supported Platforms Qt 6.12 (ADR-0004; FACT-002). | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
-| REQ-01-002 | AGENTS.md §1 | - Один код, один UI на обе ОС. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
-| REQ-01-003 | AGENTS.md §1 | - **Запрещено:** Electron, Tauri, WebView, TypeScript/JavaScript внутри приложения. ⚠ Семантика запрета JavaScript при обязательном QML: ADR-0003, ждёт владельца; запрет не ослаблен. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
-| REQ-01-004 | AGENTS.md §1 | - UI: **Qt 6.12 LTS, Qt Quick / QML**. Логика: **Rust stable, edition 2024**. Мост: **CXX-Qt** (последний стабильный релиз crates.io). C++ — только тонкий слой (canvas items, интеграция с ОС, печать). | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
-| REQ-01-005 | AGENTS.md §1 | - Стабильные проверенные версии, всё пинится (`Cargo.lock`, CMake). Релизы младше 2 недель не брать. ⚠ Qt 6.12.0 выпущен 2026-09-30; по текущей дате ещё не проходит это правило (ADR-0002). | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
-| REQ-01-006 | AGENTS.md §1 | - Лицензии: Qt под LGPLv3 с **динамической линковкой**. Не использовать Qt-модули, доступные в open-source только под GPL (Qt Charts, Qt Graphs и др.) — диаграммы рисуем сами. Никакого AGPL-кода. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
-| REQ-02-001 | AGENTS.md §2 | \| UI \| Qt 6.12 LTS, Qt Quick/QML, Qt SVG, Qt Print Support, Qt Multimedia \| оболочка, панели, диалоги, печать, видео в слайдах \| | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
-| REQ-02-002 | AGENTS.md §2 | \| Мост \| CXX-Qt \| QObject-ы на Rust, сигналы/свойства в QML \| | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
-| REQ-02-003 | AGENTS.md §2 | \| CRDT \| Loro ^1 (за trait; запасной — Yrs) \| совместная работа, офлайн, история, undo \| | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
-| REQ-02-004 | AGENTS.md §2 | \| Вёрстка текста \| Skia SkParagraph (skia-safe) \| шейпинг (HarfBuzz), bidi, переносы; пагинация и Word-вёрстка — отдельный слой, спайк 4.1 \| | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
-| REQ-02-005 | AGENTS.md §2 | \| Рендер \| skia-safe: тайлы на экран, PDF-бэкенд; QPainter-бэкенд для печати \| один display list — три вывода \| | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
-| REQ-02-006 | AGENTS.md §2 | \| Формулы \| IronCalc за trait `CalcEngine` \| функции Excel, пересчёт; покрытие проверяется спайком 4.5 \| | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
-| REQ-02-007 | AGENTS.md §2 | \| OOXML \| quick-xml + zip, свой маппинг \| docx/xlsx/pptx без потерь; неподдержанное сохраняется непрозрачно \| | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
-| REQ-02-008 | AGENTS.md §2 | \| Legacy \| LibreOffice headless, отдельный процесс \| .doc/.xls/.ppt, ODF, RTF \| | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
-| REQ-02-009 | AGENTS.md §2 | \| MCP \| rmcp (официальный Rust SDK) \| агент и внешние клиенты \| | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
-| REQ-02-010 | AGENTS.md §2 | \| Async \| tokio \| сеть, MCP, фоновые задачи \| | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
-| REQ-02-011 | AGENTS.md §2 | \| Локальная БД \| SQLite (rusqlite) + FTS5 \| библиотека файлов, поиск, снапшоты \| | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
-| REQ-02-012 | AGENTS.md §2 | \| Сервер \| Rust: axum + tokio, PostgreSQL, S3-совместимое хранилище \| синхронизация, шаринг \| | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
-| REQ-02-013 | AGENTS.md §2 | \| Логи \| tracing \| диагностика \| | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
-| REQ-02-014 | AGENTS.md §2 | \| Обновления \| Sparkle (macOS), WinSparkle или MSIX App Installer (Windows) — выбрать в ADR \| автообновление \| | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
-| REQ-02-015 | AGENTS.md §2 | \| Иконки/шрифты \| Lucide (ISC), Inter и JetBrains Mono (OFL) \| минималистичный UI; лицензии проверить до включения \| | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
+| REQ-01-001 | AGENTS.md §1 | Платформы: Windows 10 и Windows 11 x64. macOS, совместная работа через сервер и Google Drive отложены по плану владельца (ADR-0025). | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
+| REQ-01-002 | AGENTS.md §1 | Один Rust workspace, общий слой операций и форматов для трёх редакторов. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
+| REQ-01-003 | AGENTS.md §1 | В приложении запрещены Electron, Tauri, WebView и JavaScript/TypeScript. GUI рисуется нативным egui. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
+| REQ-01-004 | AGENTS.md §1 | UI: egui/eframe =0.36.2 (glow), Rust =1.98.1, edition 2024. Qt/QML/CXX-Qt заменены решением владельца ADR-0025. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
+| REQ-01-005 | AGENTS.md §1 | Прямые зависимости пинятся =x.y.z, транзитивные — Cargo.lock; релизы младше 14 дней исключаются. Реестр версий, лицензий и непроверенных пунктов — docs/licenses.md. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
+| REQ-01-006 | AGENTS.md §1 | Никакого AGPL, unsafe в коде проекта или unwrap/expect в рабочем коде. Системные шрифты не входят в установщик. Лицензии зависимостей и notices поставляются отдельно. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
+| REQ-02-001 | AGENTS.md §2 | \| UI \| egui/eframe =0.36.2, glow \| нативное окно и три редактора \| | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
+| REQ-02-002 | AGENTS.md §2 | \| Модель/операции \| Rust, serde JSON, ops \| UI владеет моделью, undo по авторам \| | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
+| REQ-02-003 | AGENTS.md §2 | \| История \| авторские undo-группы и recovery snapshots \| CRDT/сетевая совместная работа отложены \| | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
+| REQ-02-004 | AGENTS.md §2 | \| Вёрстка текста \| свои страницы/строки, egui + системные TTF метрики \| точность и Unicode отдельно проверяются \| | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
+| REQ-02-005 | AGENTS.md §2 | \| Рендер \| общий Page/Primitive, egui, pdf-writer/ttf-parser/subsetter \| экран/PDF, ограничения фиксируются \| | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
+| REQ-02-006 | AGENTS.md §2 | \| Формулы \| собственные lexer/parser/evaluator \| parity Microsoft и regression corpus \| | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
+| REQ-02-007 | AGENTS.md §2 | \| OOXML \| quick-xml + zip, calamine, rust_xlsxwriter \| собственные DOCX/PPTX, XLSX \| | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
+| REQ-02-008 | AGENTS.md §2 | \| Legacy \| XLS/XLSB/ODS — calamine при безопасных лимитах; DOC/PPT отложены \| неподдержанное честно отклоняется \| | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
+| REQ-02-009 | AGENTS.md §2 | \| MCP \| rmcp =3.5.0 \| официальный Rust SDK, Streamable HTTP и stdio-шим \| | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
+| REQ-02-010 | AGENTS.md §2 | \| Async \| tokio =1.53.1 + bounded mpsc/oneshot \| фоновые задачи, UI без ожидания сети \| | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
+| REQ-02-011 | AGENTS.md §2 | \| Настройки/файлы \| JSON + zip(JSON/assets) \| APPDATA, recent, атомарная запись с .bak \| | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
+| REQ-02-012 | AGENTS.md §2 | \| Сервер совместной работы \| отложен владельцем \| не объявлять работающим \| | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
+| REQ-02-013 | AGENTS.md §2 | \| Логи \| локальные файлы в APPDATA/TrineDocs/logs \| без токенов и текста документов \| | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
+| REQ-02-014 | AGENTS.md §2 | \| Дистрибуция \| NSIS LZMA solid, Windows x64 \| текущий пользователь без UAC; подпись пока отсутствует \| | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
+| REQ-02-015 | AGENTS.md §2 | \| Иконки/шрифты \| свои кодовые иконки, системные Windows шрифты \| встроенные Inter/JetBrains не используются приложением \| | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
 | REQ-03-001 | AGENTS.md §3 | Внутри TrineDocs.app / TrineDocs.exe: | 1 | T-01-CRDT, T-01-LAYOUT, T-01-INPUT, T-01-RECOVERY | planned |
-| REQ-03-002 | AGENTS.md §3 | - QML UI: Главная, вкладки Docs/Sheets/Slides, панели, палитра команд, AI-чат. | 1 | T-01-CRDT, T-01-LAYOUT, T-01-INPUT, T-01-RECOVERY | planned |
-| REQ-03-003 | AGENTS.md §3 | - C++ canvas items (QQuickItem): тайлы, ввод, IME, курсоры людей и AI. | 1 | T-01-CRDT, T-01-LAYOUT, T-01-INPUT, T-01-RECOVERY | planned |
-| REQ-03-004 | AGENTS.md §3 | - CXX-Qt bridge. | 1 | T-01-CRDT, T-01-LAYOUT, T-01-INPUT, T-01-RECOVERY | planned |
+| REQ-03-002 | AGENTS.md §3 | Rust egui UI: Главная, вкладки Docs/Sheets/Slides, панели и палитра команд. | 1 | T-01-CRDT, T-01-LAYOUT, T-01-INPUT, T-01-RECOVERY | planned |
+| REQ-03-003 | AGENTS.md §3 | Собственные canvas editors и egui input/IME; доступность пользовательского canvas проверяется отдельно. | 1 | T-01-CRDT, T-01-LAYOUT, T-01-INPUT, T-01-RECOVERY | planned |
+| REQ-03-004 | AGENTS.md §3 | Общий crate trinedocs; C++/QML-моста нет (ADR-0025). | 1 | T-01-CRDT, T-01-LAYOUT, T-01-INPUT, T-01-RECOVERY | planned |
 | REQ-03-005 | AGENTS.md §3 | - Rust core (cargo workspace): | 1 | T-01-CRDT, T-01-LAYOUT, T-01-INPUT, T-01-RECOVERY | planned |
 | REQ-03-006 | AGENTS.md §3 | - `model` — модель документа поверх CRDT; `ops` — все команды правки. | 1 | T-01-CRDT, T-01-LAYOUT, T-01-INPUT, T-01-RECOVERY | planned |
 | REQ-03-007 | AGENTS.md §3 | - `layout` — вёрстка страниц/ячеек/слайдов; `render` — display list + бэкенды. | 1 | T-01-CRDT, T-01-LAYOUT, T-01-INPUT, T-01-RECOVERY | planned |
@@ -52,13 +52,13 @@ ID закреплены в HTML-комментариях источников. I
 | REQ-03-013 | AGENTS.md §3 | - `storage` — SQLite, автосейв, восстановление; `settings` — настройки. | 1 | T-01-CRDT, T-01-LAYOUT, T-01-INPUT, T-01-RECOVERY | planned |
 | REQ-03-014 | AGENTS.md §3 | - Локальный IPC (named pipe / unix socket) → `trinedocs-mcp` (stdio-шим). | 1 | T-01-CRDT, T-01-LAYOUT, T-01-INPUT, T-01-RECOVERY | planned |
 | REQ-03-015 | AGENTS.md §3 | - WebSocket (TLS) → Sync Server (Rust). | 1 | T-01-CRDT, T-01-LAYOUT, T-01-INPUT, T-01-RECOVERY | planned |
-| REQ-03-016 | AGENTS.md §3 | - **Единый путь изменений:** пользователь, AI-агент, удалённый участник, импорт, макро-команды — всё через `ops` → CRDT. Обходных путей нет. | 1 | T-01-CRDT, T-01-LAYOUT, T-01-INPUT, T-01-RECOVERY | planned |
-| REQ-03-017 | AGENTS.md §3 | - **CRDT — источник истины.** Rich text — LoroText с марками; структура — MovableTree/MovableList; таблицы: строки и столбцы — MovableList стабильных ID, ячейки — Map по (rowId, colId); слайды — MovableList, фигуры — Map. Доступ только через trait-слой в `model`. | 1 | T-01-CRDT, T-01-LAYOUT, T-01-INPUT, T-01-RECOVERY | planned |
+| REQ-03-016 | AGENTS.md §3 | Единый путь изменения содержимого: UI и MCP → ops. UI-команда готовит копию модели; commit создаёт undo-группу с автором. | 1 | T-01-CRDT, T-01-LAYOUT, T-01-INPUT, T-01-RECOVERY | planned |
+| REQ-03-017 | AGENTS.md §3 | Источник истины — типизированная модель в UI-потоке. CRDT/сеть отложены; их старые требования сохраняются как будущий объём, не как выполненная возможность. | 1 | T-01-CRDT, T-01-LAYOUT, T-01-INPUT, T-01-RECOVERY | planned |
 | REQ-03-018 | AGENTS.md §3 | - **Стабильные ID** у каждого абзаца, блока, ячейки, листа, слайда, фигуры. Используются в UI, MCP, комментариях, ссылках. | 1 | T-01-CRDT, T-01-LAYOUT, T-01-INPUT, T-01-RECOVERY | planned |
-| REQ-03-019 | AGENTS.md §3 | - **UI-поток только показывает готовое.** Вёрстка и растеризация — фоновые потоки Rust; тайлы 512×512 → QSGTexture. При вводе перевёрстывается только затронутый блок. | 1 | T-01-CRDT, T-01-LAYOUT, T-01-INPUT, T-01-RECOVERY | planned |
-| REQ-03-020 | AGENTS.md §3 | - **Один display list** (позиционированные глифы, пути, изображения) → Skia-тайлы (экран), Skia PDF (экспорт), QPainter (печать). Экран, PDF и печать совпадают. | 1 | T-01-CRDT, T-01-LAYOUT, T-01-INPUT, T-01-RECOVERY | planned |
+| REQ-03-019 | AGENTS.md §3 | UI применяет model ops в logic перед отрисовкой; файловые операции/MCP/снимки выполняются в отдельных потоках. Производительность измеряется отдельно. | 1 | T-01-CRDT, T-01-LAYOUT, T-01-INPUT, T-01-RECOVERY | planned |
+| REQ-03-020 | AGENTS.md §3 | Общий Page/Primitive → egui/PDF; неподдержанные повороты/шейпинг/сложная вёрстка в отчёте. Печать через PDF-просмотрщик с честной подписью. | 1 | T-01-CRDT, T-01-LAYOUT, T-01-INPUT, T-01-RECOVERY | planned |
 | REQ-03-021 | AGENTS.md §3 | - **Внутренняя модель ≠ OOXML.** Неподдержанное хранится как непрозрачные фрагменты с привязкой к месту и пишется обратно. | 1 | T-01-CRDT, T-01-LAYOUT, T-01-INPUT, T-01-RECOVERY | planned |
-| REQ-03-022 | AGENTS.md §3 | - **Undo/redo локальный** (только свои правки), UndoManager Loro. Правки AI — отдельные группы undo. | 1 | T-01-CRDT, T-01-LAYOUT, T-01-INPUT, T-01-RECOVERY | planned |
+| REQ-03-022 | AGENTS.md §3 | Undo/redo и AI review по авторам через ops; выборочный откат с последующими правками требует сохранения данных и конфликт-проверки. | 1 | T-01-CRDT, T-01-LAYOUT, T-01-INPUT, T-01-RECOVERY | planned |
 | REQ-03-023 | AGENTS.md §3 | - Импорт OOXML и LibreOffice выполняется в отдельном дочернем процессе с лимитами памяти/времени, отменой и корректным завершением (SPEC-AUDIT §3.C.5; ADR-0006). | 1 | T-01-CRDT, T-01-LAYOUT, T-01-INPUT, T-01-RECOVERY | planned |
 | REQ-04-001 | AGENTS.md §4 | \| Клавиша → пиксели \| ≤ 16 мс p95 (100 стр., 100k ячеек, 100 слайдов) \| | 1 | T-01-CRDT, T-01-LAYOUT, T-01-INPUT, T-01-RECOVERY | planned |
 | REQ-04-002 | AGENTS.md §4 | \| Анимации UI и скролл \| 60 fps; 120 fps на ProMotion \| | 1 | T-01-CRDT, T-01-LAYOUT, T-01-INPUT, T-01-RECOVERY | planned |
@@ -73,7 +73,7 @@ ID закреплены в HTML-комментариях источников. I
 | REQ-04-011 | AGENTS.md §4 | - Цели не считаются доказанными до измерений по `docs/testing/acceptance.md`. | 1 | T-01-CRDT, T-01-LAYOUT, T-01-INPUT, T-01-RECOVERY | planned |
 | REQ-05-001 | AGENTS.md §5 | - Контент в центре, интерфейс отступает. Сетка 4 px, радиусы 6/10 px, тонкие разделители вместо рамок, минимум теней. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
 | REQ-05-002 | AGENTS.md §5 | - Компактная верхняя панель + плавающая контекстная панель у выделения + палитра команд. Классическая «лента» Office — опция в настройках. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
-| REQ-05-003 | AGENTS.md §5 | - Inter (UI), JetBrains Mono (формулы, код), встроены в приложение. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
+| REQ-05-003 | AGENTS.md §5 | UI использует системные шрифты Windows, загружаемые во время выполнения; встроенные шрифты не входят в exe (ADR-0025). | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
 | REQ-05-004 | AGENTS.md §5 | - Lucide: сетка 24, stroke 1.75, скругления. Свои иконки — в том же стиле. Цвет только через `currentColor` + токены. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
 | REQ-05-005 | AGENTS.md §5 | - Docs — синий, Sheets — зелёный, Slides — оранжевый. Точечные акценты. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
 | REQ-05-006 | AGENTS.md §5 | - Светлая, тёмная, системная (по умолчанию). Системная тема — `QStyleHints::colorScheme`. Переключение на лету, кросс-фейд 150–200 мс. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI, T-00-POLICY | partial |
@@ -208,7 +208,7 @@ ID закреплены в HTML-комментариях источников. I
 | REQ-17-004 | AGENTS.md §17 | - Complex scripts/bidi/RTL/CJK/vertical — P1. | 1 | T-01-CRDT, T-01-LAYOUT, T-01-INPUT, T-01-RECOVERY | planned |
 | REQ-17-005 | AGENTS.md §17 | - CJK IME обязательно с фазы 1. | 1 | T-01-CRDT, T-01-LAYOUT, T-01-INPUT, T-01-RECOVERY | planned |
 | REQ-17-006 | AGENTS.md §17 | - Hyphenation ru/en. | 1 | T-01-CRDT, T-01-LAYOUT, T-01-INPUT, T-01-RECOVERY | planned |
-| REQ-18-001 | AGENTS.md §18 | - ru/en с первого дня, Qt Linguist, строки `qsTr`, расширяемость. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
+| REQ-18-001 | AGENTS.md §18 | Русский и английский словарь оболочки с тестом полноты. Локализация редакторов и доступность оцениваются в release-review отдельно. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
 | REQ-18-002 | AGENTS.md §18 | - Числа/даты/валюты по системе/документу. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
 | REQ-18-003 | AGENTS.md §18 | - Полная клавиатура, фокус, Narrator/VoiceOver; QAccessible дерево абзацев/ячеек/фигур; UI scale; high contrast; reduced motion. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
 | REQ-19-001 | AGENTS.md §19 | - Импорт/OOXML cargo-fuzz, resource limits, без `unwrap()` в production. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
@@ -230,21 +230,21 @@ ID закреплены в HTML-комментариях источников. I
 | REQ-20-010 | AGENTS.md §20 | \| 9. Выпуск \| installers/notarization/updates/opt-in crashes/a11y/i18n \| clean install/update обеих ОС; старт разрешён владельцем после приёмки предыдущих фаз (ADR-0005) \| | 9 | T-09-RELEASE, T-SECURITY | planned |
 | REQ-20-011 | AGENTS.md §20 | Перестановка Docs → Sheets → MCP/AI → collaboration → export/print из SPEC-AUDIT — **предложение**, не принято без владельца. Пока сохраняется базовая нумерация фаз. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
 | REQ-20-012 | AGENTS.md §20 | В конце каждой фазы: работает / не работает / баги / следующий шаг, плюс аудит по SPEC-AUDIT. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
-| REQ-M00-001 | docs/MCP.md §0 | Обязательная спецификация, вместе с `../AGENTS.md` и `SPEC-AUDIT.md`. MCP даёт встроенным/внешним агентам полный доступ к чтению, правке, форматированию, экспорту, PDF, комментариям и версиям. Все изменения через `ops` → CRDT, видны участникам в реальном времени с курсором агента. | 3 | T-03-MCP, T-03-AI, T-SECURITY | planned |
+| REQ-M00-001 | docs/MCP.md §0 | MCP предоставляет семантическое чтение и правку моделей через ops → UI-поток. CRDT/сервер совместной работы отложены владельцем ADR-0025. Реализованные инструменты и пробелы в docs/audit/release-review.md. | 3 | T-03-MCP, T-03-AI, T-SECURITY | planned |
 | REQ-M00-002 | docs/MCP.md §0 | Crate `mcp` на **rmcp**, официальном Rust SDK. Версия протокола — актуальная стабильная при реализации; на 2026-10-12 официальная `/specification/latest` указывает **2026-07-28** (FACT-006). Утверждение «сейчас 2025-11-25» исправлено (CHANGE-004). Поддержка 2026-07-28 конкретным rmcp и клиентами ещё не подтверждена; breaking changes требуют спайка 4.6 и ADR-0010. Предыдущие версии поддерживаются в пределах возможностей закреплённого rmcp. Непроверенные возможности SDK/клиентов не объявляются рабочими. | 3 | T-03-MCP, T-03-AI, T-SECURITY | planned |
 | REQ-M01-001 | docs/MCP.md §1 | - Сервер стартует с приложением, по умолчанию вкл.; фоновая tokio-задача не задерживает окно. | 3 | T-03-MCP, T-03-AI, T-SECURITY | planned |
 | REQ-M01-002 | docs/MCP.md §1 | - «Работать в фоне»: Windows tray / macOS menu bar; последнее окно закрывается, MCP остаётся. | 3 | T-03-MCP, T-03-AI, T-SECURITY | planned |
 | REQ-M01-003 | docs/MCP.md §1 | - «При входе»: Windows MSIX Startup task / current-user Run; macOS `SMAppService`; без окна. | 3 | T-03-MCP, T-03-AI, T-SECURITY | planned |
 | REQ-M01-004 | docs/MCP.md §1 | - Если приложения нет, шим запускает `--background`, ждёт готовности до 10 с. | 3 | T-03-MCP, T-03-AI, T-SECURITY | planned |
 | REQ-M01-005 | docs/MCP.md §1 | - Поставляется маленький Rust-бинарник; проксирует JSON-RPC в приложение, сам документы не редактирует. | 3 | T-03-MCP, T-03-AI, T-SECURITY | planned |
-| REQ-M01-006 | docs/MCP.md §1 | - Windows named pipe `\\.\pipe\trinedocs-mcp-<user-sid>`. | 3 | T-03-MCP, T-03-AI, T-SECURITY | planned |
+| REQ-M01-006 | docs/MCP.md §1 | Windows stdio-шим проксирует запросы на loopback Streamable HTTP, порт/токен в APPDATA/TrineDocs/mcp.json (ADR-0025). | 3 | T-03-MCP, T-03-AI, T-SECURITY | planned |
 | REQ-M01-007 | docs/MCP.md §1 | - macOS unix socket в `~/Library/Application Support/TrineDocs/`, 0600. | 3 | T-03-MCP, T-03-AI, T-SECURITY | planned |
-| REQ-M01-008 | docs/MCP.md §1 | - При отсутствии приложения запуск в фоне, ожидание сокета. | 3 | T-03-MCP, T-03-AI, T-SECURITY | planned |
+| REQ-M01-008 | docs/MCP.md §1 | При отсутствии приложения шим запускает TrineDocs --background и ждёт loopback до 10 секунд. | 3 | T-03-MCP, T-03-AI, T-SECURITY | planned |
 | REQ-M01-009 | docs/MCP.md §1 | - IPC: same OS user SID/uid + одноразовый токен в owner-only файле. Конкретная handshake/replay-защита — threat model. | 3 | T-03-MCP, T-03-AI, T-SECURITY | planned |
 | REQ-M01-010 | docs/MCP.md §1 | - Только `127.0.0.1` / `::1`; настройка порта, следующий свободный при занятости, фактический порт виден UI. | 3 | T-03-MCP, T-03-AI, T-SECURITY | planned |
-| REQ-M01-011 | docs/MCP.md §1 | - Bearer token при первом запуске, OS keychain; посмотреть/копировать/rotate в settings. | 3 | T-03-MCP, T-03-AI, T-SECURITY | planned |
+| REQ-M01-011 | docs/MCP.md §1 | Bearer-токен CSPRNG при первом запуске, файл конфигурации в пользовательском APPDATA. Keychain/ротация требуют отдельной реализации; не объявлять их выполненными. | 3 | T-03-MCP, T-03-AI, T-SECURITY | planned |
 | REQ-M01-012 | docs/MCP.md §1 | - Проверка Origin **каждого** запроса; чужой browser Origin отклоняется. Отдельно определить разрешённые Origin, отсутствие Origin у native clients и Host validation; ADR-0010. | 3 | T-03-MCP, T-03-AI, T-SECURITY | planned |
-| REQ-M01-013 | docs/MCP.md §1 | - Выкл. по умолчанию, один переключатель. | 3 | T-03-MCP, T-03-AI, T-SECURITY | planned |
+| REQ-M01-013 | docs/MCP.md §1 | Streamable HTTP запускается по умолчанию в отдельном потоке, переключатель MCP отзывает клиентский доступ (план владельца/ADR-0025). | 3 | T-03-MCP, T-03-AI, T-SECURITY | planned |
 | REQ-M01-014 | docs/MCP.md §1 | Встроенный чат — тот же сервер, in-memory transport, одна реализация инструментов. | 3 | T-03-MCP, T-03-AI, T-SECURITY | planned |
 | REQ-M02-001 | docs/MCP.md §2 | - MCP → Подключения: обнаруженные Claude Desktop, Codex CLI, Cursor, VS Code, Windsurf и др., «Подключить». | 3 | T-03-MCP, T-03-AI, T-SECURITY | planned |
 | REQ-M02-002 | docs/MCP.md §2 | - Согласие → дифф → бэкап → дописать только запись `trinedocs` с stdio-командой абсолютного пути к шиму. «Отключить» удаляет только принадлежащую приложению запись. | 3 | T-03-MCP, T-03-AI, T-SECURITY | planned |
@@ -264,7 +264,7 @@ ID закреплены в HTML-комментариях источников. I
 | REQ-M03-007 | docs/MCP.md §3 | - Документ — недоверенные данные; text в явно обозначенных полях, не команды. Это явно сказано в tool descriptions. | 3 | T-03-MCP, T-03-AI, T-SECURITY | planned |
 | REQ-M03-008 | docs/MCP.md §3 | - Наследование доступа по токену, сессии и текущей роли; отзыв должен прекращать уже начатую незафиксированную правку (ADR-0010). | 3 | T-03-MCP, T-03-AI, T-SECURITY | planned |
 | REQ-M04-001 | docs/MCP.md §4 | - Stable IDs: `doc_`, `blk_`, `tbl_`, `img_`, `sht_`, `sld_`, `shp_`, `cmt_`, `ver_`. | 3 | T-03-MCP, T-03-AI, T-SECURITY | planned |
-| REQ-M04-002 | docs/MCP.md §4 | - Text `{ block_id, offset }`; Unicode, grapheme-safe; `{ start, end }`. ⚠ «Символы Unicode» неоднозначны для combining/emoji, ADR-0010 должен закрепить единицу смещения и проверку границ, до этого контракт не готов. | 3 | T-03-MCP, T-03-AI, T-SECURITY | planned |
+| REQ-M04-002 | docs/MCP.md §4 | Текстовые offset считают Unicode scalar values, не байты UTF-8. Grapheme-safe навигация остаётся отдельным требованием и до реализации отмечается gap. | 3 | T-03-MCP, T-03-AI, T-SECURITY | planned |
 | REQ-M04-003 | docs/MCP.md §4 | - Sheets A1 (`Лист1!B2:D10`, Cyrillic names) или `{ sheet_id, row_id, col_id }`. | 3 | T-03-MCP, T-03-AI, T-SECURITY | planned |
 | REQ-M04-004 | docs/MCP.md §4 | - Slides/shapes по ID; порядок ответов 0..N. | 3 | T-03-MCP, T-03-AI, T-SECURITY | planned |
 | REQ-M04-005 | docs/MCP.md §4 | - Read содержит компактный CRDT version vector. Optional `base_version`: если затронутые объекты менялись → `conflict` + текущий фрагмент; без него правка текущего состояния со слиянием CRDT. Границы «затронутого» должны быть формализованы. | 3 | T-03-MCP, T-03-AI, T-SECURITY | planned |

@@ -21,7 +21,9 @@ class RegistryTests(unittest.TestCase):
 
     def test_source_edit_cannot_pass_with_old_traceability(self):
         path = self.root / "AGENTS.md"
-        path.write_text(path.read_text(encoding="utf-8").replace("build 22000+", "build 99999+", 1), encoding="utf-8")
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("Windows 10/11 x64", text)
+        path.write_text(text.replace("Windows 10/11 x64", "Windows 99999 only", 1), encoding="utf-8")
         self.assertTrue(any("Source drift" in e for e in registry.validate(self.root)))
 
     def test_new_unregistered_requirement_fails(self):

@@ -28,6 +28,7 @@ jobs:
         run: python tools/check_assets.py
       - name: Install pinned aged stable Rust toolchain
         run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Check core lints

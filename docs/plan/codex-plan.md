@@ -1,0 +1,7 @@
+# План владельца и выполнение Codex
+Получен 2026-10-13 из чата. Репозиторий orcspace/Or, исходная main 92675a737dbf6a7c49be151ec4c6c2c86139624f. Ветки Claude в GitHub нет, основа из той сессии недоступна. Приложение создано из текущего ядра.
+Владелец разрешил egui/Rust/Windows 10–11, NSIS, 2–4 параллельных агента; требуется расширенный паритет Word/Excel/PowerPoint, свои функции и MCP. Ни один gap не удаляет функцию из конечного объёма.
+Потоки работы: Docs, Sheets, Slides — отдельные агенты; общий ops/native/recovery/PDF/MCP/shell/CI — ведущий агент. Claims orell_flow для каждой записи.
+Порядок: 1) ADR/stack/licenses; 2) оболочка и три editor/model/IO; 3) единый ops + MCP; 4) recovery/locks/disk watcher; 5) тесты round-trip/формулы/безопасность; 6) review-1 трёх независимых участников с исправлениями; 7) review-2 после исправлений; 8) только затем NSIS, smoke install/uninstall, checksums и GitHub prerelease/Release согласно доказанной готовности.
+Матрицы: docs/parity.json + parity-docs.md + parity-sheets.md + parity-slides.md. Полный список функций Excel сверяется с Microsoft; частичные области явно отмечены. Базовые Office инструменты и будущие требования остаются в спецификации.
+Гейты стабильного релиза: весь P0, полное живое MCP/регистрация/undo, документы без потери поддерживаемого, screen=PDF, crash recovery, 100k performance, 150-file corpus, Windows 10/11 ручная приёмка, два review, CI, размеры. Если гейт не пройден, нельзя ставить v0.1.0 ready: честный preview и отчёт с остающимися задачами.

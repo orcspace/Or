@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/shell-core"]
+members = ["crates/shell-core", "crates/trinedocs"]
 resolver = "3"
 
 [workspace.package]
@@ -19,3 +19,9 @@ expect_used = "deny"
 lto = "thin"
 codegen-units = 1
 
+[profile.dist]
+inherits = "release"
+opt-level = "s"
+lto = "fat"
+strip = true
+panic = "abort"
