@@ -2681,16 +2681,32 @@ mod shell_input_tests {
         tab.document = Document::Docs(crate::docs::model::Doc::from_text("second"));
         Ok(())
     }
+    fn second_paragraph(app: &App) -> Result<u64, String> {
+        match app
+            .tabs
+            .iter()
+            .find(|tab| tab.id == 11)
+            .map(|tab| &tab.document)
+        {
+            Some(Document::Docs(doc)) => doc
+                .paragraphs
+                .first()
+                .map(|p| p.id)
+                .ok_or_else(|| "paragraph".to_string()),
+            _ => Err("second doc".into()),
+        }
+    }
     #[test]
     fn mcp_edit_in_another_document_preserves_active_document_input() -> Result<(), String> {
         let mut app = fixture()?;
         second_doc(&mut app)?;
         focus_page(&mut app)?;
+        let paragraph = second_paragraph(&app)?;
         let mut response = mcp_request(
             &mut app,
             "docs_insert_text",
             json!({
-                "document_id":11, "paragraph_id":1, "offset":0, "text":"agent "
+                "document_id":11, "paragraph_id":paragraph, "offset":0, "text":"agent "
             }),
         )?;
         frame_with_logic(&mut app, vec![egui::Event::Text("local".into())]);
@@ -2748,11 +2764,12 @@ mod shell_input_tests {
             .find(|tab| tab.id == 11)
             .ok_or("second tab")?
             .pending_docs_edits = None;
+        let paragraph = second_paragraph(&app)?;
         let mut response = mcp_request(
             &mut app,
             "docs_insert_text",
             json!({
-                "document_id":11, "paragraph_id":1, "offset":0, "text":"agent "
+                "document_id":11, "paragraph_id":paragraph, "offset":0, "text":"agent "
             }),
         )?;
         frame_with_logic(&mut app, vec![egui::Event::Text("prefix".into())]);
