@@ -68,7 +68,8 @@ pub fn write(pages: &[Page]) -> Result<Vec<u8>, String> {
             }
             let covered = faces.get(&key).is_some_and(|(bytes, index)| {
                 ttf_parser::Face::parse(bytes, *index).is_ok_and(|face| {
-                    t.chars()
+                    crate::render::normalized_text(t)
+                        .chars()
                         .filter(|c| !c.is_control())
                         .all(|c| face.glyph_index(c).is_some())
                 })
@@ -89,7 +90,11 @@ pub fn write(pages: &[Page]) -> Result<Vec<u8>, String> {
             .zip(&keys)
             .filter(|(_, k)| **k == key)
             .filter_map(|(i, _)| text(i))
-            .flat_map(str::chars)
+            .flat_map(|text| {
+                crate::render::normalized_text(text)
+                    .chars()
+                    .collect::<Vec<_>>()
+            })
             .filter(|c| !c.is_control())
             .collect();
         let (bytes, face_index) = match faces.get(&key) {
@@ -251,7 +256,7 @@ pub fn write(pages: &[Page]) -> Result<Vec<u8>, String> {
                         .ok_or("Шрифт PDF отсутствует")?;
                     let c = rgb(*color);
                     content.set_fill_rgb(c[0], c[1], c[2]);
-                    for (line, t) in text.lines().enumerate() {
+                    for (line, t) in crate::render::normalized_text(text).lines().enumerate() {
                         let encoded: Vec<u8> = t
                             .chars()
                             .filter(|c| !c.is_control())
@@ -419,7 +424,8 @@ fn validate_pages(pages: &[Page]) -> Result<(), String> {
                 | Primitive::TextStyled {
                     x, y, size, text, ..
                 } => {
-                    text_bytes = text_bytes.saturating_add(text.len());
+                    text_bytes =
+                        text_bytes.saturating_add(crate::render::normalized_text(text).len());
                     coord(*x) && coord(*y) && positive(*size)
                 }
                 Primitive::Rect { x, y, w, h, .. } | Primitive::Ellipse { x, y, w, h, .. } => {
@@ -455,6 +461,25 @@ fn validate_pages(pages: &[Page]) -> Result<(), String> {
 #[cfg(test)]
 mod limit_tests {
     use super::*;
+    #[test]
+    fn pdf_keeps_tabs_and_legacy_line_breaks() -> Result<(), String> {
+        let page = |text: &str| Page {
+            width: 200.0,
+            height: 200.0,
+            items: vec![Primitive::Text {
+                x: 10.0,
+                y: 10.0,
+                text: text.into(),
+                size: 12.0,
+                color: [0, 0, 0],
+            }],
+        };
+        assert_eq!(
+            write(&[page("A\tB\rC\u{000b}D\r\nE")])?,
+            write(&[page("A    B\nC\nD\nE")])?
+        );
+        Ok(())
+    }
     #[test]
     fn invalid_geometry_before_font_or_stream() {
         let p = Page {

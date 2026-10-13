@@ -497,8 +497,10 @@ impl Deck {
             .unwrap_or(0)
             .max(col.saturating_add(width))
             .max(1);
-        if rows > 1000 || columns > 1000 {
-            return Err("invalid_range: таблица слайда ограничена 1000×1000".into());
+        if rows > 1000 || columns > 1000 || rows.saturating_mul(columns) > 100000 {
+            return Err(
+                "invalid_range: предел таблицы — 1000 строк, 1000 столбцов и 100 000 ячеек".into(),
+            );
         }
         cells.resize_with(rows, Vec::new);
         for line in cells.iter_mut() {
@@ -524,13 +526,19 @@ impl Deck {
     ) -> Result<(), String> {
         let cells = self.table_cells_mut(slide_id, element_id)?;
         let columns = cells.iter().map(Vec::len).max().unwrap_or(0).max(1);
-        for line in cells.iter_mut() {
-            line.resize_with(columns, String::new);
-        }
         let count = if rows { cells.len() } else { columns };
         if insert {
-            if index > count || count >= 1000 {
+            let new_rows = cells.len().saturating_add(usize::from(rows));
+            let new_columns = columns.saturating_add(usize::from(!rows));
+            if index > count || count >= 1000 || new_rows.saturating_mul(new_columns) > 100000 {
                 return Err("invalid_range: index".into());
+            }
+        } else if index >= count || count <= 1 {
+            return Err("invalid_range: нельзя удалить эту строку или столбец".into());
+        }
+        if insert {
+            for line in cells.iter_mut() {
+                line.resize_with(columns, String::new);
             }
             if rows {
                 cells.insert(index, vec![String::new(); columns]);
@@ -540,14 +548,13 @@ impl Deck {
                 }
             }
         } else {
-            if index >= count || count <= 1 {
-                return Err("invalid_range: нельзя удалить эту строку или столбец".into());
-            }
             if rows {
                 cells.remove(index);
             } else {
                 for line in cells.iter_mut() {
-                    line.remove(index);
+                    if index < line.len() {
+                        line.remove(index);
+                    }
                 }
             }
         }
@@ -1115,6 +1122,69 @@ pub fn text_lines(element: &Element) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn failed_table_edits_preserve_ragged_data() -> Result<(), String> {
+        let mut deck = Deck::default();
+        let slide = deck.add_slide("blank");
+        let table = deck.add_element(
+            slide,
+            ElementKind::Table {
+                cells: vec![vec!["A".into(), "B".into()], vec!["C".into()]],
+            },
+        )?;
+        let original = deck.clone();
+        for (rows, insert, index) in [
+            (true, true, 9),
+            (false, true, 9),
+            (true, false, 9),
+            (false, false, 9),
+        ] {
+            assert!(deck.edit_table(slide, table, rows, insert, index).is_err());
+            assert_eq!(deck, original);
+        }
+        assert!(
+            deck.write_table(slide, table, 999, 999, &[vec!["X".into()]])
+                .is_err()
+        );
+        assert_eq!(deck, original);
+        Ok(())
+    }
+    #[test]
+    fn table_growth_respects_cell_budget_without_mutation() -> Result<(), String> {
+        let mut deck = Deck::empty();
+        let slide = deck.add_slide("blank");
+        let table = deck.add_element(
+            slide,
+            ElementKind::Table {
+                cells: vec![vec![String::new(); 1000]; 100],
+            },
+        )?;
+        let original = deck.clone();
+        assert!(deck.edit_table(slide, table, true, true, 100).is_err());
+        assert_eq!(deck, original);
+        deck.validate()?;
+        Ok(())
+    }
+    #[test]
+    fn deleting_from_ragged_tables_does_not_expand_them() -> Result<(), String> {
+        let mut deck = Deck::default();
+        let slide = deck.add_slide("blank");
+        let mut cells = vec![vec!["A".into()]; 1000];
+        cells[0] = vec!["B".into(); 1000];
+        let table = deck.add_element(slide, ElementKind::Table { cells })?;
+        deck.validate()?;
+        deck.edit_table(slide, table, false, false, 500)?;
+        deck.validate()?;
+        let cells = deck.table_cells_mut(slide, table)?;
+        assert_eq!(cells[0].len(), 999);
+        assert_eq!(cells[1].len(), 1);
+        deck.edit_table(slide, table, true, false, 0)?;
+        deck.validate()?;
+        let cells = deck.table_cells_mut(slide, table)?;
+        assert_eq!(cells.len(), 999);
+        assert!(cells.iter().all(|row| row.len() == 1));
+        Ok(())
+    }
     #[test]
     fn ids_survive_reorder() {
         let mut d = Deck::default();

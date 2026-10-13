@@ -1289,18 +1289,18 @@ fn delete_selection(deck: &mut Deck, state: &mut State) -> bool {
     changed
 }
 fn duplicate_selection(deck: &mut Deck, state: &mut State) -> bool {
-    let mut changed = false;
-    let selected = state.selected.clone();
-    state.selected.clear();
-    for id in selected {
-        match deck.duplicate_element(state.slide_id, id) {
-            Ok(id) => {
-                state.selected.push(id);
-                changed = true;
-            }
-            Err(error) => state.error = error,
-        }
-    }
+    let Some(slide) = deck.slide(state.slide_id) else {
+        return false;
+    };
+    let copies = slide
+        .elements
+        .iter()
+        .filter(|element| state.selected.contains(&element.id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let clipboard = std::mem::replace(&mut state.clipboard, copies.into());
+    let changed = paste_selection(deck, state);
+    state.clipboard = clipboard;
     changed
 }
 
@@ -1308,7 +1308,8 @@ fn table_columns(cells: &[Vec<String>]) -> usize {
     cells.iter().map(Vec::len).max().unwrap_or(0)
 }
 fn add_table_row(cells: &mut Vec<Vec<String>>) -> bool {
-    if cells.len() >= 1000 {
+    if cells.len() >= 1000 || (cells.len() + 1).saturating_mul(table_columns(cells).max(1)) > 100000
+    {
         return false;
     }
     cells.push(vec![String::new(); table_columns(cells).max(1)]);
@@ -1316,7 +1317,7 @@ fn add_table_row(cells: &mut Vec<Vec<String>>) -> bool {
 }
 fn add_table_column(cells: &mut Vec<Vec<String>>) -> bool {
     let columns = table_columns(cells);
-    if columns >= 1000 {
+    if columns >= 1000 || cells.len().max(1).saturating_mul(columns + 1) > 100000 {
         return false;
     }
     if cells.is_empty() {
@@ -1333,8 +1334,9 @@ fn delete_table_column(cells: &mut [Vec<String>]) -> bool {
         return false;
     }
     for row in cells {
-        row.resize_with(columns, String::new);
-        row.pop();
+        if row.len() == columns {
+            row.pop();
+        }
     }
     true
 }
@@ -1467,13 +1469,23 @@ fn properties(ui: &mut egui::Ui, e: &mut Element) -> bool {
                 });
             ui.horizontal_wrapped(|ui| {
                 if ui
-                    .add_enabled(cells.len() < 1000, egui::Button::new("+ строка"))
+                    .add_enabled(
+                        cells.len() < 1000
+                            && (cells.len() + 1).saturating_mul(table_columns(cells).max(1))
+                                <= 100000,
+                        egui::Button::new("+ строка"),
+                    )
                     .clicked()
                 {
                     changed |= add_table_row(cells);
                 }
                 if ui
-                    .add_enabled(table_columns(cells) < 1000, egui::Button::new("+ столбец"))
+                    .add_enabled(
+                        table_columns(cells) < 1000
+                            && cells.len().max(1).saturating_mul(table_columns(cells) + 1)
+                                <= 100000,
+                        egui::Button::new("+ столбец"),
+                    )
                     .clicked()
                 {
                     changed |= add_table_column(cells);
@@ -1803,8 +1815,10 @@ fn canvas(
         state.edit_text = None;
         response.request_focus();
     }
-    let interactions = slide.elements.clone();
-    for element in &interactions {
+    for index in 0..slide.elements.len() {
+        let Some(element) = slide.elements.get(index) else {
+            continue;
+        };
         let object = Rect::from_min_size(
             rect.min + Vec2::new(element.x, element.y) * scale,
             Vec2::new(element.w, element.h) * scale,
@@ -2696,6 +2710,15 @@ mod tests {
         );
         assert!(add_table_row(&mut cells));
         assert_eq!(cells.last(), Some(&vec![String::new(), String::new()]));
+        let mut ragged = vec![vec!["A".into()], vec!["B".into(), "C".into(), "D".into()]];
+        assert!(delete_table_column(&mut ragged));
+        assert_eq!(
+            ragged,
+            vec![
+                vec![String::from("A")],
+                vec![String::from("B"), String::from("C")]
+            ]
+        );
     }
     #[test]
     fn paste_preserves_groups_with_fresh_ids() {
@@ -2731,6 +2754,43 @@ mod tests {
         assert!(pasted.iter().all(|element| element.group == pasted_group
             && !copied.iter().any(|old| old.id == element.id)));
         assert!(deck.validate().is_ok());
+    }
+    #[test]
+    fn duplication_preserves_groups_layer_order_and_clipboard() -> Result<(), String> {
+        let mut deck = Deck::default();
+        let slide_id = deck.slides.first().map(|slide| slide.id).ok_or("slide")?;
+        let group = deck.allocate_id();
+        let slide = deck.slide_mut(slide_id).ok_or("slide")?;
+        for element in &mut slide.elements {
+            element.group = Some(group);
+        }
+        slide.elements.reverse();
+        let originals = slide.elements.clone();
+        let clipboard = std::sync::Arc::new(vec![Element {
+            text: "Буфер".into(),
+            ..Element::default()
+        }]);
+        let mut state = State {
+            slide_id,
+            selected: originals.iter().rev().map(|element| element.id).collect(),
+            clipboard: clipboard.clone(),
+            ..State::default()
+        };
+        assert!(duplicate_selection(&mut deck, &mut state));
+        assert!(std::sync::Arc::ptr_eq(&clipboard, &state.clipboard));
+        let copies = &deck.slide(slide_id).ok_or("slide")?.elements[originals.len()..];
+        let copy_group = copies
+            .first()
+            .and_then(|element| element.group)
+            .ok_or("group")?;
+        assert_ne!(copy_group, group);
+        for (copy, original) in copies.iter().zip(&originals) {
+            assert_eq!(copy.text, original.text);
+            assert_eq!(copy.group, Some(copy_group));
+            assert_eq!((copy.x, copy.y), (original.x + 20.0, original.y + 20.0));
+        }
+        deck.validate()?;
+        Ok(())
     }
     #[test]
     fn proportional_side_resize_moves_both_dimensions() {

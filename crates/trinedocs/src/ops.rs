@@ -104,6 +104,7 @@ impl Tab {
                 let group = matches!(author, Author::User)
                     && author == self.last_author
                     && self.last_edit.elapsed().as_secs_f32() < 1.0
+                    && self.version != self.saved_version
                     && self.undo.last().is_some_and(|c| c.label == label);
                 self.version = self.version.checked_add(1).ok_or("Исчерпаны версии")?;
                 let change = Change {
@@ -256,13 +257,21 @@ fn preserve_sheets_view(destination: &mut Document, source: &Document) {
             && let Some(index) = destination
                 .sheets
                 .iter()
-                .position(|sheet| sheet.id == sheet_id)
+                .position(|sheet| sheet.id == sheet_id && !sheet.hidden)
         {
             destination.active = index;
         } else {
             destination.active = destination
                 .active
                 .min(destination.sheets.len().saturating_sub(1));
+            if destination
+                .sheets
+                .get(destination.active)
+                .is_some_and(|sheet| sheet.hidden)
+                && let Some(visible) = destination.sheets.iter().position(|sheet| !sheet.hidden)
+            {
+                destination.active = visible;
+            }
         }
         destination.selection = source.selection.clone();
         destination.selection.row = destination
@@ -345,6 +354,38 @@ mod tests {
 #[cfg(test)]
 mod bounds_tests {
     use super::*;
+    #[test]
+    fn save_boundary_splits_user_undo_groups() -> Result<(), String> {
+        let mut tab = Tab::new(
+            1,
+            Document::create("docs")?,
+            "t".into(),
+            Some("t.docx".into()),
+        );
+        for value in ["saved", "saved plus more"] {
+            let mut document = tab.document.clone();
+            if let Document::Docs(doc) = &mut document {
+                let end = crate::docs::model::Position {
+                    paragraph: 0,
+                    offset: doc.paragraphs[0].len(),
+                };
+                doc.replace_range(crate::docs::model::Position::default(), end, value, None)?;
+            }
+            tab.apply(Op::Replace {
+                document,
+                label: "typing".into(),
+                author: Author::User,
+                base_version: None,
+            })?;
+            if value == "saved" {
+                tab.saved_version = tab.version;
+            }
+        }
+        assert_eq!(tab.undo.len(), 2);
+        tab.apply(Op::Undo)?;
+        assert!(matches!(&tab.document, Document::Docs(doc) if doc.plain_text() == "saved"));
+        Ok(())
+    }
     #[test]
     fn undo_failure_is_atomic() -> Result<(), String> {
         let mut t = Tab::new(1, Document::create("docs")?, "t".into(), None);
@@ -600,6 +641,30 @@ mod sheets_view_tests {
             .ok_or("Нет AI правки".into())
     }
 
+    #[test]
+    fn ai_rollback_of_unhide_selects_a_visible_sheet() -> Result<(), String> {
+        let mut book = Book::default();
+        let visible = book.active_id();
+        let hidden = book.add_sheet("Hidden")?;
+        book.sheet_by_id_mut(hidden).ok_or("Missing sheet")?.hidden = true;
+        let mut tab = Tab::new(1, Document::Sheets(book.clone()), "book".into(), None);
+        book.sheet_by_id_mut(hidden).ok_or("Missing sheet")?.hidden = false;
+        let change = agent_change(&mut tab, book)?;
+        if let Document::Sheets(book) = &mut tab.document {
+            book.active = book
+                .sheets
+                .iter()
+                .position(|sheet| sheet.id == hidden)
+                .ok_or("Missing sheet")?;
+        }
+        tab.reject_ai(change)?;
+        let Document::Sheets(restored) = &tab.document else {
+            return Err("Missing workbook".into());
+        };
+        assert_eq!(restored.active_id(), visible);
+        assert!(restored.sheet_by_id(hidden).ok_or("Missing sheet")?.hidden);
+        restored.validate()
+    }
     #[test]
     fn ai_rollback_preserves_navigation_without_content_conflict() -> Result<(), String> {
         let mut book = Book::default();

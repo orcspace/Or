@@ -54,6 +54,17 @@ pub enum Primitive {
         bytes: Vec<u8>,
     },
 }
+pub fn normalized_text(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.contains(['\r', '\t', '\u{000b}', '\u{000c}']) {
+        std::borrow::Cow::Owned(
+            text.replace("\r\n", "\n")
+                .replace(['\r', '\u{000b}', '\u{000c}'], "\n")
+                .replace('\t', "    "),
+        )
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
+}
 pub fn paint(ui: &mut egui::Ui, page: &Page, origin: egui::Pos2, scale: f32) {
     let p = ui.painter();
     let point = |x: f32, y: f32| origin + egui::vec2(x * scale, y * scale);
@@ -97,7 +108,7 @@ pub fn paint(ui: &mut egui::Ui, page: &Page, origin: egui::Pos2, scale: f32) {
                 p.text(
                     point(*x, *y),
                     egui::Align2::LEFT_TOP,
-                    text,
+                    normalized_text(text),
                     egui::FontId::new(size * scale, family),
                     rgb(*color),
                 );

@@ -105,6 +105,7 @@ pub fn run() -> Result<(), String> {
                 && let Ok(c) = serde_json::from_slice::<super::server::Connection>(&bytes)
                 && (39217..39317).contains(&c.port)
                 && c.token.len() == 64
+                && c.token.bytes().all(|byte| byte.is_ascii_hexdigit())
                 && tokio::net::TcpStream::connect(("127.0.0.1", c.port))
                     .await
                     .is_ok()
@@ -150,18 +151,22 @@ pub fn run() -> Result<(), String> {
                 .map_err(|e| e.to_string())?,
             config,
         );
-        let client = rmcp::model::ClientConfig::new(
-            ClientCapabilities::default(),
-            Implementation::new(
-                std::env::args()
-                    .skip_while(|a| a != "--client")
-                    .nth(1)
-                    .unwrap_or_else(|| "TrineDocs stdio".into()),
-                env!("CARGO_PKG_VERSION"),
-            ),
+        let client = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            rmcp::model::ClientConfig::new(
+                ClientCapabilities::default(),
+                Implementation::new(
+                    std::env::args()
+                        .skip_while(|a| a != "--client")
+                        .nth(1)
+                        .unwrap_or_else(|| "TrineDocs stdio".into()),
+                    env!("CARGO_PKG_VERSION"),
+                ),
+            )
+            .serve(transport),
         )
-        .serve(transport)
         .await
+        .map_err(|_| "MCP не ответил на инициализацию за 10 секунд".to_string())?
         .map_err(|e| e.to_string())?;
         let proxy = Proxy {
             peer: client.peer().clone(),

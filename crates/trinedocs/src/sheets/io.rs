@@ -17,7 +17,8 @@ pub fn read(bytes: &[u8], ext: &str) -> Result<Book, String> {
     if bytes.len() > MAX_FILE {
         return Err("Файл превышает 64 МБ".into());
     }
-    match ext.trim_start_matches('.').to_ascii_lowercase().as_str() {
+    let ext = ext.trim_start_matches('.').to_ascii_lowercase();
+    match ext.as_str() {
         "csv" | "tsv" | "txt" => {
             let text = decode_text(bytes)?;
             let sep = if ext.eq_ignore_ascii_case("tsv") {
@@ -36,7 +37,8 @@ pub fn read(bytes: &[u8], ext: &str) -> Result<Book, String> {
 }
 pub fn write(book: &Book, ext: &str) -> Result<Vec<u8>, String> {
     book.validate()?;
-    match ext.trim_start_matches('.').to_ascii_lowercase().as_str() {
+    let ext = ext.trim_start_matches('.').to_ascii_lowercase();
+    match ext.as_str() {
         "xlsx" => write_xlsx(book),
         "csv" | "tsv" => {
             let s = book.active_sheet().ok_or("Нет активного листа")?;
@@ -1075,6 +1077,14 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
     let mut paths = Vec::new();
     if let Some(bytes) = parts.get("xl/workbook.xml") {
         each_tag(bytes, |tag, a| {
+            if tag == "workbookView"
+                && let Some(active) = a
+                    .get("activeTab")
+                    .and_then(|value| value.parse::<usize>().ok())
+                && active < book.sheets.len()
+            {
+                book.active = active;
+            }
             if tag == "sheet"
                 && let (Some(name), Some(id)) = (a.get("name"), a.get("r:id"))
                 && let Some(path) = targets.get(id)
@@ -1190,6 +1200,13 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
             }
             Ok(())
         })?;
+    }
+    if book.active_sheet().is_some_and(|sheet| sheet.hidden) {
+        book.active = book
+            .sheets
+            .iter()
+            .position(|sheet| !sheet.hidden)
+            .ok_or("Книга не содержит видимых листов")?;
     }
     Ok(())
 }
@@ -1676,6 +1693,39 @@ mod tests {
             parse_csv("a,b,\r\n", ','),
             Ok(vec![vec!["a".into(), "b".into(), "".into()]])
         );
+    }
+    #[test]
+    fn dotted_tsv_extensions_keep_tabs() -> Result<(), String> {
+        let mut book = Book::default();
+        book.set_range(
+            book.active_id(),
+            0,
+            0,
+            &[vec!["a;b;c".into(), "value".into()]],
+        )?;
+        for ext in ["tsv", ".tsv", ".TSV"] {
+            let bytes = write(&book, ext)?;
+            assert!(decode_text(&bytes)?.contains("\t"));
+            let restored = read(&bytes, ext)?;
+            assert_eq!(
+                restored.read_range(restored.active_id(), 0, 0, 0, 1)?,
+                vec![vec!["a;b;c".to_string(), "value".to_string()]]
+            );
+        }
+        Ok(())
+    }
+    #[test]
+    fn xlsx_keeps_active_sheet() -> Result<(), String> {
+        let mut book = Book::default();
+        book.add_sheet("Second")?;
+        book.active = 1;
+        let restored = read(&write(&book, "xlsx")?, "xlsx")?;
+        assert_eq!(restored.active, 1);
+        assert_eq!(
+            restored.active_sheet().map(|sheet| sheet.name.as_str()),
+            Some("Second")
+        );
+        Ok(())
     }
     #[test]
     fn xlsx_roundtrip() -> Result<(), String> {

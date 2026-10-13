@@ -57,27 +57,29 @@ pub fn observe(ctx: &egui::Context) {
     let mut last_text = ctx
         .data(|d| d.get_temp::<f64>(text_paste_id()))
         .unwrap_or(f64::NEG_INFINITY);
-    let mut wanted = false;
-    for event in &events {
-        match event {
-            egui::Event::Paste(_) => last_text = now,
-            egui::Event::Key {
-                key,
-                pressed: false,
-                modifiers,
-                ..
-            } if (*key == egui::Key::V && modifiers.command)
-                || (*key == egui::Key::Insert && modifiers.shift) =>
-            {
-                wanted = now - last_text > 1.0;
-            }
-            _ => {}
-        }
+    if events
+        .iter()
+        .any(|event| matches!(event, egui::Event::Paste(_)))
+    {
+        last_text = now;
     }
+    let wanted = image_requested(&events, now, last_text);
     ctx.data_mut(|d| d.insert_temp(text_paste_id(), last_text));
     if wanted && let Some(png) = read_image() {
         offer(ctx, png);
     }
+}
+fn image_requested(events: &[egui::Event], now: f64, last_text: f64) -> bool {
+    now - last_text > 1.0
+        && !events
+            .iter()
+            .any(|event| matches!(event, egui::Event::Paste(_)))
+        && events.iter().any(|event| {
+            matches!(event,
+            egui::Event::Key { key, pressed: false, modifiers, .. }
+            if (*key == egui::Key::V && (modifiers.command || modifiers.ctrl))
+                || (*key == egui::Key::Insert && modifiers.shift))
+        })
 }
 /// The ribbon "Paste" command: text goes through egui, otherwise the clipboard picture.
 pub fn paste(ctx: &egui::Context) {
@@ -85,5 +87,31 @@ pub fn paste(ctx: &egui::Context) {
         ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste);
     } else if let Some(png) = read_image() {
         offer(ctx, png);
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn text_paste_suppresses_picture_regardless_of_event_order() {
+        let key = egui::Event::Key {
+            key: egui::Key::V,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers: egui::Modifiers::CTRL,
+        };
+        assert!(image_requested(
+            std::slice::from_ref(&key),
+            2.0,
+            f64::NEG_INFINITY
+        ));
+        let text = egui::Event::Paste("text".into());
+        assert!(!image_requested(
+            &[key.clone(), text.clone()],
+            2.0,
+            f64::NEG_INFINITY
+        ));
+        assert!(!image_requested(&[text, key], 2.0, f64::NEG_INFINITY));
     }
 }

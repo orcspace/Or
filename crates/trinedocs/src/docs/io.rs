@@ -179,8 +179,9 @@ pub fn read(bytes: &[u8], ext: &str) -> Result<Doc, String> {
 }
 pub fn write(doc: &Doc, ext: &str) -> Result<Vec<u8>, String> {
     doc.validate()?;
-    match ext.trim_start_matches('.').to_ascii_lowercase().as_str() {
-        "docx" | "dotx" | "docm" => write_docx(doc, ext.trim_start_matches('.')),
+    let ext = ext.trim_start_matches('.').to_ascii_lowercase();
+    match ext.as_str() {
+        "docx" | "dotx" | "docm" => write_docx(doc, &ext),
         "txt" => Ok(doc.plain_text().into_bytes()),
         "md" | "markdown" => Ok(write_markdown(doc).into_bytes()),
         "html" | "htm" => Ok(write_html(doc).into_bytes()),
@@ -1517,7 +1518,7 @@ fn inline_md(text: &str) -> Vec<Run> {
 fn read_markdown(text: &str) -> Doc {
     let mut doc = Doc::default();
     doc.paragraphs.clear();
-    for line in text.replace("\r\n", "\n").split('\n') {
+    for line in text.replace("\r\n", "\n").replace('\r', "\n").split('\n') {
         let id = doc.alloc_id();
         let mut p = Paragraph {
             id,
@@ -1722,19 +1723,16 @@ fn read_html(text: &str) -> Result<Doc, String> {
     })?;
     let mut doc = Doc::default();
     doc.paragraphs.clear();
-    fn walk(node: &Node, doc: &mut Doc) {
+    fn walk(node: &Node, doc: &mut Doc, inherited_css: &str) {
         if matches!(node.name.as_str(), "script" | "style" | "head") {
             return;
         }
+        let css = format!("{inherited_css};{}", node.attr("style").unwrap_or_default());
         let block = matches!(
             node.name.as_str(),
             "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "blockquote" | "li"
         );
-        let loose = matches!(node.name.as_str(), "div" | "body")
-            && !["p", "div", "h1", "h2", "h3", "li", "table"]
-                .iter()
-                .any(|tag| node.children.iter().any(|n| n.name == *tag));
-        if block || loose {
+        if block {
             let id = doc.alloc_id();
             let mut p = Paragraph {
                 id,
@@ -1813,7 +1811,9 @@ fn read_html(text: &str) -> Result<Doc, String> {
                     }
                 }
             }
-            runs(node, &TextFormat::default(), &mut p.runs);
+            let mut styled = node.clone();
+            styled.attrs.insert("style".into(), css.clone());
+            runs(&styled, &TextFormat::default(), &mut p.runs);
             match node.name.as_str() {
                 "h1" => p.style = "Heading1".into(),
                 "h2" => p.style = "Heading2".into(),
@@ -1825,14 +1825,66 @@ fn read_html(text: &str) -> Result<Doc, String> {
             p.normalize();
             doc.paragraphs.push(p);
         } else {
-            for child in &node.children {
-                walk(child, doc);
+            fn boundary(node: &Node) -> bool {
+                matches!(
+                    node.name.as_str(),
+                    "p" | "h1"
+                        | "h2"
+                        | "h3"
+                        | "h4"
+                        | "h5"
+                        | "h6"
+                        | "blockquote"
+                        | "li"
+                        | "div"
+                        | "section"
+                        | "article"
+                        | "html"
+                        | "body"
+                        | "table"
+                        | "thead"
+                        | "tbody"
+                        | "tfoot"
+                        | "tr"
+                        | "td"
+                        | "th"
+                        | "ul"
+                        | "ol"
+                        | "head"
+                        | "script"
+                        | "style"
+                ) || node.children.iter().any(boundary)
             }
+            fn flush(inline: &mut Vec<Node>, doc: &mut Doc, css: &str) {
+                let paragraph = Node {
+                    name: "p".into(),
+                    attrs: BTreeMap::from([("style".into(), css.into())]),
+                    children: std::mem::take(inline),
+                    ..Node::default()
+                };
+                // Formatting whitespace between blocks must not add blank paragraphs.
+                if !paragraph.text_content().trim().is_empty()
+                    || paragraph.children.iter().any(|n| n.name == "br")
+                {
+                    walk(&paragraph, doc, "");
+                }
+            }
+            let mut inline = Vec::new();
+            for child in &node.children {
+                if boundary(child) {
+                    flush(&mut inline, doc, &css);
+                    walk(child, doc, &css);
+                } else {
+                    inline.push(child.clone());
+                }
+            }
+            flush(&mut inline, doc, &css);
         }
     }
-    walk(&node, &mut doc);
-    doc.losses
-        .push("HTML: сложные CSS-макеты, сетевые изображения и таблицы не импортируются.".into());
+    walk(&node, &mut doc, "");
+    doc.losses.push(
+        "HTML: сложные CSS-макеты и сетевые изображения не импортируются; таблицы преобразуются в абзацы.".into(),
+    );
     doc.normalize();
     Ok(doc)
 }
@@ -2307,6 +2359,77 @@ mod tests {
                     .is_some_and(|r| r.format.link.as_deref() == Some("https://example.com"))
             );
         }
+    }
+    #[test]
+    fn html_mixed_blocks_and_tables_keep_all_visible_text() -> Result<(), String> {
+        let doc = read(
+            br#"<html><head><title>hidden</title></head><body>before <b>bold</b><p>middle</p>after<table><tr><th>Header</th><td><p>Cell one</p><p>Cell two</p></td></tr></table>end<script>hidden</script></body></html>"#,
+            "html",
+        )?;
+        assert_eq!(
+            doc.plain_text(),
+            "before bold\nmiddle\nafter\nHeader\nCell one\nCell two\nend"
+        );
+        assert!(
+            doc.paragraphs
+                .first()
+                .is_some_and(|p| p.runs.iter().any(|r| r.text == "bold" && r.format.bold))
+        );
+        assert!(
+            doc.losses
+                .iter()
+                .any(|loss| loss.contains("таблицы преобразуются"))
+        );
+        Ok(())
+    }
+    #[test]
+    fn html_container_formats_survive_loose_and_mixed_blocks() -> Result<(), String> {
+        for html in [
+            r#"<div style="font-size:24pt;color:#ff0000">Hello <b>bold</b></div>"#,
+            r#"<div style="font-size:24pt;color:#ff0000">Hello <p>middle <b>bold</b></p>end</div>"#,
+        ] {
+            let doc = read(html.as_bytes(), "html")?;
+            assert!(
+                doc.paragraphs
+                    .iter()
+                    .flat_map(|p| &p.runs)
+                    .all(|r| r.format.size == 24.0 && r.format.color == [255, 0, 0])
+            );
+            assert!(
+                doc.paragraphs
+                    .iter()
+                    .flat_map(|p| &p.runs)
+                    .any(|r| r.text == "bold" && r.format.bold)
+            );
+        }
+        Ok(())
+    }
+    #[test]
+    fn html_loose_body_preserves_heading_semantics() -> Result<(), String> {
+        let doc = read(b"<html><body><h4>Heading</h4></body></html>", "html")?;
+        assert_eq!(doc.plain_text(), "Heading");
+        assert_eq!(doc.paragraphs[0].style, "Heading3");
+        Ok(())
+    }
+    #[test]
+    fn office_extension_case_keeps_the_correct_content_type() -> Result<(), String> {
+        for (extension, expected) in [
+            (".DOTX", "wordprocessingml.template.main+xml"),
+            ("DOCM", "macroEnabled.main+xml"),
+        ] {
+            let parts = read_zip(&write(&Doc::from_text("text"), extension)?)?;
+            let content = parts
+                .get("[Content_Types].xml")
+                .ok_or("Missing content types")?;
+            assert!(String::from_utf8_lossy(content).contains(expected));
+        }
+        Ok(())
+    }
+    #[test]
+    fn markdown_legacy_newlines_form_separate_paragraphs() -> Result<(), String> {
+        let doc = read(b"first\rsecond\r\nthird", "md")?;
+        assert_eq!(doc.plain_text(), "first\nsecond\nthird");
+        Ok(())
     }
     #[test]
     fn html_own_export_preserves_mixed_text_order() {

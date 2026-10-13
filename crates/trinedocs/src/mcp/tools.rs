@@ -273,7 +273,32 @@ fn object<'a>(a: &'a Value, key: &str) -> Result<&'a serde_json::Map<String, Val
         .ok_or_else(|| format!("invalid_args: требуется объект {key}"))
 }
 /// Merges a JSON patch into a model value; `locked` fields (IDs, content) cannot change.
-fn patched<T: serde::Serialize + serde::de::DeserializeOwned>(
+trait PatchModel {
+    const OMITTED_FIELDS: &'static [&'static str] = &[];
+}
+impl PatchModel for crate::docs::model::Paragraph {
+    const OMITTED_FIELDS: &'static [&'static str] = &[
+        "line_points",
+        "line_exact",
+        "keep_next",
+        "keep_lines",
+        "widow_control",
+        "contextual_spacing",
+    ];
+}
+impl PatchModel for crate::docs::model::Table {
+    const OMITTED_FIELDS: &'static [&'static str] = &["borderless", "row_heights", "header_rows"];
+}
+impl PatchModel for crate::docs::model::TextFormat {}
+impl PatchModel for crate::docs::model::PageSetup {}
+impl PatchModel for crate::docs::model::AnchoredImage {}
+impl PatchModel for crate::sheets::model::Sheet {}
+impl PatchModel for crate::sheets::model::Chart {}
+impl PatchModel for crate::sheets::model::SheetImage {}
+impl PatchModel for crate::sheets::model::CellFormat {}
+impl PatchModel for crate::slides::model::Slide {}
+
+fn patched<T: serde::Serialize + serde::de::DeserializeOwned + PatchModel>(
     value: &T,
     patch: &serde_json::Map<String, Value>,
     locked: &[&str],
@@ -283,40 +308,89 @@ fn patched<T: serde::Serialize + serde::de::DeserializeOwned>(
     }
     let mut merged = serde_json::to_value(value).map_err(|e| e.to_string())?;
     if let Some(map) = merged.as_object_mut() {
+        if let Some(key) = patch
+            .keys()
+            .find(|key| !map.contains_key(*key) && !T::OMITTED_FIELDS.contains(&key.as_str()))
+        {
+            return Err(format!("invalid_args: неизвестное поле {key}"));
+        }
         map.extend(patch.clone());
     }
     serde_json::from_value(merged).map_err(|e| format!("invalid_args: {e}"))
 }
 /// Replaces every non-overlapping match of `query` in `text`; returns the number of replacements.
-fn replace_text(text: &mut String, query: &str, replacement: &str, case_sensitive: bool) -> usize {
+fn replace_text(
+    text: &mut String,
+    query: &str,
+    replacement: &str,
+    case_sensitive: bool,
+    limit: usize,
+    budget: &mut usize,
+) -> Result<usize, String> {
     let needle: Vec<char> = query.chars().collect();
     if needle.is_empty() {
-        return 0;
+        return Ok(0);
     }
     let same =
         |a: char, b: char| a == b || (!case_sensitive && a.to_lowercase().eq(b.to_lowercase()));
     let chars: Vec<char> = text.chars().collect();
-    let mut out = String::with_capacity(text.len());
-    let mut count = 0;
-    let mut i = 0;
-    while i < chars.len() {
-        if chars
-            .get(i..i + needle.len())
-            .is_some_and(|window| window.iter().zip(&needle).all(|(a, b)| same(*a, *b)))
-        {
-            out.push_str(replacement);
-            i += needle.len();
-            count += 1;
-        } else if let Some(c) = chars.get(i) {
-            out.push(*c);
-            i += 1;
+    let mut prefix = vec![0; needle.len()];
+    for index in 1..needle.len() {
+        let mut matched = prefix[index - 1];
+        while matched > 0 && !same(needle[index], needle[matched]) {
+            matched = prefix[matched - 1];
+        }
+        if same(needle[index], needle[matched]) {
+            matched += 1;
+        }
+        prefix[index] = matched;
+    }
+    let mut matches = Vec::new();
+    let mut matched = 0;
+    for (index, character) in chars.iter().enumerate() {
+        while matched > 0 && !same(*character, needle[matched]) {
+            matched = prefix[matched - 1];
+        }
+        if same(*character, needle[matched]) {
+            matched += 1;
+        }
+        if matched == needle.len() {
+            matches.push(index + 1 - matched);
+            matched = 0;
         }
     }
-    if count > 0 {
-        *text = out;
+    if matches.is_empty() {
+        return Ok(0);
     }
-    count
+    let removed: usize = matches
+        .iter()
+        .map(|start| {
+            chars[*start..*start + needle.len()]
+                .iter()
+                .map(|character| character.len_utf8())
+                .sum::<usize>()
+        })
+        .sum();
+    let length = matches
+        .len()
+        .checked_mul(replacement.len())
+        .and_then(|added| (text.len() - removed).checked_add(added));
+    let length = length
+        .filter(|length| *length <= limit.min(*budget))
+        .ok_or("too_large: результат замены превышает безопасный предел")?;
+    let mut out = String::with_capacity(length);
+    let mut cursor = 0;
+    for start in &matches {
+        out.extend(chars[cursor..*start].iter());
+        out.push_str(replacement);
+        cursor = *start + needle.len();
+    }
+    out.extend(chars[cursor..].iter());
+    *budget -= out.len();
+    *text = out;
+    Ok(matches.len())
 }
+
 fn flag(a: &Value, key: &str, default: bool) -> bool {
     a.get(key).and_then(Value::as_bool).unwrap_or(default)
 }
@@ -415,8 +489,45 @@ pub fn dispatch(
     a: &Value,
     client: &str,
 ) -> Result<Value, String> {
+    if !names().contains(&name) {
+        return Err("unsupported_feature: неизвестный инструмент MCP".into());
+    }
+    let result = dispatch_inner(tabs, next_id, name, a, client)?;
+    if read_only(name) {
+        struct ResponseSize(usize);
+        impl std::io::Write for ResponseSize {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if bytes.len() > self.0 {
+                    return Err(std::io::Error::other("response limit"));
+                }
+                self.0 -= bytes.len();
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        serde_json::to_writer(ResponseSize(1024 * 1024), &result).map_err(|_| {
+            "too_large: ответ MCP превышает 1 МБ; уменьшите диапазон или count".to_string()
+        })?;
+    }
+    Ok(result)
+}
+
+fn dispatch_inner(
+    tabs: &mut Vec<Tab>,
+    next_id: &mut u64,
+    name: &str,
+    a: &Value,
+    client: &str,
+) -> Result<Value, String> {
     if !a.is_object() {
         return Err("Аргументы должны быть объектом".into());
+    }
+    for key in ["contents", "formats", "front", "case_sensitive"] {
+        if a.get(key).is_some_and(|value| !value.is_boolean()) {
+            return Err(format!("invalid_args: {key} должен быть boolean"));
+        }
     }
     if let Some(mode) = a.get("mode") {
         let m = mode.as_str().ok_or("mode должен быть строкой")?;
@@ -501,6 +612,7 @@ pub fn dispatch(
         let row = u(a, "row", 0)?;
         let col = u(a, "col", 0)?;
         if active >= book.sheets.len()
+            || book.sheets.get(active).is_some_and(|sheet| sheet.hidden)
             || row >= crate::sheets::model::MAX_ROWS
             || col >= crate::sheets::model::MAX_COLS
         {
@@ -544,7 +656,7 @@ pub fn dispatch(
                     .sheet_by_id(
                         a.get("sheet_id")
                             .and_then(Value::as_u64)
-                            .unwrap_or_else(|| b.sheets.first().map(|s| s.id).unwrap_or_default()),
+                            .unwrap_or_else(|| b.active_id()),
                     )
                     .ok_or("Лист не найден")?;
                 json!({"kind":"sheets","sheet_id":sh.id,"cells":sh.cells.iter().skip(start).take(count).collect::<Vec<_>>(),"total":sh.cells.len()})
@@ -898,6 +1010,12 @@ pub fn dispatch(
                 if r1 < r0 || c1 < c0 {
                     return Err("invalid_range: r1/c1 меньше r0/c0".into());
                 }
+                let rows = (r1 - r0)
+                    .checked_add(1)
+                    .ok_or("invalid_range: диапазон строк переполнен")?;
+                let columns = (c1 - c0)
+                    .checked_add(1)
+                    .ok_or("invalid_range: диапазон столбцов переполнен")?;
                 let fill: Option<[u8; 3]> = style
                     .get("fill")
                     .map(|v| serde_json::from_value(v.clone()))
@@ -910,8 +1028,8 @@ pub fn dispatch(
                     .map_err(|e| format!("invalid_args: align {e}"))?;
                 let format = style.get("format").and_then(Value::as_object);
                 let mut touched = false;
-                for row in table.rows.iter_mut().skip(r0).take(r1 - r0 + 1) {
-                    for cell in row.iter_mut().skip(c0).take(c1 - c0 + 1) {
+                for row in table.rows.iter_mut().skip(r0).take(rows) {
+                    for cell in row.iter_mut().skip(c0).take(columns) {
                         touched = true;
                         if let Some(fill) = fill {
                             cell.fill = fill;
@@ -1036,6 +1154,7 @@ pub fn dispatch(
             let case_sensitive = flag(a, "case_sensitive", false);
             let only = a.get("sheet_id").and_then(Value::as_u64);
             let mut edits = Vec::new();
+            let mut budget = 32 * 1024 * 1024;
             for sheet in b
                 .sheets
                 .iter()
@@ -1043,7 +1162,14 @@ pub fn dispatch(
             {
                 for (key, cell) in &sheet.cells {
                     let mut input = cell.input.clone();
-                    if replace_text(&mut input, query, replacement, case_sensitive) > 0
+                    if replace_text(
+                        &mut input,
+                        query,
+                        replacement,
+                        case_sensitive,
+                        32767,
+                        &mut budget,
+                    )? > 0
                         && let Some((r, c)) = crate::sheets::model::parse_address(key)
                     {
                         edits.push((sheet.id, r, c, input));
@@ -1238,14 +1364,35 @@ pub fn dispatch(
             let replacement = s(a, "replacement")?;
             let case_sensitive = flag(a, "case_sensitive", false);
             let mut total = 0;
+            let mut budget = 8 * 1024 * 1024;
             for slide in &mut d.slides {
-                total += replace_text(&mut slide.notes, query, replacement, case_sensitive);
+                total += replace_text(
+                    &mut slide.notes,
+                    query,
+                    replacement,
+                    case_sensitive,
+                    8 * 1024 * 1024,
+                    &mut budget,
+                )?;
                 for element in &mut slide.elements {
-                    let mut hits =
-                        replace_text(&mut element.text, query, replacement, case_sensitive);
+                    let mut hits = replace_text(
+                        &mut element.text,
+                        query,
+                        replacement,
+                        case_sensitive,
+                        8 * 1024 * 1024,
+                        &mut budget,
+                    )?;
                     if let crate::slides::model::ElementKind::Table { cells } = &mut element.kind {
                         for cell in cells.iter_mut().flatten() {
-                            hits += replace_text(cell, query, replacement, case_sensitive);
+                            hits += replace_text(
+                                cell,
+                                query,
+                                replacement,
+                                case_sensitive,
+                                8 * 1024 * 1024,
+                                &mut budget,
+                            )?;
                         }
                     }
                     if hits > 0 {
@@ -1417,6 +1564,230 @@ pub fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn replacement_expansion_is_bounded_before_mutation() -> Result<(), String> {
+        let mut text = "aaa".to_string();
+        let original = text.clone();
+        let mut budget = 10;
+        assert!(replace_text(&mut text, "a", &"z".repeat(20), true, 10, &mut budget).is_err());
+        assert_eq!(text, original);
+        assert_eq!(budget, 10);
+        budget = 20;
+        assert_eq!(
+            replace_text(&mut text, "A", "ёж", false, 20, &mut budget)?,
+            3
+        );
+        assert_eq!(text, "ёжёжёж");
+        assert_eq!(budget, 20 - text.len());
+        Ok(())
+    }
+    #[test]
+    fn replacement_matcher_keeps_unicode_and_nonoverlap_semantics() -> Result<(), String> {
+        for (input, query, replacement, sensitive, expected, count) in [
+            ("aaaaa", "aaa", "z", true, "zaa", 1),
+            ("ababababac", "ababac", "z", true, "ababz", 1),
+            ("KxkX", "kx", "ёж", false, "ёжёж", 2),
+            ("value", "", "z", true, "value", 0),
+        ] {
+            let mut text = input.to_string();
+            let mut budget = 100;
+            assert_eq!(
+                replace_text(&mut text, query, replacement, sensitive, 100, &mut budget)?,
+                count
+            );
+            assert_eq!(text, expected);
+        }
+        Ok(())
+    }
+    #[test]
+    fn unknown_patch_fields_fail_instead_of_disappearing() -> Result<(), String> {
+        let format = crate::sheets::model::CellFormat::default();
+        let patch = json!({"boldd":true});
+        assert!(patched(&format, patch.as_object().ok_or("patch")?, &[]).is_err());
+        Ok(())
+    }
+    #[test]
+    fn omitted_default_paragraph_and_table_fields_remain_patchable() -> Result<(), String> {
+        let mut tabs = Vec::new();
+        let mut next = 1;
+        dispatch(
+            &mut tabs,
+            &mut next,
+            "create_document",
+            &json!({"kind":"docs"}),
+            "agent",
+        )?;
+        let paragraph = docs_of(&tabs)?.paragraphs.first().ok_or("paragraph")?.id;
+        dispatch(
+            &mut tabs,
+            &mut next,
+            "docs_set_paragraph",
+            &json!({
+                "document_id":1,"start_paragraph_id":paragraph,
+                "paragraph":{"line_points":14.0,"line_exact":true,"keep_next":true,"keep_lines":true,"widow_control":false,"contextual_spacing":true}
+            }),
+            "agent",
+        )?;
+        let p = docs_of(&tabs)?.paragraphs.first().ok_or("paragraph")?;
+        assert_eq!(p.line_points, 14.0);
+        assert!(p.line_exact && p.keep_next && p.keep_lines && p.contextual_spacing);
+        assert!(!p.widow_control);
+        dispatch(
+            &mut tabs,
+            &mut next,
+            "docs_insert_table",
+            &json!({"document_id":1,"paragraph_id":paragraph,"rows":1,"columns":1}),
+            "agent",
+        )?;
+        let table = docs_of(&tabs)?.tables.first().ok_or("table")?.id;
+        dispatch(
+            &mut tabs,
+            &mut next,
+            "docs_format_table",
+            &json!({
+                "document_id":1,"table_id":table,"format":{"borderless":true,"row_heights":[24.0],"header_rows":1}
+            }),
+            "agent",
+        )?;
+        let t = docs_of(&tabs)?.tables.first().ok_or("table")?;
+        assert!(t.borderless);
+        assert_eq!(t.row_heights, vec![24.0]);
+        assert_eq!(t.header_rows, 1);
+        for (tool, args) in [
+            (
+                "docs_set_paragraph",
+                json!({"document_id":1,"start_paragraph_id":paragraph,"paragraph":{"keep_nexxt":true}}),
+            ),
+            (
+                "docs_format_table",
+                json!({"document_id":1,"table_id":table,"format":{"header_rowss":1}}),
+            ),
+        ] {
+            let before = tabs[0].document.clone();
+            let version = tabs[0].version;
+            assert!(dispatch(&mut tabs, &mut next, tool, &args, "agent").is_err());
+            assert_eq!(tabs[0].document, before);
+            assert_eq!(tabs[0].version, version);
+        }
+        Ok(())
+    }
+    #[test]
+    fn selection_cannot_activate_hidden_sheet() -> Result<(), String> {
+        let mut book = crate::sheets::model::Book::default();
+        let hidden = book.add_sheet("Hidden")?;
+        book.sheet_by_id_mut(hidden).ok_or("sheet")?.hidden = true;
+        let mut tabs = vec![Tab::new(1, Document::Sheets(book), "Book".into(), None)];
+        let before = tabs[0].document.clone();
+        for mode in ["apply", "dry_run"] {
+            assert!(
+                dispatch(
+                    &mut tabs,
+                    &mut 2,
+                    "set_selection",
+                    &json!({"document_id":1,"sheet_id":hidden,"mode":mode}),
+                    "agent"
+                )
+                .is_err()
+            );
+            assert_eq!(tabs[0].document, before);
+        }
+        Ok(())
+    }
+    #[test]
+    fn every_read_response_obeys_size_limit() -> Result<(), String> {
+        let mut book = crate::sheets::model::Book::default();
+        let sheet = book.active_id();
+        for row in 0..40 {
+            book.set_input(sheet, row, 0, &format!("needle{}", "x".repeat(30000)))?;
+        }
+        book.recalculate();
+        let mut tabs = vec![Tab::new(1, Document::Sheets(book), "Book".into(), None)];
+        let before = tabs[0].document.clone();
+        let error = dispatch(
+            &mut tabs,
+            &mut 2,
+            "sheets_find",
+            &json!({"document_id":1,"sheet_id":sheet,"query":"needle","count":40}),
+            "agent",
+        )
+        .err()
+        .ok_or("expected size error")?;
+        assert!(error.starts_with("too_large:"));
+        assert_eq!(tabs[0].document, before);
+        Ok(())
+    }
+    #[test]
+    fn invalid_boolean_cannot_turn_clear_into_data_deletion() -> Result<(), String> {
+        let mut book = crate::sheets::model::Book::default();
+        let sheet = book.active_id();
+        book.set_cell(sheet, 0, 0, "keep")?;
+        let mut tabs = vec![Tab::new(1, Document::Sheets(book), "Book".into(), None)];
+        let before = tabs[0].document.clone();
+        assert!(
+            dispatch(
+                &mut tabs,
+                &mut 2,
+                "sheets_clear_range",
+                &json!({"document_id":1,"sheet_id":sheet,"contents":"false","formats":false}),
+                "agent"
+            )
+            .is_err()
+        );
+        assert_eq!(tabs[0].document, before);
+        assert_eq!(tabs[0].version, 0);
+        Ok(())
+    }
+    #[test]
+    fn slides_bulk_replacement_failure_is_atomic() -> Result<(), String> {
+        let mut deck = crate::slides::model::Deck::default();
+        deck.slides.first_mut().ok_or("slide")?.notes = "a".repeat(10000);
+        let mut tabs = vec![Tab::new(1, Document::Slides(deck), "Deck".into(), None)];
+        let before = tabs[0].document.clone();
+        let error = dispatch(
+            &mut tabs,
+            &mut 2,
+            "slides_replace_all",
+            &json!({"document_id":1,"query":"a","replacement":"b".repeat(1000)}),
+            "agent",
+        )
+        .err()
+        .ok_or("expected size error")?;
+        assert!(error.starts_with("too_large:"));
+        assert_eq!(tabs[0].document, before);
+        assert_eq!(tabs[0].version, 0);
+        Ok(())
+    }
+    #[test]
+    fn table_format_extreme_bounds_return_error_without_mutation() -> Result<(), String> {
+        let mut tabs = Vec::new();
+        let mut next = 1;
+        dispatch(
+            &mut tabs,
+            &mut next,
+            "create_document",
+            &json!({"kind":"docs"}),
+            "agent",
+        )?;
+        let paragraph = docs_of(&tabs)?.paragraphs.first().ok_or("paragraph")?.id;
+        dispatch(
+            &mut tabs,
+            &mut next,
+            "docs_insert_table",
+            &json!({"document_id":1,"paragraph_id":paragraph,"rows":1,"columns":1}),
+            "agent",
+        )?;
+        let table = docs_of(&tabs)?.tables.first().ok_or("table")?.id;
+        let before = tabs[0].document.clone();
+        let version = tabs[0].version;
+        for key in ["r1", "c1"] {
+            let mut args = json!({"document_id":1,"table_id":table,"cell":{"fill":[1,2,3]}});
+            args[key] = json!(usize::MAX);
+            assert!(dispatch(&mut tabs, &mut next, "docs_format_table", &args, "agent").is_err());
+            assert_eq!(tabs[0].document, before);
+            assert_eq!(tabs[0].version, version);
+        }
+        Ok(())
+    }
     fn docs_of(tabs: &[Tab]) -> Result<&crate::docs::model::Doc, String> {
         match tabs.first().map(|t| &t.document) {
             Some(Document::Docs(d)) => Ok(d),

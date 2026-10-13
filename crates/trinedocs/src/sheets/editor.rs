@@ -935,9 +935,11 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                     .iter()
                     .filter(|((r, c), _)| (*r, *c) > (row, col))
                     .chain(cells.iter().filter(|((r, c), _)| (*r, *c) <= (row, col)))
-                    .find(|(_, c)| {
+                    .find(|((r, col), c)| {
                         c.input.to_lowercase().contains(&needle)
-                            || c.value.display().to_lowercase().contains(&needle)
+                            || s.display(*r, *col, book.locale_ru)
+                                .to_lowercase()
+                                .contains(&needle)
                     })
                     .map(|(pos, _)| *pos);
                 if let Some((r, c)) = found {
@@ -959,27 +961,18 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                     .desired_width(140.0)
                     .id(state_id.with("replace")),
             );
-            if command_action(ui.button("Все"), book, &mut state, &mut changed)
+            if command_action(ui.button("Заменить все"), book, &mut state, &mut changed)
                 && !state.find.is_empty()
             {
-                let inputs: Vec<_> = book
-                    .active_sheet()
-                    .map(|s| {
-                        s.cells
-                            .iter()
-                            .filter_map(|(a, c)| {
-                                super::model::parse_address(a)
-                                    .map(|pos| (pos, c.input.replace(&state.find, &state.replace)))
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                for ((r, c), input) in inputs {
-                    changed |= result(&mut state, book.set_input(id, r, c, &input).map(|_| ()));
+                match book.replace_all(id, &state.find, &state.replace) {
+                    Ok(count) => {
+                        changed |= count > 0;
+                        state.error.clear();
+                    }
+                    Err(error) => state.error = error,
                 }
-                book.recalculate();
             }
-            if ui.button("×").clicked() {
+            if ui.button("×").on_hover_text("Закрыть поиск").clicked() {
                 state.find_open = false;
             }
         });

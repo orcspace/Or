@@ -10,7 +10,7 @@ use std::{
     process::{Child, Command, Stdio},
     sync::{
         Arc, Mutex,
-        mpsc::{Receiver, Sender, channel},
+        mpsc::{Receiver, SyncSender, channel, sync_channel},
     },
 };
 
@@ -77,9 +77,15 @@ pub struct Context {
     /// Text the user selected in the document.
     pub selection: String,
 }
+#[derive(Default)]
+struct ProcessState {
+    child: Option<Child>,
+    cleanup: Option<std::thread::JoinHandle<()>>,
+}
+type Process = Arc<Mutex<ProcessState>>;
 struct Turn {
     rx: Receiver<Event>,
-    child: Arc<Mutex<Option<Child>>>,
+    child: Process,
     replied: bool,
     /// Answer text streamed so far.
     draft: String,
@@ -204,6 +210,7 @@ pub struct Chat {
     pub messages: Vec<Message>,
     input: String,
     turn: Option<Turn>,
+    processes: Vec<Process>,
     session: [Option<String>; 2],
     access: [Access; 2],
     paths: [Option<PathBuf>; 2],
@@ -239,6 +246,7 @@ impl Chat {
             messages: Vec::new(),
             input: String::new(),
             turn: None,
+            processes: Vec::new(),
             session: [None, None],
             access: [Access::Checking; 2],
             paths: [None, None],
@@ -301,7 +309,8 @@ impl Chat {
         });
         self.probe = Some(rx);
     }
-    fn poll(&mut self) {
+    pub fn poll(&mut self) {
+        self.processes.retain(process_running);
         if let Some(rx) = &self.probe {
             loop {
                 match rx.try_recv() {
@@ -322,7 +331,21 @@ impl Chat {
         }
         let mut finished = false;
         if let Some(turn) = &mut self.turn {
-            while let Ok(event) = turn.rx.try_recv() {
+            for _ in 0..64 {
+                let event = match turn.rx.try_recv() {
+                    Ok(event) => event,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        push_text(&mut self.messages, std::mem::take(&mut turn.draft));
+                        self.messages.push(Message {
+                            role: Role::Error,
+                            text: "Соединение с ассистентом прервано. Можно повторить запрос."
+                                .into(),
+                        });
+                        finished = true;
+                        break;
+                    }
+                };
                 match event {
                     Event::Session(id) => self.session[self.provider.index()] = Some(id),
                     Event::Delta(text) => {
@@ -335,13 +358,14 @@ impl Chat {
                         push_text(&mut self.messages, text);
                     }
                     Event::Tool(name) => {
-                        turn.draft.clear();
+                        push_text(&mut self.messages, std::mem::take(&mut turn.draft));
                         self.messages.push(Message {
                             role: Role::Tool,
                             text: name,
                         });
                     }
                     Event::Error(text) => {
+                        push_text(&mut self.messages, std::mem::take(&mut turn.draft));
                         if is_auth_error(&text) {
                             self.needs_login = true;
                             self.access[self.provider.index()] = Access::LoggedOut;
@@ -352,17 +376,28 @@ impl Chat {
                             text,
                         });
                     }
-                    Event::Done => finished = true,
+                    Event::Done => {
+                        finished = true;
+                        break;
+                    }
                 }
             }
         }
-        if finished {
-            self.turn = None;
+        if finished && let Some(turn) = self.turn.take() {
+            push_text(&mut self.messages, turn.draft);
         }
     }
     pub fn stop(&mut self) {
+        self.poll();
         if let Some(turn) = self.turn.take() {
             kill(&turn.child);
+            if !self
+                .processes
+                .iter()
+                .any(|process| Arc::ptr_eq(process, &turn.child))
+            {
+                self.processes.push(turn.child.clone());
+            }
             // Keep what was already streamed.
             push_text(&mut self.messages, turn.draft);
             self.messages.push(Message {
@@ -433,7 +468,10 @@ impl Chat {
             prompt,
             ctx,
         ) {
-            Ok(turn) => self.turn = Some(turn),
+            Ok(turn) => {
+                self.processes.push(turn.child.clone());
+                self.turn = Some(turn);
+            }
             Err(e) => self.messages.push(Message {
                 role: Role::Error,
                 text: e,
@@ -893,7 +931,10 @@ impl Chat {
 impl Drop for Chat {
     fn drop(&mut self) {
         if let Some(turn) = self.turn.take() {
-            kill(&turn.child);
+            finish_process(&turn.child);
+        }
+        for process in self.processes.drain(..) {
+            finish_process(&process);
         }
     }
 }
@@ -1314,8 +1355,11 @@ fn start(
     let stdin = child.stdin.take();
     let stdout = child.stdout.take().ok_or("Нет stdout")?;
     let stderr = child.stderr.take();
-    let child = Arc::new(Mutex::new(Some(child)));
-    let (tx, rx) = channel();
+    let child = Arc::new(Mutex::new(ProcessState {
+        child: Some(child),
+        cleanup: None,
+    }));
+    let (tx, rx) = sync_channel(8);
     std::thread::spawn(move || {
         if let Some(mut stdin) = stdin {
             let _ = stdin.write_all(prompt.as_bytes());
@@ -1326,7 +1370,18 @@ fn start(
         let errors = errors.clone();
         std::thread::spawn(move || {
             let mut buf = Vec::new();
-            let _ = (&mut stderr).take(64 * 1024).read_to_end(&mut buf);
+            let mut chunk = [0u8; 8192];
+            loop {
+                match stderr.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(count) => {
+                        buf.extend_from_slice(&chunk[..count]);
+                        if buf.len() > 64 * 1024 {
+                            buf.drain(..buf.len() - 64 * 1024);
+                        }
+                    }
+                }
+            }
             if let Ok(mut e) = errors.lock() {
                 *e = String::from_utf8_lossy(&buf).into_owned();
             }
@@ -1346,15 +1401,26 @@ fn start(
 fn read(
     provider: Provider,
     stdout: impl Read,
-    tx: &Sender<Event>,
-    child: &Arc<Mutex<Option<Child>>>,
+    tx: &SyncSender<Event>,
+    child: &Process,
     errors: &Arc<Mutex<String>>,
     ctx: &egui::Context,
 ) {
     let mut any = false;
-    for line in BufReader::new(stdout).lines() {
-        let Ok(line) = line else { break };
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+    let mut output_bytes = 0usize;
+    let mut reader = BufReader::new(stdout);
+    'stream: loop {
+        let line = match read_line_limited(&mut reader) {
+            Ok(Some(line)) => line,
+            Ok(None) => break,
+            Err(error) => {
+                let _ = tx.send(Event::Error(error));
+                any = true;
+                kill(child);
+                break;
+            }
+        };
+        let Ok(value) = serde_json::from_slice::<Value>(&line) else {
             continue;
         };
         let events = match provider {
@@ -1362,19 +1428,32 @@ fn read(
             Provider::Codex => parse_codex(&value),
         };
         for event in events {
-            any |= matches!(event, Event::Text(_) | Event::Error(_));
+            let size = match &event {
+                Event::Session(text)
+                | Event::Delta(text)
+                | Event::Text(text)
+                | Event::Tool(text)
+                | Event::Error(text) => text.len(),
+                Event::Done => 0,
+            };
+            output_bytes = output_bytes.saturating_add(size);
+            if output_bytes > 32 * 1024 * 1024 {
+                let _ = tx.send(Event::Error(
+                    "Ответ ассистента превышает 32 МБ. Запрос остановлен.".into(),
+                ));
+                any = true;
+                kill(child);
+                break 'stream;
+            }
+            any |= matches!(event, Event::Text(_) | Event::Delta(_) | Event::Error(_));
             if tx.send(event).is_err() {
                 return;
             }
         }
         ctx.request_repaint();
     }
-    let status = child
-        .lock()
-        .ok()
-        .and_then(|mut c| c.take())
-        .and_then(|mut c| c.wait().ok());
-    if !any {
+    let status = wait_child(child);
+    if !any || status.is_some_and(|status| !status.success()) {
         // Give the stderr reader a moment to finish after the process exits.
         std::thread::sleep(std::time::Duration::from_millis(150));
         let stderr = errors
@@ -1402,6 +1481,20 @@ fn read(
     }
     let _ = tx.send(Event::Done);
     ctx.request_repaint();
+}
+fn read_line_limited(reader: &mut impl BufRead) -> Result<Option<Vec<u8>>, String> {
+    const LIMIT: usize = 8 * 1024 * 1024;
+    let mut line = Vec::new();
+    (&mut *reader)
+        .take(LIMIT as u64 + 1)
+        .read_until(b'\n', &mut line)
+        .map_err(|e| e.to_string())?;
+    if line.len() > LIMIT {
+        return Err(
+            "Ответ CLI превышает безопасный размер строки (8 МБ). Запрос остановлен.".into(),
+        );
+    }
+    Ok((!line.is_empty()).then_some(line))
 }
 fn tool_name(name: &str) -> String {
     name.strip_prefix("mcp__trinedocs__")
@@ -1525,28 +1618,219 @@ pub fn parse_codex(v: &Value) -> Vec<Event> {
     }
     out
 }
-fn kill(child: &Arc<Mutex<Option<Child>>>) {
-    let Ok(mut guard) = child.lock() else {
-        return;
-    };
-    if let Some(c) = guard.as_mut() {
-        #[cfg(windows)]
+fn wait_child(child: &Process) -> Option<std::process::ExitStatus> {
+    loop {
         {
-            // npm installs run through cmd.exe → node; kill the whole tree.
-            let _ = hidden(Path::new("taskkill"))
-                .args(["/PID", &c.id().to_string(), "/T", "/F"])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+            let mut guard = child.lock().ok()?;
+            let process = guard.child.as_mut()?;
+            match process.try_wait() {
+                Ok(Some(status)) => {
+                    guard.child.take();
+                    return Some(status);
+                }
+                Ok(None) => {}
+                Err(_) => return None,
+            }
         }
-        let _ = c.kill();
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }
+fn terminate(mut child: Child) {
+    #[cfg(windows)]
+    {
+        // npm installs run through cmd.exe → node; kill the whole tree.
+        let _ = hidden(Path::new("taskkill"))
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+fn kill(child: &Process) {
+    let mut process = child
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(child) = process.child.take() {
+        // Register cleanup before releasing the lock so shutdown cannot miss it.
+        process.cleanup = Some(std::thread::spawn(move || terminate(child)));
+    }
+}
+fn finish_process(child: &Process) {
+    let (child, cleanup) = {
+        let mut process = child
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (process.child.take(), process.cleanup.take())
+    };
+    if let Some(child) = child {
+        terminate(child);
+    }
+    if let Some(cleanup) = cleanup {
+        let _ = cleanup.join();
+    }
+}
+fn process_running(child: &Process) -> bool {
+    let mut process = child
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if process.child.is_some() {
+        return true;
+    }
+    if process
+        .cleanup
+        .as_ref()
+        .is_some_and(|cleanup| !cleanup.is_finished())
+    {
+        return true;
+    }
+    if let Some(cleanup) = process.cleanup.take() {
+        let _ = cleanup.join();
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    fn pending_cleanup() -> (
+        Process,
+        std::sync::mpsc::Sender<()>,
+        Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let (release, gate) = channel();
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let completed = finished.clone();
+        let cleanup = std::thread::spawn(move || {
+            if gate
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .is_ok()
+            {
+                completed.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+        (
+            Arc::new(Mutex::new(ProcessState {
+                child: None,
+                cleanup: Some(cleanup),
+            })),
+            release,
+            finished,
+        )
+    }
+    #[test]
+    fn stop_and_clear_keep_cleanup_until_chat_shutdown() -> Result<(), String> {
+        let (process, release, finished) = pending_cleanup();
+        let mut chat = Chat::new();
+        let (_events, rx) = sync_channel(8);
+        chat.turn = Some(Turn {
+            rx,
+            child: process.clone(),
+            replied: false,
+            draft: String::new(),
+            started: std::time::Instant::now(),
+        });
+        chat.processes.push(process);
+        // Stop/Clear must return while the cleanup worker is still blocked.
+        chat.stop();
+        chat.clear();
+        assert!(!finished.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(chat.processes.len(), 1);
+        release.send(()).map_err(|error| error.to_string())?;
+        drop(chat);
+        assert!(finished.load(std::sync::atomic::Ordering::SeqCst));
+        Ok(())
+    }
+    #[test]
+    fn completed_reader_turn_keeps_pending_cleanup_for_shutdown() -> Result<(), String> {
+        let (process, release, finished) = pending_cleanup();
+        let mut chat = Chat::new();
+        let (events, rx) = sync_channel(8);
+        events
+            .send(Event::Done)
+            .map_err(|error| error.to_string())?;
+        chat.turn = Some(Turn {
+            rx,
+            child: process.clone(),
+            replied: false,
+            draft: String::new(),
+            started: std::time::Instant::now(),
+        });
+        chat.processes.push(process);
+        chat.poll();
+        assert!(!chat.busy());
+        assert_eq!(chat.processes.len(), 1);
+        assert!(!finished.load(std::sync::atomic::Ordering::SeqCst));
+        release.send(()).map_err(|error| error.to_string())?;
+        drop(chat);
+        assert!(finished.load(std::sync::atomic::Ordering::SeqCst));
+        Ok(())
+    }
+    #[test]
+    fn streamed_draft_survives_done_tools_and_disconnect() {
+        for ending in [
+            Some(Event::Done),
+            Some(Event::Tool("docs_read".into())),
+            None,
+        ] {
+            let mut chat = Chat::new();
+            let (tx, rx) = sync_channel(64);
+            chat.turn = Some(Turn {
+                rx,
+                child: Arc::new(Mutex::new(ProcessState::default())),
+                replied: false,
+                draft: String::new(),
+                started: std::time::Instant::now(),
+            });
+            assert!(tx.send(Event::Delta("Сохранённый ответ".into())).is_ok());
+            if let Some(event) = ending {
+                assert!(tx.send(event).is_ok());
+            }
+            drop(tx);
+            chat.poll();
+            assert!(!chat.busy());
+            assert_eq!(
+                chat.messages
+                    .iter()
+                    .filter(|m| m.role == Role::Assistant)
+                    .map(|m| m.text.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["Сохранённый ответ"]
+            );
+        }
+    }
+    #[test]
+    fn cli_lines_are_bounded_and_remain_separate() -> Result<(), String> {
+        let mut reader = std::io::Cursor::new(b"first\nsecond\n");
+        assert_eq!(read_line_limited(&mut reader)?, Some(b"first\n".to_vec()));
+        assert_eq!(read_line_limited(&mut reader)?, Some(b"second\n".to_vec()));
+        assert_eq!(read_line_limited(&mut reader)?, None);
+        let mut oversized = std::io::Cursor::new(vec![b'x'; 8 * 1024 * 1024 + 1]);
+        assert!(read_line_limited(&mut oversized).is_err());
+        Ok(())
+    }
+    #[test]
+    fn stopping_preserves_already_queued_stream_text() {
+        let mut chat = Chat::new();
+        let (tx, rx) = sync_channel(64);
+        chat.turn = Some(Turn {
+            rx,
+            child: Arc::new(Mutex::new(ProcessState::default())),
+            replied: false,
+            draft: String::new(),
+            started: std::time::Instant::now(),
+        });
+        assert!(tx.send(Event::Delta("Ответ до остановки".into())).is_ok());
+        chat.stop();
+        assert!(!chat.busy());
+        assert_eq!(
+            chat.messages.first().map(|m| m.text.as_str()),
+            Some("Ответ до остановки")
+        );
+    }
     #[test]
     fn claude_stream_events() {
         assert_eq!(

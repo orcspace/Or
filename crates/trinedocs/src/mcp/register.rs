@@ -45,6 +45,9 @@ pub fn preview(client: Client, shim: &Path) -> Result<Preview, String> {
     prepare(client, client.path()?, shim)
 }
 fn prepare(client: Client, path: PathBuf, shim: &Path) -> Result<Preview, String> {
+    if !shim.is_absolute() {
+        return Err("Путь шима должен быть абсолютным".into());
+    }
     let before = if path.exists() {
         Some(crate::util::read_limited(&path, 1024 * 1024)?)
     } else {
@@ -139,6 +142,17 @@ pub fn apply(p: &Preview) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn registration_requires_absolute_shim_path() {
+        assert!(
+            prepare(
+                Client::Codex,
+                std::env::temp_dir().join("unused-config.toml"),
+                Path::new("trinedocs-mcp.exe")
+            )
+            .is_err()
+        );
+    }
     #[test]
     fn preserves_unrelated_toml_and_rejects_stale_preview() -> Result<(), String> {
         let path =

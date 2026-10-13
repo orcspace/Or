@@ -1,4 +1,142 @@
 use super::{formula, model::*};
+#[test]
+fn images_follow_structural_edits_without_losing_data() -> Result<(), String> {
+    let mut book = Book::default();
+    let id = book.active_id();
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgba8(2, 2)
+        .write_to(&mut png, image::ImageFormat::Png)
+        .map_err(|error| error.to_string())?;
+    book.add_image(id, 3, 4, png.into_inner())?;
+    book.edit_dimension(id, 1, 2, true, false)?;
+    book.edit_dimension(id, 2, 3, false, false)?;
+    let picture = book
+        .active_sheet()
+        .and_then(|sheet| sheet.images.first())
+        .ok_or("image")?;
+    assert_eq!((picture.row, picture.col), (5, 7));
+    let bytes = picture.bytes.clone();
+    book.edit_dimension(id, 4, 2, true, true)?;
+    book.edit_dimension(id, 6, 2, false, true)?;
+    let picture = book
+        .active_sheet()
+        .and_then(|sheet| sheet.images.first())
+        .ok_or("image")?;
+    assert_eq!((picture.row, picture.col), (4, 6));
+    assert_eq!(picture.bytes, bytes);
+    for rows in [true, false] {
+        if let Some(picture) = book
+            .active_sheet_mut()
+            .and_then(|sheet| sheet.images.first_mut())
+        {
+            if rows {
+                picture.row = MAX_ROWS - 1;
+            } else {
+                picture.col = MAX_COLS - 1;
+            }
+        }
+        let before = book.clone();
+        assert!(book.edit_dimension(id, 0, 1, rows, false).is_err());
+        assert_eq!(book, before);
+    }
+    book.validate()?;
+    Ok(())
+}
+
+#[test]
+fn invalid_formats_and_failed_replace_leave_book_unchanged() -> Result<(), String> {
+    let mut book = Book::default();
+    let id = book.active_id();
+    book.set_cell(id, 0, 0, "a")?;
+    book.set_cell(id, 0, 1, &"a".repeat(16384))?;
+    let before = book.clone();
+    assert!(book.replace_all(id, "a", "aa").is_err());
+    assert_eq!(book, before);
+    for size in [0.0, 500.0, f32::INFINITY] {
+        assert!(
+            book.set_format(
+                id,
+                Range::new(0, 0, 1, 1),
+                CellFormat {
+                    size,
+                    ..CellFormat::default()
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(book, before);
+    }
+    assert_eq!(book.replace_all(id, "missing", "x")?, 0);
+    assert_eq!(book.replace_all(id, "a", "z")?, 2);
+    assert_eq!(
+        book.active_sheet()
+            .and_then(|sheet| sheet.cell(0, 0))
+            .map(|cell| &cell.value),
+        Some(&Value::Text("z".into()))
+    );
+    book.validate()?;
+    Ok(())
+}
+
+#[test]
+fn limited_search_returns_first_matches_in_grid_order() -> Result<(), String> {
+    let mut book = Book::default();
+    let id = book.active_id();
+    for (row, col) in [(9, 0), (1, 1), (1, 0), (0, 25)] {
+        book.set_cell(id, row, col, "match")?;
+    }
+    assert!(book.find(id, "match", false, 0)?.is_empty());
+    let positions: Vec<_> = book
+        .find(id, "match", false, 2)?
+        .into_iter()
+        .map(|(r, c, _, _)| (r, c))
+        .collect();
+    assert_eq!(positions, vec![(0, 25), (1, 0)]);
+    Ok(())
+}
+
+#[test]
+fn sheet_deletion_and_reorder_keep_a_visible_active_sheet() -> Result<(), String> {
+    let mut book = Book::default();
+    let first = book.active_id();
+    let hidden = book.add_sheet("Hidden")?;
+    if let Some(sheet) = book.sheet_by_id_mut(hidden) {
+        sheet.hidden = true;
+    }
+    let before = book.clone();
+    assert!(book.delete_sheet(first).is_err());
+    assert_eq!(book, before);
+    book.move_sheet(hidden, 0)?;
+    assert_eq!(book.active_id(), first);
+    let visible = book.add_sheet("Visible")?;
+    book.delete_sheet(first)?;
+    assert_eq!(book.active_id(), visible);
+    book.validate()?;
+    Ok(())
+}
+
+#[test]
+fn canonical_formula_length_is_checked_before_any_mutation() -> Result<(), String> {
+    let mut book = Book::default();
+    let id = book.active_id();
+    book.set_cell(id, 0, 0, "x")?;
+    let input = format!("=И(\"{}\")", "a".repeat(32760));
+    assert_eq!(input.len(), 32767);
+    assert_eq!(formula::canonicalize(&input).len(), 32768);
+    let before = book.clone();
+    assert!(book.set_input(id, 1, 0, &input).is_err());
+    assert_eq!(book, before);
+    assert!(
+        book.set_range(id, 0, 0, &[vec!["changed".into(), input.clone()]])
+            .is_err()
+    );
+    assert_eq!(book, before);
+    assert!(book.replace_all(id, "x", &input).is_err());
+    assert_eq!(book, before);
+    book.validate()?;
+    Ok(())
+}
+
 fn seeded() -> Result<Book, String> {
     let mut book = Book::default();
     let id = book.active_id();
