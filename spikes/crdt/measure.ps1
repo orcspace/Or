@@ -17,6 +17,7 @@ $hostInfo = @{
     acceptance_scope = "Infrastructure benchmark; Windows Server is not Windows 11 GUI acceptance"
 }
 $hostInfo | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $outputDirectory "host.json")
+$hostInfo | ConvertTo-Json -Compress | Write-Output
 
 foreach ($case in @("docs", "sheets", "slides", "history", "merge")) {
     $process = [System.Diagnostics.Process]::new()
