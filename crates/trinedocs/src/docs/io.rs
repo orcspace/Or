@@ -357,6 +357,33 @@ fn apply_ppr(p: &mut Paragraph, node: &Node, num_formats: &BTreeMap<String, List
     if let Some(v) = bool_prop(node, "pageBreakBefore") {
         p.page_break_before = v;
     }
+    if let Some(v) = bool_prop(node, "keepNext") {
+        p.keep_next = v;
+    }
+    if let Some(v) = bool_prop(node, "keepLines") {
+        p.keep_lines = v;
+    }
+    if let Some(v) = bool_prop(node, "widowControl") {
+        p.widow_control = v;
+    }
+    if let Some(v) = bool_prop(node, "contextualSpacing") {
+        p.contextual_spacing = v;
+    }
+}
+/// Body-level blocks with content controls (`w:sdt`) and custom XML unwrapped: their
+/// paragraphs and tables are ordinary document content.
+fn body_blocks<'a>(nodes: &'a [Node], out: &mut Vec<&'a Node>, depth: usize) {
+    for node in nodes {
+        match node.name.as_str() {
+            "sdt" if depth < 32 => {
+                if let Some(content) = node.child("sdtContent") {
+                    body_blocks(&content.children, out, depth + 1);
+                }
+            }
+            "customXml" if depth < 32 => body_blocks(&node.children, out, depth + 1),
+            _ => out.push(node),
+        }
+    }
 }
 fn style_chain<'a>(
     styles: &'a BTreeMap<String, Node>,
@@ -646,7 +673,9 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
         paragraph: &default_paragraph,
         normal: &normal,
     };
-    for node in &body.children {
+    let mut blocks = Vec::new();
+    body_blocks(&body.children, &mut blocks, 0);
+    for node in blocks {
         match node.name.as_str() {
             "p" => {
                 let p = paragraph(node, &mut doc, &styles, &defaults, &[], &nums, &rels);
@@ -719,6 +748,17 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
                 }
                 let mut rows = Vec::new();
                 let mut row_heights = Vec::new();
+                // Leading rows marked as headers repeat on every page.
+                let header_rows = node
+                    .children
+                    .iter()
+                    .filter(|n| n.name == "tr")
+                    .take_while(|tr| {
+                        tr.child("trPr")
+                            .and_then(|n| bool_prop(n, "tblHeader"))
+                            .unwrap_or(false)
+                    })
+                    .count();
                 if node.children.iter().filter(|n| n.name == "tr").count() > 10000 {
                     return Err("Таблица DOCX превышает 10 000 строк".into());
                 }
@@ -846,12 +886,10 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
                     borderless: !visible,
                     cell_margin,
                     row_heights,
+                    header_rows,
                 });
             }
             "sectPr" => read_section(node, &mut doc, &rels, &parts)?,
-            "sdt" => doc
-                .losses
-                .push("Элементы управления содержимым не импортированы.".into()),
             _ => {}
         }
         if node.name == "p"
@@ -1063,9 +1101,20 @@ fn p_xml(p: &Paragraph, links: &mut Vec<(String, String)>) -> String {
     };
     // Paragraph properties in the element order required by the OOXML schema (CT_PPr).
     let mut properties = format!("<w:pStyle w:val=\"{}\"/>", esc(&p.style));
+    if p.keep_next {
+        properties.push_str("<w:keepNext/>");
+    }
+    if p.keep_lines {
+        properties.push_str("<w:keepLines/>");
+    }
     if p.page_break_before {
         properties.push_str("<w:pageBreakBefore/>");
     }
+    properties.push_str(if p.widow_control {
+        "<w:widowControl/>"
+    } else {
+        "<w:widowControl w:val=\"0\"/>"
+    });
     if p.list != List::None {
         properties.push_str(&format!(
             "<w:numPr><w:ilvl w:val=\"{}\"/><w:numId w:val=\"{}\"/></w:numPr>",
@@ -1074,10 +1123,15 @@ fn p_xml(p: &Paragraph, links: &mut Vec<(String, String)>) -> String {
         ));
     }
     properties.push_str(&format!(
-        "<w:spacing w:before=\"{}\" w:after=\"{}\" {line}/><w:ind w:left=\"{}\" {first_indent}/><w:jc w:val=\"{}\"/>",
+        "<w:spacing w:before=\"{}\" w:after=\"{}\" {line}/><w:ind w:left=\"{}\" {first_indent}/>{}<w:jc w:val=\"{}\"/>",
         (p.spacing_before * 20.0).round() as u32,
         (p.spacing_after * 20.0).round() as u32,
         (p.indent * 20.0).round() as i32,
+        if p.contextual_spacing {
+            "<w:contextualSpacing/>"
+        } else {
+            ""
+        },
         match p.align {
             Align::Left => "left",
             Align::Center => "center",
@@ -1150,11 +1204,18 @@ fn table_xml(table: &Table, usable_width: f32, links: &mut Vec<(String, String)>
     out.push_str("</w:tblGrid>");
     for (row_index, row) in table.rows.iter().enumerate() {
         out.push_str("<w:tr>");
+        let mut row_properties = String::new();
         if let Some(height) = table.row_heights.get(row_index).filter(|h| **h > 0.0) {
-            out.push_str(&format!(
-                "<w:trPr><w:trHeight w:val=\"{}\" w:hRule=\"atLeast\"/></w:trPr>",
+            row_properties.push_str(&format!(
+                "<w:trHeight w:val=\"{}\" w:hRule=\"atLeast\"/>",
                 (height.min(1500.0) * 20.0).round() as u32
             ));
+        }
+        if row_index < table.header_rows {
+            row_properties.push_str("<w:tblHeader/>");
+        }
+        if !row_properties.is_empty() {
+            out.push_str(&format!("<w:trPr>{row_properties}</w:trPr>"));
         }
         let starts = table.grid_starts(row_index);
         let below = table.grid_starts(row_index + 1);
@@ -1821,6 +1882,23 @@ mod tests {
                 .is_some_and(|p| p.spacing_after == 0.0 && p.line_spacing == 1.0)
         );
         Ok(())
+    }
+    #[test]
+    fn docx_page_flow_properties_content_controls_and_header_rows() -> Result<(), String> {
+        let xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:keepNext/><w:keepLines/><w:widowControl w:val="0"/><w:contextualSpacing/></w:pPr><w:r><w:t>a</w:t></w:r></w:p><w:sdt><w:sdtPr/><w:sdtContent><w:p><w:r><w:t>inside</w:t></w:r></w:p></w:sdtContent></w:sdt><w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:trPr><w:tblHeader/></w:trPr><w:tc><w:p><w:r><w:t>h</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:p><w:r><w:t>b</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/></w:body></w:document>"#;
+        let bytes =
+            crate::package::write_zip(vec![("word/document.xml".into(), xml.as_bytes().to_vec())])?;
+        let doc = read(&bytes, "docx")?;
+        let check = |doc: &Doc| -> Result<(), String> {
+            let p = doc.paragraphs.first().ok_or("p")?;
+            assert!(p.keep_next && p.keep_lines && p.contextual_spacing && !p.widow_control);
+            assert!(doc.paragraphs.iter().any(|p| p.text() == "inside"));
+            assert_eq!(doc.tables.first().map(|t| t.header_rows), Some(1));
+            Ok(())
+        };
+        check(&doc)?;
+        assert!(!doc.losses.iter().any(|l| l.contains("управления")));
+        check(&read(&write(&doc, "docx")?, "docx")?)
     }
     #[test]
     fn docx_line_rules_round_trip() -> Result<(), String> {

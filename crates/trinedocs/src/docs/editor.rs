@@ -201,7 +201,7 @@ fn paint_ai_caret(
         if caret_to >= row.start && caret_to <= row.end {
             let x = origin.x + row_x(row, caret_to) * scale;
             let top = origin.y + row.y * scale;
-            let bottom = top + row.height * scale;
+            let bottom = top + caret_height(row, caret_to, None) * scale;
             let ink = Color32::from_black_alpha((235.0 * fade * blink) as u8);
             painter.line_segment(
                 [egui::pos2(x, top), egui::pos2(x, bottom)],
@@ -435,7 +435,10 @@ pub fn show_with_edits(ui: &mut egui::Ui, doc: &mut Doc, edits: Option<&[TextEdi
                         page_origin + egui::vec2(0.0, row.page as f32 * (page_height + gap));
                     Rect::from_min_size(
                         origin + egui::vec2(row_x(row, state.cursor.offset) * scale, row.y * scale),
-                        egui::vec2(1.5, row.height * scale),
+                        egui::vec2(
+                            1.5,
+                            caret_height(row, state.cursor.offset, Some(&state.typing)) * scale,
+                        ),
                     )
                 });
             let visible = Rect::from_min_size(canvas.min + viewport.min.to_vec2(), viewport.size())
@@ -495,7 +498,10 @@ pub fn show_with_edits(ui: &mut egui::Ui, doc: &mut Doc, edits: Option<&[TextEdi
                         let x = row_x(row, state.cursor.offset);
                         let rect = Rect::from_min_size(
                             origin + egui::vec2(x * scale, row.y * scale),
-                            egui::vec2(1.5, row.height * scale),
+                            egui::vec2(
+                                1.5,
+                                caret_height(row, state.cursor.offset, Some(&state.typing)) * scale,
+                            ),
                         );
                         cursor_rect = Some(rect);
                         if focused && !state.selected() {
@@ -2500,15 +2506,36 @@ fn word_range(doc: &Doc, pos: Position) -> (Position, Position) {
         },
     )
 }
+/// Widths of a segment's characters as laid out: tabs and justified spaces are wider than
+/// their glyphs, so the segment's own width is shared out in proportion.
+fn segment_advances(segment: &Segment) -> Vec<f32> {
+    let count = segment.text.chars().count();
+    if count == 1 {
+        return vec![segment.width];
+    }
+    let natural: Vec<f32> = segment
+        .text
+        .chars()
+        .map(|ch| char_width(ch, &segment.format))
+        .collect();
+    let total: f32 = natural.iter().sum();
+    if total > 0.01 && (total - segment.width).abs() > 0.01 {
+        let k = segment.width / total;
+        natural.iter().map(|w| w * k).collect()
+    } else {
+        natural
+    }
+}
 fn row_x(row: &Row, offset: usize) -> f32 {
     let mut remaining = offset.saturating_sub(row.start);
-    let mut x = row.x;
+    let mut x = row.segments.first().map_or(row.x, |s| s.x);
     for segment in &row.segments {
-        for ch in segment.text.chars() {
+        x = segment.x;
+        for width in segment_advances(segment) {
             if remaining == 0 {
                 return x;
             }
-            x += char_width(ch, &segment.format);
+            x += width;
             remaining -= 1;
         }
     }
@@ -2516,10 +2543,9 @@ fn row_x(row: &Row, offset: usize) -> f32 {
 }
 fn row_offset(row: &Row, x: f32) -> usize {
     let mut offset = row.start;
-    let mut cursor = row.x;
     for segment in &row.segments {
-        for ch in segment.text.chars() {
-            let width = char_width(ch, &segment.format);
+        let mut cursor = segment.x;
+        for width in segment_advances(segment) {
             if x < cursor + width / 2.0 {
                 return offset;
             }
@@ -2528,6 +2554,28 @@ fn row_offset(row: &Row, x: f32) -> usize {
         }
     }
     offset.min(row.end)
+}
+/// Height of the text caret: the font of the character before it (as in Word), not the
+/// whole line with its line spacing.
+fn caret_height(row: &Row, offset: usize, typing: Option<&TextFormat>) -> f32 {
+    let mut index = row.start;
+    let mut format = row.segments.first().map(|s| &s.format);
+    for segment in &row.segments {
+        if index >= offset.max(row.start + 1) {
+            break;
+        }
+        format = Some(&segment.format);
+        index += segment.text.chars().count();
+    }
+    let format = if row.segments.is_empty() {
+        typing
+    } else {
+        format
+    };
+    format
+        .map(|f| line_height(f, f.size.max(4.0), 1.0))
+        .unwrap_or(row.height)
+        .min(row.height)
 }
 fn hit_test(
     layout: &Layout,

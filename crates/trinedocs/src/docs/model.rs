@@ -73,6 +73,21 @@ pub struct Paragraph {
     #[serde(skip_serializing_if = "is_false")]
     pub line_exact: bool,
     pub page_break_before: bool,
+    /// Keep on the same page as the next paragraph (`w:keepNext`).
+    #[serde(skip_serializing_if = "is_false")]
+    pub keep_next: bool,
+    /// Don't split the paragraph across pages (`w:keepLines`).
+    #[serde(skip_serializing_if = "is_false")]
+    pub keep_lines: bool,
+    /// No page starts or ends with a single line of the paragraph (`w:widowControl`).
+    #[serde(skip_serializing_if = "is_true")]
+    pub widow_control: bool,
+    /// No spacing between paragraphs of the same style (`w:contextualSpacing`).
+    #[serde(skip_serializing_if = "is_false")]
+    pub contextual_spacing: bool,
+}
+fn is_true(value: &bool) -> bool {
+    *value
 }
 fn is_zero(value: &f32) -> bool {
     *value == 0.0
@@ -94,6 +109,10 @@ impl Default for Paragraph {
             line_points: 0.0,
             line_exact: false,
             page_break_before: false,
+            keep_next: false,
+            keep_lines: false,
+            widow_control: true,
+            contextual_spacing: false,
         }
     }
 }
@@ -179,6 +198,8 @@ impl Paragraph {
         } else {
             0.0
         };
+        // Like Word's built-in headings, a heading stays with the text that follows it.
+        self.keep_next = style.starts_with("Heading") || style == "Title";
     }
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -274,6 +295,12 @@ pub struct Table {
     /// Minimum height of each row in points (`w:trHeight`); 0 or missing = automatic.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub row_heights: Vec<f32>,
+    /// Leading rows repeated at the top of every page the table continues on (`w:tblHeader`).
+    #[serde(default, skip_serializing_if = "is_zero_count")]
+    pub header_rows: usize,
+}
+fn is_zero_count(value: &usize) -> bool {
+    *value == 0
 }
 /// Padding of tables saved before cell margins were stored.
 fn legacy_cell_margin() -> [f32; 4] {
@@ -1265,6 +1292,7 @@ impl Doc {
             borderless: false,
             cell_margin: WORD_CELL_MARGIN,
             row_heights: Vec::new(),
+            header_rows: 0,
         });
         Ok(id)
     }
@@ -1577,13 +1605,17 @@ impl Doc {
             rows: Vec::new(),
             cells: Vec::new(),
         };
+        let bottom = setup.height - setup.margin_bottom;
+        let body = bottom - setup.margin_top;
         let mut y = setup.margin_top;
         let mut list_number = 0;
         for (pi, p) in doc.paragraphs.iter().enumerate() {
+            let prev = pi.checked_sub(1).and_then(|i| doc.paragraphs.get(i));
+            let next = doc.paragraphs.get(pi + 1);
+            let (before, after) = paragraph_spacing(p, prev, next);
             if p.page_break_before && (y > setup.margin_top || pi > 0) {
                 next_page(&mut layout, setup, &mut y);
             }
-            y += p.spacing_before.max(0.0);
             if p.list == List::Number {
                 list_number += 1;
             } else if p.list == List::None {
@@ -1604,78 +1636,85 @@ impl Doc {
                 .iter()
                 .flat_map(|r| r.text.chars().map(move |ch| (ch, r.format.clone())))
                 .collect();
-            let mut offset = 0;
-            let mut first = true;
-            loop {
-                let x = base_x + if first { p.first_indent } else { 0.0 };
-                let max_width = (available - if first { p.first_indent } else { 0.0 }).max(12.0);
-                let start = offset;
-                let mut end = start;
-                let mut width = 0.0;
-                let mut break_at = None;
-                let mut hard_break = false;
-                while let Some((ch, fmt)) = chars.get(end) {
-                    if *ch == '\u{000b}' || *ch == '\n' || *ch == '\u{000c}' {
-                        hard_break = true;
-                        break;
-                    }
-                    let w = char_width(*ch, fmt);
-                    // Like Word, spaces may hang past the margin instead of wrapping a word that fits.
-                    if width + w > max_width && end > start && *ch != ' ' {
-                        break;
-                    }
-                    width += w;
-                    end += 1;
-                    if ch.is_whitespace() {
-                        break_at = Some(end);
-                    }
+            let lines = wrap_lines(p, &chars, available, indent, 12.0);
+            let heights: Vec<f32> = lines.iter().map(|l| l.height).collect();
+            // Manual page breaks inside the paragraph are placed as they come.
+            let forced = chars.iter().any(|(ch, _)| *ch == '\u{000c}');
+            let mut breaks = if forced {
+                Vec::new()
+            } else {
+                line_breaks(
+                    &heights,
+                    y + before,
+                    setup.margin_top,
+                    bottom,
+                    p.widow_control,
+                )
+            };
+            if y > setup.margin_top + 0.5 && !forced {
+                let total: f32 = heights.iter().sum();
+                // Keep lines together: the whole paragraph moves to the next page.
+                if p.keep_lines && !breaks.is_empty() && total <= body {
+                    breaks = vec![0];
                 }
-                if end < chars.len()
-                    && !hard_break
-                    && let Some(word_end) = break_at.filter(|n| *n > start)
+                // Keep with next: this paragraph and the first line of the next share a page.
+                if p.keep_next
+                    && breaks.is_empty()
+                    && let Some(n) = next
                 {
-                    end = word_end;
-                    width = chars
-                        .iter()
-                        .skip(start)
-                        .take(end - start)
-                        .map(|(ch, f)| char_width(*ch, f))
-                        .sum();
+                    let first = n.format_at(0);
+                    let need = before
+                        + total
+                        + after
+                        + paragraph_spacing(n, Some(p), doc.paragraphs.get(pi + 2)).0
+                        + paragraph_line_height(n, &first, first.size.max(4.0));
+                    if y + need > bottom && need <= body {
+                        breaks = vec![0];
+                    }
                 }
-                let max_size = chars
-                    .iter()
-                    .skip(start)
-                    .take(end.saturating_sub(start))
-                    .map(|(_, f)| f.size)
-                    .fold(p.format_at(start).size.max(4.0), f32::max);
-                let height = paragraph_line_height(p, &p.format_at(start), max_size);
-                if y + height > setup.height - setup.margin_bottom {
+            }
+            if breaks.first() == Some(&0) {
+                // Word drops the space before a paragraph that moved to the top of a page.
+                next_page(&mut layout, setup, &mut y);
+            } else {
+                y += before;
+            }
+            let count = lines.len();
+            for (li, line) in lines.iter().enumerate() {
+                let (start, end, height) = (line.start, line.end, line.height);
+                if (li > 0 && breaks.contains(&li))
+                    || (y + height > bottom && y > setup.margin_top + 0.5)
+                {
                     next_page(&mut layout, setup, &mut y);
                 }
-                let visible = width - trailing_spaces(&chars, start, end);
+                let x = base_x + line.indent;
+                let max_width = (available - line.indent).max(12.0);
+                let visible = line.width - trailing_spaces(&chars, start, end);
                 let align_x = match p.align {
                     Align::Center => x + (max_width - visible).max(0.0) / 2.0,
                     Align::Right => x + (max_width - visible).max(0.0),
                     _ => x,
                 };
-                let mut segments: Vec<Segment> = Vec::new();
-                let mut cursor = align_x;
-                for (ch, format) in chars.iter().skip(start).take(end.saturating_sub(start)) {
-                    let cw = char_width(*ch, format);
-                    if let Some(segment) = segments.last_mut().filter(|s| s.format == *format) {
-                        segment.text.push(*ch);
-                        segment.width += cw;
-                    } else {
-                        segments.push(Segment {
-                            text: ch.to_string(),
-                            format: format.clone(),
-                            x: cursor,
-                            width: cw,
-                        });
-                    }
-                    cursor += cw;
-                }
-                let row_marker = if first { marker.clone() } else { String::new() };
+                // Justified text stretches every line but the last one.
+                let justify = if p.align == Align::Justify && li + 1 < count {
+                    justify_gap(&chars, start, end, max_width - visible)
+                } else {
+                    0.0
+                };
+                let segments = line_segments(
+                    &chars,
+                    start,
+                    end,
+                    align_x,
+                    indent + line.indent,
+                    indent,
+                    justify,
+                );
+                let row_marker = if li == 0 {
+                    marker.clone()
+                } else {
+                    String::new()
+                };
                 let page = layout.pages.len().saturating_sub(1);
                 let row = Row {
                     paragraph: pi,
@@ -1693,18 +1732,11 @@ impl Doc {
                 }
                 layout.rows.push(row);
                 y += height;
-                let page_break =
-                    hard_break && chars.get(end).is_some_and(|(ch, _)| *ch == '\u{000c}');
-                offset = end + usize::from(hard_break);
-                if page_break {
+                if line.hard_break && chars.get(end).is_some_and(|(ch, _)| *ch == '\u{000c}') {
                     next_page(&mut layout, setup, &mut y);
                 }
-                first = false;
-                if offset >= chars.len() && !hard_break {
-                    break;
-                }
             }
-            y += p.spacing_after.max(0.0);
+            y += after;
             for table in doc.tables.iter().filter(|t| t.after_paragraph_id == p.id) {
                 render_table(&mut layout, setup, table, &mut y);
             }
@@ -1860,23 +1892,26 @@ fn render_row(page: &mut Page, row: &Row) {
                 color,
             });
         }
-        page.items.push(Primitive::TextStyled {
-            x: seg.x,
-            y: row.y
-                + if seg.format.script > 0 {
-                    -3.0
-                } else if seg.format.script < 0 {
-                    3.0
-                } else {
-                    0.0
-                },
-            text: seg.text.clone(),
-            size: seg.format.size * if seg.format.script != 0 { 0.75 } else { 1.0 },
-            color: seg.format.color,
-            bold: seg.format.bold,
-            italic: seg.format.italic,
-            font: seg.format.font.clone(),
-        });
+        // A tab only moves the text after it; underline still covers it below.
+        if seg.text != "\t" {
+            page.items.push(Primitive::TextStyled {
+                x: seg.x,
+                y: row.y
+                    + if seg.format.script > 0 {
+                        -3.0
+                    } else if seg.format.script < 0 {
+                        3.0
+                    } else {
+                        0.0
+                    },
+                text: seg.text.clone(),
+                size: seg.format.size * if seg.format.script != 0 { 0.75 } else { 1.0 },
+                color: seg.format.color,
+                bold: seg.format.bold,
+                italic: seg.format.italic,
+                font: seg.format.font.clone(),
+            });
+        }
         if seg.format.underline || seg.format.link.is_some() {
             page.items.push(Primitive::Line {
                 x1: seg.x,
@@ -1910,109 +1945,288 @@ fn trailing_spaces(chars: &[(char, TextFormat)], start: usize, end: usize) -> f3
         .map(|(ch, f)| char_width(*ch, f))
         .sum()
 }
-fn table_lines(cell: &Cell, width: f32, margin: [f32; 4]) -> Vec<Row> {
+/// Word's default tab stops: every 1.27 cm (`w:defaultTabStop` 720 twips).
+pub const DEFAULT_TAB_STOP: f32 = 36.0;
+/// Space before and after a paragraph; contextual spacing drops it between paragraphs of
+/// the same style (list items, table text).
+fn paragraph_spacing(
+    p: &Paragraph,
+    prev: Option<&Paragraph>,
+    next: Option<&Paragraph>,
+) -> (f32, f32) {
+    let same = |other: Option<&Paragraph>| {
+        p.contextual_spacing && other.is_some_and(|q| q.style == p.style)
+    };
+    (
+        if same(prev) {
+            0.0
+        } else {
+            p.spacing_before.max(0.0)
+        },
+        if same(next) {
+            0.0
+        } else {
+            p.spacing_after.max(0.0)
+        },
+    )
+}
+/// Advance of a character `pos` points right of the text area's left edge. A tab jumps to
+/// the hanging indent `hang` when that is ahead, otherwise to the next default tab stop.
+fn advance(ch: char, format: &TextFormat, pos: f32, hang: f32) -> f32 {
+    if ch != '\t' {
+        return char_width(ch, format);
+    }
+    if pos + 0.5 < hang {
+        return hang - pos;
+    }
+    let next = ((pos + 0.5) / DEFAULT_TAB_STOP).floor() * DEFAULT_TAB_STOP + DEFAULT_TAB_STOP;
+    (next - pos).max(0.0)
+}
+fn line_width(
+    chars: &[(char, TextFormat)],
+    start: usize,
+    end: usize,
+    origin: f32,
+    hang: f32,
+) -> f32 {
+    let mut pos = origin;
+    for (ch, format) in chars.get(start..end).unwrap_or_default() {
+        pos += advance(*ch, format, pos, hang);
+    }
+    pos - origin
+}
+/// A wrapped line of a paragraph before it is placed on a page.
+struct Line {
+    start: usize,
+    end: usize,
+    /// Width including trailing spaces.
+    width: f32,
+    height: f32,
+    /// First-line indent applied to this line.
+    indent: f32,
+    hard_break: bool,
+}
+/// Breaks a paragraph into lines at most `available` wide. `origin` is the paragraph's left
+/// indent relative to the text area, where tab stops are measured from.
+fn wrap_lines(
+    p: &Paragraph,
+    chars: &[(char, TextFormat)],
+    available: f32,
+    origin: f32,
+    floor: f32,
+) -> Vec<Line> {
     let mut lines = Vec::new();
+    let mut start = 0;
+    loop {
+        let indent = if lines.is_empty() {
+            p.first_indent
+        } else {
+            0.0
+        };
+        let max_width = (available - indent).max(floor);
+        let line_origin = origin + indent;
+        let mut end = start;
+        let mut width = 0.0;
+        let mut break_at = None;
+        let mut hard_break = false;
+        while let Some((ch, format)) = chars.get(end) {
+            if matches!(*ch, '\u{000b}' | '\u{000c}' | '\n') {
+                hard_break = true;
+                break;
+            }
+            let w = advance(*ch, format, line_origin + width, origin);
+            // Like Word, spaces may hang past the margin instead of wrapping a word that fits.
+            if width + w > max_width && end > start && *ch != ' ' {
+                break;
+            }
+            width += w;
+            end += 1;
+            if ch.is_whitespace() {
+                break_at = Some(end);
+            }
+        }
+        if end < chars.len()
+            && !hard_break
+            && let Some(word_end) = break_at.filter(|n| *n > start)
+        {
+            end = word_end;
+            width = line_width(chars, start, end, line_origin, origin);
+        }
+        let format = p.format_at(start);
+        let max_size = chars
+            .get(start..end)
+            .unwrap_or_default()
+            .iter()
+            .map(|(_, f)| f.size)
+            .fold(format.size.max(4.0), f32::max);
+        lines.push(Line {
+            start,
+            end,
+            width,
+            height: paragraph_line_height(p, &format, max_size),
+            indent,
+            hard_break,
+        });
+        start = end + usize::from(hard_break);
+        if start >= chars.len() && !hard_break {
+            break;
+        }
+    }
+    lines
+}
+/// Extra width for each inner space of a justified line.
+fn justify_gap(chars: &[(char, TextFormat)], start: usize, end: usize, extra: f32) -> f32 {
+    let line = chars.get(start..end).unwrap_or_default();
+    let trailing = line.iter().rev().take_while(|(ch, _)| *ch == ' ').count();
+    let spaces = line
+        .iter()
+        .take(line.len() - trailing)
+        .filter(|(ch, _)| *ch == ' ')
+        .count();
+    if spaces == 0 || extra <= 0.0 {
+        0.0
+    } else {
+        extra / spaces as f32
+    }
+}
+/// Segments of one line starting at `x`; `origin` is the line start relative to the text
+/// area (for tab stops). Tabs and widened justified spaces get their own segments.
+fn line_segments(
+    chars: &[(char, TextFormat)],
+    start: usize,
+    end: usize,
+    x: f32,
+    origin: f32,
+    hang: f32,
+    justify: f32,
+) -> Vec<Segment> {
+    let line = chars.get(start..end).unwrap_or_default();
+    let content = line.len() - line.iter().rev().take_while(|(ch, _)| *ch == ' ').count();
+    let mut segments: Vec<Segment> = Vec::new();
+    let mut cursor = x;
+    let mut pos = origin;
+    let mut alone = true;
+    for (i, (ch, format)) in line.iter().enumerate() {
+        let mut width = advance(*ch, format, pos, hang);
+        pos += width;
+        let wide = justify > 0.0 && *ch == ' ' && i < content;
+        if wide {
+            width += justify;
+        }
+        let solo = *ch == '\t' || wide;
+        if !solo
+            && !alone
+            && let Some(segment) = segments.last_mut().filter(|s| s.format == *format)
+        {
+            segment.text.push(*ch);
+            segment.width += width;
+        } else {
+            segments.push(Segment {
+                text: ch.to_string(),
+                format: format.clone(),
+                x: cursor,
+                width,
+            });
+        }
+        alone = solo;
+        cursor += width;
+    }
+    segments
+}
+/// Lines of a paragraph that start a new page when its first line starts at `start`
+/// (`0` moves the whole paragraph). With widow control a page never ends with only the
+/// first line or starts with only the last line of a paragraph.
+fn line_breaks(heights: &[f32], start: f32, top: f32, bottom: f32, widow: bool) -> Vec<usize> {
+    let count = heights.len();
+    let mut breaks = Vec::new();
+    let mut y = start;
+    let mut page_first = 0;
+    let mut i = 0;
+    while let Some(&height) = heights.get(i) {
+        if y + height > bottom && y > top + 0.5 {
+            let mut at = i;
+            if widow && count >= 2 {
+                if at == 1 && page_first == 0 && start > top + 0.5 {
+                    at = 0;
+                } else if at + 1 == count && at >= 2 && at - 1 > page_first {
+                    at -= 1;
+                }
+            }
+            breaks.push(at);
+            page_first = at;
+            i = at;
+            y = top;
+            continue;
+        }
+        y += height;
+        i += 1;
+    }
+    breaks
+}
+fn table_lines(cell: &Cell, width: f32, margin: [f32; 4]) -> Vec<Row> {
+    let mut rows = Vec::new();
     for (paragraph, p) in cell.paragraphs.iter().enumerate() {
-        let available =
-            (width - margin[1] - margin[3] - p.indent.max(0.0) - f32::from(p.list_level) * 18.0)
-                .max(1.0);
+        let indent = p.indent.max(0.0) + f32::from(p.list_level) * 18.0;
+        let available = (width - margin[1] - margin[3] - indent).max(1.0);
         let chars: Vec<(char, TextFormat)> = p
             .runs
             .iter()
             .flat_map(|r| r.text.chars().map(move |ch| (ch, r.format.clone())))
             .collect();
-        let mut start = 0;
-        let mut first = true;
-        loop {
-            let indent = if first { p.first_indent } else { 0.0 };
-            let max_width = (available - indent).max(1.0);
-            let mut end = start;
-            let mut used = 0.0;
-            let mut break_at = None;
-            let mut hard_break = false;
-            while let Some((ch, format)) = chars.get(end) {
-                if matches!(*ch, '\u{000b}' | '\u{000c}' | '\n') {
-                    hard_break = true;
-                    break;
-                }
-                let w = char_width(*ch, format);
-                if used + w > max_width && end > start && *ch != ' ' {
-                    break;
-                }
-                used += w;
-                end += 1;
-                if ch.is_whitespace() {
-                    break_at = Some(end);
-                }
-            }
-            if end < chars.len()
-                && !hard_break
-                && let Some(word_end) = break_at.filter(|n| *n > start)
-            {
-                end = word_end;
-                used = chars
-                    .iter()
-                    .skip(start)
-                    .take(end - start)
-                    .map(|(ch, f)| char_width(*ch, f))
-                    .sum();
-            }
-            let max_size = chars
-                .iter()
-                .skip(start)
-                .take(end - start)
-                .map(|(_, f)| f.size)
-                .fold(p.format_at(start).size, f32::max);
-            let text_height = paragraph_line_height(p, &p.format_at(start), max_size);
-            let visible = used - trailing_spaces(&chars, start, end);
-            let before = if first { p.spacing_before } else { 0.0 };
-            let final_line = end + usize::from(hard_break) >= chars.len() && !hard_break;
-            let after = if final_line { p.spacing_after } else { 0.0 };
+        let (spacing_before, spacing_after) = paragraph_spacing(
+            p,
+            paragraph
+                .checked_sub(1)
+                .and_then(|i| cell.paragraphs.get(i)),
+            cell.paragraphs.get(paragraph + 1),
+        );
+        let lines = wrap_lines(p, &chars, available, indent, 1.0);
+        let count = lines.len();
+        for (li, line) in lines.iter().enumerate() {
+            let max_width = (available - line.indent).max(1.0);
+            let visible = line.width - trailing_spaces(&chars, line.start, line.end);
+            let before = if li == 0 { spacing_before } else { 0.0 };
+            let after = if li + 1 == count { spacing_after } else { 0.0 };
             let x = margin[3]
-                + p.indent.max(0.0)
-                + f32::from(p.list_level) * 18.0
                 + indent
+                + line.indent
                 + match p.align {
                     Align::Center => (max_width - visible).max(0.0) / 2.0,
                     Align::Right => (max_width - visible).max(0.0),
                     _ => 0.0,
                 };
-            let mut segments: Vec<Segment> = Vec::new();
-            let mut cursor = x;
-            for (ch, format) in chars.iter().skip(start).take(end - start) {
-                let cw = char_width(*ch, format);
-                if let Some(segment) = segments.last_mut().filter(|s| s.format == *format) {
-                    segment.text.push(*ch);
-                    segment.width += cw;
-                } else {
-                    segments.push(Segment {
-                        text: ch.to_string(),
-                        format: format.clone(),
-                        x: cursor,
-                        width: cw,
-                    });
-                }
-                cursor += cw;
-            }
-            lines.push(Row {
+            let justify = if p.align == Align::Justify && li + 1 < count {
+                justify_gap(&chars, line.start, line.end, max_width - visible)
+            } else {
+                0.0
+            };
+            rows.push(Row {
                 paragraph,
-                start,
-                end,
+                start: line.start,
+                end: line.end,
                 x,
                 y: before,
-                height: before + text_height + after,
+                height: before + line.height + after,
                 page: 0,
-                segments,
+                segments: line_segments(
+                    &chars,
+                    line.start,
+                    line.end,
+                    x,
+                    indent + line.indent,
+                    indent,
+                    justify,
+                ),
                 marker: String::new(),
             });
-            start = end + usize::from(hard_break);
-            first = false;
-            if start >= chars.len() && !hard_break {
-                break;
-            }
         }
     }
-    lines
+    rows
+}
+/// Column widths and cell padding of a table on the page.
+struct TableGeometry {
+    widths: Vec<f32>,
+    margin: [f32; 4],
 }
 fn render_table(layout: &mut Layout, setup: &PageSetup, table: &Table, y: &mut f32) {
     let usable_width = setup.width - setup.margin_left - setup.margin_right;
@@ -2038,183 +2252,323 @@ fn render_table(layout: &mut Layout, setup: &PageSetup, table: &Table, y: &mut f
             *width *= limit / raw_sum;
         }
     }
-    let margin = table.cell_margin.map(|m| m.clamp(0.0, 72.0));
-    let pad = margin[0] + margin[2];
-    for (row_index, cells) in table.rows.iter().enumerate() {
-        let starts = table.grid_starts(row_index);
-        let next_starts = table.grid_starts(row_index + 1);
-        // Width of a cell = sum of the grid columns it spans.
-        let cell_widths: Vec<f32> = cells
-            .iter()
-            .zip(&starts)
-            .map(|(cell, start)| {
-                widths
-                    .iter()
-                    .skip(*start)
-                    .take(cell.span())
-                    .sum::<f32>()
-                    .max(12.0)
-            })
-            .collect();
-        // A merged cell below continues this one: no line between them.
-        let continued: Vec<bool> = starts
-            .iter()
-            .map(|start| {
-                table.rows.get(row_index + 1).is_some_and(|below| {
-                    next_starts
-                        .iter()
-                        .position(|s| s == start)
-                        .and_then(|i| below.get(i))
-                        .is_some_and(|c| c.merged)
-                })
-            })
-            .collect();
-        let cell_lines: Vec<Vec<Row>> = cells
-            .iter()
-            .enumerate()
-            .map(|(ci, cell)| {
-                table_lines(
-                    cell,
-                    cell_widths
-                        .get(ci)
-                        .copied()
-                        .unwrap_or(usable_width / columns as f32),
-                    margin,
-                )
-            })
-            .collect();
-        let line_total = cell_lines.iter().map(Vec::len).max().unwrap_or(1).max(1);
-        let heights: Vec<f32> = (0..line_total)
-            .map(|i| {
-                cell_lines
-                    .iter()
-                    .filter_map(|lines| lines.get(i))
-                    .map(|row| row.height)
-                    .fold(8.0_f32, f32::max)
-            })
-            .collect();
-        let body_height = setup.height - setup.margin_top - setup.margin_bottom;
-        let min_height = table
-            .row_heights
-            .get(row_index)
-            .copied()
-            .filter(|h| h.is_finite())
-            .unwrap_or_default()
-            .clamp(0.0, body_height);
-        let full_height = (heights.iter().sum::<f32>() + pad).max(min_height);
-        if full_height <= body_height && *y + full_height > setup.height - setup.margin_bottom {
-            next_page(layout, setup, y);
-        }
-        let mut line_offset = 0;
-        while line_offset < line_total {
-            let available = setup.height - setup.margin_bottom - *y;
-            let first_height = heights.get(line_offset).copied().unwrap_or(8.0);
-            if available < first_height + pad && *y > setup.margin_top {
-                next_page(layout, setup, y);
-                continue;
-            }
-            let mut count = 0;
-            let mut row_height = pad;
-            for height in heights.iter().skip(line_offset) {
-                if count > 0 && row_height + height > available {
-                    break;
-                }
-                row_height += height;
-                count += 1;
-            }
-            if line_offset == 0 && count == line_total {
-                row_height = row_height.max(min_height);
-            }
-            let page_index = layout.pages.len().saturating_sub(1);
-            if let Some(page) = layout.pages.last_mut() {
-                for (ci, cell) in cells.iter().enumerate() {
-                    let x = setup.margin_left
-                        + widths
-                            .iter()
-                            .take(starts.get(ci).copied().unwrap_or_default())
-                            .sum::<f32>();
-                    let width = cell_widths
-                        .get(ci)
-                        .copied()
-                        .unwrap_or(usable_width / columns as f32);
-                    layout.cells.push(CellBox {
-                        table: table.id,
-                        row: row_index,
-                        column: ci,
-                        page: page_index,
-                        x,
-                        y: *y,
-                        w: width,
-                        h: row_height,
-                    });
-                    page.items.push(Primitive::Rect {
-                        x,
-                        y: *y,
-                        w: width,
-                        h: row_height,
-                        color: cell.fill,
-                    });
-                    let edges = [
-                        (!cell.merged, (x, *y, x + width, *y)),
-                        (
-                            !continued.get(ci).copied().unwrap_or_default(),
-                            (x, *y + row_height, x + width, *y + row_height),
-                        ),
-                        (true, (x, *y, x, *y + row_height)),
-                        (true, (x + width, *y, x + width, *y + row_height)),
-                    ];
-                    for (visible, (a, b, c, d)) in edges {
-                        if !visible || table.borderless {
-                            continue;
-                        }
-                        page.items.push(Primitive::Line {
-                            x1: a,
-                            y1: b,
-                            x2: c,
-                            y2: d,
-                            width: 0.7,
-                            color: table.border_color,
-                        });
-                    }
-                    let content: f32 = (line_offset..line_offset + count)
-                        .filter(|li| cell_lines.get(ci).is_some_and(|lines| *li < lines.len()))
-                        .map(|li| heights.get(li).copied().unwrap_or(8.0))
-                        .sum();
-                    let free = (row_height - pad - content).max(0.0);
-                    let mut slot_y = *y
-                        + margin[0]
-                        + match cell.v_align {
-                            VAlign::Top => 0.0,
-                            VAlign::Center => free / 2.0,
-                            VAlign::Bottom => free,
-                        };
-                    for li in line_offset..line_offset + count {
-                        if let Some(row) = cell_lines.get(ci).and_then(|lines| lines.get(li)) {
-                            let mut positioned = row.clone();
-                            positioned.y = slot_y + row.y;
-                            positioned.x += x;
-                            for segment in &mut positioned.segments {
-                                segment.x += x;
-                            }
-                            render_row(page, &positioned);
-                        }
-                        slot_y += heights.get(li).copied().unwrap_or(8.0);
-                    }
-                }
-            }
-            *y += row_height;
-            line_offset += count;
-            if line_offset < line_total {
-                next_page(layout, setup, y);
-            }
-        }
+    let geometry = TableGeometry {
+        widths,
+        margin: table.cell_margin.map(|m| m.clamp(0.0, 72.0)),
+    };
+    let headers = table.header_rows.min(table.rows.len());
+    for row_index in 0..table.rows.len() {
+        table_row(
+            layout,
+            setup,
+            table,
+            &geometry,
+            row_index,
+            y,
+            row_index >= headers,
+        );
     }
     *y += 8.0;
+}
+/// Starts a new page inside a table; `repeat` draws the table's header rows at its top.
+fn table_page(
+    layout: &mut Layout,
+    setup: &PageSetup,
+    table: &Table,
+    geometry: &TableGeometry,
+    y: &mut f32,
+    repeat: bool,
+) {
+    next_page(layout, setup, y);
+    if repeat {
+        for row_index in 0..table.header_rows.min(table.rows.len()) {
+            table_row(layout, setup, table, geometry, row_index, y, false);
+        }
+    }
+}
+/// Lays out one table row, splitting it across pages when it doesn't fit.
+fn table_row(
+    layout: &mut Layout,
+    setup: &PageSetup,
+    table: &Table,
+    geometry: &TableGeometry,
+    row_index: usize,
+    y: &mut f32,
+    repeat: bool,
+) {
+    let Some(cells) = table.rows.get(row_index) else {
+        return;
+    };
+    let widths = &geometry.widths;
+    let margin = geometry.margin;
+    let pad = margin[0] + margin[2];
+    let starts = table.grid_starts(row_index);
+    let next_starts = table.grid_starts(row_index + 1);
+    // Width of a cell = sum of the grid columns it spans.
+    let cell_widths: Vec<f32> = cells
+        .iter()
+        .zip(&starts)
+        .map(|(cell, start)| {
+            widths
+                .iter()
+                .skip(*start)
+                .take(cell.span())
+                .sum::<f32>()
+                .max(12.0)
+        })
+        .collect();
+    // A merged cell below continues this one: no line between them.
+    let continued: Vec<bool> = starts
+        .iter()
+        .map(|start| {
+            table.rows.get(row_index + 1).is_some_and(|below| {
+                next_starts
+                    .iter()
+                    .position(|s| s == start)
+                    .and_then(|i| below.get(i))
+                    .is_some_and(|c| c.merged)
+            })
+        })
+        .collect();
+    let cell_lines: Vec<Vec<Row>> = cells
+        .iter()
+        .enumerate()
+        .map(|(ci, cell)| table_lines(cell, cell_widths.get(ci).copied().unwrap_or(12.0), margin))
+        .collect();
+    let line_total = cell_lines.iter().map(Vec::len).max().unwrap_or(1).max(1);
+    let heights: Vec<f32> = (0..line_total)
+        .map(|i| {
+            cell_lines
+                .iter()
+                .filter_map(|lines| lines.get(i))
+                .map(|row| row.height)
+                .fold(8.0_f32, f32::max)
+        })
+        .collect();
+    let body_height = setup.height - setup.margin_top - setup.margin_bottom;
+    let min_height = table
+        .row_heights
+        .get(row_index)
+        .copied()
+        .filter(|h| h.is_finite())
+        .unwrap_or_default()
+        .clamp(0.0, body_height);
+    let full_height = (heights.iter().sum::<f32>() + pad).max(min_height);
+    if full_height <= body_height && *y + full_height > setup.height - setup.margin_bottom {
+        table_page(layout, setup, table, geometry, y, repeat);
+    }
+    let mut line_offset = 0;
+    // Header rows that leave no room for the row are not repeated again (no endless pages).
+    let mut stalled = false;
+    while line_offset < line_total {
+        let available = setup.height - setup.margin_bottom - *y;
+        let first_height = heights.get(line_offset).copied().unwrap_or(8.0);
+        if available < first_height + pad && *y > setup.margin_top {
+            table_page(layout, setup, table, geometry, y, repeat && !stalled);
+            stalled = true;
+            continue;
+        }
+        stalled = false;
+        let mut count = 0;
+        let mut row_height = pad;
+        for height in heights.iter().skip(line_offset) {
+            if count > 0 && row_height + height > available {
+                break;
+            }
+            row_height += height;
+            count += 1;
+        }
+        if line_offset == 0 && count == line_total {
+            row_height = row_height.max(min_height);
+        }
+        let page_index = layout.pages.len().saturating_sub(1);
+        if let Some(page) = layout.pages.last_mut() {
+            for (ci, cell) in cells.iter().enumerate() {
+                let x = setup.margin_left
+                    + widths
+                        .iter()
+                        .take(starts.get(ci).copied().unwrap_or_default())
+                        .sum::<f32>();
+                let width = cell_widths.get(ci).copied().unwrap_or(12.0);
+                layout.cells.push(CellBox {
+                    table: table.id,
+                    row: row_index,
+                    column: ci,
+                    page: page_index,
+                    x,
+                    y: *y,
+                    w: width,
+                    h: row_height,
+                });
+                page.items.push(Primitive::Rect {
+                    x,
+                    y: *y,
+                    w: width,
+                    h: row_height,
+                    color: cell.fill,
+                });
+                let edges = [
+                    (!cell.merged, (x, *y, x + width, *y)),
+                    (
+                        !continued.get(ci).copied().unwrap_or_default(),
+                        (x, *y + row_height, x + width, *y + row_height),
+                    ),
+                    (true, (x, *y, x, *y + row_height)),
+                    (true, (x + width, *y, x + width, *y + row_height)),
+                ];
+                for (visible, (a, b, c, d)) in edges {
+                    if !visible || table.borderless {
+                        continue;
+                    }
+                    page.items.push(Primitive::Line {
+                        x1: a,
+                        y1: b,
+                        x2: c,
+                        y2: d,
+                        width: 0.7,
+                        color: table.border_color,
+                    });
+                }
+                let content: f32 = (line_offset..line_offset + count)
+                    .filter(|li| cell_lines.get(ci).is_some_and(|lines| *li < lines.len()))
+                    .map(|li| heights.get(li).copied().unwrap_or(8.0))
+                    .sum();
+                let free = (row_height - pad - content).max(0.0);
+                let mut slot_y = *y
+                    + margin[0]
+                    + match cell.v_align {
+                        VAlign::Top => 0.0,
+                        VAlign::Center => free / 2.0,
+                        VAlign::Bottom => free,
+                    };
+                for li in line_offset..line_offset + count {
+                    if let Some(row) = cell_lines.get(ci).and_then(|lines| lines.get(li)) {
+                        let mut positioned = row.clone();
+                        positioned.y = slot_y + row.y;
+                        positioned.x += x;
+                        for segment in &mut positioned.segments {
+                            segment.x += x;
+                        }
+                        render_row(page, &positioned);
+                    }
+                    slot_y += heights.get(li).copied().unwrap_or(8.0);
+                }
+            }
+        }
+        *y += row_height;
+        line_offset += count;
+        if line_offset < line_total {
+            table_page(layout, setup, table, geometry, y, repeat);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn page_breaks_avoid_widows_and_orphans() {
+        // Five 10 pt lines on a page whose text area is 0..100.
+        let h = [10.0; 5];
+        // Only the first line would fit: the whole paragraph moves.
+        assert_eq!(line_breaks(&h, 85.0, 0.0, 100.0, true), vec![0]);
+        assert_eq!(line_breaks(&h, 85.0, 0.0, 100.0, false), vec![1]);
+        // Only the last line would move: it takes one more line with it.
+        assert_eq!(line_breaks(&h, 55.0, 0.0, 100.0, true), vec![3]);
+        assert_eq!(line_breaks(&h, 55.0, 0.0, 100.0, false), vec![4]);
+        assert!(line_breaks(&h, 0.0, 0.0, 100.0, true).is_empty());
+    }
+    #[test]
+    fn tabs_jump_to_default_stops_and_hanging_indent() {
+        let f = TextFormat::default();
+        assert_eq!(advance('\t', &f, 10.0, 0.0), 26.0);
+        assert_eq!(advance('\t', &f, 0.0, 0.0), 36.0);
+        assert_eq!(advance('\t', &f, 5.0, 18.0), 13.0);
+        let mut doc = Doc::from_text("a\tb");
+        let layout = doc.layout();
+        let row = layout
+            .rows
+            .first()
+            .map(|r| r.segments.clone())
+            .unwrap_or_default();
+        let b = row.iter().find(|s| s.text == "b").map(|s| s.x);
+        let expected = doc.page.margin_left + 36.0;
+        assert!(b.is_some_and(|x| (x - expected).abs() < 0.01), "{b:?}");
+        doc.paragraphs.clear();
+        assert!(doc.layout().rows.is_empty());
+    }
+    #[test]
+    fn justified_lines_fill_the_width() -> Result<(), String> {
+        let mut doc = Doc::from_text(&"слово ".repeat(80));
+        if let Some(p) = doc.paragraphs.first_mut() {
+            p.align = Align::Justify;
+        }
+        let layout = doc.layout();
+        let right = doc.page.width - doc.page.margin_right;
+        let row = layout.rows.first().ok_or("row")?;
+        let end = row
+            .segments
+            .iter()
+            .rev()
+            .find(|s| !s.text.trim().is_empty())
+            .map(|s| s.x + s.width)
+            .ok_or("segment")?;
+        assert!((end - right).abs() < 0.5, "{end} vs {right}");
+        // The last line keeps normal spacing.
+        assert_eq!(layout.rows.last().map(|r| r.segments.len()), Some(1));
+        Ok(())
+    }
+    #[test]
+    fn contextual_spacing_and_keep_with_next() -> Result<(), String> {
+        let mut doc = Doc::from_text("a\nb");
+        for p in &mut doc.paragraphs {
+            p.spacing_after = 10.0;
+            p.contextual_spacing = true;
+        }
+        let layout = doc.layout();
+        let (a, b) = (
+            layout.rows.first().ok_or("a")?,
+            layout.rows.get(1).ok_or("b")?,
+        );
+        assert!((b.y - (a.y + a.height)).abs() < 0.01);
+        let mut doc = Doc::from_text(&vec!["строка"; 90].join("\n"));
+        let layout = doc.layout();
+        let last = layout
+            .rows
+            .iter()
+            .filter(|r| r.page == 0)
+            .map(|r| r.paragraph)
+            .max()
+            .ok_or("page")?;
+        if let Some(p) = doc.paragraphs.get_mut(last) {
+            p.keep_next = true;
+        }
+        let layout = doc.layout();
+        assert_eq!(
+            layout
+                .rows
+                .iter()
+                .find(|r| r.paragraph == last)
+                .map(|r| r.page),
+            Some(1)
+        );
+        Ok(())
+    }
+    #[test]
+    fn table_header_rows_repeat_on_new_pages() -> Result<(), String> {
+        let mut doc = Doc::from_text("a");
+        let anchor = doc.paragraphs.first().ok_or("p")?.id;
+        doc.add_table(anchor, 120, 2)?;
+        if let Some(t) = doc.tables.first_mut() {
+            t.header_rows = 1;
+        }
+        let layout = doc.layout();
+        assert!(layout.pages.len() > 1);
+        for page in 1..layout.pages.len() {
+            assert!(layout.cells.iter().any(|c| c.page == page && c.row == 0));
+        }
+        Ok(())
+    }
     #[test]
     fn splitting_a_paragraph_keeps_its_table_after_the_text() -> Result<(), String> {
         let mut doc = Doc::from_text("ab");
