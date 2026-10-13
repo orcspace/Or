@@ -1862,7 +1862,7 @@ fn cell_editor(
     let margin = (5.0 * scale).clamp(1.0, 100.0) as i8;
     let editor = egui::TextEdit::multiline(&mut text)
         .id(id)
-        .frame(false)
+        .frame(egui::Frame::NONE)
         .margin(egui::Margin::same(margin))
         .font(FontId::new((format.size * scale).max(4.0), family))
         .text_color(rgb(format.color))

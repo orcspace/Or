@@ -14,6 +14,7 @@ struct ImageJob {
 #[derive(Clone, Default)]
 struct State {
     slide_id: u64,
+    ribbon_tab: usize,
     table_rows: usize,
     table_columns: usize,
     show_thumbnails: bool,
@@ -633,253 +634,489 @@ fn slide_panel(ui: &mut egui::Ui, deck: &mut Deck, state: &mut State, main_heigh
     changed
 }
 
+/// Applies `change` to every selected element of the current slide.
+fn edit_selected(deck: &mut Deck, state: &State, mut change: impl FnMut(&mut Element)) -> bool {
+    let Some(slide) = deck.slide_mut(state.slide_id) else {
+        return false;
+    };
+    let mut changed = false;
+    for id in &state.selected {
+        if let Some(element) = slide.element_mut(*id) {
+            change(element);
+            changed = true;
+        }
+    }
+    changed
+}
+fn new_slide_menu(ui: &mut egui::Ui, deck: &mut Deck, state: &mut State) -> bool {
+    let mut changed = false;
+    ui.menu_button("＋ Новый слайд", |ui| {
+        for (name, layout) in [
+            ("Титульный слайд", "title"),
+            ("Заголовок и объект", "content"),
+            ("Два объекта", "two_content"),
+            ("Пустой слайд", "blank"),
+        ] {
+            if ui.button(name).clicked() {
+                state.slide_id = deck.add_slide(layout);
+                state.selected.clear();
+                state.edit_text = None;
+                changed = true;
+                ui.close();
+            }
+        }
+    });
+    changed
+}
 fn ribbon(ui: &mut egui::Ui, deck: &mut Deck, state: &mut State) -> bool {
     let mut changed = false;
     let has_slide = deck.slide(state.slide_id).is_some();
     let has_selection = has_slide && !state.selected.is_empty();
     let compact = ui.available_width() < 860.0;
-    egui::Frame::new()
-        .fill(ui.visuals().window_fill)
-        .inner_margin(8)
-        .show(ui, |ui| {
-            egui::ScrollArea::horizontal()
-                .id_salt("slides_commands")
-                .max_height(36.0)
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
+    let current = deck
+        .slide(state.slide_id)
+        .and_then(|slide| slide.element(state.selected.first().copied()?))
+        .cloned();
+    crate::chrome::tabs(
+        ui,
+        &mut state.ribbon_tab,
+        &["Главная", "Вставка", "Конструктор", "Показ слайдов", "Вид"],
+    );
+    crate::chrome::ribbon(ui, |ui| match state.ribbon_tab {
+        0 => {
+            crate::chrome::group(ui, "Буфер обмена", 150.0, |ui| {
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(!state.clipboard.is_empty(), egui::Button::new("Вставить"))
+                        .on_hover_text("Объекты TrineDocs · Ctrl+V")
+                        .clicked()
+                    {
+                        changed |= paste_selection(deck, state);
+                    }
+                    ui.add_enabled_ui(has_selection, |ui| {
+                        if crate::chrome::tool(ui, "⧉", "Копировать · Ctrl+C", false).clicked()
+                        {
+                            copy_selection(ui.ctx(), deck, state);
+                        }
+                        if crate::chrome::tool(ui, "✂", "Вырезать · Ctrl+X", false).clicked()
+                        {
+                            copy_selection(ui.ctx(), deck, state);
+                            changed |= delete_selection(deck, state);
+                        }
+                    });
+                });
+                ui.add_enabled_ui(has_selection, |ui| {
+                    if ui.small_button("Дублировать · Ctrl+D").clicked() {
+                        changed |= duplicate_selection(deck, state);
+                    }
+                });
+            });
+            crate::chrome::group(ui, "Слайды", 170.0, |ui| {
+                changed |= new_slide_menu(ui, deck, state);
+                ui.add_enabled_ui(has_slide, |ui| {
                     ui.horizontal(|ui| {
-                        ui.menu_button("Новый слайд", |ui| {
-                            for (name, layout) in [
-                                ("Титульный", "title"),
-                                ("Заголовок и текст", "content"),
-                                ("Пустой", "blank"),
-                            ] {
-                                if ui.button(name).clicked() {
-                                    state.slide_id = deck.add_slide(layout);
+                        changed |= layout_menu(ui, deck, state);
+                        if crate::chrome::tool(ui, "⧉", "Дублировать слайд", false).clicked()
+                        {
+                            match deck.duplicate_slide(state.slide_id) {
+                                Ok(id) => {
+                                    state.slide_id = id;
                                     state.selected.clear();
                                     state.edit_text = None;
                                     changed = true;
-                                    ui.close();
                                 }
+                                Err(error) => state.error = error,
                             }
-                        });
-                        ui.add_enabled_ui(has_slide, |ui| {
-                            ui.menu_button("Вставка", |ui| {
-                                if insert_button(ui, deck, state, "Текстовое поле", ElementKind::Text) {
+                        }
+                        if crate::chrome::tool(ui, "🗑", "Удалить слайд", false).clicked()
+                        {
+                            match deck.delete_slide(state.slide_id) {
+                                Ok(()) => {
+                                    state.slide_id =
+                                        deck.slides.first().map(|slide| slide.id).unwrap_or(0);
+                                    state.selected.clear();
+                                    state.edit_text = None;
                                     changed = true;
-                                    ui.close();
                                 }
-                                ui.menu_button("Фигура", |ui| {
-                                    for (label, kind) in [
-                                        ("Прямоугольник", ElementKind::Rect),
-                                        ("Эллипс", ElementKind::Ellipse),
-                                        ("Линия", ElementKind::Line),
-                                        ("Стрелка", ElementKind::Arrow),
-                                    ] {
-                                        if insert_button(ui, deck, state, label, kind) {
-                                            changed = true;
-                                            ui.close();
-                                        }
-                                    }
-                                });
-                                if ui.add_enabled(state.image_job.is_none(), egui::Button::new("Изображение…"))
-                                    .on_hover_text("PNG, JPEG · до 32 МБ").clicked() {
-                                    start_image_job(ui.ctx(), state);
-                                    ui.close();
-                                }
-                                ui.menu_button("Таблица…", |ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.label("Строки");
-                                        ui.add(egui::DragValue::new(&mut state.table_rows).range(1..=20));
-                                    });
-                                    ui.horizontal(|ui| {
-                                        ui.label("Столбцы");
-                                        ui.add(egui::DragValue::new(&mut state.table_columns).range(1..=20));
-                                    });
-                                    let kind = ElementKind::Table {
-                                        cells: vec![vec![String::new(); state.table_columns.max(1)]; state.table_rows.max(1)],
-                                    };
-                                    if insert_button(ui, deck, state, "Создать таблицу", kind) {
-                                        changed = true;
-                                        ui.close();
-                                    }
-                                });
-                                if insert_button(
-                                    ui, deck, state, "Столбчатая диаграмма",
-                                    ElementKind::Chart {
-                                        values: vec![30.0, 60.0, 45.0],
-                                        labels: vec!["A".into(), "B".into(), "C".into()],
-                                    },
-                                ) {
-                                    changed = true;
-                                    ui.close();
-                                }
-                            });
-                            ui.menu_button("Объект", |ui| {
-                                if ui.add_enabled(has_selection, egui::Button::new("Копировать · Ctrl+C")).clicked() {
-                                    copy_selection(ui.ctx(), deck, state);
-                                    ui.close();
-                                }
-                                if ui.add_enabled(has_selection, egui::Button::new("Вырезать · Ctrl+X")).clicked() {
-                                    copy_selection(ui.ctx(), deck, state);
-                                    changed |= delete_selection(deck, state);
-                                    ui.close();
-                                }
-                                if ui.add_enabled(!state.clipboard.is_empty(), egui::Button::new("Вставить объекты · Ctrl+V"))
-                                    .on_hover_text("Объекты из TrineDocs. Внешний текст вставляется через Ctrl+V.").clicked() {
-                                    changed |= paste_selection(deck, state);
-                                    ui.close();
-                                }
-                                if ui.add_enabled(has_selection, egui::Button::new("Дублировать · Ctrl+D")).clicked() {
-                                    changed |= duplicate_selection(deck, state);
-                                    ui.close();
-                                }
-                                ui.separator();
-                                ui.add_enabled_ui(has_selection, |ui| {
-                                    if ui.button("Редактировать текст…").clicked() {
-                                        state.edit_text = state.selected.first().copied();
-                                        ui.close();
-                                    }
-                                    ui.menu_button("Выровнять", |ui| {
-                                        for (label, axis) in [
-                                            ("Слева", "left"), ("По центру", "center"), ("Справа", "right"),
-                                            ("Сверху", "top"), ("Посередине", "middle"), ("Снизу", "bottom"),
-                                            ("Распределить по горизонтали", "horizontal"),
-                                            ("Распределить по вертикали", "vertical"),
-                                        ] {
-                                            if ui.add_enabled(
-                                                !matches!(axis, "horizontal" | "vertical") || state.selected.len() >= 3,
-                                                egui::Button::new(label),
-                                            ).clicked() {
-                                                let (width, height) = (deck.width, deck.height);
-                                                if let Some(slide) = deck.slide_mut(state.slide_id) {
-                                                    align(slide, &state.selected, axis, width, height);
-                                                    changed = true;
-                                                }
-                                                ui.close();
-                                            }
-                                        }
-                                    });
-                                    for (label, front) in [("На передний план", true), ("На задний план", false)] {
-                                        if ui.button(label).clicked() {
-                                            match deck.set_z_order_many(state.slide_id, &state.selected, front) {
-                                                Ok(()) => changed = true,
-                                                Err(error) => state.error = error,
-                                            }
-                                            ui.close();
-                                        }
-                                    }
-                                    if ui.add_enabled(state.selected.len() > 1, egui::Button::new("Сгруппировать")).clicked() {
-                                        let group = deck.allocate_id();
-                                        if let Some(slide) = deck.slide_mut(state.slide_id) {
-                                            for id in &state.selected {
-                                                if let Some(element) = slide.element_mut(*id) {
-                                                    element.group = Some(group);
-                                                }
-                                            }
-                                            changed = true;
-                                        }
-                                        ui.close();
-                                    }
-                                    if ui.button("Разгруппировать").clicked() {
-                                        if let Some(slide) = deck.slide_mut(state.slide_id) {
-                                            for id in &state.selected {
-                                                if let Some(element) = slide.element_mut(*id) {
-                                                    changed |= element.group.take().is_some();
-                                                }
-                                            }
-                                        }
-                                        ui.close();
-                                    }
-                                    ui.separator();
-                                    if ui.button("Удалить объект · Delete").clicked() {
-                                        changed |= delete_selection(deck, state);
-                                        ui.close();
-                                    }
-                                });
-                            });
-                            ui.menu_button("Оформление", |ui| {
-                                changed |= layout_menu(ui, deck, state);
-                                changed |= theme_menu(ui, deck);
-                                ui.menu_button("Размер слайда", |ui| {
-                                    for (label, width) in [("16:9", 960.0), ("4:3", 720.0)] {
-                                        if ui.selectable_label(deck.width == width && deck.height == 540.0, label).clicked() {
-                                            changed |= deck.width != width || deck.height != 540.0;
-                                            deck.width = width;
-                                            deck.height = 540.0;
-                                            ui.close();
-                                        }
-                                    }
-                                });
-                                ui.separator();
-                                if ui.button("Дублировать слайд").clicked() {
-                                    match deck.duplicate_slide(state.slide_id) {
-                                        Ok(id) => {
-                                            state.slide_id = id;
-                                            state.selected.clear();
-                                            state.edit_text = None;
-                                            changed = true;
-                                        }
-                                        Err(error) => state.error = error,
-                                    }
-                                    ui.close();
-                                }
-                                if ui.button("Удалить слайд").clicked() {
-                                    match deck.delete_slide(state.slide_id) {
-                                        Ok(()) => {
-                                            state.slide_id = deck.slides.first().map(|slide| slide.id).unwrap_or(0);
-                                            state.selected.clear();
-                                            state.edit_text = None;
-                                            changed = true;
-                                        }
-                                        Err(error) => state.error = error,
-                                    }
-                                    ui.close();
-                                }
-                            });
-                        });
-                        ui.menu_button("Вид", |ui| {
-                            if compact {
-                                if ui.button("Слайды…").clicked() {
-                                    state.show_thumbnails = true;
-                                    ui.close();
-                                }
-                            } else {
-                                let mut thumbnails = !state.hide_thumbnails;
-                                if ui.checkbox(&mut thumbnails, "Миниатюры слайдов").changed() {
-                                    state.hide_thumbnails = !thumbnails;
-                                }
+                                Err(error) => state.error = error,
                             }
-                            ui.checkbox(&mut state.show_properties, "Свойства слайда и объекта");
-                            ui.checkbox(&mut state.show_notes, "Заметки докладчика");
-                            ui.separator();
-                            ui.checkbox(&mut state.grid, "Сетка и привязка");
-                            ui.add(egui::Slider::new(&mut state.zoom, 0.25..=2.0).text("Масштаб"));
-                            if ui.button("Вписать в окно").clicked() {
-                                state.zoom = 1.0;
-                                ui.close();
-                            }
-                        });
-                        ui.add_enabled_ui(has_slide, |ui| {
-                            ui.menu_button("Показ", |ui| {
-                                if ui.button("С начала · F5").clicked() {
-                                    state.presentation.start(ui.ctx(), deck, 0);
-                                    ui.close();
-                                }
-                                if ui.button("С текущего · Shift+F5").clicked() {
-                                    let index = deck.slides.iter().position(|slide| slide.id == state.slide_id).unwrap_or(0);
-                                    state.presentation.start(ui.ctx(), deck, index);
-                                    ui.close();
-                                }
-                                ui.separator();
-                                ui.small("← → / пробел — следующий слайд");
-                                ui.small("Esc — закончить · указка и перо в показе");
-                            });
-                        });
+                        }
                     });
                 });
-        });
-    ui.add_space(6.0);
+            });
+            crate::chrome::group(ui, "Шрифт", 236.0, |ui| {
+                ui.add_enabled_ui(has_selection, |ui| {
+                    let format = current.clone().unwrap_or_default();
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        let mut family = format.font.clone();
+                        if crate::chrome::font_picker(ui, "slides-font", &mut family, 120.0) {
+                            changed |= edit_selected(deck, state, |e| e.font = family.clone());
+                        }
+                        let mut size = format.font_size;
+                        if crate::chrome::size_picker(ui, "slides-size", &mut size) {
+                            let size = size.clamp(1.0, 400.0);
+                            changed |= edit_selected(deck, state, |e| e.font_size = size);
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        if crate::chrome::tool(
+                            ui,
+                            egui::RichText::new("B").strong(),
+                            "Полужирный",
+                            format.bold,
+                        )
+                        .clicked()
+                        {
+                            changed |= edit_selected(deck, state, |e| e.bold = !format.bold);
+                        }
+                        if crate::chrome::tool(
+                            ui,
+                            egui::RichText::new("I").italics(),
+                            "Курсив",
+                            format.italic,
+                        )
+                        .clicked()
+                        {
+                            changed |= edit_selected(deck, state, |e| e.italic = !format.italic);
+                        }
+                        for (glyph, grow, tip) in [
+                            ("A+", true, "Увеличить размер шрифта"),
+                            ("A−", false, "Уменьшить размер шрифта"),
+                        ] {
+                            if crate::chrome::tool(ui, glyph, tip, false).clicked() {
+                                let size = crate::chrome::step_size(format.font_size, grow);
+                                changed |= edit_selected(deck, state, |e| e.font_size = size);
+                            }
+                        }
+                        if let Some(Some(color)) = crate::chrome::color_menu(
+                            ui,
+                            "A",
+                            "Цвет текста",
+                            Some(format.color),
+                            None,
+                        ) {
+                            changed |= edit_selected(deck, state, |e| e.color = color);
+                        }
+                    });
+                });
+            });
+            crate::chrome::group(ui, "Рисование", 196.0, |ui| {
+                ui.add_enabled_ui(has_selection, |ui| {
+                    let format = current.clone().unwrap_or_default();
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        if let Some(Some(fill)) = crate::chrome::color_menu(
+                            ui,
+                            "◧",
+                            "Заливка фигуры",
+                            Some(format.fill),
+                            None,
+                        ) {
+                            changed |= edit_selected(deck, state, |e| e.fill = fill);
+                        }
+                        if let Some(Some(stroke)) = crate::chrome::color_menu(
+                            ui,
+                            "▢",
+                            "Контур фигуры",
+                            Some(format.stroke),
+                            None,
+                        ) {
+                            changed |= edit_selected(deck, state, |e| e.stroke = stroke);
+                        }
+                        let mut width = format.stroke_width;
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut width)
+                                    .range(0.0..=40.0)
+                                    .speed(0.25)
+                                    .suffix(" pt"),
+                            )
+                            .on_hover_text("Толщина контура")
+                            .changed()
+                        {
+                            changed |= edit_selected(deck, state, |e| e.stroke_width = width);
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        ui.menu_button("Упорядочить", |ui| {
+                            for (label, front) in
+                                [("На передний план", true), ("На задний план", false)]
+                            {
+                                if ui.button(label).clicked() {
+                                    match deck.set_z_order_many(
+                                        state.slide_id,
+                                        &state.selected,
+                                        front,
+                                    ) {
+                                        Ok(()) => changed = true,
+                                        Err(error) => state.error = error,
+                                    }
+                                    ui.close();
+                                }
+                            }
+                            ui.separator();
+                            if ui
+                                .add_enabled(
+                                    state.selected.len() > 1,
+                                    egui::Button::new("Сгруппировать"),
+                                )
+                                .clicked()
+                            {
+                                let group = deck.allocate_id();
+                                changed |= edit_selected(deck, state, |e| e.group = Some(group));
+                                ui.close();
+                            }
+                            if ui.button("Разгруппировать").clicked() {
+                                let mut any = false;
+                                edit_selected(deck, state, |e| any |= e.group.take().is_some());
+                                changed |= any;
+                                ui.close();
+                            }
+                            ui.separator();
+                            for (label, angle) in [
+                                ("Повернуть вправо на 90°", 90.0),
+                                ("Повернуть влево на 90°", -90.0),
+                            ] {
+                                if ui.button(label).clicked() {
+                                    changed |= edit_selected(deck, state, |e| {
+                                        e.rotation = (e.rotation + angle).rem_euclid(360.0);
+                                    });
+                                    ui.close();
+                                }
+                            }
+                        });
+                        if crate::chrome::tool(ui, "✎", "Редактировать текст", false).clicked()
+                        {
+                            state.edit_text = state.selected.first().copied();
+                        }
+                        if crate::chrome::tool(ui, "🗑", "Удалить объект · Delete", false).clicked()
+                        {
+                            changed |= delete_selection(deck, state);
+                        }
+                    });
+                });
+            });
+            crate::chrome::group(ui, "Выравнивание", 176.0, |ui| {
+                ui.add_enabled_ui(has_selection, |ui| {
+                    for row in [
+                        [
+                            ("⇤", "left", "По левому краю"),
+                            ("↔", "center", "По центру"),
+                            ("⇥", "right", "По правому краю"),
+                            ("⇹", "horizontal", "Распределить по горизонтали"),
+                        ],
+                        [
+                            ("⤒", "top", "По верхнему краю"),
+                            ("↕", "middle", "Посередине"),
+                            ("⤓", "bottom", "По нижнему краю"),
+                            ("⇳", "vertical", "Распределить по вертикали"),
+                        ],
+                    ] {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            for (glyph, axis, tip) in row {
+                                let enabled = !matches!(axis, "horizontal" | "vertical")
+                                    || state.selected.len() >= 3;
+                                let response = ui
+                                    .add_enabled_ui(enabled, |ui| {
+                                        crate::chrome::tool(ui, glyph, tip, false)
+                                    })
+                                    .inner;
+                                if response.clicked() {
+                                    let (width, height) = (deck.width, deck.height);
+                                    if let Some(slide) = deck.slide_mut(state.slide_id) {
+                                        align(slide, &state.selected, axis, width, height);
+                                        changed = true;
+                                    }
+                                }
+                            }
+                        });
+                    }
+                });
+            });
+        }
+        1 => {
+            crate::chrome::group(ui, "Слайды", 120.0, |ui| {
+                changed |= new_slide_menu(ui, deck, state);
+            });
+            ui.add_enabled_ui(has_slide, |ui| {
+                crate::chrome::group(ui, "Таблицы", 110.0, |ui| {
+                    ui.menu_button("▦ Таблица", |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Строки");
+                            ui.add(egui::DragValue::new(&mut state.table_rows).range(1..=20));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Столбцы");
+                            ui.add(egui::DragValue::new(&mut state.table_columns).range(1..=20));
+                        });
+                        let kind = ElementKind::Table {
+                            cells: vec![
+                                vec![String::new(); state.table_columns.max(1)];
+                                state.table_rows.max(1)
+                            ],
+                        };
+                        if insert_button(ui, deck, state, "Вставить таблицу", kind) {
+                            changed = true;
+                            ui.close();
+                        }
+                    });
+                });
+                crate::chrome::group(ui, "Изображения", 120.0, |ui| {
+                    if ui
+                        .add_enabled(state.image_job.is_none(), egui::Button::new("🖼 Рисунок…"))
+                        .on_hover_text("PNG, JPEG · до 32 МБ")
+                        .clicked()
+                    {
+                        start_image_job(ui.ctx(), state);
+                    }
+                });
+                crate::chrome::group(ui, "Иллюстрации", 230.0, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        for (glyph, label, kind) in [
+                            ("▭", "Прямоугольник", ElementKind::Rect),
+                            ("◯", "Эллипс", ElementKind::Ellipse),
+                            ("╱", "Линия", ElementKind::Line),
+                            ("→", "Стрелка", ElementKind::Arrow),
+                        ] {
+                            if crate::chrome::tool(ui, glyph, label, false).clicked() {
+                                match deck.add_element(state.slide_id, kind) {
+                                    Ok(id) => {
+                                        state.selected = vec![id];
+                                        changed = true;
+                                    }
+                                    Err(error) => state.error = error,
+                                }
+                            }
+                        }
+                    });
+                    if insert_button(
+                        ui,
+                        deck,
+                        state,
+                        "📊 Диаграмма",
+                        ElementKind::Chart {
+                            values: vec![30.0, 60.0, 45.0],
+                            labels: vec!["A".into(), "B".into(), "C".into()],
+                        },
+                    ) {
+                        changed = true;
+                    }
+                });
+                crate::chrome::group(ui, "Текст", 120.0, |ui| {
+                    if insert_button(ui, deck, state, "🅰 Надпись", ElementKind::Text) {
+                        changed = true;
+                    }
+                });
+            });
+        }
+        2 => {
+            ui.add_enabled_ui(has_slide, |ui| {
+                crate::chrome::group(ui, "Темы", 130.0, |ui| {
+                    changed |= theme_menu(ui, deck);
+                });
+                crate::chrome::group(ui, "Настроить", 210.0, |ui| {
+                    ui.menu_button("Размер слайда", |ui| {
+                        for (label, width) in
+                            [("Широкоэкранный 16:9", 960.0), ("Стандартный 4:3", 720.0)]
+                        {
+                            if ui
+                                .selectable_label(
+                                    deck.width == width && deck.height == 540.0,
+                                    label,
+                                )
+                                .clicked()
+                            {
+                                changed |= deck.width != width || deck.height != 540.0;
+                                deck.width = width;
+                                deck.height = 540.0;
+                                ui.close();
+                            }
+                        }
+                    });
+                    let background = deck.slide(state.slide_id).map(|slide| slide.background);
+                    ui.horizontal(|ui| {
+                        if let Some(Some(color)) =
+                            crate::chrome::color_menu(ui, "◩", "Формат фона", background, None)
+                            && let Some(slide) = deck.slide_mut(state.slide_id)
+                        {
+                            slide.background = color;
+                            changed = true;
+                        }
+                        ui.label("Фон слайда");
+                    });
+                });
+            });
+        }
+        3 => {
+            ui.add_enabled_ui(has_slide, |ui| {
+                crate::chrome::group(ui, "Начать показ", 230.0, |ui| {
+                    ui.horizontal(|ui| {
+                        if ui.button("▶ С начала").on_hover_text("F5").clicked() {
+                            state.presentation.start(ui.ctx(), deck, 0);
+                        }
+                        if ui
+                            .button("▷ С текущего")
+                            .on_hover_text("Shift+F5")
+                            .clicked()
+                        {
+                            let index = deck
+                                .slides
+                                .iter()
+                                .position(|slide| slide.id == state.slide_id)
+                                .unwrap_or(0);
+                            state.presentation.start(ui.ctx(), deck, index);
+                        }
+                    });
+                    ui.small("← → пробел · Esc — выход · указка и перо");
+                });
+                crate::chrome::group(ui, "Настройка", 150.0, |ui| {
+                    let mut hidden = deck.slide(state.slide_id).is_some_and(|slide| slide.hidden);
+                    if ui.checkbox(&mut hidden, "Скрыть слайд").changed()
+                        && let Some(slide) = deck.slide_mut(state.slide_id)
+                    {
+                        slide.hidden = hidden;
+                        changed = true;
+                    }
+                });
+            });
+        }
+        _ => {
+            crate::chrome::group(ui, "Показать", 300.0, |ui| {
+                ui.horizontal(|ui| {
+                    if compact {
+                        if ui.button("Слайды…").clicked() {
+                            state.show_thumbnails = true;
+                        }
+                    } else {
+                        let mut thumbnails = !state.hide_thumbnails;
+                        if ui.checkbox(&mut thumbnails, "Миниатюры").changed() {
+                            state.hide_thumbnails = !thumbnails;
+                        }
+                    }
+                    ui.checkbox(&mut state.show_notes, "Заметки");
+                });
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut state.show_properties, "Свойства");
+                    ui.checkbox(&mut state.grid, "Сетка и привязка");
+                });
+            });
+            crate::chrome::group(ui, "Масштаб", 220.0, |ui| {
+                ui.add(egui::Slider::new(&mut state.zoom, 0.25..=2.0).show_value(false));
+                ui.horizontal(|ui| {
+                    ui.label(format!("{:.0}%", state.zoom * 100.0));
+                    if ui.button("Вписать").clicked() {
+                        state.zoom = 1.0;
+                    }
+                });
+            });
+        }
+    });
+    ui.add_space(4.0);
     changed
 }
 fn insert_button(

@@ -149,130 +149,195 @@ fn toolbar(
                     });
                 });
             });
-            crate::chrome::group(ui, "Текст", 226.0, |ui| {
+            crate::chrome::group(ui, "Шрифт", 452.0, |ui| {
                 ui.horizontal(|ui| {
-                    let mut size = selected.size;
-                    if command_action(
-                        ui.add(
-                            egui::DragValue::new(&mut size)
-                                .range(6.0..=72.0)
-                                .speed(0.5)
-                                .suffix(" pt"),
-                        ),
-                        book,
-                        state,
-                        &mut changed,
-                    ) {
-                        changed |= result(state, apply_format(book, |format| format.size = size));
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    let mut family = selected.font.clone();
+                    if crate::chrome::font_picker(ui, "sheets-font", &mut family, 128.0) {
+                        changed |= commit(book, state);
+                        if !state.editing {
+                            changed |= result(
+                                state,
+                                apply_format(book, |format| format.font = family.clone()),
+                            );
+                        }
                     }
-                    for (label, flag, tip) in [
-                        ("B", selected.bold, "Полужирный"),
-                        ("I", selected.italic, "Курсив"),
+                    let mut size = selected.size;
+                    if crate::chrome::size_picker(ui, "sheets-size", &mut size) {
+                        changed |= commit(book, state);
+                        if !state.editing {
+                            let size = size.clamp(1.0, 400.0);
+                            changed |=
+                                result(state, apply_format(book, |format| format.size = size));
+                        }
+                    }
+                    for (glyph, grow, tip) in [
+                        ("A+", true, "Увеличить размер шрифта"),
+                        ("A−", false, "Уменьшить размер шрифта"),
                     ] {
                         if command_action(
-                            ui.selectable_label(flag, label).on_hover_text(tip),
+                            crate::chrome::tool(ui, glyph, tip, false),
+                            book,
+                            state,
+                            &mut changed,
+                        ) {
+                            let size = crate::chrome::step_size(selected.size, grow);
+                            changed |=
+                                result(state, apply_format(book, |format| format.size = size));
+                        }
+                    }
+                    ui.separator();
+                    for (index, (label, flag, tip)) in [
+                        (
+                            egui::RichText::new("B").strong(),
+                            selected.bold,
+                            "Полужирный · Ctrl+B",
+                        ),
+                        (
+                            egui::RichText::new("I").italics(),
+                            selected.italic,
+                            "Курсив · Ctrl+I",
+                        ),
+                        (
+                            egui::RichText::new("U").underline(),
+                            selected.underline,
+                            "Подчёркнутый · Ctrl+U",
+                        ),
+                        (
+                            egui::RichText::new("S").strikethrough(),
+                            selected.strike,
+                            "Зачёркнутый · Ctrl+5",
+                        ),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        if command_action(
+                            crate::chrome::tool(ui, label, tip, flag),
                             book,
                             state,
                             &mut changed,
                         ) {
                             changed |= result(
                                 state,
-                                apply_format(book, |format| {
-                                    if label == "B" {
-                                        format.bold = !flag;
-                                    } else {
-                                        format.italic = !flag;
-                                    }
+                                apply_format(book, |format| match index {
+                                    0 => format.bold = !flag,
+                                    1 => format.italic = !flag,
+                                    2 => format.underline = !flag,
+                                    _ => format.strike = !flag,
                                 }),
                             );
                         }
                     }
-                    ui.menu_button("Шрифт", |ui| {
-                        let mut family = selected.font.clone();
-                        egui::ComboBox::from_id_salt(state_id.with("font"))
-                            .width(150.0)
-                            .selected_text(&family)
-                            .show_ui(ui, |ui| {
-                                for name in [
-                                    "Calibri",
-                                    "Arial",
-                                    "Times New Roman",
-                                    "Courier New",
-                                    "Segoe UI",
-                                ] {
-                                    ui.selectable_value(&mut family, name.into(), name);
-                                }
-                            });
-                        if family != selected.font {
-                            changed |= commit(book, state);
-                            if !state.editing {
-                                changed |= result(
-                                    state,
-                                    apply_format(book, |format| format.font = family.clone()),
-                                );
-                            }
+                    ui.separator();
+                    if command_action(
+                        crate::chrome::tool(ui, "▦", "Границы ячеек", selected.border),
+                        book,
+                        state,
+                        &mut changed,
+                    ) {
+                        changed |= result(
+                            state,
+                            apply_format(book, |format| format.border = !selected.border),
+                        );
+                    }
+                    if let Some(fill) = crate::chrome::color_menu(
+                        ui,
+                        "◧",
+                        "Цвет заливки",
+                        selected.fill,
+                        Some("Нет заливки"),
+                    ) {
+                        changed |= commit(book, state);
+                        if !state.editing {
+                            changed |=
+                                result(state, apply_format(book, |format| format.fill = fill));
                         }
-                        ui.separator();
-                        for (label, flag) in [
-                            ("Подчёркнутый", selected.underline),
-                            ("Зачёркнутый", selected.strike),
-                        ] {
-                            if command_action(
-                                ui.selectable_label(flag, label),
-                                book,
-                                state,
-                                &mut changed,
-                            ) {
-                                changed |= result(
-                                    state,
-                                    apply_format(book, |format| {
-                                        if label == "Подчёркнутый" {
-                                            format.underline = !flag;
-                                        } else {
-                                            format.strike = !flag;
-                                        }
-                                    }),
-                                );
-                            }
+                    }
+                    if let Some(Some(color)) = crate::chrome::color_menu(
+                        ui,
+                        "A",
+                        "Цвет текста",
+                        Some(selected.color),
+                        None,
+                    ) {
+                        changed |= commit(book, state);
+                        if !state.editing {
+                            changed |=
+                                result(state, apply_format(book, |format| format.color = color));
                         }
-                        ui.horizontal(|ui| {
-                            ui.label("Цвет текста");
-                            let mut color = selected.color;
-                            if command_action(
-                                ui.color_edit_button_srgb(&mut color),
-                                book,
-                                state,
-                                &mut changed,
-                            ) {
-                                changed |= result(
-                                    state,
-                                    apply_format(book, |format| format.color = color),
-                                );
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Заливка");
-                            let mut fill = selected.fill.unwrap_or([255, 255, 255]);
-                            if command_action(
-                                ui.color_edit_button_srgb(&mut fill),
-                                book,
-                                state,
-                                &mut changed,
-                            ) {
-                                changed |= result(
-                                    state,
-                                    apply_format(book, |format| format.fill = Some(fill)),
-                                );
-                            }
-                        });
-                    });
+                    }
                 });
             });
-            crate::chrome::group(ui, "Ячейки", 254.0, |ui| {
+            crate::chrome::group(ui, "Выравнивание", 236.0, |ui| {
                 ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    for (index, label, align) in [
+                        (0, "По левому краю", Align::Left),
+                        (1, "По центру", Align::Center),
+                        (2, "По правому краю", Align::Right),
+                    ] {
+                        let on = selected.align == align;
+                        if command_action(
+                            crate::chrome::alignment_button(ui, index, label, on),
+                            book,
+                            state,
+                            &mut changed,
+                        ) {
+                            let align = if on { Align::General } else { align };
+                            changed |=
+                                result(state, apply_format(book, |format| format.align = align));
+                        }
+                    }
+                    ui.separator();
+                    if command_action(
+                        crate::chrome::tool(ui, "↵", "Перенос текста", selected.wrap),
+                        book,
+                        state,
+                        &mut changed,
+                    ) {
+                        changed |= result(
+                            state,
+                            apply_format(book, |format| format.wrap = !selected.wrap),
+                        );
+                    }
+                    ui.menu_button("⟲", |ui| {
+                        for (label, angle) in [
+                            ("Без поворота", 0),
+                            ("Против часовой (45°)", 45),
+                            ("По часовой (−45°)", -45),
+                            ("Вверх (90°)", 90),
+                            ("Вниз (−90°)", -90),
+                        ] {
+                            if command_action(
+                                ui.selectable_label(selected.rotation == angle, label),
+                                book,
+                                state,
+                                &mut changed,
+                            ) {
+                                changed |= result(
+                                    state,
+                                    apply_format(book, |format| format.rotation = angle),
+                                );
+                                ui.close();
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text("Ориентация текста");
+                    ui.menu_button("⊞", |ui| {
+                        merge_menu(ui, book, state, &mut changed);
+                    })
+                    .response
+                    .on_hover_text("Объединить ячейки");
+                });
+            });
+            crate::chrome::group(ui, "Число", 214.0, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
                     let mut number = selected.number.clone();
                     egui::ComboBox::from_id_salt(state_id.with("number-format"))
-                        .width(120.0)
+                        .width(118.0)
                         .selected_text(
                             super::format::NUMBER_FORMATS
                                 .iter()
@@ -285,6 +350,14 @@ fn toolbar(
                                 ui.selectable_value(&mut number, code.to_string(), *label);
                             }
                         });
+                    for (glyph, code, tip) in [
+                        ("%", "0%", "Процентный формат"),
+                        ("000", "#,##0", "Формат с разделителями"),
+                    ] {
+                        if crate::chrome::tool(ui, glyph, tip, selected.number == code).clicked() {
+                            number = code.into();
+                        }
+                    }
                     if number != selected.number {
                         changed |= commit(book, state);
                         if !state.editing {
@@ -294,62 +367,17 @@ fn toolbar(
                             );
                         }
                     }
-                    ui.menu_button("Формат", |ui| {
-                        for (label, align) in [
-                            ("По левому краю", Align::Left),
-                            ("По центру", Align::Center),
-                            ("По правому краю", Align::Right),
-                        ] {
-                            if command_action(
-                                ui.selectable_label(selected.align == align, label),
-                                book,
-                                state,
-                                &mut changed,
-                            ) {
-                                changed |= result(
-                                    state,
-                                    apply_format(book, |format| format.align = align),
-                                );
-                                ui.close();
-                            }
-                        }
-                        ui.separator();
-                        if command_action(
-                            ui.selectable_label(selected.wrap, "Перенос текста"),
-                            book,
+                    if command_action(
+                        crate::chrome::tool(ui, "⌫", "Очистить формат", false),
+                        book,
+                        state,
+                        &mut changed,
+                    ) {
+                        changed |= result(
                             state,
-                            &mut changed,
-                        ) {
-                            changed |= result(
-                                state,
-                                apply_format(book, |format| format.wrap = !selected.wrap),
-                            );
-                            ui.close();
-                        }
-                        if command_action(
-                            ui.selectable_label(selected.border, "Границы"),
-                            book,
-                            state,
-                            &mut changed,
-                        ) {
-                            changed |= result(
-                                state,
-                                apply_format(book, |format| format.border = !selected.border),
-                            );
-                            ui.close();
-                        }
-                        ui.separator();
-                        merge_menu(ui, book, state, &mut changed);
-                        ui.separator();
-                        if command_action(ui.button("Очистить формат"), book, state, &mut changed)
-                        {
-                            changed |= result(
-                                state,
-                                apply_format(book, |format| *format = CellFormat::default()),
-                            );
-                            ui.close();
-                        }
-                    });
+                            apply_format(book, |format| *format = CellFormat::default()),
+                        );
+                    }
                 });
             });
             crate::chrome::group(ui, "Правка", 92.0, |ui| {
@@ -1409,6 +1437,27 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                                         memory.move_focus(egui::FocusDirection::None);
                                     });
                                 }
+                                continue;
+                            }
+                            if modifiers.ctrl && matches!(key, Key::B | Key::I | Key::U | Key::Num5)
+                            {
+                                // Excel: Ctrl+B/I/U/5 toggle bold/italic/underline/strike.
+                                let current = book
+                                    .active_sheet()
+                                    .and_then(|sheet| {
+                                        sheet.cell(book.selection.row, book.selection.col)
+                                    })
+                                    .map(|cell| cell.fmt.clone())
+                                    .unwrap_or_default();
+                                changed |= result(
+                                    &mut state,
+                                    apply_format(book, |format| match key {
+                                        Key::B => format.bold = !current.bold,
+                                        Key::I => format.italic = !current.italic,
+                                        Key::U => format.underline = !current.underline,
+                                        _ => format.strike = !current.strike,
+                                    }),
+                                );
                                 continue;
                             }
                             if modifiers.ctrl && (key == Key::F || key == Key::H) {
