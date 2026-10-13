@@ -557,7 +557,7 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
             .map(|b| xml(b))
             .transpose()?,
     );
-    let mut styles = BTreeMap::new();
+    let mut styles: BTreeMap<String, Node> = BTreeMap::new();
     // Word's built-in defaults: automatic (black) text, 10 pt, single spacing, no gaps.
     let mut default_format = TextFormat {
         color: [0, 0, 0],
