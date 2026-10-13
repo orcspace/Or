@@ -127,10 +127,11 @@ pub fn style(ctx: &egui::Context, kind: &str) {
         v.widgets.inactive.bg_stroke = Stroke::new(1.0, p.border);
         v.widgets.hovered.bg_fill = p.hover;
         v.widgets.hovered.weak_bg_fill = p.hover;
-        v.widgets.hovered.bg_stroke = Stroke::new(1.0, p.border);
+        v.widgets.hovered.bg_stroke = Stroke::new(1.0, accent.gamma_multiply(0.55));
         v.widgets.active.bg_fill = p.pressed;
         v.widgets.active.weak_bg_fill = p.pressed;
         v.widgets.active.bg_stroke = Stroke::new(1.0, p.border);
+        v.widgets.active.bg_stroke = Stroke::new(1.0, accent);
         v.widgets.open.bg_fill = p.hover;
         v.widgets.open.weak_bg_fill = p.hover;
         style.spacing.item_spacing = egui::vec2(4.0, 4.0);
@@ -138,6 +139,12 @@ pub fn style(ctx: &egui::Context, kind: &str) {
         style.spacing.interact_size = egui::vec2(24.0, 24.0);
         style.spacing.menu_margin = egui::Margin::same(4);
         style.spacing.combo_height = 360.0;
+        style.spacing.tooltip_width = 360.0;
+        style.animation_time = 0.12;
+        style.interaction.tooltip_delay = 0.45;
+        style.interaction.show_tooltips_only_when_still = true;
+        v.slider_trailing_fill = true;
+        v.text_cursor.blink = true;
         style
             .text_styles
             .insert(TextStyle::Body, FontId::proportional(13.0));
@@ -159,12 +166,18 @@ pub fn tabs(ui: &mut Ui, active: &mut usize, labels: &[&str]) {
         for (index, label) in labels.iter().enumerate() {
             let selected = *active == index;
             let text = RichText::new(*label).size(13.0);
-            let text = if selected { text.strong() } else { text };
-            let response = ui.add(
-                egui::Button::new(text)
-                    .frame_when_inactive(false)
-                    .min_size(egui::vec2(56.0, 28.0)),
-            );
+            let text = if selected {
+                text.strong().color(accent(ui))
+            } else {
+                text
+            };
+            let response = ui
+                .add(
+                    egui::Button::new(text)
+                        .frame_when_inactive(false)
+                        .min_size(egui::vec2(56.0, 28.0)),
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
             if response.clicked() {
                 *active = index;
             }
@@ -174,7 +187,7 @@ pub fn tabs(ui: &mut Ui, active: &mut usize, labels: &[&str]) {
                         response.rect.left_bottom() + egui::vec2(12.0, -1.0),
                         response.rect.right_bottom() - egui::vec2(12.0, 1.0),
                     ],
-                    Stroke::new(3.0, accent(ui)),
+                    Stroke::new(2.5, accent(ui)),
                 );
             }
         }
@@ -246,6 +259,7 @@ pub fn tool(
             .frame_when_inactive(false)
             .min_size(egui::vec2(24.0, 24.0)),
     )
+    .on_hover_cursor(egui::CursorIcon::PointingHand)
     .on_hover_text(tip)
 }
 /// Font family picker with a search box; each family is previewed in itself.
