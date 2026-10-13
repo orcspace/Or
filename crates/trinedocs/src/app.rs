@@ -834,8 +834,45 @@ impl App {
             }
         }
     }
+    /// Shows the black AI caret where an agent's Docs edit landed.
+    fn mark_ai_caret(&self, ctx: &egui::Context, target: u64, args: &Value) {
+        if !self
+            .tabs
+            .iter()
+            .any(|t| t.id == target && matches!(t.document, Document::Docs(_)))
+        {
+            return;
+        }
+        let int = |keys: &[&str]| {
+            keys.iter()
+                .find_map(|k| args.get(*k).and_then(Value::as_u64))
+        };
+        let Some(paragraph_id) = int(&["paragraph_id", "end_paragraph_id", "start_paragraph_id"])
+        else {
+            return;
+        };
+        let from = int(&["offset", "start_offset"]).unwrap_or_default() as usize;
+        let to = match (
+            args.get("text").and_then(Value::as_str),
+            int(&["end_offset"]),
+        ) {
+            (Some(text), _) => from.saturating_add(text.chars().count()),
+            (None, Some(end)) => end as usize,
+            _ => from,
+        };
+        let caret = crate::docs::editor::AiCaret {
+            tab: target,
+            paragraph_id,
+            from,
+            to,
+            time: ctx.input(|i| i.time),
+        };
+        ctx.data_mut(|d| d.insert_temp(crate::docs::editor::ai_caret_id(), caret));
+        ctx.request_repaint();
+    }
     fn mcp_requests(&mut self, ctx: &egui::Context) {
-        for _ in 0..16 {
+        // Agents often send bursts of small edits; drain them in one frame.
+        for _ in 0..64 {
             let Some(r) = self.bridge.as_ref().and_then(|b| b.try_recv().ok()) else {
                 break;
             };
@@ -974,6 +1011,7 @@ impl App {
                 .and_then(|value| id.or_else(|| value.get("document_id").and_then(Value::as_u64)));
             if let Some(target) = applied_target {
                 self.last_agent = Some((target, r.client.clone(), Instant::now()));
+                self.mark_ai_caret(ctx, target, &r.args);
                 if r.tool == "create_document" {
                     self.deferred.push((target, "activate_external"));
                 }
@@ -2003,6 +2041,9 @@ impl eframe::App for App {
             .show(ui, |ui| {
                 if let Some(t) = self.tabs.iter_mut().find(|t| Some(t.id) == self.active) {
                     let mut d = t.document.clone();
+                    ui.ctx().data_mut(|data| {
+                        data.insert_temp(crate::docs::editor::active_tab_id(), t.id)
+                    });
                     let docs_edits = t.pending_docs_edits.take();
                     t.pending_docs_edits = Some(Vec::new());
                     let changed = ui

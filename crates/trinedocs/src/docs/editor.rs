@@ -133,6 +133,94 @@ impl EditorState {
 pub fn show(ui: &mut egui::Ui, doc: &mut Doc) -> bool {
     show_with_edits(ui, doc, None)
 }
+/// Where an AI agent just edited: drawn as a black caret with a fading trail.
+#[derive(Clone, Copy, Debug)]
+pub struct AiCaret {
+    pub tab: u64,
+    pub paragraph_id: u64,
+    pub from: usize,
+    pub to: usize,
+    /// `ctx.input(|i| i.time)` when the edit landed.
+    pub time: f64,
+}
+const AI_CARET_SECONDS: f64 = 2.6;
+pub fn ai_caret_id() -> egui::Id {
+    egui::Id::new("trinedocs-ai-caret")
+}
+pub fn active_tab_id() -> egui::Id {
+    egui::Id::new("trinedocs-active-tab")
+}
+fn paint_ai_caret(
+    ui: &egui::Ui,
+    doc: &Doc,
+    layout: &Layout,
+    page_origin: egui::Pos2,
+    page_height: f32,
+    gap: f32,
+    scale: f32,
+) {
+    let ctx = ui.ctx();
+    let Some(caret) = ctx.data(|d| d.get_temp::<AiCaret>(ai_caret_id())) else {
+        return;
+    };
+    let tab = ctx.data(|d| d.get_temp::<u64>(active_tab_id()));
+    let age = ctx.input(|i| i.time) - caret.time;
+    if tab != Some(caret.tab) || !(0.0..AI_CARET_SECONDS).contains(&age) {
+        return;
+    }
+    let Some(paragraph) = doc
+        .paragraphs
+        .iter()
+        .position(|p| p.id == caret.paragraph_id)
+    else {
+        return;
+    };
+    // Fade out over the last second; the caret blinks gently meanwhile.
+    let fade = ((AI_CARET_SECONDS - age) as f32).clamp(0.0, 1.0);
+    let blink = 0.65 + 0.35 * ((age * 7.0).cos() as f32).abs();
+    let len = doc.paragraphs.get(paragraph).map_or(0, Paragraph::len);
+    let caret_to = caret.to.min(len);
+    let (from, to) = (caret.from.min(caret_to), caret_to.max(caret.from).min(len));
+    let painter = ui.painter();
+    for row in layout.rows.iter().filter(|r| r.paragraph == paragraph) {
+        let origin = page_origin + egui::vec2(0.0, row.page as f32 * (page_height + gap));
+        let a = from.max(row.start);
+        let b = to.min(row.end);
+        if b > a {
+            let x1 = row_x(row, a);
+            let x2 = row_x(row, b);
+            painter.rect_filled(
+                Rect::from_min_size(
+                    origin + egui::vec2(x1 * scale, row.y * scale),
+                    egui::vec2((x2 - x1) * scale, row.height * scale),
+                ),
+                2.0,
+                Color32::from_black_alpha((34.0 * fade) as u8),
+            );
+        }
+        if caret_to >= row.start && caret_to <= row.end {
+            let x = origin.x + row_x(row, caret_to) * scale;
+            let top = origin.y + row.y * scale;
+            let bottom = top + row.height * scale;
+            let ink = Color32::from_black_alpha((235.0 * fade * blink) as u8);
+            painter.line_segment(
+                [egui::pos2(x, top), egui::pos2(x, bottom)],
+                Stroke::new(2.0, ink),
+            );
+            let tag = Rect::from_min_size(egui::pos2(x, top - 13.0), egui::vec2(20.0, 12.0));
+            painter.rect_filled(tag, 3.0, Color32::from_black_alpha((235.0 * fade) as u8));
+            painter.text(
+                tag.center(),
+                Align2::CENTER_CENTER,
+                "AI",
+                FontId::proportional(9.0),
+                Color32::from_white_alpha((255.0 * fade) as u8),
+            );
+            break;
+        }
+    }
+    ctx.request_repaint();
+}
 pub fn show_with_edits(ui: &mut egui::Ui, doc: &mut Doc, edits: Option<&[TextEditDelta]>) -> bool {
     doc.normalize();
     let state_id = ui.id().with("docs-state");
@@ -428,6 +516,7 @@ pub fn show_with_edits(ui: &mut egui::Ui, doc: &mut Doc, edits: Option<&[TextEdi
                     }
                 }
             }
+            paint_ai_caret(ui, doc, &layout, page_origin, page_height, gap, scale);
             cell_editor(
                 ui,
                 doc,
