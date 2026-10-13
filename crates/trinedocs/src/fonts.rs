@@ -301,7 +301,7 @@ fn base_family(bold: bool, italic: bool) -> egui::FontFamily {
         (true, true) => egui::FontFamily::Name("bold-italic".into()),
         (true, false) => egui::FontFamily::Name("bold".into()),
         (false, true) => egui::FontFamily::Name("italic".into()),
-        _ => egui::FontFamily::Proportional,
+        _ => egui::FontFamily::Name("system".into()),
     }
 }
 fn family_key(family: &str, bold: bool, italic: bool) -> Option<String> {
@@ -414,12 +414,35 @@ pub fn install(ctx: &egui::Context) -> Result<(), String> {
             .families
             .insert(egui::FontFamily::Name(name.into()), vec![name.into()]);
     }
-    fonts
-        .families
-        .insert(egui::FontFamily::Proportional, vec!["system".into()]);
-    fonts
-        .families
-        .insert(egui::FontFamily::Monospace, vec!["system".into()]);
+    // Interface text uses Segoe UI as Office does; documents keep their own fonts.
+    let root = font_dirs().into_iter().next().unwrap_or_default();
+    let mut ui = vec!["system".to_string()];
+    let mut mono = vec!["system".to_string()];
+    for (name, file, chain) in [
+        ("ui", "segoeui.ttf", 0),
+        ("mono", "consola.ttf", 1),
+        ("symbols", "seguisym.ttf", 2),
+    ] {
+        let Ok(bytes) = std::fs::read(root.join(file)) else {
+            continue;
+        };
+        fonts
+            .font_data
+            .insert(name.into(), egui::FontData::from_owned(bytes).into());
+        match chain {
+            0 => ui.insert(0, name.into()),
+            1 => mono.insert(0, name.into()),
+            _ => {
+                ui.push(name.into());
+                mono.push(name.into());
+                for family in fonts.families.values_mut() {
+                    family.push(name.into());
+                }
+            }
+        }
+    }
+    fonts.families.insert(egui::FontFamily::Proportional, ui);
+    fonts.families.insert(egui::FontFamily::Monospace, mono);
     {
         let registry = registry(ctx);
         let mut registry = registry.lock().unwrap_or_else(|e| e.into_inner());

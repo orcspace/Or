@@ -1134,13 +1134,9 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                     let right = fmt.align == Align::Right
                         || (fmt.align == Align::General
                             && cell.is_some_and(|c| matches!(c.value, Value::Number(_))));
-                    let family = match (fmt.bold, fmt.italic) {
-                        (true, true) => "bold-italic",
-                        (true, false) => "bold",
-                        (false, true) => "italic",
-                        _ => "system",
-                    };
-                    let font = FontId::new(fmt.size * 1.333, egui::FontFamily::Name(family.into()));
+                    let family =
+                        crate::fonts::egui_family(ui.ctx(), &fmt.font, fmt.bold, fmt.italic);
+                    let font = FontId::new(fmt.size * 1.333, family);
                     let align = if fmt.align == Align::Center {
                         Align2::CENTER_CENTER
                     } else if right {

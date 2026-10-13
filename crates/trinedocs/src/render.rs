@@ -92,7 +92,7 @@ pub fn paint(ui: &mut egui::Ui, page: &Page, origin: egui::Pos2, scale: f32) {
                     Primitive::TextStyled { italic: true, .. } => {
                         egui::FontFamily::Name("italic".into())
                     }
-                    _ => egui::FontFamily::Proportional,
+                    _ => egui::FontFamily::Name("system".into()),
                 };
                 p.text(
                     point(*x, *y),

@@ -1850,22 +1850,12 @@ fn paint_element(
                         font_size: e.font_size.min(ch / scale * 0.7),
                         bold: e.bold,
                         italic: e.italic,
+                        font: e.font.clone(),
                         ..Element::default()
                     };
                     let font = FontId::new(
                         cell_element.font_size * scale,
-                        egui::FontFamily::Name(
-                            if e.bold && e.italic {
-                                "bold-italic"
-                            } else if e.bold {
-                                "bold"
-                            } else if e.italic {
-                                "italic"
-                            } else {
-                                "system"
-                            }
-                            .into(),
-                        ),
+                        crate::fonts::egui_family(painter.ctx(), &e.font, e.bold, e.italic),
                     );
                     let cell_painter = painter.with_clip_rect(cell.shrink(2.0 * scale));
                     for (index, line) in super::model::text_lines(&cell_element)
@@ -1935,18 +1925,7 @@ fn paint_element(
             egui::TextFormat {
                 font_id: FontId::new(
                     e.font_size * scale,
-                    egui::FontFamily::Name(
-                        if e.bold && e.italic {
-                            "bold-italic"
-                        } else if e.bold {
-                            "bold"
-                        } else if e.italic {
-                            "italic"
-                        } else {
-                            "system"
-                        }
-                        .into(),
-                    ),
+                    crate::fonts::egui_family(painter.ctx(), &e.font, e.bold, e.italic),
                 ),
                 color: rgb(e.color),
                 italics: false,

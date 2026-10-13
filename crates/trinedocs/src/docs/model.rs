@@ -356,10 +356,23 @@ pub struct Row {
     pub segments: Vec<Segment>,
     pub marker: String,
 }
+/// Where a table cell (or its part on one page) was laid out, in page points.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CellBox {
+    pub table: u64,
+    pub row: usize,
+    pub column: usize,
+    pub page: usize,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
 #[derive(Clone, Debug, Default)]
 pub struct Layout {
     pub pages: Vec<Page>,
     pub rows: Vec<Row>,
+    pub cells: Vec<CellBox>,
 }
 
 pub fn char_width(ch: char, format: &TextFormat) -> f32 {
@@ -1069,6 +1082,7 @@ impl Doc {
         let mut layout = Layout {
             pages: vec![blank_page(setup, 1)],
             rows: Vec::new(),
+            cells: Vec::new(),
         };
         let mut y = setup.margin_top;
         let mut list_number = 0;
@@ -1512,7 +1526,7 @@ fn render_table(layout: &mut Layout, setup: &PageSetup, table: &Table, y: &mut f
             *width *= usable_width / raw_sum;
         }
     }
-    for cells in &table.rows {
+    for (row_index, cells) in table.rows.iter().enumerate() {
         let cell_lines: Vec<Vec<Row>> = cells
             .iter()
             .enumerate()
@@ -1558,6 +1572,7 @@ fn render_table(layout: &mut Layout, setup: &PageSetup, table: &Table, y: &mut f
                 row_height += height;
                 count += 1;
             }
+            let page_index = layout.pages.len().saturating_sub(1);
             if let Some(page) = layout.pages.last_mut() {
                 let mut x = setup.margin_left;
                 for (ci, cell) in cells.iter().enumerate() {
@@ -1565,6 +1580,16 @@ fn render_table(layout: &mut Layout, setup: &PageSetup, table: &Table, y: &mut f
                         .get(ci)
                         .copied()
                         .unwrap_or(usable_width / columns as f32);
+                    layout.cells.push(CellBox {
+                        table: table.id,
+                        row: row_index,
+                        column: ci,
+                        page: page_index,
+                        x,
+                        y: *y,
+                        w: width,
+                        h: row_height,
+                    });
                     page.items.push(Primitive::Rect {
                         x,
                         y: *y,
