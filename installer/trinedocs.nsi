@@ -12,7 +12,7 @@ Unicode true
 !define OUTFILE "TrineDocs-Setup.exe"
 !endif
 !ifndef VERSION
-!define VERSION "0.0.1"
+!define VERSION "0.0.4"
 !endif
 Name "TrineDocs ${VERSION}"
 OutFile "${OUTFILE}"
@@ -22,7 +22,7 @@ SetCompressor /SOLID lzma
 SetCompressorDictSize 32
 SetDatablockOptimize on
 ManifestDPIAware true
-VIProductVersion "0.0.1.0"
+VIProductVersion "0.0.4.0"
 VIAddVersionKey /LANG=1033 "ProductName" "TrineDocs"
 VIAddVersionKey /LANG=1033 "FileDescription" "TrineDocs installer"
 VIAddVersionKey /LANG=1033 "FileVersion" "${VERSION}"

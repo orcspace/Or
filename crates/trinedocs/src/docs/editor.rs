@@ -150,6 +150,10 @@ pub fn ai_caret_id() -> egui::Id {
 pub fn active_tab_id() -> egui::Id {
     egui::Id::new("trinedocs-active-tab")
 }
+/// The selected text of the document editor and its tab, for the AI chat.
+pub fn selection_id() -> egui::Id {
+    egui::Id::new("trinedocs-doc-selection")
+}
 fn paint_ai_caret(
     ui: &egui::Ui,
     doc: &Doc,
@@ -600,7 +604,17 @@ pub fn show_with_edits(ui: &mut egui::Ui, doc: &mut Doc, edits: Option<&[TextEdi
     if state.previous.as_deref() != Some(doc) {
         state.previous = Some(std::sync::Arc::new(doc.clone()));
     }
-    ui.ctx().data_mut(|d| d.insert_temp(state_id, state));
+    let selection = if state.selected() {
+        let (a, b) = state.range();
+        doc.selected_text(a, b)
+    } else {
+        String::new()
+    };
+    let tab = ui.ctx().data(|d| d.get_temp::<u64>(active_tab_id()));
+    ui.ctx().data_mut(|d| {
+        d.insert_temp(selection_id(), (tab, selection));
+        d.insert_temp(state_id, state);
+    });
     changed
 }
 fn cell_editor_id(canvas_id: egui::Id) -> egui::Id {

@@ -1138,6 +1138,9 @@ impl App {
             return;
         }
         let cmd = egui::Modifiers::COMMAND;
+        if ctx.input_mut(|i| i.consume_key(cmd | egui::Modifiers::SHIFT, egui::Key::A)) {
+            self.show_ai = !self.show_ai;
+        }
         if ctx.input_mut(|i| i.consume_key(cmd, egui::Key::O)) {
             self.send(Job::PickOpen);
         }
@@ -1809,7 +1812,7 @@ impl eframe::App for App {
                                     .selected(self.show_ai)
                                     .frame_when_inactive(false),
                             )
-                            .on_hover_text("AI-чат и изменения")
+                            .on_hover_text("AI-чат и изменения (Ctrl+Shift+A)")
                             .clicked()
                         {
                             self.show_ai = !self.show_ai;
@@ -1965,6 +1968,13 @@ impl eframe::App for App {
                     id: t.id,
                     title: t.title.clone(),
                     kind: t.document.kind(),
+                    selection: ctx
+                        .data(|d| {
+                            d.get_temp::<(Option<u64>, String)>(crate::docs::editor::selection_id())
+                        })
+                        .filter(|(tab, _)| *tab == Some(t.id))
+                        .map(|(_, text)| text)
+                        .unwrap_or_default(),
                 });
             egui::Panel::right("ai-review")
                 .default_size(340.0)
