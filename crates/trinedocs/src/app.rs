@@ -1922,11 +1922,19 @@ impl eframe::App for App {
                             Document::Sheets(_) => "Таблица",
                             Document::Slides(_) => "Презентация",
                         });
-                        ui.small(if t.dirty() {
-                            "Не сохранено"
+                        if t.dirty() {
+                            ui.label(
+                                egui::RichText::new("● Не сохранено")
+                                    .small()
+                                    .color(ui.visuals().warn_fg_color),
+                            );
                         } else {
-                            "Сохранено"
-                        });
+                            ui.label(
+                                egui::RichText::new("Сохранено")
+                                    .small()
+                                    .color(crate::chrome::muted(ui)),
+                            );
+                        }
                         if t.save_locked {
                             ui.label(
                                 egui::RichText::new("Файл занят · правки можно сохранить копией")
