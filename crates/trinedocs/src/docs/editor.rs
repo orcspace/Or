@@ -518,7 +518,7 @@ fn refocus(ui: &egui::Ui, state: &EditorState, canvas_id: egui::Id) {
 fn table_mut(doc: &mut Doc, id: u64) -> Option<&mut Table> {
     doc.tables.iter_mut().find(|t| t.id == id)
 }
-fn active_cell<'a>(doc: &'a mut Doc, cursor: Option<TableCursor>) -> Option<&'a mut Cell> {
+fn active_cell(doc: &mut Doc, cursor: Option<TableCursor>) -> Option<&mut Cell> {
     let cursor = cursor?;
     table_mut(doc, cursor.table)?
         .rows

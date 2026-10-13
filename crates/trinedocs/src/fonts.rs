@@ -63,7 +63,7 @@ fn describe_face(file: &mut std::fs::File, offset: u64) -> Option<(String, bool,
     let records = read_at(file, offset + 12, count * 16)?;
     let mut name = None;
     let mut os2 = None;
-    for record in records.chunks_exact(16) {
+    for record in records.as_chunks::<16>().0 {
         let location = (u64::from(be32(record, 8)?), be32(record, 12)? as usize);
         match record.get(..4)? {
             b"name" => name = Some(location),
@@ -133,7 +133,9 @@ fn scan() -> BTreeMap<String, Faces> {
             let count = be32(&header, 8).unwrap_or_default().min(64) as usize;
             read_at(&mut file, 12, count * 4)
                 .map(|b| {
-                    b.chunks_exact(4)
+                    b.as_chunks::<4>()
+                        .0
+                        .iter()
                         .filter_map(|c| be32(c, 0))
                         .map(u64::from)
                         .collect()
@@ -256,8 +258,8 @@ pub fn font_bytes(bold: bool, italic: bool) -> Result<Vec<u8>, String> {
 }
 /// Horizontal advances (em fractions) of a family/style; cached per face.
 pub fn advances(family: &str, bold: bool, italic: bool) -> Arc<HashMap<char, f32>> {
-    static TABLES: OnceLock<Mutex<HashMap<(String, usize), Arc<HashMap<char, f32>>>>> =
-        OnceLock::new();
+    type Tables = HashMap<(String, usize), Arc<HashMap<char, f32>>>;
+    static TABLES: OnceLock<Mutex<Tables>> = OnceLock::new();
     let tables = TABLES.get_or_init(Default::default);
     let key = (
         canonical(family)

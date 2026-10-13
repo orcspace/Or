@@ -452,9 +452,15 @@ pub fn edit_cell_text(cell: &mut Cell, text: &str, next_id: &mut u64) {
         *next_id = nested.next_id;
     }
 }
+type FaceMetrics = (
+    String,
+    bool,
+    bool,
+    std::sync::Arc<std::collections::HashMap<char, f32>>,
+);
 pub fn char_width(ch: char, format: &TextFormat) -> f32 {
     thread_local! {
-        static LAST: std::cell::RefCell<Option<(String, bool, bool, std::sync::Arc<std::collections::HashMap<char, f32>>)>> =
+        static LAST: std::cell::RefCell<Option<FaceMetrics>> =
             const { std::cell::RefCell::new(None) };
     }
     let metrics = LAST.with(|last| {
