@@ -19,12 +19,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .display()
         .to_string()
         .replace('\\', "\\\\");
+    let version = std::env::var("CARGO_PKG_VERSION")?;
+    let numeric = version
+        .split(['.', '-'])
+        .take(3)
+        .map(|part| part.parse::<u16>().unwrap_or(0).to_string())
+        .collect::<Vec<_>>()
+        .join(",");
     let source = format!(
         r#"1 ICON "{icon}"
 1 24 "{manifest}"
 1 VERSIONINFO
-FILEVERSION 0,1,0,0
-PRODUCTVERSION 0,1,0,0
+FILEVERSION {numeric},0
+PRODUCTVERSION {numeric},0
 FILEOS 0x40004L
 FILETYPE 0x1L
 BEGIN
@@ -33,10 +40,10 @@ BEGIN
 BLOCK "040904B0"
 BEGIN
 VALUE "CompanyName", "orcspace\0"
-VALUE "FileDescription", "TrineDocs Office Preview\0"
-VALUE "FileVersion", "0.1.0-preview.1\0"
+VALUE "FileDescription", "TrineDocs Office\0"
+VALUE "FileVersion", "{version}\0"
 VALUE "ProductName", "TrineDocs\0"
-VALUE "ProductVersion", "0.1.0-preview.1\0"
+VALUE "ProductVersion", "{version}\0"
 END
 END
 BLOCK "VarFileInfo"

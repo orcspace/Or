@@ -3636,7 +3636,7 @@ dependencies = [
 
 [[package]]
 name = "trinedocs"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "arboard",
  "axum",
@@ -3665,7 +3665,7 @@ dependencies = [
 
 [[package]]
 name = "trinedocs-shell-core"
-version = "0.1.0"
+version = "0.0.1"
 
 [[package]]
 name = "try-lock"
