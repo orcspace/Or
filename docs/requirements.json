@@ -1,0 +1,7460 @@
+[
+  {
+    "id": "REQ-00-001",
+    "source": "AGENTS.md",
+    "section": 0,
+    "heading": "AGENTS.md — TrineDocs",
+    "clause": "Офисный пакет «три в одном» для **Windows 11** и **macOS (Apple Silicon)**: **Docs** (документы), **Sheets** (таблицы), **Slides** (презентации).",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-00-002",
+    "source": "AGENTS.md",
+    "section": 0,
+    "heading": "AGENTS.md — TrineDocs",
+    "clause": "Функциональность уровня Word / Excel / PowerPoint, свои фичи сверху, real-time совместная работа и встроенный AI-агент через MCP, который редактирует документ вживую с видимым курсором.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-00-003",
+    "source": "AGENTS.md",
+    "section": 0,
+    "heading": "AGENTS.md — TrineDocs",
+    "clause": "Ты — ведущий инженер проекта. Этот файл — главная спецификация. Детальная спецификация MCP — в `docs/MCP.md` (обязательна к реализации так же, как этот файл). Дополнение `docs/SPEC-AUDIT.md` имеет равный приоритет и при расхождении применяется первым, кроме жёстких ограничений раздела 1. Указание владельца от 2026-10-13: сейчас реализация и проверка только Windows 11 x64; macOS arm64 позже, без исключения из конечной поддержки (ADR-0001).",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-00-004",
+    "source": "AGENTS.md",
+    "section": 0,
+    "heading": "AGENTS.md — TrineDocs",
+    "clause": "**Правило полноты:** если функция есть в Word / Excel / PowerPoint или очевидно ожидается пользователем офисного пакета, но не упомянута здесь, — она всё равно в объёме проекта. Внеси её в матрицу паритета (`docs/parity.md`) с приоритетом и реализуй по плану. «Не написано» ≠ «не нужно».",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-00-005",
+    "source": "AGENTS.md",
+    "section": 0,
+    "heading": "0. Как работать",
+    "clause": "1. Работай **по фазам** (раздел 20). Следующая фаза — только после выполнения критериев приёмки текущей.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-00-006",
+    "source": "AGENTS.md",
+    "section": 0,
+    "heading": "0. Как работать",
+    "clause": "2. Перед фазой — план в `docs/plan/phase-N.md`; после — отчёт: что сделано, что не работает, известные баги, решения.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-00-007",
+    "source": "AGENTS.md",
+    "section": 0,
+    "heading": "0. Как работать",
+    "clause": "3. Сначала тонкий вертикальный срез, потом расширение. **Заглушки не выдавать за готовые функции**: недоделанная команда в UI помечается и отключается.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-00-008",
+    "source": "AGENTS.md",
+    "section": 0,
+    "heading": "0. Как работать",
+    "clause": "4. Конфликт требования с реальностью (производительность, лицензия, возможности библиотеки) — остановись и опиши варианты в `docs/decisions/NNNN-*.md` (ADR). Не обходи молча.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-00-009",
+    "source": "AGENTS.md",
+    "section": 0,
+    "heading": "0. Как работать",
+    "clause": "5. Стек не меняется без ADR.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-00-010",
+    "source": "AGENTS.md",
+    "section": 0,
+    "heading": "0. Как работать",
+    "clause": "6. Каждую зависимость и её лицензию — в `docs/licenses.md`.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-01-001",
+    "source": "AGENTS.md",
+    "section": 1,
+    "heading": "1. Жёсткие ограничения",
+    "clause": "- Платформы: **Windows 11 x64** (build 22000+) и **macOS arm64**. Windows 10, Intel Mac, Linux, мобильные — не поддерживаются. Установщик Windows отказывает на Windows 10. Минимальная macOS — **14.4** по Supported Platforms Qt 6.12 (ADR-0004; FACT-002).",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-01-002",
+    "source": "AGENTS.md",
+    "section": 1,
+    "heading": "1. Жёсткие ограничения",
+    "clause": "- Один код, один UI на обе ОС.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-01-003",
+    "source": "AGENTS.md",
+    "section": 1,
+    "heading": "1. Жёсткие ограничения",
+    "clause": "- **Запрещено:** Electron, Tauri, WebView, TypeScript/JavaScript внутри приложения. ⚠ Семантика запрета JavaScript при обязательном QML: ADR-0003, ждёт владельца; запрет не ослаблен.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-01-004",
+    "source": "AGENTS.md",
+    "section": 1,
+    "heading": "1. Жёсткие ограничения",
+    "clause": "- UI: **Qt 6.12 LTS, Qt Quick / QML**. Логика: **Rust stable, edition 2024**. Мост: **CXX-Qt** (последний стабильный релиз crates.io). C++ — только тонкий слой (canvas items, интеграция с ОС, печать).",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-01-005",
+    "source": "AGENTS.md",
+    "section": 1,
+    "heading": "1. Жёсткие ограничения",
+    "clause": "- Стабильные проверенные версии, всё пинится (`Cargo.lock`, CMake). Релизы младше 2 недель не брать. ⚠ Qt 6.12.0 выпущен 2026-09-30; по текущей дате ещё не проходит это правило (ADR-0002).",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-01-006",
+    "source": "AGENTS.md",
+    "section": 1,
+    "heading": "1. Жёсткие ограничения",
+    "clause": "- Лицензии: Qt под LGPLv3 с **динамической линковкой**. Не использовать Qt-модули, доступные в open-source только под GPL (Qt Charts, Qt Graphs и др.) — диаграммы рисуем сами. Никакого AGPL-кода.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-02-001",
+    "source": "AGENTS.md",
+    "section": 2,
+    "heading": "2. Стек",
+    "clause": "| UI | Qt 6.12 LTS, Qt Quick/QML, Qt SVG, Qt Print Support, Qt Multimedia | оболочка, панели, диалоги, печать, видео в слайдах |",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-02-002",
+    "source": "AGENTS.md",
+    "section": 2,
+    "heading": "2. Стек",
+    "clause": "| Мост | CXX-Qt | QObject-ы на Rust, сигналы/свойства в QML |",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-02-003",
+    "source": "AGENTS.md",
+    "section": 2,
+    "heading": "2. Стек",
+    "clause": "| CRDT | Loro ^1 (за trait; запасной — Yrs) | совместная работа, офлайн, история, undo |",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-02-004",
+    "source": "AGENTS.md",
+    "section": 2,
+    "heading": "2. Стек",
+    "clause": "| Вёрстка текста | Skia SkParagraph (skia-safe) | шейпинг (HarfBuzz), bidi, переносы; пагинация и Word-вёрстка — отдельный слой, спайк 4.1 |",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-02-005",
+    "source": "AGENTS.md",
+    "section": 2,
+    "heading": "2. Стек",
+    "clause": "| Рендер | skia-safe: тайлы на экран, PDF-бэкенд; QPainter-бэкенд для печати | один display list — три вывода |",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-02-006",
+    "source": "AGENTS.md",
+    "section": 2,
+    "heading": "2. Стек",
+    "clause": "| Формулы | IronCalc за trait `CalcEngine` | функции Excel, пересчёт; покрытие проверяется спайком 4.5 |",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-02-007",
+    "source": "AGENTS.md",
+    "section": 2,
+    "heading": "2. Стек",
+    "clause": "| OOXML | quick-xml + zip, свой маппинг | docx/xlsx/pptx без потерь; неподдержанное сохраняется непрозрачно |",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-02-008",
+    "source": "AGENTS.md",
+    "section": 2,
+    "heading": "2. Стек",
+    "clause": "| Legacy | LibreOffice headless, отдельный процесс | .doc/.xls/.ppt, ODF, RTF |",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-02-009",
+    "source": "AGENTS.md",
+    "section": 2,
+    "heading": "2. Стек",
+    "clause": "| MCP | rmcp (официальный Rust SDK) | агент и внешние клиенты |",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-02-010",
+    "source": "AGENTS.md",
+    "section": 2,
+    "heading": "2. Стек",
+    "clause": "| Async | tokio | сеть, MCP, фоновые задачи |",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-02-011",
+    "source": "AGENTS.md",
+    "section": 2,
+    "heading": "2. Стек",
+    "clause": "| Локальная БД | SQLite (rusqlite) + FTS5 | библиотека файлов, поиск, снапшоты |",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-02-012",
+    "source": "AGENTS.md",
+    "section": 2,
+    "heading": "2. Стек",
+    "clause": "| Сервер | Rust: axum + tokio, PostgreSQL, S3-совместимое хранилище | синхронизация, шаринг |",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-02-013",
+    "source": "AGENTS.md",
+    "section": 2,
+    "heading": "2. Стек",
+    "clause": "| Логи | tracing | диагностика |",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-02-014",
+    "source": "AGENTS.md",
+    "section": 2,
+    "heading": "2. Стек",
+    "clause": "| Обновления | Sparkle (macOS), WinSparkle или MSIX App Installer (Windows) — выбрать в ADR | автообновление |",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-02-015",
+    "source": "AGENTS.md",
+    "section": 2,
+    "heading": "2. Стек",
+    "clause": "| Иконки/шрифты | Lucide (ISC), Inter и JetBrains Mono (OFL) | минималистичный UI; лицензии проверить до включения |",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-03-001",
+    "source": "AGENTS.md",
+    "section": 3,
+    "heading": "3. Архитектура",
+    "clause": "Внутри TrineDocs.app / TrineDocs.exe:",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-03-002",
+    "source": "AGENTS.md",
+    "section": 3,
+    "heading": "3. Архитектура",
+    "clause": "- QML UI: Главная, вкладки Docs/Sheets/Slides, панели, палитра команд, AI-чат.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-03-003",
+    "source": "AGENTS.md",
+    "section": 3,
+    "heading": "3. Архитектура",
+    "clause": "- C++ canvas items (QQuickItem): тайлы, ввод, IME, курсоры людей и AI.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-03-004",
+    "source": "AGENTS.md",
+    "section": 3,
+    "heading": "3. Архитектура",
+    "clause": "- CXX-Qt bridge.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-03-005",
+    "source": "AGENTS.md",
+    "section": 3,
+    "heading": "3. Архитектура",
+    "clause": "- Rust core (cargo workspace):",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-03-006",
+    "source": "AGENTS.md",
+    "section": 3,
+    "heading": "3. Архитектура",
+    "clause": "- `model` — модель документа поверх CRDT; `ops` — все команды правки.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-03-007",
+    "source": "AGENTS.md",
+    "section": 3,
+    "heading": "3. Архитектура",
+    "clause": "- `layout` — вёрстка страниц/ячеек/слайдов; `render` — display list + бэкенды.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-03-008",
+    "source": "AGENTS.md",
+    "section": 3,
+    "heading": "3. Архитектура",
+    "clause": "- `anim` — анимации и переходы слайдов; `calc` — CalcEngine (IronCalc).",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-03-009",
+    "source": "AGENTS.md",
+    "section": 3,
+    "heading": "3. Архитектура",
+    "clause": "- `ooxml` — docx/xlsx/pptx; `legacy` — LibreOffice-конвертер.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-03-010",
+    "source": "AGENTS.md",
+    "section": 3,
+    "heading": "3. Архитектура",
+    "clause": "- `export` — PDF/CSV/MD/HTML/PNG/…; `print` — пагинация печати.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-03-011",
+    "source": "AGENTS.md",
+    "section": 3,
+    "heading": "3. Архитектура",
+    "clause": "- `cloud` — Google Drive/Docs; `sync` — клиент синхронизации.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-03-012",
+    "source": "AGENTS.md",
+    "section": 3,
+    "heading": "3. Архитектура",
+    "clause": "- `mcp` — MCP-сервер, агент, IPC-шим; `library` — недавние, превью, FTS.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-03-013",
+    "source": "AGENTS.md",
+    "section": 3,
+    "heading": "3. Архитектура",
+    "clause": "- `storage` — SQLite, автосейв, восстановление; `settings` — настройки.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-03-014",
+    "source": "AGENTS.md",
+    "section": 3,
+    "heading": "3. Архитектура",
+    "clause": "- Локальный IPC (named pipe / unix socket) → `trinedocs-mcp` (stdio-шим).",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-03-015",
+    "source": "AGENTS.md",
+    "section": 3,
+    "heading": "3. Архитектура",
+    "clause": "- WebSocket (TLS) → Sync Server (Rust).",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-03-016",
+    "source": "AGENTS.md",
+    "section": 3,
+    "heading": "Принципы",
+    "clause": "- **Единый путь изменений:** пользователь, AI-агент, удалённый участник, импорт, макро-команды — всё через `ops` → CRDT. Обходных путей нет.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-03-017",
+    "source": "AGENTS.md",
+    "section": 3,
+    "heading": "Принципы",
+    "clause": "- **CRDT — источник истины.** Rich text — LoroText с марками; структура — MovableTree/MovableList; таблицы: строки и столбцы — MovableList стабильных ID, ячейки — Map по (rowId, colId); слайды — MovableList, фигуры — Map. Доступ только через trait-слой в `model`.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-03-018",
+    "source": "AGENTS.md",
+    "section": 3,
+    "heading": "Принципы",
+    "clause": "- **Стабильные ID** у каждого абзаца, блока, ячейки, листа, слайда, фигуры. Используются в UI, MCP, комментариях, ссылках.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-03-019",
+    "source": "AGENTS.md",
+    "section": 3,
+    "heading": "Принципы",
+    "clause": "- **UI-поток только показывает готовое.** Вёрстка и растеризация — фоновые потоки Rust; тайлы 512×512 → QSGTexture. При вводе перевёрстывается только затронутый блок.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-03-020",
+    "source": "AGENTS.md",
+    "section": 3,
+    "heading": "Принципы",
+    "clause": "- **Один display list** (позиционированные глифы, пути, изображения) → Skia-тайлы (экран), Skia PDF (экспорт), QPainter (печать). Экран, PDF и печать совпадают.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-03-021",
+    "source": "AGENTS.md",
+    "section": 3,
+    "heading": "Принципы",
+    "clause": "- **Внутренняя модель ≠ OOXML.** Неподдержанное хранится как непрозрачные фрагменты с привязкой к месту и пишется обратно.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-03-022",
+    "source": "AGENTS.md",
+    "section": 3,
+    "heading": "Принципы",
+    "clause": "- **Undo/redo локальный** (только свои правки), UndoManager Loro. Правки AI — отдельные группы undo.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-03-023",
+    "source": "AGENTS.md",
+    "section": 3,
+    "heading": "Принципы",
+    "clause": "- Импорт OOXML и LibreOffice выполняется в отдельном дочернем процессе с лимитами памяти/времени, отменой и корректным завершением (SPEC-AUDIT §3.C.5; ADR-0006).",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-04-001",
+    "source": "AGENTS.md",
+    "section": 4,
+    "heading": "4. Нефункциональные требования",
+    "clause": "| Клавиша → пиксели | ≤ 16 мс p95 (100 стр., 100k ячеек, 100 слайдов) |",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-04-002",
+    "source": "AGENTS.md",
+    "section": 4,
+    "heading": "4. Нефункциональные требования",
+    "clause": "| Анимации UI и скролл | 60 fps; 120 fps на ProMotion |",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-04-003",
+    "source": "AGENTS.md",
+    "section": 4,
+    "heading": "4. Нефункциональные требования",
+    "clause": "| Холодный старт до Главной | ≤ 1,5 с (M1 / типичный ПК с Win11) |",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-04-004",
+    "source": "AGENTS.md",
+    "section": 4,
+    "heading": "4. Нефункциональные требования",
+    "clause": "| Открытие docx 100 стр. | первая страница ≤ 1 с, остальное в фоне |",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-04-005",
+    "source": "AGENTS.md",
+    "section": 4,
+    "heading": "4. Нефункциональные требования",
+    "clause": "| Удалённая правка | RTT + ≤ 20 мс на сервере |",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-04-006",
+    "source": "AGENTS.md",
+    "section": 4,
+    "heading": "4. Нефункциональные требования",
+    "clause": "| Пересчёт таблицы | изменение ячейки → зависимые ≤ 50 мс для 100k формул (многопоточно, инкрементально) |",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-04-007",
+    "source": "AGENTS.md",
+    "section": 4,
+    "heading": "4. Нефункциональные требования",
+    "clause": "| Память | документ 100 стр. ≤ 300 МБ |",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-04-008",
+    "source": "AGENTS.md",
+    "section": 4,
+    "heading": "4. Нефункциональные требования",
+    "clause": "- UI-поток никогда не ждёт сеть, диск, AI, LibreOffice.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-04-009",
+    "source": "AGENTS.md",
+    "section": 4,
+    "heading": "4. Нефункциональные требования",
+    "clause": "- Офлайн — полная работа; слияние без конфликтов при подключении.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-04-010",
+    "source": "AGENTS.md",
+    "section": 4,
+    "heading": "4. Нефункциональные требования",
+    "clause": "- Никаких потерь данных: автосохранение, восстановление после падения.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-04-011",
+    "source": "AGENTS.md",
+    "section": 4,
+    "heading": "4. Нефункциональные требования",
+    "clause": "- Цели не считаются доказанными до измерений по `docs/testing/acceptance.md`.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-05-001",
+    "source": "AGENTS.md",
+    "section": 5,
+    "heading": "Стиль — минимализм",
+    "clause": "- Контент в центре, интерфейс отступает. Сетка 4 px, радиусы 6/10 px, тонкие разделители вместо рамок, минимум теней.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-05-002",
+    "source": "AGENTS.md",
+    "section": 5,
+    "heading": "Стиль — минимализм",
+    "clause": "- Компактная верхняя панель + плавающая контекстная панель у выделения + палитра команд. Классическая «лента» Office — опция в настройках.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-05-003",
+    "source": "AGENTS.md",
+    "section": 5,
+    "heading": "Стиль — минимализм",
+    "clause": "- Inter (UI), JetBrains Mono (формулы, код), встроены в приложение.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-05-004",
+    "source": "AGENTS.md",
+    "section": 5,
+    "heading": "Стиль — минимализм",
+    "clause": "- Lucide: сетка 24, stroke 1.75, скругления. Свои иконки — в том же стиле. Цвет только через `currentColor` + токены.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-05-005",
+    "source": "AGENTS.md",
+    "section": 5,
+    "heading": "Стиль — минимализм",
+    "clause": "- Docs — синий, Sheets — зелёный, Slides — оранжевый. Точечные акценты.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-05-006",
+    "source": "AGENTS.md",
+    "section": 5,
+    "heading": "Темы",
+    "clause": "- Светлая, тёмная, системная (по умолчанию). Системная тема — `QStyleHints::colorScheme`. Переключение на лету, кросс-фейд 150–200 мс.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-05-007",
+    "source": "AGENTS.md",
+    "section": 5,
+    "heading": "Темы",
+    "clause": "- Цвета — только токены singleton `Theme.qml`: background, surface, surface-raised, border, text-primary/secondary/disabled, accent, accent-docs/sheets/slides, danger, warning, success, selection, ai-cursor, remote-cursor-1…8. Хардкод цветов в других QML запрещён (CI).",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-05-008",
+    "source": "AGENTS.md",
+    "section": 5,
+    "heading": "Темы",
+    "clause": "- «Тёмная бумага» — только отображение; печать/экспорт как в документе.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-05-009",
+    "source": "AGENTS.md",
+    "section": 5,
+    "heading": "Темы",
+    "clause": "- Контраст ≥ WCAG AA; высокий контраст Windows.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-05-010",
+    "source": "AGENTS.md",
+    "section": 5,
+    "heading": "Нативность",
+    "clause": "- Windows 11: Mica (`DwmSetWindowAttribute`, `DWMWA_SYSTEMBACKDROP_TYPE`), своя строка заголовка с Snap Layouts (hit-test кнопки «развернуть»), системные скругления, jump list «Недавние».",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-05-011",
+    "source": "AGENTS.md",
+    "section": 5,
+    "heading": "Нативность",
+    "clause": "- macOS: единая строка заголовка со «светофором», vibrancy сайдбара, системное меню, pinch-zoom, инерционный скролл, полноэкранный режим, вкладки окна.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-05-012",
+    "source": "AGENTS.md",
+    "section": 5,
+    "heading": "Нативность",
+    "clause": "- Ctrl ↔ Cmd, раскладки как в Office: B/I/U, S; F2 — ячейка; F5 — показ. Полный список — `docs/shortcuts.md`.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-05-013",
+    "source": "AGENTS.md",
+    "section": 5,
+    "heading": "Моушен",
+    "clause": "- Микроанимации 120–220 мс, out-cubic: панели, меню, вкладки, элементы.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-05-014",
+    "source": "AGENTS.md",
+    "section": 5,
+    "heading": "Моушен",
+    "clause": "- Плавные курсоры пользователя, участников и AI.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-05-015",
+    "source": "AGENTS.md",
+    "section": 5,
+    "heading": "Моушен",
+    "clause": "- Уважать системное «уменьшить движение».",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-06-001",
+    "source": "AGENTS.md",
+    "section": 6,
+    "heading": "Главная",
+    "clause": "- Создать Документ / Таблицу / Презентацию + шаблоны.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-06-002",
+    "source": "AGENTS.md",
+    "section": 6,
+    "heading": "Главная",
+    "clause": "- Недавние: сетка/список; превью (страница/слайд/лист), имя, режим, путь/облако, время, последний автор. Открыть, открыть расположение, закрепить, удалить из списка, переименовать.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-06-003",
+    "source": "AGENTS.md",
+    "section": 6,
+    "heading": "Главная",
+    "clause": "- Закреплённые, Общие со мной, Google Drive (если подключён).",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-06-004",
+    "source": "AGENTS.md",
+    "section": 6,
+    "heading": "Главная",
+    "clause": "- Поиск названий/содержимого (SQLite FTS5), фильтры типа/даты.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-06-005",
+    "source": "AGENTS.md",
+    "section": 6,
+    "heading": "Главная",
+    "clause": "- Drag-and-drop файлов, ассоциации двойного клика Проводник/Finder.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-06-006",
+    "source": "AGENTS.md",
+    "section": 6,
+    "heading": "Главная",
+    "clause": "- Превью в фоне, кэш.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-06-007",
+    "source": "AGENTS.md",
+    "section": 6,
+    "heading": "Окна и вкладки",
+    "clause": "- Несколько окон, смешанные вкладки Docs/Sheets/Slides; перетаскивание вкладки в новое окно.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-06-008",
+    "source": "AGENTS.md",
+    "section": 6,
+    "heading": "Окна и вкладки",
+    "clause": "- Переключатель документов, split-view: один документ в двух местах / два документа.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-06-009",
+    "source": "AGENTS.md",
+    "section": 6,
+    "heading": "Окна и вкладки",
+    "clause": "- Восстановление сессии (опция).",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-07-001",
+    "source": "AGENTS.md",
+    "section": 7,
+    "heading": "Полное меню «Файл»",
+    "clause": "Создать · Создать из шаблона · Открыть… · Открыть недавние ▸ · Закрыть · Сохранить · Сохранить как… · Сохранить копию… · Экспорт ▸ · Печать… · Предпросмотр печати · Параметры страницы… · Поделиться… · История версий · Восстановить… · Свойства документа · Защита ▸ · Отправить в Google Drive ▸ · Выход.",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-07-002",
+    "source": "AGENTS.md",
+    "section": 7,
+    "heading": "Модель сохранения",
+    "clause": "- Нативный формат (`.trinedoc`, `.trinesheet`, `.trineslide` — zip: Loro-снапшот, ассеты, превью, метаданные). Полная история, комментарии, AI-изменения. ⚠ Финальные расширения: ADR-0009, ждёт владельца.",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-07-003",
+    "source": "AGENTS.md",
+    "section": 7,
+    "heading": "Модель сохранения",
+    "clause": "- Office-файлы сохраняются напрямую в исходном формате (.docx → Ctrl/Cmd+S пишет .docx). История и CRDT — sidecar-кэш приложения.",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-07-004",
+    "source": "AGENTS.md",
+    "section": 7,
+    "heading": "Модель сохранения",
+    "clause": "- Облачные документы: автоматическое сохранение, вместо кнопки статус «Сохранено / Синхронизация / Офлайн».",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-07-005",
+    "source": "AGENTS.md",
+    "section": 7,
+    "heading": "Сохранить / Сохранить как / Сохранить копию",
+    "clause": "- Нативные QFileDialog.",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-07-006",
+    "source": "AGENTS.md",
+    "section": 7,
+    "heading": "Сохранить / Сохранить как / Сохранить копию",
+    "clause": "- «Сохранить как»: формат, имя, папка; для потерь — предупреждение с конкретным списком (Morph → исчезание; связи → статичные), продолжить/отмена.",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-07-007",
+    "source": "AGENTS.md",
+    "section": 7,
+    "heading": "Сохранить / Сохранить как / Сохранить копию",
+    "clause": "- «Сохранить копию» не переключает текущий файл.",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-07-008",
+    "source": "AGENTS.md",
+    "section": 7,
+    "heading": "Сохранить / Сохранить как / Сохранить копию",
+    "clause": "- Атомарно: соседний временный файл → fsync → атомарная замена. Исходник не повреждается.",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-07-009",
+    "source": "AGENTS.md",
+    "section": 7,
+    "heading": "Сохранить / Сохранить как / Сохранить копию",
+    "clause": "- Бэкап предыдущей версии: опция, по умолчанию вкл.",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-07-010",
+    "source": "AGENTS.md",
+    "section": 7,
+    "heading": "Сохранить / Сохранить как / Сохранить копию",
+    "clause": "- Watcher: внешняя правка → Перезагрузить / Сравнить / Оставить. Сравнение и слияние — трёхсторонние: моя версия / версия на диске / общая база (SPEC-AUDIT §3.C.6).",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-07-011",
+    "source": "AGENTS.md",
+    "section": 7,
+    "heading": "Сохранить / Сохранить как / Сохранить копию",
+    "clause": "- Office lock `~$имя`; занят → Только чтение / Копия.",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-07-012",
+    "source": "AGENTS.md",
+    "section": 7,
+    "heading": "Сохранить / Сохранить как / Сохранить копию",
+    "clause": "- Длинные пути Windows; плейсхолдеры iCloud/OneDrive/Dropbox.",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-07-013",
+    "source": "AGENTS.md",
+    "section": 7,
+    "heading": "Автосохранение и восстановление",
+    "clause": "- Каждая правка → SQLite CRDT-журнал фоново, батчи ≤ 1 с. Падение теряет ≤ 1 с.",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-07-014",
+    "source": "AGENTS.md",
+    "section": 7,
+    "heading": "Автосохранение и восстановление",
+    "clause": "- После сбоя — список восстановления с превью.",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-07-015",
+    "source": "AGENTS.md",
+    "section": 7,
+    "heading": "Автосохранение и восстановление",
+    "clause": "- Office-автосейв: переключатель в шапке. Выкл → журнал сохраняется, файл только по «Сохранить».",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-07-016",
+    "source": "AGENTS.md",
+    "section": 7,
+    "heading": "История версий",
+    "clause": "- Шкала CRDT: именованные/автоматические точки, авторы и AI.",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-07-017",
+    "source": "AGENTS.md",
+    "section": 7,
+    "heading": "История версий",
+    "clause": "- Просмотр версии, дифф, восстановление, версия как копия.",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-07-018",
+    "source": "AGENTS.md",
+    "section": 7,
+    "heading": "Свойства и защита",
+    "clause": "- Название, автор, теги, даты, статистика слов/символов/страниц/формул.",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-07-019",
+    "source": "AGENTS.md",
+    "section": 7,
+    "heading": "Свойства и защита",
+    "clause": "- OOXML Agile Encryption чтение/запись — P1; пароль нативного формата.",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-07-020",
+    "source": "AGENTS.md",
+    "section": 7,
+    "heading": "Свойства и защита",
+    "clause": "- Только чтение, защита листа/книги, «окончательный».",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-07-021",
+    "source": "AGENTS.md",
+    "section": 7,
+    "heading": "Свойства и защита",
+    "clause": "- Инспектор личных данных: автор, комментарии, скрытый текст, история.",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-08-001",
+    "source": "AGENTS.md",
+    "section": 8,
+    "heading": "Docs",
+    "clause": "| .docx, .dotx | ✓ | ✓ | ooxml |",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-08-002",
+    "source": "AGENTS.md",
+    "section": 8,
+    "heading": "Docs",
+    "clause": "| .docm | ✓, макросы не исполняются, сохраняются | ✓ | ooxml |",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-08-003",
+    "source": "AGENTS.md",
+    "section": 8,
+    "heading": "Docs",
+    "clause": "| .doc, .rtf, .odt | ✓ | ✓ | LibreOffice ↔ OOXML |",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-08-004",
+    "source": "AGENTS.md",
+    "section": 8,
+    "heading": "Docs",
+    "clause": "| .pdf | P2: картинки/текст | ✓; PDF/A — P1 | Skia PDF |",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-08-005",
+    "source": "AGENTS.md",
+    "section": 8,
+    "heading": "Docs",
+    "clause": "| .txt | ✓ | ✓ | свой |",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-08-006",
+    "source": "AGENTS.md",
+    "section": 8,
+    "heading": "Docs",
+    "clause": "| .md | ✓ | ✓ | CommonMark + GFM-таблицы |",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-08-007",
+    "source": "AGENTS.md",
+    "section": 8,
+    "heading": "Docs",
+    "clause": "| .html | ✓ | ✓ | свой |",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-08-008",
+    "source": "AGENTS.md",
+    "section": 8,
+    "heading": "Docs",
+    "clause": "| .epub | — | P2 | свой |",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-08-009",
+    "source": "AGENTS.md",
+    "section": 8,
+    "heading": "Docs",
+    "clause": "| Google Docs | ✓ | ✓ | Drive API |",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-08-010",
+    "source": "AGENTS.md",
+    "section": 8,
+    "heading": "Sheets",
+    "clause": "| .xlsx, .xltx | ✓ | ✓ | ooxml; IronCalc reader/writer, если покрывает |",
+    "phases": [
+      5
+    ],
+    "tests": [
+      "T-05-CALC",
+      "T-05-GRID",
+      "T-02-ROUNDTRIP"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-08-011",
+    "source": "AGENTS.md",
+    "section": 8,
+    "heading": "Sheets",
+    "clause": "| .xlsm | ✓, VBA не исполняется, сохраняется | ✓ | ooxml |",
+    "phases": [
+      5
+    ],
+    "tests": [
+      "T-05-CALC",
+      "T-05-GRID",
+      "T-02-ROUNDTRIP"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-08-012",
+    "source": "AGENTS.md",
+    "section": 8,
+    "heading": "Sheets",
+    "clause": "| .xlsb | P2 | P2 | LibreOffice |",
+    "phases": [
+      5
+    ],
+    "tests": [
+      "T-05-CALC",
+      "T-05-GRID",
+      "T-02-ROUNDTRIP"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-08-013",
+    "source": "AGENTS.md",
+    "section": 8,
+    "heading": "Sheets",
+    "clause": "| .xls, .ods | ✓ | ✓ | LibreOffice |",
+    "phases": [
+      5
+    ],
+    "tests": [
+      "T-05-CALC",
+      "T-05-GRID",
+      "T-02-ROUNDTRIP"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-08-014",
+    "source": "AGENTS.md",
+    "section": 8,
+    "heading": "Sheets",
+    "clause": "| .csv, .tsv | ✓: мастер UTF-8/UTF-16/Windows-1251 и др.; разделитель, кавычки, типы, локаль | ✓: лист или все листы в zip | свой |",
+    "phases": [
+      5
+    ],
+    "tests": [
+      "T-05-CALC",
+      "T-05-GRID",
+      "T-02-ROUNDTRIP"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-08-015",
+    "source": "AGENTS.md",
+    "section": 8,
+    "heading": "Sheets",
+    "clause": "| .pdf | — | ✓: область, масштаб | Skia PDF |",
+    "phases": [
+      5
+    ],
+    "tests": [
+      "T-05-CALC",
+      "T-05-GRID",
+      "T-02-ROUNDTRIP"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-08-016",
+    "source": "AGENTS.md",
+    "section": 8,
+    "heading": "Sheets",
+    "clause": "| .html, .md | — | ✓: таблица | свой |",
+    "phases": [
+      5
+    ],
+    "tests": [
+      "T-05-CALC",
+      "T-05-GRID",
+      "T-02-ROUNDTRIP"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-08-017",
+    "source": "AGENTS.md",
+    "section": 8,
+    "heading": "Sheets",
+    "clause": "| Google Sheets | ✓ | ✓ | Drive API |",
+    "phases": [
+      5
+    ],
+    "tests": [
+      "T-05-CALC",
+      "T-05-GRID",
+      "T-02-ROUNDTRIP"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-08-018",
+    "source": "AGENTS.md",
+    "section": 8,
+    "heading": "Slides",
+    "clause": "| .pptx, .potx, .ppsx | ✓ | ✓ | ooxml |",
+    "phases": [
+      6
+    ],
+    "tests": [
+      "T-06-SLIDES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-08-019",
+    "source": "AGENTS.md",
+    "section": 8,
+    "heading": "Slides",
+    "clause": "| .pptm | ✓, макросы не исполняются, сохраняются | ✓ | ooxml |",
+    "phases": [
+      6
+    ],
+    "tests": [
+      "T-06-SLIDES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-08-020",
+    "source": "AGENTS.md",
+    "section": 8,
+    "heading": "Slides",
+    "clause": "| .ppt, .odp | ✓ | ✓ | LibreOffice |",
+    "phases": [
+      6
+    ],
+    "tests": [
+      "T-06-SLIDES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-08-021",
+    "source": "AGENTS.md",
+    "section": 8,
+    "heading": "Slides",
+    "clause": "| .pdf | — | ✓: слайды/заметки/раздаточные | Skia PDF |",
+    "phases": [
+      6
+    ],
+    "tests": [
+      "T-06-SLIDES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-08-022",
+    "source": "AGENTS.md",
+    "section": 8,
+    "heading": "Slides",
+    "clause": "| .png, .jpg, .svg | — | ✓: слайд/все, разрешение | Skia |",
+    "phases": [
+      6
+    ],
+    "tests": [
+      "T-06-SLIDES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-08-023",
+    "source": "AGENTS.md",
+    "section": 8,
+    "heading": "Slides",
+    "clause": "| .mp4 | — | P2: анимации, ffmpeg отдельным процессом, проверить лицензию сборки | — |",
+    "phases": [
+      6
+    ],
+    "tests": [
+      "T-06-SLIDES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-08-024",
+    "source": "AGENTS.md",
+    "section": 8,
+    "heading": "Slides",
+    "clause": "| .gif | — | P2 | — |",
+    "phases": [
+      6
+    ],
+    "tests": [
+      "T-06-SLIDES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-08-025",
+    "source": "AGENTS.md",
+    "section": 8,
+    "heading": "Slides",
+    "clause": "| Google Slides | ✓ | ✓ | Drive API |",
+    "phases": [
+      6
+    ],
+    "tests": [
+      "T-06-SLIDES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-08-026",
+    "source": "AGENTS.md",
+    "section": 8,
+    "heading": "Общие правила",
+    "clause": "- Экспорт: формат, область (всё/выделение/лист/слайды), параметры, превью.",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-08-027",
+    "source": "AGENTS.md",
+    "section": 8,
+    "heading": "Общие правила",
+    "clause": "- Потери — предупреждение как «Сохранить как».",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-08-028",
+    "source": "AGENTS.md",
+    "section": 8,
+    "heading": "Общие правила",
+    "clause": "- LibreOffice не входит в установщик; докачивается при первой нужной операции; отдельный процесс, таймаут, изолированный временный каталог, отмена.",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-08-029",
+    "source": "AGENTS.md",
+    "section": 8,
+    "heading": "Общие правила",
+    "clause": "- Безопасный импорт: лимиты zip-бомб (размер/коэффициент), XXE отключён, внешние xlsx-ссылки не обновляются, OLE/макросы не исполняются, ссылки только после подтверждения.",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-09-001",
+    "source": "AGENTS.md",
+    "section": 9,
+    "heading": "9. Google Docs / Sheets / Slides",
+    "clause": "- OAuth 2.0 desktop: loopback + PKCE; scope `drive.file` (только открытое/созданное через приложение). Верификация scope — проверить, ADR.",
+    "phases": [
+      7
+    ],
+    "tests": [
+      "T-07-LEGACY",
+      "T-07-GOOGLE",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-09-002",
+    "source": "AGENTS.md",
+    "section": 9,
+    "heading": "9. Google Docs / Sheets / Slides",
+    "clause": "- Токены в Windows Credential Manager / macOS Keychain.",
+    "phases": [
+      7
+    ],
+    "tests": [
+      "T-07-LEGACY",
+      "T-07-GOOGLE",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-09-003",
+    "source": "AGENTS.md",
+    "section": 9,
+    "heading": "9. Google Docs / Sheets / Slides",
+    "clause": "- Экспорт: docx/xlsx/pptx → Drive API конвертация или Office-файл; ссылка «Открыть в Google».",
+    "phases": [
+      7
+    ],
+    "tests": [
+      "T-07-LEGACY",
+      "T-07-GOOGLE",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-09-004",
+    "source": "AGENTS.md",
+    "section": 9,
+    "heading": "9. Google Docs / Sheets / Slides",
+    "clause": "- Импорт: Google Picker или доступные файлы → Drive API export → обычный импорт. Проверить лимиты размера, понятная ошибка при превышении.",
+    "phases": [
+      7
+    ],
+    "tests": [
+      "T-07-LEGACY",
+      "T-07-GOOGLE",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-09-005",
+    "source": "AGENTS.md",
+    "section": 9,
+    "heading": "9. Google Docs / Sheets / Slides",
+    "clause": "- Повторная отправка обновляет тот же fileId; связь хранится локально.",
+    "phases": [
+      7
+    ],
+    "tests": [
+      "T-07-LEGACY",
+      "T-07-GOOGLE",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-09-006",
+    "source": "AGENTS.md",
+    "section": 9,
+    "heading": "9. Google Docs / Sheets / Slides",
+    "clause": "- Одноразовый обмен; живая синхронизация только своим сервером.",
+    "phases": [
+      7
+    ],
+    "tests": [
+      "T-07-LEGACY",
+      "T-07-GOOGLE",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-09-007",
+    "source": "AGENTS.md",
+    "section": 9,
+    "heading": "9. Google Docs / Sheets / Slides",
+    "clause": "- OneDrive/Dropbox — P2.",
+    "phases": [
+      7
+    ],
+    "tests": [
+      "T-07-LEGACY",
+      "T-07-GOOGLE",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-10-001",
+    "source": "AGENTS.md",
+    "section": 10,
+    "heading": "Общее",
+    "clause": "- Свой предпросмотр + системный диалог через Qt Print Support; QPainter display list (вектор, текст остаётся текстом).",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-10-002",
+    "source": "AGENTS.md",
+    "section": 10,
+    "heading": "Общее",
+    "clause": "- Постраничный предпросмотр, масштаб, листание, точное совпадение.",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-10-003",
+    "source": "AGENTS.md",
+    "section": 10,
+    "heading": "Общее",
+    "clause": "- Принтер, копии, разбор; диапазон все/текущая/выделение/«1-3, 5»; чёт/нечёт; duplex длинный/короткий край; ориентация; A4/Letter/A3/Legal/свой; поля; масштаб вписать/%; 1/2/4/6/9/16 страниц на листе; цвет/серый; качество.",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-10-004",
+    "source": "AGENTS.md",
+    "section": 10,
+    "heading": "Общее",
+    "clause": "- Собственная «Печать в PDF» всегда доступна.",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-10-005",
+    "source": "AGENTS.md",
+    "section": 10,
+    "heading": "Общее",
+    "clause": "- Подготовка в фоне, прогресс, отмена.",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-10-006",
+    "source": "AGENTS.md",
+    "section": 10,
+    "heading": "Docs",
+    "clause": "Колонтитулы, номера, разрывы; скрытый текст; комментарии/правки как в документе / на полях / без; фон; обновление полей.",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-10-007",
+    "source": "AGENTS.md",
+    "section": 10,
+    "heading": "Sheets",
+    "clause": "Область печати; повтор строк/столбцов; вписать в N по ширине/высоте; сетка, заголовки; порядок вниз-вправо / вправо-вниз; разметка с drag разрывов; выделение/лист/книга; колонтитулы.",
+    "phases": [
+      5
+    ],
+    "tests": [
+      "T-05-CALC",
+      "T-05-GRID",
+      "T-02-ROUNDTRIP"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-10-008",
+    "source": "AGENTS.md",
+    "section": 10,
+    "heading": "Slides",
+    "clause": "Слайды 1 на страницу; страницы заметок; раздаточные 1/2/3/4/6/9 (при 3 линии для заметок); структура; рамка; скрытые; последний кадр анимаций.",
+    "phases": [
+      6
+    ],
+    "tests": [
+      "T-06-SLIDES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-11-001",
+    "source": "AGENTS.md",
+    "section": 11,
+    "heading": "11. Функциональность — паритет с Office + свои фичи",
+    "clause": "`docs/parity.md`: функция → P0 MVP / P1 v1 / P2 позже → статус → импорт/экспорт. Реализация по приоритетам. ⚠ Границы v1 и перестановка фаз: ADR-0005, ждёт владельца; ничего не удалено из конечного объёма.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-11-002",
+    "source": "AGENTS.md",
+    "section": 11,
+    "heading": "Общее",
+    "clause": "P0: буфер обмена (внутренний/HTML/RTF/текст/изображения; Word/Excel/браузер), без форматирования, специальная вставка (Sheets значения/формулы/форматы/транспонировать); поиск/замена (регистр, целые слова, regex, формат); масштаб; линейки; сетка/направляющие; системная орфография ru/en (Windows Spell Checking API/NSSpellChecker); автозамена; спецсимволы/эмодзи; ссылки; комментарии с ответами/@; undo/redo с историей.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-11-003",
+    "source": "AGENTS.md",
+    "section": 11,
+    "heading": "Общее",
+    "clause": "P1: опциональная AI-грамматика, перевод выделения, OCR (Windows.Media.Ocr / Vision), системный TTS.",
+    "phases": [
+      8
+    ],
+    "tests": [
+      "T-08-PARITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-11-004",
+    "source": "AGENTS.md",
+    "section": 11,
+    "heading": "Docs (Word)",
+    "clause": "P0: шрифты, размер, жирный/курсив/подчёркнутый/зачёркнутый, над/подстрочный, регистр, текст/выделение, очистка, формат по образцу; стили (заголовки 1–6, обычный, цитата, код, свои, наборы); выравнивание, отступы, межстрочный, до/после, табуляции, висячие строки, «не отрывать»; списки маркированные/нумерованные/многоуровневые/перезапуск; таблицы (вставка, merge/split, границы, заливка, ширина, повтор заголовка, сортировка, формулы); изображения (масштаб, поворот, crop, обтекание в тексте/рамка/контур/за/перед, привязка); фигуры/надписи; разрывы страниц/разделов; поля, ориентация, размер; колонтитулы первая/чёт/нечёт; номера; колонки; разметка/веб/чтение/фокус; навигация заголовков; статистика.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-11-005",
+    "source": "AGENTS.md",
+    "section": 11,
+    "heading": "Docs (Word)",
+    "clause": "P1: обновляемое оглавление; сноски/концевые; поля дата/страница/количество/автор; закладки/перекрёстные ссылки; track changes принять/отклонить; сравнение; OMML редактор/рендер/LaTeX; SmartArt рендер/базовая правка; водяные знаки; буквица; подложка/рамки страницы; авто/ручные переносы; языки; библиография/цитаты; подписи; список иллюстраций.",
+    "phases": [
+      8
+    ],
+    "tests": [
+      "T-08-PARITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-11-006",
+    "source": "AGENTS.md",
+    "section": 11,
+    "heading": "Docs (Word)",
+    "clause": "P2: mail merge CSV/Sheets; предметный указатель; формы/content controls; главный документ; водяные знаки-изображения.",
+    "phases": [
+      9
+    ],
+    "tests": [
+      "T-09-RELEASE",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-11-007",
+    "source": "AGENTS.md",
+    "section": 11,
+    "heading": "Sheets (Excel)",
+    "clause": "P0: число/текст/дата-время/bool/ошибка; формулы Excel (математика, статистика, текст, даты, логика, XLOOKUP/VLOOKUP/HLOOKUP/INDEX/MATCH/XMATCH, базовые финансовые); абсолютные/относительные/межлистовые ссылки; completion/аргументы/зависимые диапазоны; числовые форматы общий/число/валюта/финансовый/%/дата/время/дробь/экспонента/текст/коды Excel; шрифты/цвета/границы/заливка/выравнивание/перенос/поворот/merge; размеры/autofit; вставка/удаление/скрытие строк/столбцов; freeze; автозаполнение рядов/дат/маркер; многоуровневая сортировка; автофильтр; листы add/rename/move/hide/tab-color; диаграммы column/bar/line/area/pie/doughnut/scatter; статус сумма/среднее/количество; локаль чисел/дат, десятичная запятая ru-RU.",
+    "phases": [
+      5
+    ],
+    "tests": [
+      "T-05-CALC",
+      "T-05-GRID",
+      "T-02-ROUNDTRIP"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-11-008",
+    "source": "AGENTS.md",
+    "section": 11,
+    "heading": "Sheets (Excel)",
+    "clause": "P1: динамические массивы LET/LAMBDA/FILTER/SORT/UNIQUE/SEQUENCE; условное форматирование правила/гистограммы/шкалы/иконки; validation списки/диапазоны/сообщения; имена/диспетчер; сводные/диаграммы; срезы; спарклайны; таблицы/структурированные ссылки; группировка/структура; промежуточные итоги; дубликаты; текст по столбцам; flash fill; защита листа/книги; комбинированные/вторая ось/trendlines; комментарии/заметки; итерации; ручной пересчёт; трассировка; watch window; локализованные функции СУММ ↔ SUM (хранение canonical English).",
+    "phases": [
+      5
+    ],
+    "tests": [
+      "T-05-CALC",
+      "T-05-GRID",
+      "T-02-ROUNDTRIP"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-11-009",
+    "source": "AGENTS.md",
+    "section": 11,
+    "heading": "Sheets (Excel)",
+    "clause": "P2: Power Query-подобный импорт; what-if goal seek/scenarios/data tables; solver; внешние книги; 3D-ссылки. VBA не поддерживается: непрозрачный round-trip с предупреждением. Неподдержанная функция → `#NAME?` с подсказкой, список в parity.",
+    "phases": [
+      5
+    ],
+    "tests": [
+      "T-05-CALC",
+      "T-05-GRID",
+      "T-02-ROUNDTRIP"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-11-010",
+    "source": "AGENTS.md",
+    "section": 11,
+    "heading": "Slides (PowerPoint)",
+    "clause": "P0: слайды add/duplicate/delete/hide/move/sections; layouts/master; темы colors/fonts/background; text autofit; базовые фигуры/линии/connectors; crop/shape-mask; таблицы; диаграммы; smart guides; align/distribute; group; layers; rotate/flip; notes; sorter; F5/Shift+F5; второй монитор presenter next/notes/timer/clock; pointer/ink.",
+    "phases": [
+      6
+    ],
+    "tests": [
+      "T-06-SLIDES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-11-011",
+    "source": "AGENTS.md",
+    "section": 11,
+    "heading": "Slides (PowerPoint)",
+    "clause": "P1: анимации entrance/emphasis/exit/motion/custom; click/with/after/object triggers; delay/duration/repeat/paragraph; timeline; переходы/Morph-аналог matched-object interpolation; pptx `p:timing`/transitions round-trip; видео/аудио Qt Multimedia + trim; SmartArt; Zoom к слайду/разделу; custom shows; rehearsal.",
+    "phases": [
+      6
+    ],
+    "tests": [
+      "T-06-SLIDES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-11-012",
+    "source": "AGENTS.md",
+    "section": 11,
+    "heading": "Slides (PowerPoint)",
+    "clause": "P2: recording voice; video export; live captions.",
+    "phases": [
+      6
+    ],
+    "tests": [
+      "T-06-SLIDES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-11-013",
+    "source": "AGENTS.md",
+    "section": 11,
+    "heading": "Свои фичи",
+    "clause": "- Ctrl/Cmd+K: команда, файл, функция, настройка.",
+    "phases": [
+      8
+    ],
+    "tests": [
+      "T-08-PARITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-11-014",
+    "source": "AGENTS.md",
+    "section": 11,
+    "heading": "Свои фичи",
+    "clause": "- Slash `/`, Markdown `#`, `-`, `1.`, `**`, `>`.",
+    "phases": [
+      8
+    ],
+    "tests": [
+      "T-08-PARITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-11-015",
+    "source": "AGENTS.md",
+    "section": 11,
+    "heading": "Свои фичи",
+    "clause": "- Живой диапазон/диаграмма Sheets → Docs/Slides; Office-экспорт статичный с предупреждением.",
+    "phases": [
+      8
+    ],
+    "tests": [
+      "T-08-PARITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-11-016",
+    "source": "AGENTS.md",
+    "section": 11,
+    "heading": "Свои фичи",
+    "clause": "- Машина времени: шкала, сравнение, восстановление.",
+    "phases": [
+      8
+    ],
+    "tests": [
+      "T-08-PARITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-11-017",
+    "source": "AGENTS.md",
+    "section": 11,
+    "heading": "Свои фичи",
+    "clause": "- Фокус/чистое чтение.",
+    "phases": [
+      8
+    ],
+    "tests": [
+      "T-08-PARITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-11-018",
+    "source": "AGENTS.md",
+    "section": 11,
+    "heading": "Свои фичи",
+    "clause": "- AI-чат с курсором.",
+    "phases": [
+      8
+    ],
+    "tests": [
+      "T-08-PARITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-11-019",
+    "source": "AGENTS.md",
+    "section": 11,
+    "heading": "Свои фичи",
+    "clause": "- AI-шаблоны с заполняемыми полями.",
+    "phases": [
+      8
+    ],
+    "tests": [
+      "T-08-PARITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-12-001",
+    "source": "AGENTS.md",
+    "section": 12,
+    "heading": "12. AI-чат",
+    "clause": "- Шапка «Чат», Ctrl/Cmd+J; боковая панель не перекрывает документ, detach.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-12-002",
+    "source": "AGENTS.md",
+    "section": 12,
+    "heading": "12. AI-чат",
+    "clause": "- Текущий документ/выделение; другие открытые только по запросу; видимые чипы переданного контекста.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-12-003",
+    "source": "AGENTS.md",
+    "section": 12,
+    "heading": "12. AI-чат",
+    "clause": "- Агент — участник CRDT; `ai-cursor`, метка AI, плавное движение.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-12-004",
+    "source": "AGENTS.md",
+    "section": 12,
+    "heading": "12. AI-чат",
+    "clause": "- Потоковые tool calls, батчи ~30 мс, мягкая затухающая подсветка.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-12-005",
+    "source": "AGENTS.md",
+    "section": 12,
+    "heading": "12. AI-чат",
+    "clause": "- Семантические модельные ops без DOM/скриншотов; задержка генерации зависит от модели, локальная обработка отдельно измеряется.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-12-006",
+    "source": "AGENTS.md",
+    "section": 12,
+    "heading": "12. AI-чат",
+    "clause": "- Пользователь печатает рядом одновременно.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-12-007",
+    "source": "AGENTS.md",
+    "section": 12,
+    "heading": "12. AI-чат",
+    "clause": "- Шаг — undo group; «Изменения AI»: всё/по одному принять/отклонить; suggest/сразу.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-12-008",
+    "source": "AGENTS.md",
+    "section": 12,
+    "heading": "12. AI-чат",
+    "clause": "- «Стоп» прерывает генерацию, откатывает незавершённый шаг.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-12-009",
+    "source": "AGENTS.md",
+    "section": 12,
+    "heading": "12. AI-чат",
+    "clause": "- Trait `LlmProvider`: OpenAI-compatible, Anthropic, Ollama/LM Studio compatible endpoints; ключи в OS keychain; выбор модели settings/панель.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-12-010",
+    "source": "AGENTS.md",
+    "section": 12,
+    "heading": "12. AI-чат",
+    "clause": "- Встроенный агент через тот же MCP in-process, одна реализация.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-12-011",
+    "source": "AGENTS.md",
+    "section": 12,
+    "heading": "12. AI-чат",
+    "clause": "- Первое явное уведомление об отправке контента провайдеру; AI off на документ/приложение.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-12-012",
+    "source": "AGENTS.md",
+    "section": 12,
+    "heading": "12. AI-чат",
+    "clause": "- По умолчанию только ключ пользователя; собственный оплачиваемый прокси требует ADR и владельца (SPEC-AUDIT §3.C.11).",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-13-001",
+    "source": "AGENTS.md",
+    "section": 13,
+    "heading": "13. MCP",
+    "clause": "Полная спецификация `docs/MCP.md`. Встроенный сервер автозапускается; stdio-шим `trinedocs-mcp`; loopback Streamable HTTP; регистрация клиентов в один клик с согласием; CRDT-участник с курсором.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-14-001",
+    "source": "AGENTS.md",
+    "section": 14,
+    "heading": "14. Совместная работа",
+    "clause": "- Курсоры/выделения, имена/цвета, аватары, follow, typing.",
+    "phases": [
+      4
+    ],
+    "tests": [
+      "T-04-SYNC",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-14-002",
+    "source": "AGENTS.md",
+    "section": 14,
+    "heading": "14. Совместная работа",
+    "clause": "- Owner/editor/commenter/viewer; email/link invitation, роль, срок.",
+    "phases": [
+      4
+    ],
+    "tests": [
+      "T-04-SYNC",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-14-003",
+    "source": "AGENTS.md",
+    "section": 14,
+    "heading": "14. Совместная работа",
+    "clause": "- Threads, @, in-app/system notifications.",
+    "phases": [
+      4
+    ],
+    "tests": [
+      "T-04-SYNC",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-14-004",
+    "source": "AGENTS.md",
+    "section": 14,
+    "heading": "14. Совместная работа",
+    "clause": "- Офлайн-слияние, sync status.",
+    "phases": [
+      4
+    ],
+    "tests": [
+      "T-04-SYNC",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-14-005",
+    "source": "AGENTS.md",
+    "section": 14,
+    "heading": "14. Совместная работа",
+    "clause": "- Сервер: document rooms, Loro relay, presence, PostgreSQL snapshots, S3 assets, JWT, rate limit, Docker, backups.",
+    "phases": [
+      4
+    ],
+    "tests": [
+      "T-04-SYNC",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-14-006",
+    "source": "AGENTS.md",
+    "section": 14,
+    "heading": "14. Совместная работа",
+    "clause": "- 50 активных участников в одном документе.",
+    "phases": [
+      4
+    ],
+    "tests": [
+      "T-04-SYNC",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-15-001",
+    "source": "AGENTS.md",
+    "section": 15,
+    "heading": "15. Аккаунты и режимы",
+    "clause": "- Без аккаунта: вся локальная работа, Office/native, BYOK AI, MCP.",
+    "phases": [
+      4
+    ],
+    "tests": [
+      "T-04-SYNC",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-15-002",
+    "source": "AGENTS.md",
+    "section": 15,
+    "heading": "15. Аккаунты и режимы",
+    "clause": "- С аккаунтом: cloud/collaboration/sharing.",
+    "phases": [
+      4
+    ],
+    "tests": [
+      "T-04-SYNC",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-15-003",
+    "source": "AGENTS.md",
+    "section": 15,
+    "heading": "15. Аккаунты и режимы",
+    "clause": "- Email magic link/password, Apple, Google; сессии в keychain.",
+    "phases": [
+      4
+    ],
+    "tests": [
+      "T-04-SYNC",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-16-001",
+    "source": "AGENTS.md",
+    "section": 16,
+    "heading": "16. Настройки",
+    "clause": "Общие: язык, тема, бумага, сессия, автосейв, папка, native/Office default. Редактирование: autocorrect, spelling, languages, cm/in/pt. Вид: ribbon/compact, UI scale, animations. AI: provider/model/keys/mode/limits. MCP. Аккаунты TrineDocs/Google. Печать defaults. Privacy: telemetry/crashes только opt-in. Updates stable/beta/auto. Remappable shortcuts. Reset.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-17-001",
+    "source": "AGENTS.md",
+    "section": 17,
+    "heading": "17. Шрифты и текст",
+    "clause": "- Системные/встроенные шрифты.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-17-002",
+    "source": "AGENTS.md",
+    "section": 17,
+    "heading": "17. Шрифты и текст",
+    "clause": "- Метрические fallback: Calibri→Carlito; Cambria→Caladea; Arial→Liberation Sans; Times New Roman→Liberation Serif; Courier New→Liberation Mono. Баннер замены.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-17-003",
+    "source": "AGENTS.md",
+    "section": 17,
+    "heading": "17. Шрифты и текст",
+    "clause": "- PDF subset embedding, чтение embedded docx/pptx fonts.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-17-004",
+    "source": "AGENTS.md",
+    "section": 17,
+    "heading": "17. Шрифты и текст",
+    "clause": "- Complex scripts/bidi/RTL/CJK/vertical — P1.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-17-005",
+    "source": "AGENTS.md",
+    "section": 17,
+    "heading": "17. Шрифты и текст",
+    "clause": "- CJK IME обязательно с фазы 1.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-17-006",
+    "source": "AGENTS.md",
+    "section": 17,
+    "heading": "17. Шрифты и текст",
+    "clause": "- Hyphenation ru/en.",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-18-001",
+    "source": "AGENTS.md",
+    "section": 18,
+    "heading": "18. Локализация и доступность",
+    "clause": "- ru/en с первого дня, Qt Linguist, строки `qsTr`, расширяемость.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-18-002",
+    "source": "AGENTS.md",
+    "section": 18,
+    "heading": "18. Локализация и доступность",
+    "clause": "- Числа/даты/валюты по системе/документу.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-18-003",
+    "source": "AGENTS.md",
+    "section": 18,
+    "heading": "18. Локализация и доступность",
+    "clause": "- Полная клавиатура, фокус, Narrator/VoiceOver; QAccessible дерево абзацев/ячеек/фигур; UI scale; high contrast; reduced motion.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-19-001",
+    "source": "AGENTS.md",
+    "section": 19,
+    "heading": "19. Безопасность, конфиденциальность, качество",
+    "clause": "- Импорт/OOXML cargo-fuzz, resource limits, без `unwrap()` в production.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-19-002",
+    "source": "AGENTS.md",
+    "section": 19,
+    "heading": "19. Безопасность, конфиденциальность, качество",
+    "clause": "- Макросы/OLE/внешние ссылки/DDE не исполняются.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-19-003",
+    "source": "AGENTS.md",
+    "section": 19,
+    "heading": "19. Безопасность, конфиденциальность, качество",
+    "clause": "- Секреты только OS keychain.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-19-004",
+    "source": "AGENTS.md",
+    "section": 19,
+    "heading": "19. Безопасность, конфиденциальность, качество",
+    "clause": "- Opt-in telemetry/crash без документа.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-19-005",
+    "source": "AGENTS.md",
+    "section": 19,
+    "heading": "19. Безопасность, конфиденциальность, качество",
+    "clause": "- Unit каждый crate; CRDT property concurrent convergence; layout/print PDF goldens; UI обе темы; ≥200 real OOXML round-trip; MCP Inspector + own client e2e; criterion CI, >10% regression red.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-19-006",
+    "source": "AGENTS.md",
+    "section": 19,
+    "heading": "19. Безопасность, конфиденциальность, качество",
+    "clause": "- GitHub Actions Windows 11 x64/macOS arm64; build/tests/rustfmt/clippy/qmllint/colors/signing. macOS job отложен по ADR-0001, это не означает macOS DoD.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-19-007",
+    "source": "AGENTS.md",
+    "section": 19,
+    "heading": "19. Безопасность, конфиденциальность, качество",
+    "clause": "- Windows Authenticode certificate/Azure Trusted Signing; MSIX (+optional EXE). Mac Developer ID/notarized DMG. Store P2, sandbox/MCP/LO ADR.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-20-001",
+    "source": "AGENTS.md",
+    "section": 20,
+    "heading": "20. План по фазам",
+    "clause": "| 0. Скелет и дизайн-система | workspace, CXX-Qt, QML shell, Theme, темы, иконки, шрифты, Mica/vibrancy, title/Snap, CI, явно обозначенная неподписанная dev-сборка | темы без перезапуска на обеих ОС, зелёный application CI; сейчас Windows-first, Mac приёмка отложена |",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-20-002",
+    "source": "AGENTS.md",
+    "section": 20,
+    "heading": "20. План по фазам",
+    "clause": "| 1. Главная и ядро Docs | Home/create/recent/search; Loro model/ops; layout/tiles/input/IME/selection/undo/P0; native; autosave/recovery | 100 стр., ≤16 мс; kill теряет ≤1 с; спайки layout/CRDT обязательны |",
+    "phases": [
+      1
+    ],
+    "tests": [
+      "T-01-CRDT",
+      "T-01-LAYOUT",
+      "T-01-INPUT",
+      "T-01-RECOVERY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-20-003",
+    "source": "AGENTS.md",
+    "section": 20,
+    "heading": "20. План по фазам",
+    "clause": "| 2. Docs файлы/экспорт/печать | save/as/copy, atomic/watcher/lock, docx/PDF/print/preview/page setup | 50 real docx round-trip; print=preview=PDF |",
+    "phases": [
+      2
+    ],
+    "tests": [
+      "T-02-FILES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-20-004",
+    "source": "AGENTS.md",
+    "section": 20,
+    "heading": "20. План по фазам",
+    "clause": "| 3. MCP/AI | full MCP/autostart/shim/registration/chat/cursor/streaming/review | внешний агент правит live; чат переписывает при вводе рядом |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-20-005",
+    "source": "AGENTS.md",
+    "section": 20,
+    "heading": "20. План по фазам",
+    "clause": "| 4. Collaboration | sync/presence/sharing/roles/comments/offline | 2 клиента + AI, offline merge, 50 participants |",
+    "phases": [
+      4
+    ],
+    "tests": [
+      "T-04-SYNC",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-20-006",
+    "source": "AGENTS.md",
+    "section": 20,
+    "heading": "20. План по фазам",
+    "clause": "| 5. Sheets | P0, grid/formulas/charts/xlsx/csv/print | 100k cells 60fps, real xlsx round-trip |",
+    "phases": [
+      5
+    ],
+    "tests": [
+      "T-05-CALC",
+      "T-05-GRID",
+      "T-02-ROUNDTRIP"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-20-007",
+    "source": "AGENTS.md",
+    "section": 20,
+    "heading": "20. План по фазам",
+    "clause": "| 6. Slides | P0, show/presenter/pptx/notes/handouts, then P1 anim/transitions | 100 slides; anim 60fps; anim pptx round-trip; старт ждёт владельца ADR-0005 |",
+    "phases": [
+      6
+    ],
+    "tests": [
+      "T-06-SLIDES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-20-008",
+    "source": "AGENTS.md",
+    "section": 20,
+    "heading": "20. План по фазам",
+    "clause": "| 7. Legacy/Google | LO; Drive всех режимов | doc/xls/ppt open/save; Google export; старт ждёт владельца ADR-0005 |",
+    "phases": [
+      7
+    ],
+    "tests": [
+      "T-07-LEGACY",
+      "T-07-GOOGLE",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-20-009",
+    "source": "AGENTS.md",
+    "section": 20,
+    "heading": "20. План по фазам",
+    "clause": "| 8. P1/свои | track changes/TOC/OMML/pivot/conditional/commands/links/time machine | P1 закрыты или перенесены ADR; старт ждёт владельца ADR-0005 |",
+    "phases": [
+      8
+    ],
+    "tests": [
+      "T-08-PARITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-20-010",
+    "source": "AGENTS.md",
+    "section": 20,
+    "heading": "20. План по фазам",
+    "clause": "| 9. Выпуск | installers/notarization/updates/opt-in crashes/a11y/i18n | clean install/update обеих ОС; старт ждёт владельца ADR-0005 |",
+    "phases": [
+      9
+    ],
+    "tests": [
+      "T-09-RELEASE",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-20-011",
+    "source": "AGENTS.md",
+    "section": 20,
+    "heading": "20. План по фазам",
+    "clause": "Перестановка Docs → Sheets → MCP/AI → collaboration → export/print из SPEC-AUDIT — **предложение**, не принято без владельца. Пока сохраняется базовая нумерация фаз.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-20-012",
+    "source": "AGENTS.md",
+    "section": 20,
+    "heading": "20. План по фазам",
+    "clause": "В конце каждой фазы: работает / не работает / баги / следующий шаг, плюс аудит по SPEC-AUDIT.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M00-001",
+    "source": "docs/MCP.md",
+    "section": 0,
+    "heading": "docs/MCP.md — MCP-сервер TrineDocs",
+    "clause": "Обязательная спецификация, вместе с `../AGENTS.md` и `SPEC-AUDIT.md`. MCP даёт встроенным/внешним агентам полный доступ к чтению, правке, форматированию, экспорту, PDF, комментариям и версиям. Все изменения через `ops` → CRDT, видны участникам в реальном времени с курсором агента.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M00-002",
+    "source": "docs/MCP.md",
+    "section": 0,
+    "heading": "docs/MCP.md — MCP-сервер TrineDocs",
+    "clause": "Crate `mcp` на **rmcp**, официальном Rust SDK. Версия протокола — актуальная стабильная при реализации; на 2026-10-12 официальная `/specification/latest` указывает **2026-07-28** (FACT-006). Утверждение «сейчас 2025-11-25» исправлено (CHANGE-004). Поддержка 2026-07-28 конкретным rmcp и клиентами ещё не подтверждена; breaking changes требуют спайка 4.6 и ADR-0010. Предыдущие версии поддерживаются в пределах возможностей закреплённого rmcp. Непроверенные возможности SDK/клиентов не объявляются рабочими.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M01-001",
+    "source": "docs/MCP.md",
+    "section": 1,
+    "heading": "Автозапуск",
+    "clause": "- Сервер стартует с приложением, по умолчанию вкл.; фоновая tokio-задача не задерживает окно.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M01-002",
+    "source": "docs/MCP.md",
+    "section": 1,
+    "heading": "Автозапуск",
+    "clause": "- «Работать в фоне»: Windows tray / macOS menu bar; последнее окно закрывается, MCP остаётся.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M01-003",
+    "source": "docs/MCP.md",
+    "section": 1,
+    "heading": "Автозапуск",
+    "clause": "- «При входе»: Windows MSIX Startup task / current-user Run; macOS `SMAppService`; без окна.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M01-004",
+    "source": "docs/MCP.md",
+    "section": 1,
+    "heading": "Автозапуск",
+    "clause": "- Если приложения нет, шим запускает `--background`, ждёт готовности до 10 с.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M01-005",
+    "source": "docs/MCP.md",
+    "section": 1,
+    "heading": "stdio через `trinedocs-mcp`",
+    "clause": "- Поставляется маленький Rust-бинарник; проксирует JSON-RPC в приложение, сам документы не редактирует.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M01-006",
+    "source": "docs/MCP.md",
+    "section": 1,
+    "heading": "stdio через `trinedocs-mcp`",
+    "clause": "- Windows named pipe `\\\\.\\pipe\\trinedocs-mcp-<user-sid>`.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M01-007",
+    "source": "docs/MCP.md",
+    "section": 1,
+    "heading": "stdio через `trinedocs-mcp`",
+    "clause": "- macOS unix socket в `~/Library/Application Support/TrineDocs/`, 0600.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M01-008",
+    "source": "docs/MCP.md",
+    "section": 1,
+    "heading": "stdio через `trinedocs-mcp`",
+    "clause": "- При отсутствии приложения запуск в фоне, ожидание сокета.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M01-009",
+    "source": "docs/MCP.md",
+    "section": 1,
+    "heading": "stdio через `trinedocs-mcp`",
+    "clause": "- IPC: same OS user SID/uid + одноразовый токен в owner-only файле. Конкретная handshake/replay-защита — threat model.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M01-010",
+    "source": "docs/MCP.md",
+    "section": 1,
+    "heading": "Streamable HTTP",
+    "clause": "- Только `127.0.0.1` / `::1`; настройка порта, следующий свободный при занятости, фактический порт виден UI.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M01-011",
+    "source": "docs/MCP.md",
+    "section": 1,
+    "heading": "Streamable HTTP",
+    "clause": "- Bearer token при первом запуске, OS keychain; посмотреть/копировать/rotate в settings.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M01-012",
+    "source": "docs/MCP.md",
+    "section": 1,
+    "heading": "Streamable HTTP",
+    "clause": "- Проверка Origin **каждого** запроса; чужой browser Origin отклоняется. Отдельно определить разрешённые Origin, отсутствие Origin у native clients и Host validation; ADR-0010.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M01-013",
+    "source": "docs/MCP.md",
+    "section": 1,
+    "heading": "Streamable HTTP",
+    "clause": "- Выкл. по умолчанию, один переключатель.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M01-014",
+    "source": "docs/MCP.md",
+    "section": 1,
+    "heading": "In-process",
+    "clause": "Встроенный чат — тот же сервер, in-memory transport, одна реализация инструментов.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M02-001",
+    "source": "docs/MCP.md",
+    "section": 2,
+    "heading": "2. Подключение внешних клиентов в один клик",
+    "clause": "- MCP → Подключения: обнаруженные Claude Desktop, Codex CLI, Cursor, VS Code, Windsurf и др., «Подключить».",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M02-002",
+    "source": "docs/MCP.md",
+    "section": 2,
+    "heading": "2. Подключение внешних клиентов в один клик",
+    "clause": "- Согласие → дифф → бэкап → дописать только запись `trinedocs` с stdio-командой абсолютного пути к шиму. «Отключить» удаляет только принадлежащую приложению запись.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M02-003",
+    "source": "docs/MCP.md",
+    "section": 2,
+    "heading": "2. Подключение внешних клиентов в один клик",
+    "clause": "- **Кандидатные пути из исходного задания; не использовать до сверки официальной документации:**",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M02-004",
+    "source": "docs/MCP.md",
+    "section": 2,
+    "heading": "2. Подключение внешних клиентов в один клик",
+    "clause": "- Claude Desktop: `~/Library/Application Support/Claude/claude_desktop_config.json` / `%APPDATA%\\Claude\\claude_desktop_config.json`, `mcpServers`.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M02-005",
+    "source": "docs/MCP.md",
+    "section": 2,
+    "heading": "2. Подключение внешних клиентов в один клик",
+    "clause": "- Codex CLI: `~/.codex/config.toml`, `[mcp_servers.trinedocs]`.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M02-006",
+    "source": "docs/MCP.md",
+    "section": 2,
+    "heading": "2. Подключение внешних клиентов в один клик",
+    "clause": "- Cursor: `~/.cursor/mcp.json`.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M02-007",
+    "source": "docs/MCP.md",
+    "section": 2,
+    "heading": "2. Подключение внешних клиентов в один клик",
+    "clause": "- VS Code/Windsurf: найти актуальные пути/форматы, FACT-REGISTRY.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M02-008",
+    "source": "docs/MCP.md",
+    "section": 2,
+    "heading": "2. Подключение внешних клиентов в один клик",
+    "clause": "- Копировать JSON-конфиг / команду для иных клиентов.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M02-009",
+    "source": "docs/MCP.md",
+    "section": 2,
+    "heading": "2. Подключение внешних клиентов в один клик",
+    "clause": "- Какие клиенты подключены, последний вызов, «Отключить сессию».",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M03-001",
+    "source": "docs/MCP.md",
+    "section": 3,
+    "heading": "3. Права и подтверждения",
+    "clause": "- Клиент: read-only / edit / full (edit + экспорт, PDF, create/delete, Google). Новый внешний и встроенный чат по умолчанию edit.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M03-002",
+    "source": "docs/MCP.md",
+    "section": 3,
+    "heading": "3. Права и подтверждения",
+    "clause": "- Первый новый клиент: имя, запрошенный доступ, Разрешить / Один раз / Запретить.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M03-003",
+    "source": "docs/MCP.md",
+    "section": 3,
+    "heading": "3. Права и подтверждения",
+    "clause": "- Elicitation либо локальный диалог: delete document/sheet/slide, >N абзацев/ячеек (настройка), экспорт за пределы приложения, overwrite disk, Google upload.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M03-004",
+    "source": "docs/MCP.md",
+    "section": 3,
+    "heading": "3. Права и подтверждения",
+    "clause": "- По умолчанию только открытые и Недавние. Arbitrary path только явный opt-in и allowlisted folders, canonical path/reparse checks.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M03-005",
+    "source": "docs/MCP.md",
+    "section": 3,
+    "heading": "3. Права и подтверждения",
+    "clause": "- Аудит каждый вызов: клиент/tool/doc/time/result, переход/undo в «Активность MCP».",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M03-006",
+    "source": "docs/MCP.md",
+    "section": 3,
+    "heading": "3. Права и подтверждения",
+    "clause": "- Rate limit, response size, pagination, timeout.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M03-007",
+    "source": "docs/MCP.md",
+    "section": 3,
+    "heading": "3. Права и подтверждения",
+    "clause": "- Документ — недоверенные данные; text в явно обозначенных полях, не команды. Это явно сказано в tool descriptions.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M03-008",
+    "source": "docs/MCP.md",
+    "section": 3,
+    "heading": "3. Права и подтверждения",
+    "clause": "- Наследование доступа по токену, сессии и текущей роли; отзыв должен прекращать уже начатую незафиксированную правку (ADR-0010).",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M04-001",
+    "source": "docs/MCP.md",
+    "section": 4,
+    "heading": "4. Модель адресации",
+    "clause": "- Stable IDs: `doc_`, `blk_`, `tbl_`, `img_`, `sht_`, `sld_`, `shp_`, `cmt_`, `ver_`.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M04-002",
+    "source": "docs/MCP.md",
+    "section": 4,
+    "heading": "4. Модель адресации",
+    "clause": "- Text `{ block_id, offset }`; Unicode, grapheme-safe; `{ start, end }`. ⚠ «Символы Unicode» неоднозначны для combining/emoji, ADR-0010 должен закрепить единицу смещения и проверку границ, до этого контракт не готов.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M04-003",
+    "source": "docs/MCP.md",
+    "section": 4,
+    "heading": "4. Модель адресации",
+    "clause": "- Sheets A1 (`Лист1!B2:D10`, Cyrillic names) или `{ sheet_id, row_id, col_id }`.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M04-004",
+    "source": "docs/MCP.md",
+    "section": 4,
+    "heading": "4. Модель адресации",
+    "clause": "- Slides/shapes по ID; порядок ответов 0..N.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M04-005",
+    "source": "docs/MCP.md",
+    "section": 4,
+    "heading": "4. Модель адресации",
+    "clause": "- Read содержит компактный CRDT version vector. Optional `base_version`: если затронутые объекты менялись → `conflict` + текущий фрагмент; без него правка текущего состояния со слиянием CRDT. Границы «затронутого» должны быть формализованы.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M04-006",
+    "source": "docs/MCP.md",
+    "section": 4,
+    "heading": "4. Модель адресации",
+    "clause": "- pt; colors `#RRGGBB` / theme name `accent1`; font family name.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M05-001",
+    "source": "docs/MCP.md",
+    "section": 5,
+    "heading": "5. Общие свойства инструментов",
+    "clause": "- `inputSchema`, `outputSchema`, честные `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M05-002",
+    "source": "docs/MCP.md",
+    "section": 5,
+    "heading": "5. Общие свойства инструментов",
+    "clause": "- Изменение: обязательный `document_id`, optional `base_version`; `mode` apply(default)/suggest/dry_run; `label` undo/AI.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M05-003",
+    "source": "docs/MCP.md",
+    "section": 5,
+    "heading": "5. Общие свойства инструментов",
+    "clause": "- Ответ `{ applied, version, changed_ids[], diff_summary, undo_group_id }`.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M05-004",
+    "source": "docs/MCP.md",
+    "section": 5,
+    "heading": "5. Общие свойства инструментов",
+    "clause": "- Для create/open (ещё нет открытого document_id) и app/asset операций схема адресации уточняется ADR-0010, не придумывать фиктивный doc ID.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M05-005",
+    "source": "docs/MCP.md",
+    "section": 5,
+    "heading": "5. Общие свойства инструментов",
+    "clause": "- Длительные export/LO/Google/bulk: tasks при поддержке клиента, иначе progress; cancellation. В 2026-07-28 Tasks — opt-in extension, явно согласуется поддержка обеих сторон; наличие инструмента в rmcp не доказывает поддержку клиентом.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M05-006",
+    "source": "docs/MCP.md",
+    "section": 5,
+    "heading": "5. Общие свойства инструментов",
+    "clause": "- Structured errors `not_found`, `conflict`, `permission_denied`, `needs_confirmation`, `invalid_range`, `unsupported_feature`, `too_large`, `timeout`, `internal`, сообщение/дальнейшие действия.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-001",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.1 Приложение и документы",
+    "clause": "| `app_status` | версия, открытые/активный документ, selection, права клиента | ✓ |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-002",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.1 Приложение и документы",
+    "clause": "| `list_documents` | open/recent/pinned/cloud, тип/query/date, pagination | ✓ |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-003",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.1 Приложение и документы",
+    "clause": "| `search_documents` | FTS библиотеки | ✓ |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-004",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.1 Приложение и документы",
+    "clause": "| `open_document` | library ID / разрешённый path / link, показать пользователю | — |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-005",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.1 Приложение и документы",
+    "clause": "| `create_document` | Docs/Sheets/Slides, template, Markdown/table/deck seed | — |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-006",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.1 Приложение и документы",
+    "clause": "| `close_document` | с save/без, confirmation | — |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-007",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.1 Приложение и документы",
+    "clause": "| `save_document` | текущий файл | — |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-008",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.1 Приложение и документы",
+    "clause": "| `save_document_as` | path/format/loss report, confirmation | — |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-009",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.1 Приложение и документы",
+    "clause": "| `get_document_info` | properties/stats/format/path/author/presence/sync | ✓ |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-010",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.1 Приложение и документы",
+    "clause": "| `set_document_properties` | title/author/tags | — |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-011",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.1 Приложение и документы",
+    "clause": "| `focus` | scroll/object/selection показать пользователю | — |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-012",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.1 Приложение и документы",
+    "clause": "| `get_selection` | текущая selection пользователя | ✓ |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-013",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.1 Приложение и документы",
+    "clause": "| `set_selection` | установить selection | — |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-014",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.2 Чтение",
+    "clause": "| `get_outline` | Docs headings/blocks IDs; Sheets ranges/tables/charts/pivots; Slides titles/shapes |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-015",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.2 Чтение",
+    "clause": "| `read_content` | range/objects: markdown ID anchors / full formatted json / text; block pagination |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-016",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.2 Чтение",
+    "clause": "| `find` | text/regex/format/value/formula, positions/context |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-017",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.2 Чтение",
+    "clause": "| `render_preview` | PNG page/range/slide, ограниченное разрешение |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-018",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.3 Docs",
+    "clause": "| `insert_content` | position + Markdown/JSON paragraphs/lists/tables/asset images/links, style mapping |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-019",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.3 Docs",
+    "clause": "| `replace_range` | replacement, preserve surrounding format/explicit format |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-020",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.3 Docs",
+    "clause": "| `delete_range` | range/blocks |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-021",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.3 Docs",
+    "clause": "| `move_blocks` | reorder blocks |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-022",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.3 Docs",
+    "clause": "| `format_text` | bold/italic/underline/strike/font/size/color/highlight/super/sub/case/clear |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-023",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.3 Docs",
+    "clause": "| `set_paragraph_format` | style/align/indents/spacing/tabs/keep/breaks |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-024",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.3 Docs",
+    "clause": "| `apply_style` / `define_style` | named style apply/create/update |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-025",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.3 Docs",
+    "clause": "| `set_list` | type/level/restart |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-026",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.3 Docs",
+    "clause": "| `insert_table` / `edit_table` | rows/cols/merge/borders/fill/width/header |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-027",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.3 Docs",
+    "clause": "| `insert_image` | asset/allowed file/generated; size/wrap/caption |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-028",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.3 Docs",
+    "clause": "| `insert_break` | page/section/column |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-029",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.3 Docs",
+    "clause": "| `set_page_setup` | paper/orientation/margins/columns/headers/page numbering |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-030",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.3 Docs",
+    "clause": "| `insert_field` | TOC/page/date/crossref/footnote |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-031",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.3 Docs",
+    "clause": "| `update_fields` | TOC/fields |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-032",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.3 Docs",
+    "clause": "| `replace_all` | whole-document replacement, count preview |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-033",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.4 Sheets",
+    "clause": "| `read_cells` | values/formulas/formats/display text; values-only |",
+    "phases": [
+      5
+    ],
+    "tests": [
+      "T-05-CALC",
+      "T-05-GRID",
+      "T-02-ROUNDTRIP"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-034",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.4 Sheets",
+    "clause": "| `write_cells` | atomic 2D array into range, explicit/inferred types |",
+    "phases": [
+      5
+    ],
+    "tests": [
+      "T-05-CALC",
+      "T-05-GRID",
+      "T-02-ROUNDTRIP"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-035",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.4 Sheets",
+    "clause": "| `set_formula` | cell/range relative fill, syntax validation before apply |",
+    "phases": [
+      5
+    ],
+    "tests": [
+      "T-05-CALC",
+      "T-05-GRID",
+      "T-02-ROUNDTRIP"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-036",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.4 Sheets",
+    "clause": "| `explain_formula` | dependencies/intermediate values, RO |",
+    "phases": [
+      5
+    ],
+    "tests": [
+      "T-05-CALC",
+      "T-05-GRID",
+      "T-02-ROUNDTRIP"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-037",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.4 Sheets",
+    "clause": "| `format_cells` | number/font/color/fill/borders/align/wrap/rotation |",
+    "phases": [
+      5
+    ],
+    "tests": [
+      "T-05-CALC",
+      "T-05-GRID",
+      "T-02-ROUNDTRIP"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-038",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.4 Sheets",
+    "clause": "| `merge_cells` / `unmerge_cells` | merge |",
+    "phases": [
+      5
+    ],
+    "tests": [
+      "T-05-CALC",
+      "T-05-GRID",
+      "T-02-ROUNDTRIP"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-039",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.4 Sheets",
+    "clause": "| `insert_rows` / `insert_cols` / `delete_rows` / `delete_cols` / `resize` / `hide` | structure |",
+    "phases": [
+      5
+    ],
+    "tests": [
+      "T-05-CALC",
+      "T-05-GRID",
+      "T-02-ROUNDTRIP"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-040",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.4 Sheets",
+    "clause": "| `sort_range` / `filter_range` | multi-key sort/autofilter |",
+    "phases": [
+      5
+    ],
+    "tests": [
+      "T-05-CALC",
+      "T-05-GRID",
+      "T-02-ROUNDTRIP"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-041",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.4 Sheets",
+    "clause": "| `freeze_panes` | freeze |",
+    "phases": [
+      5
+    ],
+    "tests": [
+      "T-05-CALC",
+      "T-05-GRID",
+      "T-02-ROUNDTRIP"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-042",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.4 Sheets",
+    "clause": "| `add_sheet` / `rename_sheet` / `move_sheet` / `delete_sheet` | sheet operations |",
+    "phases": [
+      5
+    ],
+    "tests": [
+      "T-05-CALC",
+      "T-05-GRID",
+      "T-02-ROUNDTRIP"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-043",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.4 Sheets",
+    "clause": "| `create_chart` / `update_chart` | type/data/axes/title/legend/position |",
+    "phases": [
+      5
+    ],
+    "tests": [
+      "T-05-CALC",
+      "T-05-GRID",
+      "T-02-ROUNDTRIP"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-044",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.4 Sheets",
+    "clause": "| `create_pivot` / `update_pivot` | source/rows/columns/values/filters |",
+    "phases": [
+      5
+    ],
+    "tests": [
+      "T-05-CALC",
+      "T-05-GRID",
+      "T-02-ROUNDTRIP"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-045",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.4 Sheets",
+    "clause": "| `conditional_format` | rules |",
+    "phases": [
+      5
+    ],
+    "tests": [
+      "T-05-CALC",
+      "T-05-GRID",
+      "T-02-ROUNDTRIP"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-046",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.4 Sheets",
+    "clause": "| `data_validation` | validation |",
+    "phases": [
+      5
+    ],
+    "tests": [
+      "T-05-CALC",
+      "T-05-GRID",
+      "T-02-ROUNDTRIP"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-047",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.4 Sheets",
+    "clause": "| `define_name` | named ranges |",
+    "phases": [
+      5
+    ],
+    "tests": [
+      "T-05-CALC",
+      "T-05-GRID",
+      "T-02-ROUNDTRIP"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-048",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.4 Sheets",
+    "clause": "| `recalculate` | sheet/book |",
+    "phases": [
+      5
+    ],
+    "tests": [
+      "T-05-CALC",
+      "T-05-GRID",
+      "T-02-ROUNDTRIP"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-049",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.4 Sheets",
+    "clause": "| `import_csv_to_sheet` | string/asset CSV, parse parameters |",
+    "phases": [
+      5
+    ],
+    "tests": [
+      "T-05-CALC",
+      "T-05-GRID",
+      "T-02-ROUNDTRIP"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-050",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.5 Slides",
+    "clause": "| `list_slides` | ID/index/layout/title/hidden/preview, RO |",
+    "phases": [
+      6
+    ],
+    "tests": [
+      "T-06-SLIDES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-051",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.5 Slides",
+    "clause": "| `add_slide` / `duplicate_slide` / `delete_slide` / `reorder_slides` / `hide_slide` | slide operations |",
+    "phases": [
+      6
+    ],
+    "tests": [
+      "T-06-SLIDES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-052",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.5 Slides",
+    "clause": "| `set_layout` / `apply_theme` | layout/theme |",
+    "phases": [
+      6
+    ],
+    "tests": [
+      "T-06-SLIDES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-053",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.5 Slides",
+    "clause": "| `add_shape` / `update_shape` / `delete_shape` | text/shape/image/table/chart; pos/size/rotation/fill/stroke/formatted text |",
+    "phases": [
+      6
+    ],
+    "tests": [
+      "T-06-SLIDES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-054",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.5 Slides",
+    "clause": "| `align_shapes` / `group_shapes` / `set_z_order` | composition |",
+    "phases": [
+      6
+    ],
+    "tests": [
+      "T-06-SLIDES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-055",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.5 Slides",
+    "clause": "| `set_notes` | speaker notes |",
+    "phases": [
+      6
+    ],
+    "tests": [
+      "T-06-SLIDES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-056",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.5 Slides",
+    "clause": "| `add_animation` / `update_animation` / `remove_animation` | effect/trigger/delay/duration/order |",
+    "phases": [
+      6
+    ],
+    "tests": [
+      "T-06-SLIDES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-057",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.5 Slides",
+    "clause": "| `set_transition` | type/duration/auto advance |",
+    "phases": [
+      6
+    ],
+    "tests": [
+      "T-06-SLIDES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-058",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.5 Slides",
+    "clause": "| `generate_deck` | structure/theme/titles/bullets/notes, batch task |",
+    "phases": [
+      6
+    ],
+    "tests": [
+      "T-06-SLIDES",
+      "T-02-ROUNDTRIP",
+      "T-02-PRINT"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-059",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.6 Комментарии, предложения, версии",
+    "clause": "| `list_comments` / `add_comment` / `reply_comment` / `resolve_comment` | comments/threads |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-060",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.6 Комментарии, предложения, версии",
+    "clause": "| `list_suggestions` | track changes/AI suggest, RO |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-061",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.6 Комментарии, предложения, версии",
+    "clause": "| `accept_suggestions` / `reject_suggestions` | by IDs/all; edit + user confirmation для чужих |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-062",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.6 Комментарии, предложения, версии",
+    "clause": "| `list_versions` / `create_version` | history/named snapshot |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-063",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.6 Комментарии, предложения, версии",
+    "clause": "| `diff_versions` | diff, RO |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-064",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.6 Комментарии, предложения, версии",
+    "clause": "| `restore_version` | restore, confirmation |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-065",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.7 Экспорт, печать, облако",
+    "clause": "| `export_document` | все AGENTS §8 formats/parameters; asset ID/allowed path, losses, task |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-066",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.7 Экспорт, печать, облако",
+    "clause": "| `print_to_pdf` | print range/handouts/area/scale |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-067",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.7 Экспорт, печать, облако",
+    "clause": "| `print_document` | только через user confirmation dialog |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-068",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.7 Экспорт, печать, облако",
+    "clause": "| `google_export` | connected account + confirmation; Google/Office, returns URL |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-069",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.7 Экспорт, печать, облако",
+    "clause": "| `google_import` | accessible Drive file |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-070",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.8 Ассеты",
+    "clause": "| `upload_asset` | base64 limited image/file → asset ID |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-071",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.8 Ассеты",
+    "clause": "| `get_asset` | preview/export asset |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-072",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.9 Пакетные операции",
+    "clause": "`apply_ops`: по исходному требованию атомарный пакет операций **любых типов выше** одного документа, всё/ничего, одна undo group. ⚠ Это конфликтует с необратимыми side effects (печать, сеть). ADR-0010 предлагает ограничить пакет транзакционными модельными ops, а side effects выделить отдельно; предложение пока не принято и не заменяет требование.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M06-073",
+    "source": "docs/MCP.md",
+    "section": 6,
+    "heading": "6.9 Пакетные операции",
+    "clause": "Все UI-команды должны иметь ops/MCP-путь и наоборот. Недостающие инструменты находятся в `docs/mcp-gaps.md`; `apply_ops` не служит маскировкой отсутствующей схемы конкретной операции.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M07-001",
+    "source": "docs/MCP.md",
+    "section": 7,
+    "heading": "7. Ресурсы",
+    "clause": "| `trinedocs://documents` | open/recent |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M07-002",
+    "source": "docs/MCP.md",
+    "section": 7,
+    "heading": "7. Ресурсы",
+    "clause": "| `trinedocs://doc/{id}/outline` | outline |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M07-003",
+    "source": "docs/MCP.md",
+    "section": 7,
+    "heading": "7. Ресурсы",
+    "clause": "| `trinedocs://doc/{id}/content` | Markdown Docs / Sheets summary / Slides text |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M07-004",
+    "source": "docs/MCP.md",
+    "section": 7,
+    "heading": "7. Ресурсы",
+    "clause": "| `trinedocs://doc/{id}/sheet/{name}/{range}` | CSV/JSON cells |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M07-005",
+    "source": "docs/MCP.md",
+    "section": 7,
+    "heading": "7. Ресурсы",
+    "clause": "| `trinedocs://doc/{id}/slide/{sid}/preview.png` | slide preview |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M07-006",
+    "source": "docs/MCP.md",
+    "section": 7,
+    "heading": "7. Ресурсы",
+    "clause": "| `trinedocs://doc/{id}/selection` | user selection |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M07-007",
+    "source": "docs/MCP.md",
+    "section": 7,
+    "heading": "7. Ресурсы",
+    "clause": "| `trinedocs://doc/{id}/comments` | comments |",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M07-008",
+    "source": "docs/MCP.md",
+    "section": 7,
+    "heading": "7. Ресурсы",
+    "clause": "Subscriptions: document edit → resource-updated; resource set change → list_changed. Проверяются revocation/privacy/pagination, percent-encoding name/range.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M08-001",
+    "source": "docs/MCP.md",
+    "section": 8,
+    "heading": "8. Промпты",
+    "clause": "`summarize`; `proofread` suggest; `rewrite_selection` formal/simple/shorter/longer; `translate`; `make_table_from_text`; `analyze_sheet` anomalies/formulas; `build_chart`; `deck_from_document`; `speaker_notes`; `fix_formulas` #REF!/#DIV/0! proposals.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M09-001",
+    "source": "docs/MCP.md",
+    "section": 9,
+    "heading": "9. Видимость агента",
+    "clause": "- MCP edit session — CRDT participant, cursor, встроенный AI / внешнее имя Claude/Codex, ai palette.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M09-002",
+    "source": "docs/MCP.md",
+    "section": 9,
+    "heading": "9. Видимость агента",
+    "clause": "- Smooth cursor → next edit, fading highlights.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M09-003",
+    "source": "docs/MCP.md",
+    "section": 9,
+    "heading": "9. Видимость агента",
+    "clause": "- «Агент редактирует», Stop → cancel session/rollback unfinished step.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M09-004",
+    "source": "docs/MCP.md",
+    "section": 9,
+    "heading": "9. Видимость агента",
+    "clause": "- Concurrent user/remote edits converge.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M09-005",
+    "source": "docs/MCP.md",
+    "section": 9,
+    "heading": "9. Видимость агента",
+    "clause": "- Agent undo groups, AI review panel, suggest=track changes.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M10-001",
+    "source": "docs/MCP.md",
+    "section": 10,
+    "heading": "10. Логирование и диагностика",
+    "clause": "- «Активность MCP»: live calls, masked content parameters by settings, duration/errors/jump to edits.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M10-002",
+    "source": "docs/MCP.md",
+    "section": 10,
+    "heading": "10. Логирование и диагностика",
+    "clause": "- Log level settings, MCP logging notifications.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M10-003",
+    "source": "docs/MCP.md",
+    "section": 10,
+    "heading": "10. Логирование и диагностика",
+    "clause": "- Inspector-compatible debug endpoint только dev build.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M11-001",
+    "source": "docs/MCP.md",
+    "section": 11,
+    "heading": "11. Тестирование",
+    "clause": "- Каждому tool: schema/errors/rights/dry_run/suggest/base_version conflicts.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M11-002",
+    "source": "docs/MCP.md",
+    "section": 11,
+    "heading": "11. Тестирование",
+    "clause": "- rmcp e2e client: stdio→shim→IPC, bearer HTTP/Origin, in-process.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M11-003",
+    "source": "docs/MCP.md",
+    "section": 11,
+    "heading": "11. Тестирование",
+    "clause": "- Live concurrent agent/user/participant: same state, correct cursors.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M11-004",
+    "source": "docs/MCP.md",
+    "section": 11,
+    "heading": "11. Тестирование",
+    "clause": "- MCP Inspector/Claude Desktop/Codex CLI ручная проверка каждого релиза.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M11-005",
+    "source": "docs/MCP.md",
+    "section": 11,
+    "heading": "11. Тестирование",
+    "clause": "- Reject missing bearer/foreign Origin/other-user IPC; injection fixture не вызывает действий вне запроса.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-M11-006",
+    "source": "docs/MCP.md",
+    "section": 11,
+    "heading": "11. Тестирование",
+    "clause": "- Tasks/elicitation capability fallback реально тестируется, не предполагается по наличию фичи в протоколе.",
+    "phases": [
+      3
+    ],
+    "tests": [
+      "T-03-MCP",
+      "T-03-AI",
+      "T-SECURITY"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A00-001",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 0,
+    "heading": "docs/SPEC-AUDIT.md — Дополнение к AGENTS.md и docs/MCP.md: ты аудируешь и чинишь спецификацию сам",
+    "clause": "Приоритет равен AGENTS.md и MCP.md. При расхождении действует это дополнение, **кроме жёстких ограничений раздела 1 AGENTS.md** (платформы, Electron/Tauri/WebView/TS/JS, стек, лицензии), которые меняет только владелец через ADR. Это включает и заменяет прежнее короткое дополнение из 11 пунктов, если оно было.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A00-002",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 0,
+    "heading": "0. Роль",
+    "clause": "Исполнитель — соавтор и аудитор. Спецификация содержит потенциально неверные/устаревшие факты, противоречия/дыры и нереалистичные места. Найти до дорогой реализации, проверить первоисточники, исправить и зафиксировать. Молчаливый обход и слепое выполнение замеченной ошибки запрещены.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A01-001",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 1,
+    "heading": "1. Порядок",
+    "clause": "1. Полностью читать AGENTS, MCP, этот файл.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A01-002",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 1,
+    "heading": "1. Порядок",
+    "clause": "2. Каждому пункту AGENTS/MCP стабильный `REQ-<раздел>-<номер>`. `docs/traceability.md`: ID → описание → фаза → проверки → статус. Отсутствие фазы/проверки — дефект. Для двух источников раздел MCP получает префикс M (например `REQ-M03-004`), чтобы IDs не пересекались; это редакционное уточнение записывается в changelog.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A01-003",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 1,
+    "heading": "1. Порядок",
+    "clause": "3. Аудит §3 → `docs/audit/00-spec-audit.md` по §8.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A01-004",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 1,
+    "heading": "1. Порядок",
+    "clause": "4. Рискованные спайки §4 → `docs/spikes/NN-название.md`, цифры, go/no-go.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A01-005",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 1,
+    "heading": "1. Порядок",
+    "clause": "5. Исправления по §6 → `docs/spec-changelog.md`.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A01-006",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 1,
+    "heading": "1. Порядок",
+    "clause": "6. Владельцу отчёт ≤1 страницы: блокеры, решения владельца, исправления, непроверенное.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A01-007",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 1,
+    "heading": "1. Порядок",
+    "clause": "Фаза 0 начинается параллельно после проверки AGENTS §§1–5/20; не ждёт весь аудит. **Фаза 1 не начинается без спайков вёрстки и CRDT.** Указание владельца 2026-10-13 позволяет пока работать/проверять Windows; macOS-замеры откладываются и никогда не выдаются за выполненные (ADR-0001).",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A02-001",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 2,
+    "heading": "2. Проверка фактов",
+    "clause": "- Только свежие первоисточники: official docs/releases/repos/licenses, ECMA-376/ISO 29500/MS-OI29500/MCP/OAuth/Google. Дата из системы.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A02-002",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 2,
+    "heading": "2. Проверка фактов",
+    "clause": "- Версии, лицензии, лимиты, цены, config paths, platforms — никогда из памяти, читать.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A02-003",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 2,
+    "heading": "2. Проверка фактов",
+    "clause": "- `facts.md`: утверждение → статус → URL → дата. `✔ подтверждено`, `✘ неверно (исправлено)`, `? не удалось проверить` + причина, `➕ пробел`.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A02-004",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 2,
+    "heading": "2. Проверка фактов",
+    "clause": "- Конфликт: оба источника, причина доверия.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A02-005",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 2,
+    "heading": "2. Проверка фактов",
+    "clause": "- Юридические вопросы: факты, «передать владельцу/юристу», без юридических выводов.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A02-006",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 2,
+    "heading": "2. Проверка фактов",
+    "clause": "- Не выдумывать; допустимо «не знаю, вот как проверить».",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-001",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "A. Фактические утверждения — каждое",
+    "clause": "- Qt: версия 6.12 LTS/open-source patches, Supported Platforms Windows/macOS; LGPL vs GPL-only/коммерческие Charts/Graphs/Quick 3D/Multimedia/Print Support/SVG/PDF/WebEngine и др.; dynamic linking. CXX-Qt latest/6.12 compatibility; QStyleHints, Mica, Snap custom Qt Quick title, SMAppService.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-002",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "A. Фактические утверждения — каждое",
+    "clause": "- Rust: Loro version/API/format stability/shallow snapshot/UndoManager/marks/MovableTree/List/memory/performance, Yrs. IronCalc version/full Excel function list/dynamic arrays/LET/LAMBDA/xlsx round-trip. skia-safe targets/textlayout/pdf/size/build time. rmcp version/tools/outputSchema/resources/subscriptions/prompts/elicitation/tasks/progress/cancel/HTTP/auth. Stable MCP spec.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-003",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "A. Фактические утверждения — каждое",
+    "clause": "- Clients: Claude/Codex/Cursor/VS Code/Windsurf actual config paths/formats, elicitation/tasks in each.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-004",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "A. Фактические утверждения — каждое",
+    "clause": "- Google: drive.file scopes/verification, export size/quotas, Picker need, OAuth publication, desktop loopback+PKCE.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-005",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "A. Фактические утверждения — каждое",
+    "clause": "- Distribution: MSIX signing/sideload, Azure Trusted Signing availability/conditions/alternatives, Apple notarization, Sparkle/WinSparkle versions/licenses, Store sandbox vs shim/LO/pipes/sockets.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-006",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "A. Фактические утверждения — каждое",
+    "clause": "- System APIs: Windows spelling, NSSpellChecker, Windows.Media.Ocr, Vision, TTS, Quick Look/preview handler, QAccessible canvas.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-007",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "A. Фактические утверждения — каждое",
+    "clause": "- Files/fonts: LO license/headless flags/distribution licenses/size/safe download; Carlito/Caladea/Liberation metric compatibility/licenses; Inter/JetBrains/Lucide licenses.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-008",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "A. Фактические утверждения — каждое",
+    "clause": "- OOXML: ECMA-376/ISO and MS-OI29500 departures.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-009",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "B. Согласованность",
+    "clause": "- AGENTS vs MCP tools/formats/rights/links.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-010",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "B. Согласованность",
+    "clause": "- Каждая AGENTS §11 функция: фаза, parity, tests, MCP. Всё UI доступно через ops/tool и наоборот.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-011",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "B. Согласованность",
+    "clause": "- Измеримые/reproducible phase acceptance/CI.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-012",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "B. Согласованность",
+    "clause": "- Dependencies: export/print need layout/render.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-013",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "B. Согласованность",
+    "clause": "- Совместная достижимость нефункциональных целей.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-014",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "C. Известные пробелы — каждый получает факты/ADR",
+    "clause": "**[ВЛАДЕЛЕЦ]**: варианты, плюсы/минусы, стоимость, рекомендация, статус «ждёт владельца»; продолжать независимую работу.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-015",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "C. Известные пробелы — каждый получает факты/ADR",
+    "clause": "1. v1: предложение Docs P0 → Sheets P0 → MCP/AI → collaboration → export/print; Slides/animations/Google/P1 позже. **[ВЛАДЕЛЕЦ]** Slides и следующие только после подтверждения.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-016",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "C. Известные пробелы — каждый получает факты/ADR",
+    "clause": "2. Бесплатно/subscription/open source → Qt license/Store/server cost. **[ВЛАДЕЛЕЦ]**",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-017",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "C. Известные пробелы — каждый получает факты/ADR",
+    "clause": "3. SkParagraph только paragraph; pagination/wrapping/footnotes/columns/table split — наш Word-layer. Спайк 4.1 до решения.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-018",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "C. Известные пробелы — каждый получает факты/ADR",
+    "clause": "4. IronCalc gaps: fork/custom/alternative; CalcEngine trait сохраняется.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-019",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "C. Известные пробелы — каждый получает факты/ADR",
+    "clause": "5. OOXML/LO child process, memory/time limits, termination; corrupt file не валит app.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-020",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "C. Известные пробелы — каждый получает факты/ADR",
+    "clause": "6. External file three-way merge local/disk/base с compare UI.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-021",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "C. Известные пробелы — каждый получает факты/ADR",
+    "clause": "7. Корпус GovDocs1/LO/POI/OSS fixtures: проверить каждую лицензию. LibreOffice автоматический layout baseline + manual Word sample, px/pt tolerance/metric.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-022",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "C. Известные пробелы — каждый получает факты/ADR",
+    "clause": "8. CRDT history compression/shallow thresholds adjustable; time machine/undo impact ADR.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-023",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "C. Известные пробелы — каждый получает факты/ADR",
+    "clause": "9. Server email/invites/@, account/data deletion, GDPR и аналоги, monitoring/alerts/backup/restore/cost N, E2EE choice (search/preview/AI), abuse.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-024",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "C. Известные пробелы — каждый получает факты/ADR",
+    "clause": "10. Coauthor missing fonts: fallback/embedding/cloud with licenses ADR.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-025",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "C. Известные пробелы — каждый получает факты/ADR",
+    "clause": "11. AI default BYOK, API vs consumer subscription billing проверять и честно UI. Proxy/quotas — отдельный ADR **[ВЛАДЕЛЕЦ]**, не самовольно.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-026",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "C. Известные пробелы — каждый получает факты/ADR",
+    "clause": "12. Windows ARM64: сначала x64 emulation; Qt/Skia/pipes/IME test. Native ADR **[ВЛАДЕЛЕЦ]**.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-027",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "C. Известные пробелы — каждый получает факты/ADR",
+    "clause": "13. Explorer/Finder previews Quick Look/handler P1 parity.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-028",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "C. Известные пробелы — каждый получает факты/ADR",
+    "clause": "14. TrineDocs similar names/domains/document companies/trademark classes facts, без legal conclusion. Name/extensions **[ВЛАДЕЛЕЦ]** ADR и conflicts.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-029",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "C. Известные пробелы — каждый получает факты/ADR",
+    "clause": "15. Uninstall: MCP configs/startup/keychain/cache; update signatures/rollback; file/database migrations/versioning/forward-backward compatibility.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-030",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "C. Известные пробелы — каждый получает факты/ADR",
+    "clause": "16. EULA/privacy/About/THIRD-PARTY-NOTICES/opt-in/content retention by AI.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-031",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "C. Известные пробелы — каждый получает факты/ADR",
+    "clause": "17. Max rows/cols against Excel, pages/slides/file size, overflow/memory.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-032",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "C. Известные пробелы — каждый получает факты/ADR",
+    "clause": "18. Excel dates 1900/1904/leap-bug; 15 digits; circular refs; locale arg separator; recalc order; volatile functions.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-033",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "C. Известные пробелы — каждый получает факты/ADR",
+    "clause": "19. Word docDefaults/latent styles/abstractNum/num/fields/w:compat/version-sensitive layout.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-034",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "C. Известные пробелы — каждый получает факты/ADR",
+    "clause": "20. Clipboard read/write formats each OS, Word/Excel/PowerPoint/browser, drag-and-drop.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-035",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "D. Самостоятельный поиск",
+    "clause": "- End-to-end сценарии: first launch; file association; edit/save; crash/recover; huge file; print; Google export; Claude connection; invite; offline/reconnect; update; uninstall.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-036",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "D. Самостоятельный поиск",
+    "clause": "- Сверка Office ribbons по официальным Microsoft docs: Home/Insert/Layout/References/Mailings/Review/View/Formulas/Data/Design/Animations/Slide Show. Missing → parity with priority.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-037",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "D. Самостоятельный поиск",
+    "clause": "- STRIDE MCP IPC/HTTP, import, sync → `docs/security/threat-model.md`; unmitigated → audit.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A03-038",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 3,
+    "heading": "D. Самостоятельный поиск",
+    "clause": "- Experienced Word/Excel red team собственной parity.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A04-001",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 4,
+    "heading": "4. Обязательные спайки",
+    "clause": "Ограниченное время, метод, **обе ОС**, measured numbers, go/no-go/change. При провале числа и ADR альтернативы. Windows-first разрешает отложить Mac результаты, не исключает их из итогового DoD.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A04-002",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 4,
+    "heading": "4.1 Вёрстка (блокирует фазу 1)",
+    "clause": "Complex real docx: multipage tables/floating images/columns/footnotes/headers/lists/styles; compare LO metric. (a) own on SkParagraph; (b) mature OSS Rust text/grid/block components, licenses; (c) LO MPL layout engine feasibility vs architecture/perf. Criteria: accuracy, ≤16ms incremental paragraph edit, effort/license/maintenance. Не решать без данных.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A04-003",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 4,
+    "heading": "4.2 CRDT",
+    "clause": "Loro 100 pages rich text/100k cells/100 slides; memory/open/merge/history 1m ops/undo/shallow. If fails compare Yrs.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A04-004",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 4,
+    "heading": "4.3 Render/Qt",
+    "clause": "Skia tiles→Qt CPU texture upload vs GPU RHI Metal/D3D11/12: latency/CPU/GPU/complexity/ProMotion/scaling/60-120fps.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A04-005",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 4,
+    "heading": "4.4 Input/accessibility",
+    "clause": "CJK IME composition/selection/drag/mac magnifier; QAccessible tree Narrator/VoiceOver viable quality.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A04-006",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 4,
+    "heading": "4.5 Formulas",
+    "clause": "IronCalc vs full official Excel list/test corpus: coverage/correctness/100k perf/incremental, plan B.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A04-007",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 4,
+    "heading": "4.6 MCP e2e",
+    "clause": "rmcp one edit: stdio shim→IPC→app; shim startup; Claude/Codex; actually test elicitation/tasks.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A04-008",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 4,
+    "heading": "4.7 Build/distribution",
+    "clause": "Clean Qt+CXX-Qt+Skia both CI targets: time/size/cache, signed/notarized empty artifact, clean install/startup.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A05-001",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 5,
+    "heading": "5. ADR",
+    "clause": "Architecture/scope/cost/license/security → `docs/decisions/NNNN-название.md`: context/options/criteria/data(links)/decision/consequences/status proposed/accepted/await owner/superseded.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A05-002",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 5,
+    "heading": "5. ADR",
+    "clause": "Owner decisions not self-approved: comparison/recommendation/reason/blockers, review in 5min. Own decisions accept+record+proceed; no barrage of minor questions.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A06-001",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 6,
+    "heading": "6. Исправления",
+    "clause": "- Wrong low-risk fact → AGENTS/MCP edit + changelog what/why/source/date.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A06-002",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 6,
+    "heading": "6. Исправления",
+    "clause": "- High-risk → ADR+owner, mark ⚠ ADR in spec until decision.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A06-003",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 6,
+    "heading": "6. Исправления",
+    "clause": "- Hard targets/platform/bans/mandatory features never silently weaken; prove issue with data, owner alone can relax/delete.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A06-004",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 6,
+    "heading": "6. Исправления",
+    "clause": "- Never delete requirement to fix defect; no fake stub functionality.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A06-005",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 6,
+    "heading": "6. Исправления",
+    "clause": "- Errors in this file corrected same way.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A07-001",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 7,
+    "heading": "7. Постоянно по фазам",
+    "clause": "Start: reread relevant sections, recheck >30d facts and phase-critical facts; mini-audit in phase plan.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A07-002",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 7,
+    "heading": "7. Постоянно по фазам",
+    "clause": "During: all deviations in changelog. **Definition of Done**: code; unit and necessary property/golden; both themes; both OS; perf budget; keyboard/screen reader; ru/en; MCP tool+test; parity+traceability; docs. Owner Windows-first permits provisional Windows acceptance only; global DoD remains unfinished.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A07-003",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 7,
+    "heading": "7. Постоянно по фазам",
+    "clause": "End `docs/audit/phase-N.md`: measured vs targets; all requirements done/not/partial with reasons; new risks; red team corrupt files/races/network/crash/MCP revocation; owner needs.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A08-001",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 8,
+    "heading": "8. Отчёт",
+    "clause": "Start: status/severity counts, top-5 risks. Severity blocker/high/medium/low; action fixed(changelog N)/ADR/owner/spike/justified accept risk.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A09-001",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 9,
+    "heading": "9. Честность",
+    "clause": "- Report failures, missed target/unreproduced/spike fail.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A09-002",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 9,
+    "heading": "9. Честность",
+    "clause": "- No done for stubs/single OS/no tests.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A09-003",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 9,
+    "heading": "9. Честность",
+    "clause": "- Numbers measured with bench; estimates labelled estimates.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A09-004",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 9,
+    "heading": "9. Честность",
+    "clause": "- No flattery/blind agreement; argue poor/costly choices with evidence/alternatives.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
+    "id": "REQ-A09-005",
+    "source": "docs/SPEC-AUDIT.md",
+    "section": 9,
+    "heading": "9. Честность",
+    "clause": "- Reports/ADR/docs Russian; code/identifiers/commits English.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-FACTS"
+    ],
+    "status": "planned",
+    "evidence": []
+  }
+]

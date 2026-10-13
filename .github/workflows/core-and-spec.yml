@@ -1,0 +1,34 @@
+name: Core and specification checks (not GUI acceptance)
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: core-spec-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core-and-spec:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - name: Check requirement integrity
+        run: python tools/spec_registry.py check
+      - name: Test detection of specification defects
+        run: python -m unittest discover -s tools/tests -v
+      - name: Install pinned aged stable Rust toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Check core lints
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Test core policies
+        run: cargo test --locked --workspace
