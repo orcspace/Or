@@ -3,6 +3,9 @@ use rmcp::{
     model::*,
     service::{Peer, RequestContext, RoleClient, RoleServer},
 };
+// Upstream negotiates via `initialize` (pre-2026-07-28) and receives results
+// without `resultType`; downstream clients may negotiate 2026-07-28, where the
+// field is required, so the proxy restores the "complete" discriminator.
 #[derive(Clone)]
 struct Proxy {
     peer: Peer<RoleClient>,
@@ -33,6 +36,10 @@ impl ServerHandler for Proxy {
         self.peer
             .list_tools(p)
             .await
+            .map(|mut r| {
+                r.result_type.get_or_insert(ResultType::COMPLETE);
+                r
+            })
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))
     }
     async fn call_tool(
@@ -43,7 +50,10 @@ impl ServerHandler for Proxy {
         self.peer
             .call_tool(r)
             .await
-            .map(|r| r.into())
+            .map(|mut r| {
+                r.result_type.get_or_insert(ResultType::COMPLETE);
+                r.into()
+            })
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))
     }
     async fn list_resources(
@@ -54,6 +64,10 @@ impl ServerHandler for Proxy {
         self.peer
             .list_resources(p)
             .await
+            .map(|mut r| {
+                r.result_type.get_or_insert(ResultType::COMPLETE);
+                r
+            })
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))
     }
     async fn read_resource(
@@ -64,7 +78,10 @@ impl ServerHandler for Proxy {
         self.peer
             .read_resource(r)
             .await
-            .map(|r| r.into())
+            .map(|mut r| {
+                r.result_type.get_or_insert(ResultType::COMPLETE);
+                r.into()
+            })
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))
     }
 }
