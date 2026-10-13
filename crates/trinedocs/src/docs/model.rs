@@ -363,32 +363,29 @@ pub struct Layout {
 }
 
 pub fn char_width(ch: char, format: &TextFormat) -> f32 {
-    static METRICS: std::sync::OnceLock<[std::collections::HashMap<char, f32>; 4]> =
-        std::sync::OnceLock::new();
-    let metrics = METRICS.get_or_init(|| {
-        std::array::from_fn(|index| {
-            let mut widths = std::collections::HashMap::new();
-            if let Ok(bytes) = crate::fonts::font_bytes(index & 1 != 0, index & 2 != 0)
-                && let Ok(face) = ttf_parser::Face::parse(&bytes, 0)
+    thread_local! {
+        static LAST: std::cell::RefCell<Option<(String, bool, bool, std::sync::Arc<std::collections::HashMap<char, f32>>)>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    let metrics = LAST.with(|last| {
+        let mut last = last.borrow_mut();
+        match last.as_ref() {
+            Some((font, bold, italic, table))
+                if *font == format.font && *bold == format.bold && *italic == format.italic =>
             {
-                let units = f32::from(face.units_per_em()).max(1.0);
-                if let Some(cmap) = face.tables().cmap {
-                    for subtable in cmap.subtables {
-                        if subtable.is_unicode() {
-                            subtable.codepoints(|code| {
-                                if let Some(ch) = char::from_u32(code)
-                                    && let Some(advance) =
-                                        face.glyph_index(ch).and_then(|g| face.glyph_hor_advance(g))
-                                {
-                                    widths.insert(ch, f32::from(advance) / units);
-                                }
-                            });
-                        }
-                    }
-                }
+                table.clone()
             }
-            widths
-        })
+            _ => {
+                let table = crate::fonts::advances(&format.font, format.bold, format.italic);
+                *last = Some((
+                    format.font.clone(),
+                    format.bold,
+                    format.italic,
+                    table.clone(),
+                ));
+                table
+            }
+        }
     });
     let index = usize::from(format.bold) + usize::from(format.italic) * 2;
     let size = format.size.clamp(4.0, 144.0) * if format.script != 0 { 0.75 } else { 1.0 };
@@ -401,24 +398,19 @@ pub fn char_width(ch: char, format: &TextFormat) -> f32 {
             * size
             * 4.0;
     }
-    metrics
-        .get(index)
-        .and_then(|m| m.get(&ch))
-        .copied()
-        .unwrap_or_else(|| {
-            if ch.is_whitespace() {
-                0.3
-            } else if "ilI.,:;!|'".contains(ch) {
-                0.28
-            } else if "MWЖШЩЮФ@".contains(ch) {
-                0.88
-            } else if ch as u32 >= 0x2e80 {
-                1.0
-            } else {
-                0.56
-            }
-        })
-        * size
+    metrics.get(&ch).copied().unwrap_or_else(|| {
+        if ch.is_whitespace() {
+            0.3
+        } else if "ilI.,:;!|'".contains(ch) {
+            0.28
+        } else if "MWЖШЩЮФ@".contains(ch) {
+            0.88
+        } else if ch as u32 >= 0x2e80 {
+            1.0
+        } else {
+            0.56
+        }
+    }) * size
 }
 impl Doc {
     pub fn validate(&self) -> Result<(), String> {
@@ -1372,6 +1364,7 @@ fn render_row(page: &mut Page, row: &Row) {
             color: seg.format.color,
             bold: seg.format.bold,
             italic: seg.format.italic,
+            font: seg.format.font.clone(),
         });
         if seg.format.underline || seg.format.link.is_some() {
             page.items.push(Primitive::Line {

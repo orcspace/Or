@@ -21,6 +21,8 @@ pub enum Primitive {
         color: [u8; 3],
         bold: bool,
         italic: bool,
+        /// Font family name; empty means the default system font.
+        font: String,
     },
     Rect {
         x: f32,
@@ -74,6 +76,11 @@ pub fn paint(ui: &mut egui::Ui, page: &Page, origin: egui::Pos2, scale: f32) {
                 ..
             } => {
                 let family = match item {
+                    Primitive::TextStyled {
+                        bold, italic, font, ..
+                    } if !font.is_empty() => {
+                        crate::fonts::egui_family(ui.ctx(), font, *bold, *italic)
+                    }
                     Primitive::TextStyled {
                         bold: true,
                         italic: true,

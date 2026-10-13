@@ -427,6 +427,12 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
                         element.bold = props.attr("b") == "1";
                         element.italic = props.attr("i") == "1";
                         element.color = color(Some(props), element.color);
+                        if let Some(latin) = props.descend("latin") {
+                            let face = latin.attr("typeface").trim();
+                            if !face.is_empty() && !face.starts_with('+') && face.len() <= 64 {
+                                element.font = face.into();
+                            }
+                        }
                     }
                     if named_title.is_none()
                         && slide.elements.is_empty()
@@ -536,7 +542,7 @@ fn xfrm(e: &Element, prefix: &str) -> String {
     )
 }
 fn text_body(e: &Element) -> String {
-    let paragraphs = e.text.split('\n').map(|line| format!("<a:p><a:r><a:rPr lang=\"ru-RU\" sz=\"{}\" b=\"{}\" i=\"{}\"><a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill></a:rPr><a:t xml:space=\"preserve\">{}</a:t></a:r><a:endParaRPr lang=\"ru-RU\"/></a:p>", (e.font_size * 100.0) as u32, u8::from(e.bold), u8::from(e.italic), hex(e.color), xml_escape(line))).collect::<String>();
+    let paragraphs = e.text.split('\n').map(|line| format!("<a:p><a:r><a:rPr lang=\"ru-RU\" sz=\"{}\" b=\"{}\" i=\"{}\"><a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill><a:latin typeface=\"{}\"/></a:rPr><a:t xml:space=\"preserve\">{}</a:t></a:r><a:endParaRPr lang=\"ru-RU\"/></a:p>", (e.font_size * 100.0) as u32, u8::from(e.bold), u8::from(e.italic), hex(e.color), xml_escape(&e.font), xml_escape(line))).collect::<String>();
     format!(
         "<p:txBody><a:bodyPr wrap=\"square\"><a:spAutoFit/></a:bodyPr><a:lstStyle/>{paragraphs}</p:txBody>"
     )

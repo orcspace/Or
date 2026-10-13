@@ -956,6 +956,7 @@ impl Book {
                         color: cell.fmt.color,
                         bold: cell.fmt.bold,
                         italic: cell.fmt.italic,
+                        font: cell.fmt.font.clone(),
                     });
                     if cell.fmt.underline || cell.fmt.strike {
                         let yy = y + if cell.fmt.strike { 8.0 } else { 15.0 };

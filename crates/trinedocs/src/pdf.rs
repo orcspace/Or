@@ -1,17 +1,37 @@
 use crate::render::{Page, Primitive};
 use pdf_writer::{Content, Name, Pdf, Rect, Ref, Str};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 struct Font {
     name: Vec<u8>,
     id: Ref,
     map: BTreeMap<char, u16>,
     ascent: f32,
 }
-fn style(item: &Primitive) -> usize {
+/// Font family (empty = default) and style index (bold + 2 * italic).
+type FontKey = (String, usize);
+fn requested(item: &Primitive) -> FontKey {
     match item {
-        Primitive::TextStyled { bold, italic, .. } => usize::from(*bold) + 2 * usize::from(*italic),
-        _ => 0,
+        Primitive::TextStyled {
+            bold, italic, font, ..
+        } => (
+            if crate::fonts::is_installed(font) {
+                font.clone()
+            } else {
+                String::new()
+            },
+            usize::from(*bold) + 2 * usize::from(*italic),
+        ),
+        _ => (String::new(), 0),
     }
+}
+fn load_face(key: &FontKey) -> Result<(Arc<Vec<u8>>, u32), String> {
+    let family = if key.0.is_empty() {
+        crate::fonts::DEFAULT_FAMILY
+    } else {
+        &key.0
+    };
+    crate::fonts::face(family, key.1 & 1 != 0, key.1 & 2 != 0)
 }
 fn text(item: &Primitive) -> Option<&str> {
     match item {
@@ -33,19 +53,51 @@ pub fn write(pages: &[Page]) -> Result<Vec<u8>, String> {
         next += 1;
         r
     };
+    // Text whose font lacks a glyph falls back to the default font of the same style.
+    let mut faces: BTreeMap<FontKey, (Arc<Vec<u8>>, u32)> = BTreeMap::new();
+    let mut keys = Vec::new();
+    for item in pages.iter().flat_map(|p| p.items.iter()) {
+        let Some(t) = text(item) else {
+            keys.push((String::new(), 0));
+            continue;
+        };
+        let mut key = requested(item);
+        if !key.0.is_empty() {
+            if !faces.contains_key(&key) {
+                faces.insert(key.clone(), load_face(&key)?);
+            }
+            let covered = faces.get(&key).is_some_and(|(bytes, index)| {
+                ttf_parser::Face::parse(bytes, *index).is_ok_and(|face| {
+                    t.chars()
+                        .filter(|c| !c.is_control())
+                        .all(|c| face.glyph_index(c).is_some())
+                })
+            });
+            if !covered {
+                key.0.clear();
+            }
+        }
+        keys.push(key);
+    }
+    let mut slots: BTreeMap<FontKey, usize> = BTreeMap::new();
     let mut fonts = Vec::new();
-    for index in 0..4 {
+    let used_keys: BTreeSet<FontKey> = keys.iter().cloned().collect();
+    for (index, key) in used_keys.into_iter().enumerate() {
         let used: BTreeSet<char> = pages
             .iter()
             .flat_map(|p| p.items.iter())
-            .filter(|i| style(i) == index)
-            .filter_map(text)
+            .zip(&keys)
+            .filter(|(_, k)| **k == key)
+            .filter_map(|(i, _)| text(i))
             .flat_map(str::chars)
             .filter(|c| !c.is_control())
             .collect();
-        let bytes = crate::fonts::font_bytes(index & 1 != 0, index & 2 != 0)?;
-        let face =
-            ttf_parser::Face::parse(&bytes, 0).map_err(|e| format!("Повреждённый шрифт: {e}"))?;
+        let (bytes, face_index) = match faces.get(&key) {
+            Some(face) => face.clone(),
+            None => load_face(&key)?,
+        };
+        let face = ttf_parser::Face::parse(&bytes, face_index)
+            .map_err(|e| format!("Повреждённый шрифт: {e}"))?;
         let units = f32::from(face.units_per_em());
         let mut mapper = subsetter::GlyphRemapper::new();
         let mut map = BTreeMap::new();
@@ -66,7 +118,7 @@ pub fn write(pages: &[Page]) -> Result<Vec<u8>, String> {
             );
             unicode.entry(cid).or_insert(ch);
         }
-        let subset = subsetter::subset(&bytes, 0, &mapper)
+        let subset = subsetter::subset(&bytes, face_index, &mapper)
             .map_err(|e| format!("Не удалось встроить шрифт: {e}"))?;
         let id = alloc();
         let descendant = alloc();
@@ -74,7 +126,17 @@ pub fn write(pages: &[Page]) -> Result<Vec<u8>, String> {
         let data = alloc();
         let cmap = alloc();
         let name = format!("F{}", index + 1).into_bytes();
-        let base = format!("TRINEA+Arial{index}").into_bytes();
+        let family: String = if key.0.is_empty() {
+            crate::fonts::DEFAULT_FAMILY.into()
+        } else {
+            key.0.chars().filter(char::is_ascii_alphanumeric).collect()
+        };
+        let base = format!(
+            "TRINE{}+{family}{}",
+            (b'A' + (index % 26) as u8) as char,
+            key.1
+        )
+        .into_bytes();
         let bbox = face.global_bounding_box();
         let mut desc = pdf.font_descriptor(descriptor);
         desc.name(Name(&base))
@@ -85,7 +147,7 @@ pub fn write(pages: &[Page]) -> Result<Vec<u8>, String> {
                 f32::from(bbox.x_max) * 1000.0 / units,
                 f32::from(bbox.y_max) * 1000.0 / units,
             ))
-            .italic_angle(if index & 2 != 0 { -12.0 } else { 0.0 })
+            .italic_angle(if key.1 & 2 != 0 { -12.0 } else { 0.0 })
             .ascent(f32::from(face.ascender()) * 1000.0 / units)
             .descent(f32::from(face.descender()) * 1000.0 / units)
             .cap_height(700.0)
@@ -136,6 +198,7 @@ pub fn write(pages: &[Page]) -> Result<Vec<u8>, String> {
         }
         mapping.push_str("endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend");
         pdf.stream(cmap, mapping.as_bytes());
+        slots.insert(key, fonts.len());
         fonts.push(Font {
             name,
             id,
@@ -144,6 +207,7 @@ pub fn write(pages: &[Page]) -> Result<Vec<u8>, String> {
         });
     }
     let mut kids = Vec::new();
+    let mut page_keys = keys.iter();
     for page in pages {
         if !page.width.is_finite()
             || !page.height.is_finite()
@@ -157,7 +221,7 @@ pub fn write(pages: &[Page]) -> Result<Vec<u8>, String> {
         kids.push(page_id);
         let mut content = Content::new();
         let mut images = Vec::new();
-        for item in &page.items {
+        for (item, key) in page.items.iter().zip(page_keys.by_ref()) {
             let rgb = |c: [u8; 3]| {
                 [
                     f32::from(c[0]) / 255.0,
@@ -181,7 +245,10 @@ pub fn write(pages: &[Page]) -> Result<Vec<u8>, String> {
                     color,
                     ..
                 } => {
-                    let f = fonts.get(style(item)).ok_or("Шрифт PDF отсутствует")?;
+                    let f = slots
+                        .get(key)
+                        .and_then(|slot| fonts.get(*slot))
+                        .ok_or("Шрифт PDF отсутствует")?;
                     let c = rgb(*color);
                     content.set_fill_rgb(c[0], c[1], c[2]);
                     for (line, t) in text.lines().enumerate() {

@@ -152,6 +152,17 @@ pub fn raster(page: &Page, scale: f32) -> Result<image::RgbaImage, String> {
     preflight(page, scale)?;
     let ctx = egui::Context::default();
     crate::fonts::install(&ctx)?;
+    let faces: std::collections::BTreeSet<(String, bool, bool)> = page
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Primitive::TextStyled {
+                font, bold, italic, ..
+            } if !font.is_empty() => Some((font.clone(), *bold, *italic)),
+            _ => None,
+        })
+        .collect();
+    crate::fonts::preload(&ctx, &faces.into_iter().collect::<Vec<_>>());
     let mut input = egui::RawInput {
         screen_rect: Some(Rect::from_min_size(
             Pos2::ZERO,

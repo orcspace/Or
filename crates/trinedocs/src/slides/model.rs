@@ -95,6 +95,7 @@ pub struct Element {
     pub color: [u8; 3],
     pub bold: bool,
     pub italic: bool,
+    pub font: String,
     pub group: Option<u64>,
     pub animation: Animation,
 }
@@ -116,6 +117,7 @@ impl Default for Element {
             color: [31, 41, 55],
             bold: false,
             italic: false,
+            font: "Calibri".into(),
             group: None,
             animation: Animation::default(),
         }
@@ -536,6 +538,7 @@ impl Deck {
                     || !(0.001..=10000.0).contains(&element.w)
                     || !(0.001..=10000.0).contains(&element.h)
                     || !(1.0..=300.0).contains(&element.font_size)
+                    || element.font.len() > 64
                     || !(0.0..=300.0).contains(&element.stroke_width)
                     || element.x.abs() > 1000000.0
                     || element.y.abs() > 1000000.0
@@ -734,6 +737,7 @@ impl Deck {
                                 font_size: element.font_size.min(ch * 0.7),
                                 bold: element.bold,
                                 italic: element.italic,
+                                font: element.font.clone(),
                                 ..Element::default()
                             };
                             for (index, line) in text_lines(&cell).into_iter().enumerate() {
@@ -745,6 +749,7 @@ impl Deck {
                                     color: element.color,
                                     bold: element.bold,
                                     italic: element.italic,
+                                    font: element.font.clone(),
                                 });
                             }
                         }
@@ -849,6 +854,7 @@ impl Deck {
                         color: element.color,
                         bold: element.bold,
                         italic: element.italic,
+                        font: element.font.clone(),
                     });
                 }
             }
@@ -955,44 +961,18 @@ pub fn chart_bounds(values: &[f32]) -> (f32, f32) {
         .fold(0.0_f32, f32::max);
     if min == max { (0.0, 1.0) } else { (min, max) }
 }
-fn system_font_bytes(bold: bool, italic: bool) -> &'static [u8] {
-    static FONTS: std::sync::OnceLock<Vec<Vec<u8>>> = std::sync::OnceLock::new();
-    let fonts = FONTS.get_or_init(|| {
-        [(false, false), (true, false), (false, true), (true, true)]
-            .into_iter()
-            .map(|(bold, italic)| crate::fonts::font_bytes(bold, italic).unwrap_or_default())
-            .collect()
-    });
-    fonts
-        .get(usize::from(bold) + 2 * usize::from(italic))
-        .map(Vec::as_slice)
-        .unwrap_or(&[])
-}
 pub fn text_width(text: &str, size: f32, bold: bool, italic: bool) -> f32 {
-    let face = ttf_parser::Face::parse(system_font_bytes(bold, italic), 0).ok();
+    let advances = crate::fonts::advances(crate::fonts::DEFAULT_FAMILY, bold, italic);
     text.chars()
-        .map(|ch| {
-            face.as_ref()
-                .and_then(|f| {
-                    f.glyph_index(ch)
-                        .and_then(|g| f.glyph_hor_advance(g))
-                        .map(|w| f32::from(w) * size / f32::from(f.units_per_em()))
-                })
-                .unwrap_or(size * 0.55)
-        })
+        .map(|ch| advances.get(&ch).map_or(size * 0.55, |w| w * size))
         .sum()
 }
 pub fn text_lines(element: &Element) -> Vec<String> {
-    let font = system_font_bytes(element.bold, element.italic);
-    let face = ttf_parser::Face::parse(font, 0).ok();
+    let advances = crate::fonts::advances(&element.font, element.bold, element.italic);
     let advance = |ch: char| {
-        face.as_ref()
-            .and_then(|f| {
-                f.glyph_index(ch)
-                    .and_then(|g| f.glyph_hor_advance(g))
-                    .map(|w| f32::from(w) * element.font_size / f32::from(f.units_per_em()))
-            })
-            .unwrap_or(element.font_size * 0.55)
+        advances
+            .get(&ch)
+            .map_or(element.font_size * 0.55, |w| w * element.font_size)
     };
     let limit = (element.w - 10.0).max(1.0);
     let mut lines = Vec::new();
