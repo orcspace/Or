@@ -90,10 +90,7 @@ mod tests {
     fn does_not_claim_arm_emulation_is_validated() {
         let mut arm = host(26_100);
         arm.native_architecture = Architecture::Arm64;
-        assert_eq!(
-            arm.validate(),
-            Err(PlatformError::UnvalidatedArmEmulation)
-        );
+        assert_eq!(arm.validate(), Err(PlatformError::UnvalidatedArmEmulation));
         arm.process_architecture = Architecture::Arm64;
         assert_eq!(
             arm.validate(),
@@ -108,4 +105,3 @@ mod tests {
         assert!(host(22_621).supports_documented_backdrop());
     }
 }
-

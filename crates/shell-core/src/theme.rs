@@ -119,11 +119,7 @@ mod tests {
     #[test]
     fn readable_text_meets_wcag_aa_on_every_surface() {
         for palette in [LIGHT, DARK] {
-            for surface in [
-                palette.background,
-                palette.surface,
-                palette.surface_raised,
-            ] {
+            for surface in [palette.background, palette.surface, palette.surface_raised] {
                 assert!(palette.text_primary.contrast_with(surface) >= 4.5);
                 assert!(palette.text_secondary.contrast_with(surface) >= 4.5);
             }
