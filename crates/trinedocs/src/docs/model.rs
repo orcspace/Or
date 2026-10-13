@@ -66,7 +66,16 @@ pub struct Paragraph {
     pub spacing_before: f32,
     pub spacing_after: f32,
     pub line_spacing: f32,
+    /// Fixed line height in points (Word "Exactly"/"At least"); 0 = use `line_spacing`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub line_points: f32,
+    /// With `line_points`: true = exactly, false = at least.
+    #[serde(skip_serializing_if = "is_false")]
+    pub line_exact: bool,
     pub page_break_before: bool,
+}
+fn is_zero(value: &f32) -> bool {
+    *value == 0.0
 }
 impl Default for Paragraph {
     fn default() -> Self {
@@ -82,6 +91,8 @@ impl Default for Paragraph {
             spacing_before: 0.0,
             spacing_after: 6.0,
             line_spacing: 1.15,
+            line_points: 0.0,
+            line_exact: false,
             page_break_before: false,
         }
     }
@@ -547,6 +558,19 @@ type FaceMetrics = (
 pub fn line_height(format: &TextFormat, size: f32, spacing: f32) -> f32 {
     (size * crate::fonts::line_factor(&format.font) * spacing).max(4.0)
 }
+/// Line height of a paragraph line, honouring Word's "Exactly" / "At least" rules.
+pub fn paragraph_line_height(p: &Paragraph, format: &TextFormat, size: f32) -> f32 {
+    if p.line_points > 0.0 {
+        let fixed = p.line_points.clamp(1.0, 1584.0);
+        if p.line_exact {
+            fixed
+        } else {
+            line_height(format, size, 1.0).max(fixed)
+        }
+    } else {
+        line_height(format, size, p.line_spacing)
+    }
+}
 pub fn char_width(ch: char, format: &TextFormat) -> f32 {
     thread_local! {
         static LAST: std::cell::RefCell<Option<FaceMetrics>> =
@@ -818,6 +842,10 @@ impl Doc {
             next = next.max(p.id.checked_add(1).unwrap_or(2));
             p.normalize();
             p.line_spacing = p.line_spacing.clamp(0.5, 5.0);
+            if !p.line_points.is_finite() {
+                p.line_points = 0.0;
+            }
+            p.line_points = p.line_points.clamp(0.0, 1584.0);
             for run in &mut p.runs {
                 run.format.size = run.format.size.clamp(4.0, 144.0);
             }
@@ -1592,7 +1620,8 @@ impl Doc {
                         break;
                     }
                     let w = char_width(*ch, fmt);
-                    if width + w > max_width && end > start {
+                    // Like Word, spaces may hang past the margin instead of wrapping a word that fits.
+                    if width + w > max_width && end > start && *ch != ' ' {
                         break;
                     }
                     width += w;
@@ -1619,13 +1648,14 @@ impl Doc {
                     .take(end.saturating_sub(start))
                     .map(|(_, f)| f.size)
                     .fold(p.format_at(start).size.max(4.0), f32::max);
-                let height = line_height(&p.format_at(start), max_size, p.line_spacing);
+                let height = paragraph_line_height(p, &p.format_at(start), max_size);
                 if y + height > setup.height - setup.margin_bottom {
                     next_page(&mut layout, setup, &mut y);
                 }
+                let visible = width - trailing_spaces(&chars, start, end);
                 let align_x = match p.align {
-                    Align::Center => x + (max_width - width).max(0.0) / 2.0,
-                    Align::Right => x + (max_width - width).max(0.0),
+                    Align::Center => x + (max_width - visible).max(0.0) / 2.0,
+                    Align::Right => x + (max_width - visible).max(0.0),
                     _ => x,
                 };
                 let mut segments: Vec<Segment> = Vec::new();
@@ -1727,9 +1757,11 @@ fn validate_paragraph(
             p.spacing_before,
             p.spacing_after,
             p.line_spacing,
+            p.line_points,
         ]
         .iter()
         .any(|v| !v.is_finite())
+        || !(0.0..=1584.0).contains(&p.line_points)
         || p.indent.abs() > 10000.0
         || p.first_indent.abs() > 10000.0
         || !(0.0..=1000.0).contains(&p.spacing_before)
@@ -1867,6 +1899,17 @@ fn render_row(page: &mut Page, row: &Row) {
         }
     }
 }
+/// Width of the spaces ending `chars[start..end]`; they don't count for alignment.
+fn trailing_spaces(chars: &[(char, TextFormat)], start: usize, end: usize) -> f32 {
+    chars
+        .get(start..end)
+        .unwrap_or_default()
+        .iter()
+        .rev()
+        .take_while(|(ch, _)| *ch == ' ')
+        .map(|(ch, f)| char_width(*ch, f))
+        .sum()
+}
 fn table_lines(cell: &Cell, width: f32, margin: [f32; 4]) -> Vec<Row> {
     let mut lines = Vec::new();
     for (paragraph, p) in cell.paragraphs.iter().enumerate() {
@@ -1893,7 +1936,7 @@ fn table_lines(cell: &Cell, width: f32, margin: [f32; 4]) -> Vec<Row> {
                     break;
                 }
                 let w = char_width(*ch, format);
-                if used + w > max_width && end > start {
+                if used + w > max_width && end > start && *ch != ' ' {
                     break;
                 }
                 used += w;
@@ -1920,7 +1963,8 @@ fn table_lines(cell: &Cell, width: f32, margin: [f32; 4]) -> Vec<Row> {
                 .take(end - start)
                 .map(|(_, f)| f.size)
                 .fold(p.format_at(start).size, f32::max);
-            let text_height = line_height(&p.format_at(start), max_size, p.line_spacing);
+            let text_height = paragraph_line_height(p, &p.format_at(start), max_size);
+            let visible = used - trailing_spaces(&chars, start, end);
             let before = if first { p.spacing_before } else { 0.0 };
             let final_line = end + usize::from(hard_break) >= chars.len() && !hard_break;
             let after = if final_line { p.spacing_after } else { 0.0 };
@@ -1929,8 +1973,8 @@ fn table_lines(cell: &Cell, width: f32, margin: [f32; 4]) -> Vec<Row> {
                 + f32::from(p.list_level) * 18.0
                 + indent
                 + match p.align {
-                    Align::Center => (max_width - used).max(0.0) / 2.0,
-                    Align::Right => (max_width - used).max(0.0),
+                    Align::Center => (max_width - visible).max(0.0) / 2.0,
+                    Align::Right => (max_width - visible).max(0.0),
                     _ => 0.0,
                 };
             let mut segments: Vec<Segment> = Vec::new();

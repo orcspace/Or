@@ -336,8 +336,18 @@ fn apply_ppr(p: &mut Paragraph, node: &Node, num_formats: &BTreeMap<String, List
     if let Some(n) = node.child("spacing") {
         p.spacing_before = number(n.attr("before"), p.spacing_before * 20.0) / 20.0;
         p.spacing_after = number(n.attr("after"), p.spacing_after * 20.0) / 20.0;
-        if n.attr("lineRule") == Some("auto") {
-            p.line_spacing = number(n.attr("line"), 240.0) / 240.0;
+        // lineRule defaults to "auto" (a multiple of single spacing) when absent.
+        if let Some(line) = n.attr("line") {
+            match n.attr("lineRule").unwrap_or("auto") {
+                "exact" | "atLeast" => {
+                    p.line_points = (number(Some(line), 240.0) / 20.0).clamp(0.0, 1584.0);
+                    p.line_exact = n.attr("lineRule") == Some("exact");
+                }
+                _ => {
+                    p.line_spacing = (number(Some(line), 240.0) / 240.0).clamp(0.5, 5.0);
+                    p.line_points = 0.0;
+                }
+            }
         }
     }
     if let Some(n) = node.child("ind") {
@@ -1039,6 +1049,18 @@ fn p_xml(p: &Paragraph, links: &mut Vec<(String, String)>) -> String {
     } else {
         format!("w:firstLine=\"{}\"", (p.first_indent * 20.0).round() as u32)
     };
+    let line = if p.line_points > 0.0 {
+        format!(
+            "w:line=\"{}\" w:lineRule=\"{}\"",
+            (p.line_points.min(1584.0) * 20.0).round() as u32,
+            if p.line_exact { "exact" } else { "atLeast" }
+        )
+    } else {
+        format!(
+            "w:line=\"{}\" w:lineRule=\"auto\"",
+            (p.line_spacing * 240.0).round() as u32
+        )
+    };
     // Paragraph properties in the element order required by the OOXML schema (CT_PPr).
     let mut properties = format!("<w:pStyle w:val=\"{}\"/>", esc(&p.style));
     if p.page_break_before {
@@ -1052,10 +1074,9 @@ fn p_xml(p: &Paragraph, links: &mut Vec<(String, String)>) -> String {
         ));
     }
     properties.push_str(&format!(
-        "<w:spacing w:before=\"{}\" w:after=\"{}\" w:line=\"{}\" w:lineRule=\"auto\"/><w:ind w:left=\"{}\" {first_indent}/><w:jc w:val=\"{}\"/>",
+        "<w:spacing w:before=\"{}\" w:after=\"{}\" {line}/><w:ind w:left=\"{}\" {first_indent}/><w:jc w:val=\"{}\"/>",
         (p.spacing_before * 20.0).round() as u32,
         (p.spacing_after * 20.0).round() as u32,
-        (p.line_spacing * 240.0).round() as u32,
         (p.indent * 20.0).round() as i32,
         match p.align {
             Align::Left => "left",
@@ -1799,6 +1820,23 @@ mod tests {
                 .first()
                 .is_some_and(|p| p.spacing_after == 0.0 && p.line_spacing == 1.0)
         );
+        Ok(())
+    }
+    #[test]
+    fn docx_line_rules_round_trip() -> Result<(), String> {
+        let xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:spacing w:line="300" w:lineRule="exact"/></w:pPr><w:r><w:t>a</w:t></w:r></w:p><w:p><w:pPr><w:spacing w:line="360"/></w:pPr><w:r><w:t>b</w:t></w:r></w:p><w:p><w:pPr><w:spacing w:line="400" w:lineRule="atLeast"/></w:pPr><w:r><w:t>c</w:t></w:r></w:p></w:body></w:document>"#;
+        let bytes =
+            crate::package::write_zip(vec![("word/document.xml".into(), xml.as_bytes().to_vec())])?;
+        for _ in 0..2 {
+            let doc = read(&bytes, "docx")?;
+            let doc = read(&write(&doc, "docx")?, "docx")?;
+            let p: Vec<_> = doc.paragraphs.iter().take(3).collect();
+            assert_eq!((p[0].line_points, p[0].line_exact), (15.0, true));
+            assert_eq!((p[1].line_points, p[1].line_spacing), (0.0, 1.5));
+            assert_eq!((p[2].line_points, p[2].line_exact), (20.0, false));
+            let layout = doc.layout();
+            assert_eq!(layout.rows.first().map(|r| r.height), Some(15.0));
+        }
         Ok(())
     }
     #[test]

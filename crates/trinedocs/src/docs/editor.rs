@@ -1566,7 +1566,10 @@ fn paragraph_spacing(ui: &mut egui::Ui, doc: &mut Doc, state: &EditorState) {
             .selectable_label((current - value).abs() < 0.01, format!("{value}"))
             .clicked()
         {
-            selected_paragraphs(doc, state, |p| p.line_spacing = value);
+            selected_paragraphs(doc, state, |p| {
+                p.line_spacing = value;
+                p.line_points = 0.0;
+            });
             ui.close();
         }
     }
