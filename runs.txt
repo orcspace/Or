@@ -1,3 +1,0 @@
-38420431073 Windows preview release in_progress None
-38420431033 Core and specification checks (not GUI acceptance) completed cancelled
-38420421582 Core and specification checks (not GUI acceptance) completed cancelled
