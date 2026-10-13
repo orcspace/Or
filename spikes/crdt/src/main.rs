@@ -1,8 +1,8 @@
 use loro::ExportMode;
 use std::time::Instant;
 use trinedocs_crdt_spike::{
-    concurrent_convergence, docs_workload, local_undo_preserves_remote, new_replica,
-    sheet_workload, slides_workload,
+    compaction_probe, concurrent_convergence, docs_workload, local_undo_preserves_remote,
+    new_replica, randomized_convergence, sheet_workload, slides_workload,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -29,10 +29,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             return Ok(());
         }
-        _ => {
-            return Err(
-                std::io::Error::other("Cases: docs, sheets, slides, history, merge").into(),
+        "properties" => {
+            let mut pending = 0;
+            for seed in 1..=32 {
+                pending += randomized_convergence(seed * 0x9e37_79b9, 64)?;
+            }
+            println!(
+                "{{\"case\":\"properties\",\"seeds\":32,\"replicas_per_seed\":4,\"generated_commands\":8192,\"pending_deliveries\":{pending},\"converged\":true,\"elapsed_ms\":{}}}",
+                started.elapsed().as_secs_f64() * 1_000.0
             );
+            return Ok(());
+        }
+        "compaction" => {
+            let probe = compaction_probe()?;
+            println!(
+                "{{\"case\":\"compaction\",\"obsolete_update_rejected\":{},\"rejected_import_partially_applied\":{},\"archive_preserved_offline_edit\":{},\"shallow_preserved_formatting\":{},\"live_undo_steps\":{},\"full_snapshot_retained_undo_steps\":{},\"shallow_retained_undo_steps\":{},\"elapsed_ms\":{}}}",
+                probe.obsolete_update_rejected,
+                probe.rejected_import_partially_applied,
+                probe.archive_preserved_offline_edit,
+                probe.shallow_preserved_formatting,
+                probe.live_undo_steps,
+                probe.full_snapshot_retained_undo_steps,
+                probe.shallow_retained_undo_steps,
+                started.elapsed().as_secs_f64() * 1_000.0
+            );
+            return Ok(());
+        }
+        _ => {
+            return Err(std::io::Error::other(
+                "Cases: docs, sheets, slides, history, merge, properties, compaction",
+            )
+            .into());
         }
     };
     let create_ms = started.elapsed().as_secs_f64() * 1_000.0;

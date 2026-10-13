@@ -29,3 +29,7 @@ Spec checker подвергнут purposeful corruption: hard platform text chan
 
 Проверить обновлённый core CI и CRDT Windows workflow. Предыдущий core Windows CI успешен: https://github.com/orcspace/Or/actions/runs/38331138940 . Для окна нужны owner ADR-0003 и Mica decision; Qt age соблюдается по ADR-0002. Затем Qt/CXX-Qt package/license pin и clean Windows shell spike. Mac отложен. Поздние фазы разрешены владельцем; фаза 1 не стартует до результатов layout/CRDT и phase 0 acceptance.
 
+
+## Дополнительная красная команда CRDT
+
+32seeds/8192generated commands с shuffled/duplicated packets и missing dependencies сошлись локально до полного resend. Отдельно воспроизведены partial import on error и old offline edit после shallow cutoff (ADR-0024/0011). Семь localCRDTtests проходят; новое WindowsCI ожидается. Production ops/sync отсутствуют: эти риски не закрыты защитой приложения.

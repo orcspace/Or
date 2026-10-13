@@ -1,10 +1,10 @@
 # Первичный аудит спецификации
 
-**Статус: первый проход, полный фактологический аудит не завершён.** Реального GUI/EXE, спайков и performance results пока нет. Mac-проверки отложены владельцем.
+**Статус: первый проход, полный фактологический аудит не завершён.** GUI/EXE пока нет. CRDT-спайк частично выполнен; модельные замеры получены на Linux development и Windows Server CI, без Windows 11 GUI-приёмки. Mac-проверки отложены владельцем.
 
-Позиций: **36**. Статусы: ✔ подтверждено: 3; ➕ противоречие: 3; ✘ неверно (исправлено): 1; ? не удалось проверить совместимость: 1; ? не удалось проверить полностью: 2; ? не удалось проверить: 1; ➕ риск: 1; ➕ пробел: 2; ? нет результатов: 1; ➕ незакрытый риск: 1; ➕ пробел разобран, не реализован: 20.
+Позиций: **38**. Статусы: ✔ подтверждено: 4; ➕ противоречие: 3; ✘ неверно (исправлено): 1; ? не удалось проверить совместимость: 1; ? не удалось проверить полностью: 2; ? не удалось проверить: 1; ➕ риск: 1; ➕ пробел: 2; ? частично проверено: 1; ➕ пробел с воспроизведением: 1; ➕ незакрытый риск: 1; ➕ пробел разобран, не реализован: 20.
 
-Серьёзность: блокер: 4; низкая: 1; высокая: 19; средняя: 12.
+Серьёзность: блокер: 4; низкая: 1; высокая: 20; средняя: 13.
 
 ## Топ-5 рисков
 
@@ -25,14 +25,14 @@
 | AUD-007 | REQ-01-006 | Per-module/transitive Qt license audit не завершён | ? не удалось проверить полностью | [FACT-013](https://doc.qt.io/qt-6/licensing.html)/014; official list не полный SBOM | высокая | licenses.md/ADR-0008, exact source audit |
 | AUD-008 | REQ-M00-002 | rmcp/clients config/tasks/elicitation актуальный контракт не проверен | ? не удалось проверить | facts.md pending inventory, installed clients недоступны | высокая | спайк4.6/ADR-0010 |
 | AUD-009 | REQ-09-001 | Google drive.file non-sensitive, basic verification; exports10MB | ✔ подтверждено | [FACT-007](https://developers.google.com/workspace/drive/api/guides/api-specific-auth)/008, Google official docs,2026-10-12 | средняя | facts; OAuth publication details ещё проверить |
-| AUD-010 | REQ-03-022 | Shallow history ограничивает merge старых peers/time machine | ➕ риск | [FACT-009](https://www.loro.dev/docs/concepts/shallow_snapshots) Loro docs,2026-10-12 | высокая | ADR-0011/спайк4.2 |
+| AUD-010 | REQ-03-022 | Shallow history ограничивает merge старых peers/time machine | ➕ риск | [FACT-009](https://www.loro.dev/docs/concepts/shallow_snapshots) Loro docs,2026-10-12; compaction probe,2026-10-13 | высокая | ADR-0011/0024; старый offline edit отвергается, полный архив сохраняет его |
 | AUD-011 | REQ-M06-072 | apply_ops atomic любых типов vs printer/network side effects | ➕ противоречие | внутренний contract analysis MCP§6.9,2026-10-12 | высокая | ADR-0010, не снижать атомарность молча |
 | AUD-012 | REQ-M05-004 | create ID/Unicode unit/suggest concurrent stop/rights scope не специфицированы | ➕ пробел | MCP§4/5/6 internal analysis,2026-10-12 | высокая | ADR-0010, schemas до реализации |
-| AUD-013 | REQ-19-006 | Hosted core checks не Win11x64 UI acceptance | ➕ пробел | [FACT-012](https://docs.github.com/en/actions/reference/runners/github-hosted-runners) + текущая средаLinux/no Qt/Rust | средняя | отдельный real desktop bench в plan0 |
-| AUD-014 | REQ-A01-007 | Обязательные layout/CRDT spikes не выполнены | ? нет результатов | spikes01/02: NOT_RUN, текущая среда не target OS | блокер | не стартовать phase1; windows experiment после gates |
+| AUD-013 | REQ-19-006 | Hosted core checks не Win11x64 UI acceptance | ➕ пробел | [FACT-012](https://docs.github.com/en/actions/reference/runners/github-hosted-runners) + Linux development безQt, Rust установлен, core/CRDT Windows Server CI passed | средняя | отдельный real desktop bench в plan0 |
+| AUD-014 | REQ-A01-007 | Layout не выполнен, CRDT частично исследован | ? частично проверено | spikes01:NOT_RUN; spikes02:raw measurements, property/offline probes; Win11/Mac pending | блокер | не стартовать phase1; windows experiment после gates |
 | AUD-015 | REQ-A03-037 | Все18STRIDE mitigations пока design, не protection | ➕ незакрытый риск | security/threat-model.md; runtime modules отсутствуют | высокая | T-SECURITY при реализации; без ложного closed |
 | AUD-016 | REQ-A03-036 | Полная ribbon parity сверка ещё не выполнена | ? не удалось проверить полностью | [FACT-017](https://support.microsoft.com/en-us/word/view-and-compare-documents-side-by-side) only subset; остальные official tabs pending | средняя | продолжить inventory,350PAR не full parity claim |
-| AUD-017 | REQ-A03-015 | C.1: v1: предложение Docs P0 → Sheets P0 → MCP/AI → collaboration → export/print; Slides/animations/Google/P1 позже. **[ВЛАДЕЛЕЦ]** Slides и следующие только после подтверждения. | ➕ пробел разобран, не реализован | SPEC-AUDIT§3.C + linked ADR; data/price/license checks указаны как pending,2026-10-12 | средняя | ADR-0005 / ждёт владельца |
+| AUD-017 | REQ-A03-015 | C.1: v1: предложение Docs P0 → Sheets P0 → MCP/AI → collaboration → export/print; Slides/animations/Google/P1 позже. **[ВЛАДЕЛЕЦ]** Slides и следующие только после подтверждения. | ➕ пробел разобран, не реализован | SPEC-AUDIT§3.C + linked ADR; data/price/license checks указаны как pending,2026-10-12 | средняя | ADR-0005 / все фазы разрешены владельцем2026-10-13; приёмка сохранена |
 | AUD-018 | REQ-A03-016 | C.2: Бесплатно/subscription/open source → Qt license/Store/server cost. **[ВЛАДЕЛЕЦ]** | ➕ пробел разобран, не реализован | SPEC-AUDIT§3.C + linked ADR; data/price/license checks указаны как pending,2026-10-12 | средняя | ADR-0008 / ждёт владельца |
 | AUD-019 | REQ-A03-017 | C.3: SkParagraph только paragraph; pagination/wrapping/footnotes/columns/table split — наш Word-layer. Спайк 4.1 до решения. | ➕ пробел разобран, не реализован | SPEC-AUDIT§3.C + linked ADR; data/price/license checks указаны как pending,2026-10-12 | высокая | ADR-0012 / проверка/спайк pending |
 | AUD-020 | REQ-A03-018 | C.4: IronCalc gaps: fork/custom/alternative; CalcEngine trait сохраняется. | ➕ пробел разобран, не реализован | SPEC-AUDIT§3.C + linked ADR; data/price/license checks указаны как pending,2026-10-12 | высокая | ADR-0012 / проверка/спайк pending |
@@ -52,6 +52,9 @@
 | AUD-034 | REQ-A03-032 | C.18: Excel dates 1900/1904/leap-bug; 15 digits; circular refs; locale arg separator; recalc order; volatile functions. | ➕ пробел разобран, не реализован | SPEC-AUDIT§3.C + linked ADR; data/price/license checks указаны как pending,2026-10-12 | высокая | ADR-0018 / проверка/спайк pending |
 | AUD-035 | REQ-A03-033 | C.19: Word docDefaults/latent styles/abstractNum/num/fields/w:compat/version-sensitive layout. | ➕ пробел разобран, не реализован | SPEC-AUDIT§3.C + linked ADR; data/price/license checks указаны как pending,2026-10-12 | высокая | ADR-0019 / проверка/спайк pending |
 | AUD-036 | REQ-A03-034 | C.20: Clipboard read/write formats each OS, Word/Excel/PowerPoint/browser, drag-and-drop. | ➕ пробел разобран, не реализован | SPEC-AUDIT§3.C + linked ADR; data/price/license checks указаны как pending,2026-10-12 | высокая | ADR-0017 / проверка/спайк pending |
+
+| AUD-037 | REQ-M06-072 / REQ-03-016 | Ошибка mixed Loro import допускает частичное применение | ✔ подтверждено | exactLoro1.16.2 source+compaction probe,2026-10-13; docs/spikes/results/linux-development-compaction.json | высокая | ADR-0024; staging/version gate исследовать, защиты ещё нет |
+| AUD-038 | REQ-03-022 / REQ-07-002 | Новый UndoManager после full и shallow snapshot reload пуст; lifecycle undo не определён | ➕ пробел с воспроизведением | compaction probe,2026-10-13; live2steps/reloaded0steps; полнаяCRDTистория сохраняется | средняя | ADR-0011; определить session lifecycle отдельно от истории; не обещать восстановление undo изsnapshot |
 
 Ссылки на первоисточники/дату раскрыты в [facts.md](../facts.md); FACT ссылка не заменяет реальные spike measurements. Claims, не проверенные в полном объёме, явно остаются «?». Недостающие tool contracts — [mcp-gaps.md](../mcp-gaps.md). Сведения о юридических/ценовых вопросах передать владельцу/юристу, не трактовать этот отчёт как заключение.
 

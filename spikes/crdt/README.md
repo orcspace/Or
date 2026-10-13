@@ -11,8 +11,10 @@ cargo run --locked --release --manifest-path spikes/crdt/Cargo.toml -- sheets
 cargo run --locked --release --manifest-path spikes/crdt/Cargo.toml -- slides
 cargo run --locked --release --manifest-path spikes/crdt/Cargo.toml -- history
 cargo run --locked --release --manifest-path spikes/crdt/Cargo.toml -- merge
+cargo run --locked --release --manifest-path spikes/crdt/Cargo.toml -- properties
+cargo run --locked --release --manifest-path spikes/crdt/Cargo.toml -- compaction
 ```
 
-Проверки convergence с разным порядком/duplicate updates, rich-text marks, stable-cell values, local undo при concurrent remote edits, Unicode scalar/UTF16/UTF8 units, snapshot restore. Полная grapheme-safe адресация MCP, случайные property tests, offline/shallow rebootstrap и50000author patterns ещё не выполнены.
+Проверки convergence с разным порядком/duplicate updates, rich-text marks, stable-cell values, local undo, Unicode units, snapshot restore. Теперь добавлены32deterministic seeds ×4peers ×64generated commands: insert/delete/marks, cell conflicts, block movement, shuffled incremental packets с missing dependencies и duplicates. Это ограниченная property workload, не exhaustive fuzzing/shrinking. Compaction проверяет старый offline edit, full archive, partial import on error и отдельную undo-state persistence. Grapheme-safe MCP, полноценный rebootstrap protocol и масштаб50участников ещё не реализованы.
 
 JSON results являются реальными измерениями конкретного процесса/стенда. Перед запуском требуются frozen Cargo.lock, license/age audit всех transitive dependencies. WindowsServerCI — инфраструктурный результат, не приёмка на Windows11x64; Mac позже по ADR-0001. Заносить failed/no-go и ограничения в docs/spikes/02-crdt.md.

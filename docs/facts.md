@@ -60,3 +60,10 @@
 | FACT-023 | Windows11 contrast colors include COLOR_3DFACE/BTNTEXT, WINDOW/WINDOWTEXT, HIGHLIGHT/HIGHLIGHTTEXT,HOTLIGHT |✔подтверждено|[GetSysColor supported contrast table](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getsyscolor); same page marks aliasBTNFACE unsupported but table explicitly supports3DFACE, choose documented contrast table alias|
 
 rmcp metadata current3.5.1 is younger14days; candidate3.5.0(2026-09-28) aged but features/protocol/client build not yet investigated. Ironcalc_base metadata0.8.3(2026-07-31) andskia-safe0.153.3(2026-09-04) eligible; not linked or claimed working. Primary metadata source: crates.io/api/v1/crates/{name}; read2026-10-13.
+
+## Воспроизведения 2026-10-13
+
+| ID | Утверждение | Статус | Источник и дата |
+|---|---|---|---|
+| FACT-024 | Loro1.16.2 mixed import после shallow cutoff может вернуть ImportUpdatesThatDependsOnOutdatedVersion и изменить допустимую часть состояния | ✔ подтверждено | exact [crate source](https://crates.io/api/v1/crates/loro/1.16.2), upstream shallow_snapshot_test.rs, собственный compaction_probe;2026-10-13 |
+| FACT-025 | Новый UndoManager после full snapshot reload, как и после shallow reload, не содержит live undo stack | ✔ подтверждено | source + own probe: live2,full0,shallow0; это не потеря полнойCRDTистории;2026-10-13 |

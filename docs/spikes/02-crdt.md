@@ -19,11 +19,11 @@ open_ms включает import и первый полный обход восс
 | Slides 100 | 5.913 | 0.247 | 3.007 | 23933 | 13534 |
 | History 1m | 1990.507 | 6.913 | 7.004 | 4073477 | 320 |
 
-Три реплики, concurrent text/cell edits и marks, разный порядок доставки и дубликаты: одинаковое состояние. Merge + local undo: 17.415 мс, remote edit сохранён. Четыре теста проходят: convergence, snapshot/marks restore, local-only undo, Unicode scalar/UTF-16/UTF-8. Grapheme-safe MCP не реализован.
+Три реплики, concurrent text/cell edits и marks, разный порядок доставки и дубликаты: одинаковое состояние. Merge + local undo: 17.415 мс, remote edit сохранён. Первоначальные четыре теста проходят: convergence, snapshot/marks restore, local-only undo, Unicode scalar/UTF-16/UTF-8. Grapheme-safe MCP не реализован.
 
 ## Решение и ограничения
 
-Можно продолжать исследование Loro; полноценный go не доказан. Не измерены целевой RSS, распределение задержек, старые offline peers после shallow compaction, случайные property-based правки и длинная история undo. Map history требует второго сценария rich-text editing. Shallow 320 байт не означает сохранение машины времени.
+Можно продолжать исследование Loro; полноценный go не доказан. Не измерены целевой RSS, распределение задержек, старые offline peers после shallow compaction, exhaustive fuzzing/shrinking и длинная история undo. Map history требует второго сценария rich-text editing. Shallow 320 байт не означает сохранение машины времени.
 
 Windows workflow записывает host/CPU/OS и sampled peak working set каждые 10 мс; последний короткий пик может быть пропущен. После целевых Windows 11 и history/compaction данных обновить ADR-0011; сравнивать Yrs при no-go. Отсутствие данных не заменять оценками.
 
@@ -43,3 +43,11 @@ Windows workflow записывает host/CPU/OS и sampled peak working set к
 Три реплики + local undo: 12.701 мс, convergence=true, local_undo=true. Один прогон, никакого p95/GUI fps из этих чисел не выводится. Sampled peak — Windows OS peak working set, опрашиваемый каждые 10 мс; короткий финальный пик мог быть пропущен. Сопоставление с бюджетом полноценного редактора некорректно: здесь нет Qt, layout, картинок, calc и render.
 
 [Raw JSON со стендом и provenance](results/windows-ci-run.json). Все ограничения предыдущего раздела сохраняются; go/no-go для продукта не вынесен.
+
+## Дополнение: random delivery и история, 2026-10-13
+
+Локально проходят7CRDTtests.32deterministic seeds ×4peers ×64generated commands =8192commands: вставка/удаление Unicode scalar text, marks, конфликтующие ячейки, перемещение stable block IDs. Пакеты инкрементальные, перемешаны и дублированы;21614импортов встретили отсутствующие dependencies. Состояния, версии и marks совпали после доставки всех пакетов, **до** полного повторного экспорта. Повторный export/import не изменил версии и не скрывал потерянный пакет. Release development Linux: 1222.906мс для всего набора, не key-to-pixel. Raw JSON: results/linux-development-properties.json. Это bounded property workload, без shrinking/50участников.
+
+Compaction probe: old offline update отвергнут shallow replica, но full archive сохранил его. Mixed import вернул ошибку и изменил допустимую часть состояния. Marks сохранились. Live undo steps=2, новый менеджер после full/shallow snapshot=0/0. Следовательно, snapshot не сериализует runtime undo stack; отсутствие undo после reload не специфично shallow GC и не означает исчезновение полной истории. Raw JSON: results/linux-development-compaction.json. ADR-0011/0024 фиксируют последствия; production protection ещё не реализована.
+
+Windows CI новых сценариев запускается отдельно. До его результатов не считать эти дополнения проверенными на целевой стороне; даже успех WindowsServer остаётся инфраструктурным результатом.

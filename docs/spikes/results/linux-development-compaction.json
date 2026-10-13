@@ -1,0 +1,11 @@
+{
+  "case": "compaction",
+  "obsolete_update_rejected": true,
+  "rejected_import_partially_applied": true,
+  "archive_preserved_offline_edit": true,
+  "shallow_preserved_formatting": true,
+  "live_undo_steps": 2,
+  "full_snapshot_retained_undo_steps": 0,
+  "shallow_retained_undo_steps": 0,
+  "elapsed_ms": 1.2136639999999999
+}

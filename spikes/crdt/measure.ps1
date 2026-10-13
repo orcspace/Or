@@ -19,7 +19,7 @@ $hostInfo = @{
 $hostInfo | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $outputDirectory "host.json")
 $hostInfo | ConvertTo-Json -Compress | Write-Output
 
-foreach ($case in @("docs", "sheets", "slides", "history", "merge")) {
+foreach ($case in @("docs", "sheets", "slides", "history", "merge", "properties", "compaction")) {
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo.FileName = (Resolve-Path $Executable).Path
     $process.StartInfo.Arguments = $case

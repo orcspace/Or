@@ -25,6 +25,7 @@
 | 0021 | Локальный файл three-way merge | предложено | compare/reload merge |
 | 0022 | Windows ARM emulation/native | ждёт владельца для native; emulation unvalidated | ARM support claim |
 | 0023 | Explorer/Finder preview | предложено, P1 | native preview |
+| 0024 | Loro import atomicity | предложено, воспроизведено спайком | нельзя считать Err rollback; ops/sync нужны разные контракты |
 
 Статус «предложено» не является разрешением ослабить требование. Сроки и затраты, если не измерены, не выдаются за числа.
 

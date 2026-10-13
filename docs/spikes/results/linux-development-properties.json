@@ -1,0 +1,9 @@
+{
+  "case": "properties",
+  "seeds": 32,
+  "replicas_per_seed": 4,
+  "generated_commands": 8192,
+  "pending_deliveries": 21614,
+  "converged": true,
+  "elapsed_ms": 1222.906393
+}

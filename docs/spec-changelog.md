@@ -25,3 +25,5 @@
 | CHANGE-013 |2026-10-13|Inter4.1/JBM2.304 OFL-1.1 иLucide1.48.0 ISC pinned assets; hashes/notices, passive SVG validation.|assets manifests, official release URLs|
 | CHANGE-014 |2026-10-13|Isolated CRDT experiment Loro1.16.2;156exact pins audited via crates.io;17younger dependencies constrained to aged versions. SemVer build metadata (+wasi-...) не prerelease: validator исправлен.|docs/dependencies/crdt-spike.json,spikes/crdt/Cargo.lock|
 | CHANGE-015 |2026-10-13|Bench import-only latency отделена от open+first text/style materialization; original-state comparison не включается в measured open. Development Linux results не target acceptance.|spikes/crdt/src/main.rs|
+| CHANGE-016 |2026-10-13|Windows CRLF checkout ломал audited hashes: LF/binary закреплены в.gitattributes, CI повторно прошёл. Full raw Windows CRDT measurements и bundled notices опубликованы.|Windows runs38339267241/38339267237|
+| CHANGE-017 |2026-10-13|Добавлены randomized/offline/compaction probes. Ошибка Loro import не равна rollback; empty undo после reload не специфиченGC. Требования не снижены, ADR0024 предложен, ADR0011 обновлён данными.|FACT024/025,7CRDTtests,raw JSON|
