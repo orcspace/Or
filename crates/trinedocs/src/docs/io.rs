@@ -364,26 +364,52 @@ fn style_chain<'a>(
         out.push(style);
     }
 }
+/// Document-wide defaults of a DOCX: run format and paragraph layout (`w:docDefaults`).
+struct Defaults<'a> {
+    format: &'a TextFormat,
+    paragraph: &'a Paragraph,
+    /// `styleId` of the default paragraph style (`a` in Russian Word, `Normal` in English).
+    normal: &'a str,
+}
+/// Our style id for an imported style, matched by its language-neutral `w:name`.
+fn canonical_style(styles: &BTreeMap<String, Node>, id: &str) -> String {
+    let name = styles
+        .get(id)
+        .and_then(|s| s.child("name"))
+        .and_then(Node::value)
+        .unwrap_or(id)
+        .to_ascii_lowercase();
+    match name.as_str() {
+        "normal" => "Normal".into(),
+        "title" => "Title".into(),
+        "heading 1" => "Heading1".into(),
+        "heading 2" => "Heading2".into(),
+        "heading 3" => "Heading3".into(),
+        "quote" => "Quote".into(),
+        _ => id.into(),
+    }
+}
 fn paragraph(
     node: &Node,
     doc: &mut Doc,
     styles: &BTreeMap<String, Node>,
-    default_format: &TextFormat,
+    defaults: &Defaults,
     nums: &BTreeMap<String, List>,
     rels: &BTreeMap<String, String>,
 ) -> Paragraph {
     let id = doc.alloc_id();
+    let default_format = defaults.format;
     let mut p = Paragraph {
         id,
         runs: Vec::new(),
-        ..Paragraph::default()
+        ..defaults.paragraph.clone()
     };
     let mut format = default_format.clone();
     let style = node
         .child("pPr")
         .and_then(|n| n.child("pStyle"))
         .and_then(Node::value)
-        .unwrap_or("Normal");
+        .unwrap_or(defaults.normal);
     let mut chain = Vec::new();
     style_chain(styles, style, &mut chain, 0);
     for n in chain {
@@ -394,10 +420,10 @@ fn paragraph(
             apply_ppr(&mut p, ppr, nums);
         }
     }
-    p.style = style.into();
     if let Some(n) = node.child("pPr") {
         apply_ppr(&mut p, n, nums);
     }
+    p.style = canonical_style(styles, style);
     let mut nodes = Vec::new();
     collect_runs(node, rels, None, &mut nodes);
     for (run, link) in nodes {
@@ -433,8 +459,35 @@ fn paragraph(
             p.runs.push(Run { text, format: fmt });
         }
     }
+    if p.runs.is_empty() {
+        // An empty paragraph keeps the size of its paragraph mark, so blank lines keep their height.
+        let mut mark = format.clone();
+        if let Some(rpr) = node.child("pPr").and_then(|n| n.child("rPr")) {
+            apply_rpr(&mut mark, rpr);
+        }
+        p.runs.push(Run {
+            text: String::new(),
+            format: mark,
+        });
+    }
     p.normalize();
     p
+}
+/// `Some(true)` when any edge of a `tblBorders`/`tcBorders` element is drawn.
+fn borders_visible(node: Option<&Node>) -> Option<bool> {
+    let node = node?;
+    Some(node.children.iter().any(|edge| {
+        !matches!(edge.value(), Some("nil" | "none") | None)
+            && edge.attr("sz").is_none_or(|s| s != "0")
+    }))
+}
+fn border_color(node: Option<&Node>) -> Option<[u8; 3]> {
+    node?.children.iter().find_map(|edge| {
+        if matches!(edge.value(), Some("nil" | "none") | None) {
+            return None;
+        }
+        Some(edge.attr("color").and_then(color).unwrap_or([0, 0, 0]))
+    })
 }
 fn collect_runs<'a>(
     node: &'a Node,
@@ -505,11 +558,25 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
             .transpose()?,
     );
     let mut styles = BTreeMap::new();
-    let mut default_format = TextFormat::default();
+    // Word's built-in defaults: automatic (black) text, 10 pt, single spacing, no gaps.
+    let mut default_format = TextFormat {
+        color: [0, 0, 0],
+        size: 10.0,
+        ..TextFormat::default()
+    };
+    let mut default_paragraph = Paragraph {
+        spacing_before: 0.0,
+        spacing_after: 0.0,
+        line_spacing: 1.0,
+        ..Paragraph::default()
+    };
     if let Some(bytes) = parts.get("word/styles.xml") {
         let node = xml(bytes)?;
         if let Some(n) = node.descendant("rPrDefault").and_then(|n| n.child("rPr")) {
             apply_rpr(&mut default_format, n);
+        }
+        if let Some(n) = node.descendant("pPrDefault").and_then(|n| n.child("pPr")) {
+            apply_ppr(&mut default_paragraph, n, &BTreeMap::new());
         }
         for n in &node.children {
             if n.name == "style"
@@ -552,12 +619,29 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
     let mut doc = Doc::default();
     doc.paragraphs.clear();
     doc.page.page_numbers = false;
+    default_paragraph.style = "Normal".into();
+    let normal = styles
+        .iter()
+        .find(|(_, s)| {
+            s.attr("type") == Some("paragraph") && matches!(s.attr("default"), Some("1" | "true"))
+        })
+        .map(|(id, _)| id.clone())
+        .unwrap_or_else(|| "Normal".into());
+    let defaults = Defaults {
+        format: &default_format,
+        paragraph: &default_paragraph,
+        normal: &normal,
+    };
     for node in &body.children {
         match node.name.as_str() {
             "p" => {
-                let p = paragraph(node, &mut doc, &styles, &default_format, &nums, &rels);
+                let p = paragraph(node, &mut doc, &styles, &defaults, &nums, &rels);
                 let mut drawings = Vec::new();
                 node.descendants("drawing", &mut drawings);
+                // Our spacer between adjacent tables is not part of the document.
+                if p.style == TABLE_GAP && p.is_empty() && drawings.is_empty() {
+                    continue;
+                }
                 let image_block = p.style == "TrineDocsImageBlock"
                     && p.is_empty()
                     && !drawings.is_empty()
@@ -632,14 +716,8 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
                         let cell_id = doc.alloc_id();
                         let mut paragraphs = Vec::new();
                         for p in tc.children.iter().filter(|n| n.name == "p") {
-                            paragraphs.push(paragraph(
-                                p,
-                                &mut doc,
-                                &styles,
-                                &default_format,
-                                &nums,
-                                &rels,
-                            ));
+                            paragraphs
+                                .push(paragraph(p, &mut doc, &styles, &defaults, &nums, &rels));
                         }
                         if paragraphs.is_empty() {
                             let id = doc.alloc_id();
@@ -648,44 +726,77 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
                                 ..Paragraph::default()
                             });
                         }
-                        let fill = tc
-                            .child("tcPr")
+                        let tc_pr = tc.child("tcPr");
+                        let fill = tc_pr
                             .and_then(|n| n.child("shd"))
                             .and_then(|n| n.attr("fill"))
                             .and_then(color)
                             .unwrap_or([255, 255, 255]);
-                        cells.push(Cell {
-                            id: cell_id,
-                            paragraphs,
-                            fill,
-                        });
+                        let mut cell = Cell::new(cell_id, paragraphs, fill);
+                        cell.span = number(
+                            tc_pr
+                                .and_then(|n| n.child("gridSpan"))
+                                .and_then(Node::value),
+                            1.0,
+                        )
+                        .clamp(1.0, 256.0) as u16;
+                        cell.merged = tc_pr
+                            .and_then(|n| n.child("vMerge"))
+                            .is_some_and(|n| n.value() != Some("restart"));
+                        cell.v_align =
+                            match tc_pr.and_then(|n| n.child("vAlign")).and_then(Node::value) {
+                                Some("center") => VAlign::Center,
+                                Some("bottom") => VAlign::Bottom,
+                                _ => VAlign::Top,
+                            };
+                        cells.push(cell);
                     }
                     rows.push(cells);
                 }
-                let widths = node
+                let widths: Vec<f32> = node
                     .child("tblGrid")
                     .map(|g| {
                         g.children
                             .iter()
-                            .map(|n| number(n.attr("w"), 1440.0) / 20.0)
+                            .filter(|n| n.name == "gridCol")
+                            .map(|n| (number(n.attr("w"), 1440.0) / 20.0).clamp(1.0, 2000.0))
                             .collect()
                     })
                     .unwrap_or_default();
-                let border_color = node
-                    .child("tblPr")
-                    .and_then(|n| n.child("tblBorders"))
-                    .and_then(|n| {
-                        n.children
-                            .iter()
-                            .find_map(|edge| edge.attr("color").and_then(color))
-                    })
-                    .unwrap_or([100, 110, 120]);
+                // Borders come from the table itself, its style, or the cells; Word's plain
+                // table has none, so a table without any of them stays borderless.
+                let tbl_pr = node.child("tblPr");
+                let own = tbl_pr.and_then(|n| n.child("tblBorders"));
+                let mut chain = Vec::new();
+                if let Some(style) = tbl_pr
+                    .and_then(|n| n.child("tblStyle"))
+                    .and_then(Node::value)
+                {
+                    style_chain(&styles, style, &mut chain, 0);
+                }
+                let styled = chain
+                    .iter()
+                    .rev()
+                    .find_map(|s| s.child("tblPr").and_then(|n| n.child("tblBorders")));
+                let mut cell_borders = Vec::new();
+                node.descendants("tcBorders", &mut cell_borders);
+                let visible = borders_visible(own)
+                    .or_else(|| borders_visible(styled))
+                    .unwrap_or(false)
+                    || cell_borders
+                        .iter()
+                        .any(|b| borders_visible(Some(b)).unwrap_or(false));
+                let border_color = border_color(own)
+                    .or_else(|| border_color(styled))
+                    .or_else(|| cell_borders.iter().find_map(|b| border_color(Some(b))))
+                    .unwrap_or([0, 0, 0]);
                 doc.tables.push(Table {
                     id,
                     after_paragraph_id: after,
                     rows,
                     column_widths: widths,
                     border_color,
+                    borderless: !visible,
                 });
             }
             "sectPr" => read_section(node, &mut doc, &rels, &parts)?,
@@ -733,11 +844,7 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
             "Поля импортированы как сохранённый текст; динамическое обновление отсутствует.",
         ),
         ("anchor", "Плавающие рисунки переведены в отдельные блоки."),
-        ("gridSpan", "Объединение ячеек таблиц не поддерживается."),
-        (
-            "vMerge",
-            "Вертикальное объединение ячеек таблиц не поддерживается.",
-        ),
+        ("tblpPr", "Плавающие таблицы размещены в потоке текста."),
     ] {
         if root.descendant(tag).is_some() {
             doc.losses.push(message.into());
@@ -819,28 +926,29 @@ fn read_section(
     }
     Ok(())
 }
-fn r_xml(run: &Run) -> String {
-    let f = &run.format;
-    let mut properties = String::new();
-    properties.push_str(&format!(
-        "<w:rFonts w:ascii=\"{}\" w:hAnsi=\"{}\"/><w:sz w:val=\"{}\"/><w:color w:val=\"{}\"/>",
-        esc(&f.font),
-        esc(&f.font),
-        (f.size * 2.0).round() as u32,
-        hex(f.color)
-    ));
+/// Run properties in the element order required by the OOXML schema (CT_RPr).
+fn rpr_xml(f: &TextFormat) -> String {
+    let font = esc(&f.font);
+    let mut properties = format!(
+        "<w:rFonts w:ascii=\"{font}\" w:hAnsi=\"{font}\" w:eastAsia=\"{font}\" w:cs=\"{font}\"/>"
+    );
     for (on, tag) in [(f.bold, "b"), (f.italic, "i"), (f.strike, "strike")] {
         properties.push_str(&format!(
             "<w:{tag} w:val=\"{}\"/>",
             if on { "true" } else { "false" }
         ));
     }
+    let size = (f.size * 2.0).round() as u32;
     properties.push_str(&format!(
-        "<w:u w:val=\"{}\"/>",
+        "<w:color w:val=\"{}\"/><w:sz w:val=\"{size}\"/><w:szCs w:val=\"{size}\"/><w:u w:val=\"{}\"/>",
+        hex(f.color),
         if f.underline { "single" } else { "none" }
     ));
     if let Some(c) = f.highlight {
-        properties.push_str(&format!("<w:shd w:fill=\"{}\"/>", hex(c)));
+        properties.push_str(&format!(
+            "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"{}\"/>",
+            hex(c)
+        ));
     }
     if f.script != 0 {
         properties.push_str(&format!(
@@ -852,6 +960,10 @@ fn r_xml(run: &Run) -> String {
             }
         ));
     }
+    properties
+}
+fn r_xml(run: &Run) -> String {
+    let properties = rpr_xml(&run.format);
     let mut text = String::new();
     let mut current = String::new();
     for ch in run.text.chars() {
@@ -888,20 +1000,11 @@ fn p_xml(p: &Paragraph, links: &mut Vec<(String, String)>) -> String {
     } else {
         format!("w:firstLine=\"{}\"", (p.first_indent * 20.0).round() as u32)
     };
-    let mut properties = format!(
-        "<w:pStyle w:val=\"{}\"/><w:jc w:val=\"{}\"/><w:spacing w:before=\"{}\" w:after=\"{}\" w:line=\"{}\" w:lineRule=\"auto\"/><w:ind w:left=\"{}\" {first_indent}/>",
-        esc(&p.style),
-        match p.align {
-            Align::Left => "left",
-            Align::Center => "center",
-            Align::Right => "right",
-            Align::Justify => "both",
-        },
-        (p.spacing_before * 20.0).round() as u32,
-        (p.spacing_after * 20.0).round() as u32,
-        (p.line_spacing * 240.0).round() as u32,
-        (p.indent * 20.0).round() as i32
-    );
+    // Paragraph properties in the element order required by the OOXML schema (CT_PPr).
+    let mut properties = format!("<w:pStyle w:val=\"{}\"/>", esc(&p.style));
+    if p.page_break_before {
+        properties.push_str("<w:pageBreakBefore/>");
+    }
     if p.list != List::None {
         properties.push_str(&format!(
             "<w:numPr><w:ilvl w:val=\"{}\"/><w:numId w:val=\"{}\"/></w:numPr>",
@@ -909,9 +1012,21 @@ fn p_xml(p: &Paragraph, links: &mut Vec<(String, String)>) -> String {
             if p.list == List::Bullet { 1 } else { 2 }
         ));
     }
-    if p.page_break_before {
-        properties.push_str("<w:pageBreakBefore/>");
-    }
+    properties.push_str(&format!(
+        "<w:spacing w:before=\"{}\" w:after=\"{}\" w:line=\"{}\" w:lineRule=\"auto\"/><w:ind w:left=\"{}\" {first_indent}/><w:jc w:val=\"{}\"/>",
+        (p.spacing_before * 20.0).round() as u32,
+        (p.spacing_after * 20.0).round() as u32,
+        (p.line_spacing * 240.0).round() as u32,
+        (p.indent * 20.0).round() as i32,
+        match p.align {
+            Align::Left => "left",
+            Align::Center => "center",
+            Align::Right => "right",
+            Align::Justify => "both",
+        },
+    ));
+    // The paragraph mark carries the format of an empty line (its height in Word).
+    properties.push_str(&format!("<w:rPr>{}</w:rPr>", rpr_xml(&p.format_at(0))));
     let mut runs = String::new();
     for run in &p.runs {
         if let Some(target) = &run.format.link {
@@ -927,29 +1042,75 @@ fn p_xml(p: &Paragraph, links: &mut Vec<(String, String)>) -> String {
     }
     format!("<w:p><w:pPr>{properties}</w:pPr>{runs}</w:p>")
 }
-fn table_xml(table: &Table, links: &mut Vec<(String, String)>) -> String {
-    let mut out = String::from("<w:tbl><w:tblPr><w:tblW w:w=\"0\" w:type=\"auto\"/><w:tblBorders>");
+/// Style of the tiny paragraph written between adjacent tables (skipped on import).
+const TABLE_GAP: &str = "TrineDocsTableGap";
+fn table_xml(table: &Table, usable_width: f32, links: &mut Vec<(String, String)>) -> String {
+    let columns = table.grid_columns().max(1);
+    let widths: Vec<u32> = (0..columns)
+        .map(|i| {
+            let pt = table
+                .column_widths
+                .get(i)
+                .copied()
+                .unwrap_or(usable_width / columns as f32)
+                .max(12.0);
+            (pt * 20.0).round() as u32
+        })
+        .collect();
+    // Explicit widths + fixed layout: Word keeps the columns exactly as laid out here
+    // instead of auto-fitting (shrinking) the table to its content.
+    let mut out = format!(
+        "<w:tbl><w:tblPr><w:tblW w:w=\"{}\" w:type=\"dxa\"/><w:tblBorders>",
+        widths.iter().sum::<u32>()
+    );
     for tag in ["top", "left", "bottom", "right", "insideH", "insideV"] {
-        out.push_str(&format!(
-            "<w:{tag} w:val=\"single\" w:sz=\"4\" w:color=\"{}\"/>",
-            hex(table.border_color)
-        ));
+        if table.borderless {
+            out.push_str(&format!("<w:{tag} w:val=\"nil\"/>"));
+        } else {
+            out.push_str(&format!(
+                "<w:{tag} w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"{}\"/>",
+                hex(table.border_color)
+            ));
+        }
     }
-    out.push_str("</w:tblBorders></w:tblPr><w:tblGrid>");
-    for width in &table.column_widths {
-        out.push_str(&format!(
-            "<w:gridCol w:w=\"{}\"/>",
-            (width * 20.0).round() as u32
-        ));
+    out.push_str("</w:tblBorders><w:tblLayout w:type=\"fixed\"/><w:tblCellMar><w:left w:w=\"100\" w:type=\"dxa\"/><w:right w:w=\"100\" w:type=\"dxa\"/></w:tblCellMar></w:tblPr><w:tblGrid>");
+    for width in &widths {
+        out.push_str(&format!("<w:gridCol w:w=\"{width}\"/>"));
     }
     out.push_str("</w:tblGrid>");
-    for row in &table.rows {
+    for (row_index, row) in table.rows.iter().enumerate() {
         out.push_str("<w:tr>");
-        for cell in row {
-            out.push_str(&format!(
-                "<w:tc><w:tcPr><w:shd w:fill=\"{}\"/></w:tcPr>",
+        let starts = table.grid_starts(row_index);
+        let below = table.grid_starts(row_index + 1);
+        for (ci, cell) in row.iter().enumerate() {
+            let start = starts.get(ci).copied().unwrap_or_default();
+            let width: u32 = widths.iter().skip(start).take(cell.span()).sum();
+            let mut properties = format!("<w:tcW w:w=\"{width}\" w:type=\"dxa\"/>");
+            if cell.span > 1 {
+                properties.push_str(&format!("<w:gridSpan w:val=\"{}\"/>", cell.span));
+            }
+            let continues = table.rows.get(row_index + 1).is_some_and(|next| {
+                below
+                    .iter()
+                    .position(|s| *s == start)
+                    .and_then(|i| next.get(i))
+                    .is_some_and(|c| c.merged)
+            });
+            if cell.merged {
+                properties.push_str("<w:vMerge/>");
+            } else if continues {
+                properties.push_str("<w:vMerge w:val=\"restart\"/>");
+            }
+            properties.push_str(&format!(
+                "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"{}\"/>",
                 hex(cell.fill)
             ));
+            match cell.v_align {
+                VAlign::Top => {}
+                VAlign::Center => properties.push_str("<w:vAlign w:val=\"center\"/>"),
+                VAlign::Bottom => properties.push_str("<w:vAlign w:val=\"bottom\"/>"),
+            }
+            out.push_str(&format!("<w:tc><w:tcPr>{properties}</w:tcPr>"));
             for p in &cell.paragraphs {
                 out.push_str(&p_xml(p, links));
             }
@@ -969,10 +1130,27 @@ fn write_docx(doc: &Doc, ext: &str) -> Result<Vec<u8>, String> {
     let mut links = Vec::new();
     let mut body = String::new();
     let mut media = Vec::new();
+    let usable = doc.page.width - doc.page.margin_left - doc.page.margin_right;
+    let gap = format!(
+        "<w:p><w:pPr><w:pStyle w:val=\"{TABLE_GAP}\"/><w:spacing w:before=\"0\" w:after=\"0\" w:line=\"240\" w:lineRule=\"auto\"/><w:rPr><w:sz w:val=\"2\"/></w:rPr></w:pPr></w:p>"
+    );
+    let last_paragraph = doc.paragraphs.last().map(|p| p.id);
     for p in &doc.paragraphs {
         body.push_str(&p_xml(p, &mut links));
-        for table in doc.tables.iter().filter(|t| t.after_paragraph_id == p.id) {
-            body.push_str(&table_xml(table, &mut links));
+        let tables: Vec<&Table> = doc
+            .tables
+            .iter()
+            .filter(|t| t.after_paragraph_id == p.id)
+            .collect();
+        let has_images = doc.images.iter().any(|im| im.after_paragraph_id == p.id);
+        for (i, table) in tables.iter().enumerate() {
+            body.push_str(&table_xml(table, usable, &mut links));
+            // Word merges adjacent tables and needs a paragraph after a final table.
+            let followed_by_table = i + 1 < tables.len();
+            let ends_body = i + 1 == tables.len() && !has_images && last_paragraph == Some(p.id);
+            if followed_by_table || ends_body {
+                body.push_str(&gap);
+            }
         }
         for image in doc.images.iter().filter(|im| im.after_paragraph_id == p.id) {
             let decoded =
@@ -1040,7 +1218,7 @@ fn write_docx(doc: &Doc, ext: &str) -> Result<Vec<u8>, String> {
         esc(&doc.author)
     );
     let mut styles = String::from(
-        "<w:styles xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii=\"Calibri\" w:hAnsi=\"Calibri\"/><w:sz w:val=\"22\"/></w:rPr></w:rPrDefault></w:docDefaults>",
+        "<w:styles xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii=\"Calibri\" w:hAnsi=\"Calibri\" w:eastAsia=\"Calibri\" w:cs=\"Calibri\"/><w:sz w:val=\"22\"/><w:lang w:val=\"ru-RU\" w:eastAsia=\"en-US\" w:bidi=\"ar-SA\"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after=\"0\" w:line=\"240\" w:lineRule=\"auto\"/></w:pPr></w:pPrDefault></w:docDefaults>",
     );
     for (id, name, size, bold) in [
         ("Normal", "Normal", 22, false),
@@ -1050,9 +1228,14 @@ fn write_docx(doc: &Doc, ext: &str) -> Result<Vec<u8>, String> {
         ("Heading3", "heading 3", 28, true),
         ("Quote", "Quote", 22, false),
     ] {
-        styles.push_str(&format!("<w:style w:type=\"paragraph\" w:styleId=\"{id}\"><w:name w:val=\"{name}\"/><w:rPr><w:sz w:val=\"{size}\"/>{}</w:rPr></w:style>",if bold {"<w:b/>"}else{""}));
+        let default = if id == "Normal" {
+            " w:default=\"1\""
+        } else {
+            ""
+        };
+        styles.push_str(&format!("<w:style w:type=\"paragraph\"{default} w:styleId=\"{id}\"><w:name w:val=\"{name}\"/><w:rPr><w:sz w:val=\"{size}\"/>{}</w:rPr></w:style>",if bold {"<w:b/>"}else{""}));
     }
-    styles.push_str("<w:style w:type=\"paragraph\" w:styleId=\"TrineDocsImageBlock\"><w:name w:val=\"TrineDocs image block\"/></w:style></w:styles>");
+    styles.push_str(&format!("<w:style w:type=\"paragraph\" w:styleId=\"TrineDocsImageBlock\"><w:name w:val=\"TrineDocs image block\"/></w:style><w:style w:type=\"paragraph\" w:styleId=\"{TABLE_GAP}\"><w:name w:val=\"TrineDocs table gap\"/><w:hidden/></w:style></w:styles>"));
     let mut numbering = String::from(
         "<w:numbering xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">",
     );
@@ -1478,6 +1661,91 @@ fn read_html(text: &str) -> Result<Doc, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn docx_tables_keep_merges_widths_and_borders() -> Result<(), String> {
+        let mut doc = Doc::from_text(
+            "До таблиц
+После",
+        );
+        let anchor = doc.paragraphs.first().map(|p| p.id).unwrap_or_default();
+        doc.add_table(anchor, 3, 3)?;
+        doc.add_table(anchor, 1, 2)?;
+        if let Some(table) = doc.tables.first_mut() {
+            table.column_widths = vec![40.0, 200.0, 120.0];
+            // Row 0: a header spanning all three columns.
+            if let Some(row) = table.rows.get_mut(0) {
+                row.truncate(1);
+                if let Some(cell) = row.first_mut() {
+                    cell.span = 3;
+                    cell.v_align = VAlign::Center;
+                }
+            }
+            // Column 0 merged vertically over rows 1 and 2.
+            if let Some(cell) = table.rows.get_mut(2).and_then(|r| r.first_mut()) {
+                cell.merged = true;
+            }
+        }
+        if let Some(table) = doc.tables.get_mut(1) {
+            table.borderless = true;
+        }
+        let first = read(&write(&doc, "docx")?, "docx")?;
+        let second = read(&write(&first, "docx")?, "docx")?;
+        for d in [&first, &second] {
+            assert_eq!(d.paragraphs.len(), 2, "no spacer paragraphs leak in");
+            assert_eq!(d.tables.len(), 2);
+            let t = d.tables.first().ok_or("table")?;
+            assert_eq!(t.grid_columns(), 3);
+            assert_eq!(t.column_widths, vec![40.0, 200.0, 120.0]);
+            assert_eq!(t.rows.first().map(Vec::len), Some(1));
+            assert!(
+                t.rows
+                    .first()
+                    .and_then(|r| r.first())
+                    .is_some_and(|c| c.span == 3 && c.v_align == VAlign::Center)
+            );
+            assert!(
+                t.rows
+                    .get(2)
+                    .and_then(|r| r.first())
+                    .is_some_and(|c| c.merged)
+            );
+            assert!(
+                !t.rows
+                    .get(1)
+                    .and_then(|r| r.first())
+                    .is_some_and(|c| c.merged)
+            );
+            assert!(!t.borderless);
+            assert!(d.tables.get(1).is_some_and(|t| t.borderless));
+        }
+        let xml = String::from_utf8_lossy(
+            &crate::package::read_zip(&write(&doc, "docx")?)?
+                .get("word/document.xml")
+                .cloned()
+                .unwrap_or_default(),
+        )
+        .into_owned();
+        assert!(xml.contains("<w:tblLayout w:type=\"fixed\"/>"));
+        assert!(xml.contains("<w:tcW w:w=\"800\" w:type=\"dxa\"/>"));
+        assert!(xml.contains("<w:gridSpan w:val=\"3\"/>"));
+        assert!(xml.contains("<w:vMerge w:val=\"restart\"/>"));
+        Ok(())
+    }
+    #[test]
+    fn docx_without_table_borders_imports_borderless() -> Result<(), String> {
+        let xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>a</w:t></w:r></w:p><w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>b</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/></w:body></w:document>"#;
+        let bytes =
+            crate::package::write_zip(vec![("word/document.xml".into(), xml.as_bytes().to_vec())])?;
+        let doc = read(&bytes, "docx")?;
+        assert!(doc.tables.first().is_some_and(|t| t.borderless));
+        // Without docDefaults Word uses single spacing and no paragraph gaps.
+        assert!(
+            doc.paragraphs
+                .first()
+                .is_some_and(|p| p.spacing_after == 0.0 && p.line_spacing == 1.0)
+        );
+        Ok(())
+    }
     #[test]
     fn docx_round_trip_format_table_page() {
         let mut doc = Doc::from_text("Привет <мир> & коллеги\nВторой абзац");

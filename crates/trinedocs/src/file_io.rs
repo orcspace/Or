@@ -91,7 +91,10 @@ pub enum Job {
     PickOpen,
     PickSave {
         id: u64,
-        extension: String,
+        /// File name without extension proposed in the dialog.
+        name: String,
+        /// Offered formats `(extension, label)`, the default first.
+        formats: Vec<(String, String)>,
         copy: bool,
         export: bool,
     },
@@ -245,12 +248,19 @@ impl Worker {
                         .add_filter(
                             "TrineDocs / Office",
                             &[
-                                "trinedoc",
-                                "trinesheet",
-                                "trineslide",
                                 "docx",
                                 "xlsx",
                                 "pptx",
+                                "trinedoc",
+                                "trinesheet",
+                                "trineslide",
+                                "dotx",
+                                "docm",
+                                "xlsm",
+                                "ppsx",
+                                "potx",
+                                "html",
+                                "htm",
                                 "txt",
                                 "lock",
                                 "md",
@@ -266,13 +276,22 @@ impl Worker {
                         .or(Some(Event::Canceled { id: 0 })),
                     Job::PickSave {
                         id,
-                        extension,
+                        name,
+                        formats,
                         copy,
                         export,
-                    } => Some(
-                        rfd::FileDialog::new()
-                            .set_file_name(format!("Без названия.{extension}"))
-                            .add_filter(&extension, &[&extension])
+                    } => Some({
+                        let default = formats.first().map(|f| f.0.clone()).unwrap_or_default();
+                        let mut dialog =
+                            rfd::FileDialog::new().set_file_name(format!("{name}.{default}"));
+                        // The file type list of the dialog decides the format, as in Office.
+                        for (extension, label) in &formats {
+                            dialog = dialog.add_filter(
+                                format!("{label} (*.{extension})"),
+                                &[extension.as_str()],
+                            );
+                        }
+                        dialog
                             .save_file()
                             .map(|path| Event::PickedSave {
                                 id,
@@ -280,8 +299,8 @@ impl Worker {
                                 copy,
                                 export,
                             })
-                            .unwrap_or(Event::Canceled { id }),
-                    ),
+                            .unwrap_or(Event::Canceled { id })
+                    }),
                     Job::PreviewUnlock { id, path } => Some(
                         FileLock::preview(&path)
                             .map(|marker| Event::UnlockPreview { id, path, marker })

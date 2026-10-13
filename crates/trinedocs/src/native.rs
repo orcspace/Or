@@ -23,18 +23,47 @@ impl Document {
             Self::Slides(_) => "slides",
         }
     }
-    pub fn extension(&self) -> &'static str {
+    /// Legacy TrineDocs package; still opened and used for recovery, no longer offered for saving.
+    pub fn native_extension(&self) -> &'static str {
         match self {
             Self::Docs(_) => "trinedoc",
             Self::Sheets(_) => "trinesheet",
             Self::Slides(_) => "trineslide",
         }
     }
+    /// Default save format: the matching Microsoft Office format.
+    pub fn extension(&self) -> &'static str {
+        self.office_extension()
+    }
     pub fn office_extension(&self) -> &'static str {
         match self {
             Self::Docs(_) => "docx",
             Self::Sheets(_) => "xlsx",
             Self::Slides(_) => "pptx",
+        }
+    }
+    /// Formats offered by "Save as", default first, with dialog labels.
+    pub fn save_formats(&self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Self::Docs(_) => &[
+                ("docx", "Документ Word"),
+                ("pdf", "PDF"),
+                ("txt", "Обычный текст"),
+                ("md", "Markdown"),
+                ("html", "Веб-страница"),
+            ],
+            Self::Sheets(_) => &[
+                ("xlsx", "Книга Excel"),
+                ("pdf", "PDF"),
+                ("csv", "CSV (разделители — запятые)"),
+                ("tsv", "TSV (разделители — табуляция)"),
+                ("html", "Веб-страница"),
+            ],
+            Self::Slides(_) => &[
+                ("pptx", "Презентация PowerPoint"),
+                ("pdf", "PDF"),
+                ("png", "Рисунок PNG (первый слайд)"),
+            ],
         }
     }
     pub fn pages(&self) -> Vec<crate::render::Page> {
@@ -172,7 +201,7 @@ pub fn open(path: &Path) -> Result<Document, String> {
 }
 pub fn export(doc: &Document, ext: &str) -> Result<Vec<u8>, String> {
     doc.validate()?;
-    if ext == doc.extension() {
+    if ext == doc.native_extension() {
         return encode(doc);
     }
     match (doc, ext) {

@@ -378,11 +378,37 @@ impl App {
         let Some(t) = self.tabs.iter().find(|t| t.id == id) else {
             return;
         };
-        if choose || t.path.is_none() || copy || export {
-            let ext = extension.unwrap_or(t.document.extension()).to_string();
+        // Files in the legacy TrineDocs format are re-saved through "Save as" in Office format.
+        let legacy = t
+            .path
+            .as_ref()
+            .is_some_and(|p| crate::native::extension(p) == t.document.native_extension());
+        if choose || t.path.is_none() || copy || export || legacy {
+            let ext = extension.unwrap_or(t.document.extension());
+            let mut formats: Vec<(String, String)> = t
+                .document
+                .save_formats()
+                .iter()
+                .map(|(e, l)| (e.to_string(), l.to_string()))
+                .collect();
+            // The requested format goes first so the dialog preselects it.
+            if let Some(i) = formats.iter().position(|(e, _)| e == ext) {
+                let chosen = formats.remove(i);
+                formats.insert(0, chosen);
+            } else {
+                formats.insert(0, (ext.to_string(), ext.to_uppercase()));
+            }
+            let name = t
+                .path
+                .as_ref()
+                .and_then(|p| p.file_stem())
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| "Без названия".into());
             match self.worker.send(Job::PickSave {
                 id,
-                extension: ext,
+                name,
+                formats,
                 copy,
                 export,
             }) {
@@ -624,6 +650,11 @@ impl App {
                     export,
                 } => {
                     self.picking.remove(&id);
+                    // A non-Office format (PDF, TXT, PNG…) is an export: the tab keeps its file.
+                    let export = export
+                        || self.tabs.iter().find(|t| t.id == id).is_some_and(|t| {
+                            crate::native::extension(&path) != t.document.office_extension()
+                        });
                     if self.pending.is_some() {
                         self.fail_save(
                             id,
@@ -1334,7 +1365,7 @@ impl App {
                 ui.horizontal(|ui| { if ui.button("Разблокировать сохранение").clicked(){action=1}
                 if ui.button("Отмена").clicked(){action=3} });
             },Some(Pending::Register(p))=>{ui.label(format!("Добавить сервер trinedocs в {}",p.path.display()));ui.label("Остальные записи сохранятся. Существующая запись trinedocs не заменяется.");ui.monospace(&p.change);ui.horizontal(|ui|{if ui.button("Добавить").clicked(){action=1}
-if ui.button("Отмена").clicked(){action=3}});},Some(Pending::SaveFormat{id,..})=>{if let Some(t)=self.tabs.iter().find(|t|t.id==*id){match &t.document{Document::Docs(d)=>{for loss in &d.losses{ui.colored_label(egui::Color32::YELLOW,loss);}},Document::Slides(d)=>{for loss in d.export_warnings(){ui.colored_label(egui::Color32::YELLOW,loss);}},_=>{}}}ui.label("Office/текстовый экспорт сохраняет поддерживаемые функции. Неподдерживаемые части могут быть потеряны; полная модель сохраняется в нативном формате.");ui.horizontal(|ui|{if ui.button("Продолжить").clicked(){action=1}
+if ui.button("Отмена").clicked(){action=3}});},Some(Pending::SaveFormat{id,..})=>{if let Some(t)=self.tabs.iter().find(|t|t.id==*id){match &t.document{Document::Docs(d)=>{for loss in &d.losses{ui.colored_label(egui::Color32::YELLOW,loss);}},Document::Slides(d)=>{for loss in d.export_warnings(){ui.colored_label(egui::Color32::YELLOW,loss);}},_=>{}}}ui.label("В этом формате сохраняется только содержимое, которое он поддерживает; остальное (форматирование, таблицы, рисунки) может быть потеряно. Для полного сохранения выберите формат Office (.docx, .xlsx, .pptx).");ui.horizontal(|ui|{if ui.button("Продолжить").clicked(){action=1}
 if ui.button("Отмена").clicked(){action=3}});}
             _=>{ui.label("Сохранить изменения?");ui.horizontal(|ui|{if ui.button("Сохранить").clicked(){action=1}
 if ui.button("Не сохранять").clicked(){action=2}
@@ -1633,23 +1664,21 @@ impl eframe::App for App {
                                 "Сохранить / экспортировать…",
                                 |ui| {
                                     let formats: &[&str] = match &t.document {
-                                        Document::Docs(_) => {
-                                            &["trinedoc", "docx", "txt", "md", "html"]
-                                        }
+                                        Document::Docs(_) => &["docx", "pdf", "txt", "md", "html"],
                                         Document::Sheets(_) => {
-                                            &["trinesheet", "xlsx", "csv", "tsv", "html"]
+                                            &["xlsx", "pdf", "csv", "tsv", "html"]
                                         }
-                                        Document::Slides(_) => &["trineslide", "pptx", "png"],
+                                        Document::Slides(_) => &["pptx", "pdf", "png"],
                                     };
                                     for ext in formats {
-                                        if ui
-                                            .button(if *ext == "png" {
-                                                "PNG · первый слайд".into()
-                                            } else {
-                                                ext.to_uppercase()
-                                            })
-                                            .clicked()
-                                        {
+                                        let label = t
+                                            .document
+                                            .save_formats()
+                                            .iter()
+                                            .find(|(e, _)| e == ext)
+                                            .map(|(_, l)| *l)
+                                            .unwrap_or(ext);
+                                        if ui.button(format!("{label}  ·  .{ext}")).clicked() {
                                             command = Some(*ext);
                                             ui.close();
                                         }
@@ -2038,8 +2067,7 @@ impl eframe::App for App {
                 }
             }
             Some(
-                ext @ ("trinedoc" | "trinesheet" | "trineslide" | "docx" | "xlsx" | "pptx" | "txt"
-                | "md" | "html" | "csv" | "tsv" | "png"),
+                ext @ ("docx" | "xlsx" | "pptx" | "txt" | "md" | "html" | "csv" | "tsv" | "png"),
             ) => {
                 if let Some(id) = self.active {
                     self.save(

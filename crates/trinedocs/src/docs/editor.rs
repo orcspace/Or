@@ -531,7 +531,7 @@ fn active_cell(doc: &mut Doc, cursor: Option<TableCursor>) -> Option<&mut Cell> 
         .get_mut(cursor.column)
 }
 fn table_columns(table: &Table) -> usize {
-    table.rows.iter().map(Vec::len).max().unwrap_or_default()
+    table.grid_columns()
 }
 fn default_column_width(doc: &Doc, columns: usize) -> f32 {
     (doc.page.width - doc.page.margin_left - doc.page.margin_right) / columns.max(1) as f32
@@ -568,6 +568,25 @@ fn table_command(doc: &mut Doc, state: &mut EditorState, command: TableCommand) 
         .iter()
         .find(|t| t.id == cursor.table)
         .map(|t| t.after_paragraph_id);
+    // Column commands address grid columns; merged cells cover several of them.
+    let (grid, span) = doc
+        .tables
+        .iter()
+        .find(|t| t.id == cursor.table)
+        .map(|t| {
+            (
+                t.grid_starts(cursor.row)
+                    .get(cursor.column)
+                    .copied()
+                    .unwrap_or(cursor.column),
+                t.rows
+                    .get(cursor.row)
+                    .and_then(|r| r.get(cursor.column))
+                    .map(Cell::span)
+                    .unwrap_or(1),
+            )
+        })
+        .unwrap_or((cursor.column, 1));
     let (edit, target) = match command {
         TableCommand::RowAbove => (TableEdit::InsertRow(cursor.row), cursor),
         TableCommand::RowBelow => (
@@ -577,16 +596,16 @@ fn table_command(doc: &mut Doc, state: &mut EditorState, command: TableCommand) 
                 ..cursor
             },
         ),
-        TableCommand::ColumnLeft => (TableEdit::InsertColumn(cursor.column), cursor),
+        TableCommand::ColumnLeft => (TableEdit::InsertColumn(grid), cursor),
         TableCommand::ColumnRight => (
-            TableEdit::InsertColumn(cursor.column + 1),
+            TableEdit::InsertColumn(grid + span),
             TableCursor {
                 column: cursor.column + 1,
                 ..cursor
             },
         ),
         TableCommand::DeleteRow => (TableEdit::DeleteRow(cursor.row), cursor),
-        TableCommand::DeleteColumn => (TableEdit::DeleteColumn(cursor.column), cursor),
+        TableCommand::DeleteColumn => (TableEdit::DeleteColumn(grid), cursor),
         TableCommand::DeleteTable => {
             if let Err(error) = doc.delete_table(cursor.table) {
                 state.message = Some(error);
@@ -597,14 +616,15 @@ fn table_command(doc: &mut Doc, state: &mut EditorState, command: TableCommand) 
     };
     match doc.edit_table(cursor.table, edit) {
         Ok(true) => {
-            let (rows, columns) = doc
-                .tables
-                .iter()
-                .find(|t| t.id == cursor.table)
-                .map(|t| (t.rows.len(), table_columns(t)))
-                .unwrap_or((1, 1));
+            let table = doc.tables.iter().find(|t| t.id == cursor.table);
+            let rows = table.map(|t| t.rows.len()).unwrap_or(1);
+            let row = target.row.min(rows.saturating_sub(1));
+            let columns = table
+                .and_then(|t| t.rows.get(row))
+                .map(Vec::len)
+                .unwrap_or(1);
             state.table_cell = Some(TableCursor {
-                row: target.row.min(rows.saturating_sub(1)),
+                row,
                 column: target.column.min(columns.saturating_sub(1)),
                 ..cursor
             });
@@ -622,26 +642,36 @@ fn step_cell(doc: &mut Doc, state: &mut EditorState, forward: bool) {
         state.table_cell = None;
         return;
     };
-    let columns = table_columns(table).max(1);
+    // Rows may hold different numbers of cells (merged cells), so walk real cells.
     let rows = table.rows.len();
-    let index = cursor.row * columns + cursor.column;
+    let row_len = |row: usize| table.rows.get(row).map(Vec::len).unwrap_or_default();
     if forward {
-        if index + 1 >= rows * columns {
+        if cursor.column + 1 < row_len(cursor.row) {
+            state.table_cell = Some(TableCursor {
+                column: cursor.column + 1,
+                ..cursor
+            });
+        } else if cursor.row + 1 < rows {
+            state.table_cell = Some(TableCursor {
+                row: cursor.row + 1,
+                column: 0,
+                ..cursor
+            });
+        } else {
             table_command(doc, state, TableCommand::RowBelow);
             if let Some(c) = &mut state.table_cell {
                 c.column = 0;
             }
-        } else {
-            state.table_cell = Some(TableCursor {
-                row: (index + 1) / columns,
-                column: (index + 1) % columns,
-                ..cursor
-            });
         }
-    } else if index > 0 {
+    } else if cursor.column > 0 {
         state.table_cell = Some(TableCursor {
-            row: (index - 1) / columns,
-            column: (index - 1) % columns,
+            column: cursor.column - 1,
+            ..cursor
+        });
+    } else if cursor.row > 0 {
+        state.table_cell = Some(TableCursor {
+            row: cursor.row - 1,
+            column: row_len(cursor.row - 1).saturating_sub(1),
             ..cursor
         });
     }
@@ -1153,6 +1183,45 @@ fn insert_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_
             }
             ui.memory_mut(|m| m.request_focus(canvas_id));
         }
+        if tool(
+            ui,
+            "🗑  Удалить пустую страницу",
+            "Удалить пустую страницу с курсором, иначе все пустые страницы документа",
+            false,
+        )
+        .clicked()
+        {
+            delete_empty_pages(doc, state);
+            ui.memory_mut(|m| m.request_focus(canvas_id));
+        }
+    });
+}
+/// Deletes the empty page under the caret, or every empty page when it has content.
+fn delete_empty_pages(doc: &mut Doc, state: &mut EditorState) {
+    let layout = doc.layout();
+    let current = layout
+        .rows
+        .iter()
+        .find(|r| r.paragraph == state.cursor.paragraph)
+        .map(|r| r.page);
+    let mut removed = current.is_some_and(|page| doc.delete_empty_page(page)) as usize;
+    if removed == 0 {
+        // Walk from the end so earlier page numbers stay valid; bounded by the page count.
+        let mut page = doc.layout().pages.len();
+        while page > 0 {
+            page -= 1;
+            if doc.delete_empty_page(page) {
+                removed += 1;
+                page = page.min(doc.layout().pages.len());
+            }
+        }
+    }
+    state.cursor = doc.clamp_position(state.cursor);
+    state.anchor = state.cursor;
+    state.message = Some(if removed == 0 {
+        "Пустых страниц нет".into()
+    } else {
+        format!("Удалено пустых страниц: {removed}")
     });
 }
 fn layout_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id: egui::Id) {
@@ -1341,7 +1410,7 @@ fn table_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_i
             command = Some(TableCommand::DeleteTable);
         }
     });
-    group(ui, "Оформление", 110.0, |ui| {
+    group(ui, "Оформление", 170.0, |ui| {
         ui.horizontal(|ui| {
             let fill = active_cell(doc, Some(cursor)).map(|c| c.fill);
             if let Some(color) =
@@ -1361,7 +1430,34 @@ fn table_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_i
             {
                 table.border_color = color;
             }
+            if let Some(table) = table_mut(doc, cursor.table) {
+                let mut borders = !table.borderless;
+                if ui
+                    .checkbox(&mut borders, "Границы")
+                    .on_hover_text("Показывать границы таблицы")
+                    .changed()
+                {
+                    table.borderless = !borders;
+                }
+            }
         });
+        if let Some(cell) = active_cell(doc, Some(cursor)) {
+            ui.horizontal(|ui| {
+                for (value, glyph, tip) in [
+                    (VAlign::Top, "⤒", "По верхнему краю"),
+                    (VAlign::Center, "↕", "По центру по вертикали"),
+                    (VAlign::Bottom, "⤓", "По нижнему краю"),
+                ] {
+                    if ui
+                        .selectable_label(cell.v_align == value, glyph)
+                        .on_hover_text(tip)
+                        .clicked()
+                    {
+                        cell.v_align = value;
+                    }
+                }
+            });
+        }
         ui.weak(format!("Ячейка {}:{}", cursor.row + 1, cursor.column + 1));
     });
     group(ui, "Размер ячейки", 150.0, |ui| {
@@ -1379,7 +1475,12 @@ fn table_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_i
             if table.column_widths.len() < columns {
                 table.column_widths.resize(columns, fallback);
             }
-            if let Some(width) = table.column_widths.get_mut(cursor.column) {
+            let grid = table
+                .grid_starts(cursor.row)
+                .get(cursor.column)
+                .copied()
+                .unwrap_or(cursor.column);
+            if let Some(width) = table.column_widths.get_mut(grid) {
                 ui.horizontal(|ui| {
                     ui.label("Ширина");
                     ui.add(
@@ -1908,7 +2009,17 @@ fn cell_editor(
             Align::Right => egui::Align::Max,
             _ => egui::Align::Min,
         });
-    let response = ui.put(rect, editor);
+    // The caret takes the text colour so it stays visible on white paper in dark theme too.
+    let caret = rgb(format.color);
+    let response = ui
+        .scope(|ui| {
+            let visuals = ui.visuals_mut();
+            visuals.text_cursor.stroke = Stroke::new((1.5 * scale).clamp(1.0, 3.0), caret);
+            visuals.selection.bg_fill = Color32::from_rgba_unmultiplied(70, 130, 230, 90);
+            visuals.selection.stroke = Stroke::new(1.0, caret);
+            ui.put(rect, editor)
+        })
+        .inner;
     if state.focus_cell {
         state.focus_cell = false;
         response.request_focus();
@@ -3007,11 +3118,7 @@ mod tests {
                 },
             },
         ];
-        let mut cell = Cell {
-            id: 6,
-            paragraphs: vec![p],
-            fill: [255; 3],
-        };
+        let mut cell = Cell::new(6, vec![p], [255; 3]);
         let mut next = 8;
         edit_cell_text(&mut cell, "boldX italic", &mut next);
         assert_eq!(cell.paragraphs.first().map(|p| p.id), Some(7));

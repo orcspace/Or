@@ -198,11 +198,54 @@ impl Default for PageSetup {
         }
     }
 }
+fn one_span() -> u16 {
+    1
+}
+fn is_one(span: &u16) -> bool {
+    *span == 1
+}
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+fn is_top(align: &VAlign) -> bool {
+    *align == VAlign::Top
+}
+/// Vertical alignment of text inside a table cell (`w:vAlign`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VAlign {
+    #[default]
+    Top,
+    Center,
+    Bottom,
+}
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Cell {
     pub id: u64,
     pub paragraphs: Vec<Paragraph>,
     pub fill: [u8; 3],
+    /// Number of grid columns the cell covers (`w:gridSpan`).
+    #[serde(default = "one_span", skip_serializing_if = "is_one")]
+    pub span: u16,
+    /// Continuation of a vertically merged cell from the row above (`w:vMerge`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub merged: bool,
+    #[serde(default, skip_serializing_if = "is_top")]
+    pub v_align: VAlign,
+}
+impl Cell {
+    pub fn new(id: u64, paragraphs: Vec<Paragraph>, fill: [u8; 3]) -> Self {
+        Self {
+            id,
+            paragraphs,
+            fill,
+            span: 1,
+            merged: false,
+            v_align: VAlign::Top,
+        }
+    }
+    pub fn span(&self) -> usize {
+        usize::from(self.span.max(1))
+    }
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Table {
@@ -211,6 +254,36 @@ pub struct Table {
     pub rows: Vec<Vec<Cell>>,
     pub column_widths: Vec<f32>,
     pub border_color: [u8; 3],
+    /// Word tables without borders (e.g. signature blocks) stay borderless.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub borderless: bool,
+}
+impl Table {
+    /// Number of grid columns, counting merged cells by their span.
+    pub fn grid_columns(&self) -> usize {
+        self.rows
+            .iter()
+            .map(|row| row.iter().map(Cell::span).sum::<usize>())
+            .max()
+            .unwrap_or_default()
+    }
+    /// First grid column of each cell in `row`.
+    pub fn grid_starts(&self, row: usize) -> Vec<usize> {
+        let mut start = 0;
+        self.rows
+            .get(row)
+            .map(|cells| {
+                cells
+                    .iter()
+                    .map(|cell| {
+                        let at = start;
+                        start += cell.span();
+                        at
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AnchoredImage {
@@ -387,14 +460,14 @@ fn empty_cell(next: &mut u64, fill: [u8; 3]) -> Cell {
     let id = *next;
     let paragraph = next.saturating_add(1);
     *next = next.saturating_add(2);
-    Cell {
+    Cell::new(
         id,
-        paragraphs: vec![Paragraph {
+        vec![Paragraph {
             id: paragraph,
             ..Paragraph::default()
         }],
         fill,
-    }
+    )
 }
 /// Plain text of a cell, paragraphs separated by line breaks.
 pub fn cell_text(cell: &Cell) -> String {
@@ -584,6 +657,8 @@ impl Doc {
                     .rows
                     .iter()
                     .any(|row| row.is_empty() || row.len() > 256)
+                || table.rows.iter().flatten().any(|c| c.span == 0)
+                || table.grid_columns() > 256
                 || table.column_widths.len() > 256
                 || table
                     .column_widths
@@ -592,7 +667,7 @@ impl Doc {
             {
                 return Err("Недопустимая таблица Docs".into());
             }
-            let columns = table.rows.iter().map(Vec::len).max().unwrap_or(1);
+            let columns = table.grid_columns().max(1);
             let widths: Vec<f64> = (0..columns)
                 .map(|i| {
                     f64::from(
@@ -924,13 +999,18 @@ impl Doc {
             replacement.push(p);
         }
         let tail_id = replacement.last().map(|p| p.id).unwrap_or(first.id);
-        let deleted_ids: Vec<u64> = self
+        let mut deleted_ids: Vec<u64> = self
             .paragraphs
             .iter()
             .skip(a.paragraph + 1)
             .take(b.paragraph.saturating_sub(a.paragraph))
             .map(|p| p.id)
             .collect();
+        // Blocks after the edited paragraph follow its end (the suffix): when the
+        // paragraph splits, they move to the last part instead of jumping up.
+        if lines.len() > 1 && a.paragraph == b.paragraph {
+            deleted_ids.push(first.id);
+        }
         for table in &mut self.tables {
             if deleted_ids.contains(&table.after_paragraph_id) {
                 table.after_paragraph_id = tail_id;
@@ -1119,14 +1199,14 @@ impl Doc {
             for _ in 0..columns {
                 let cell_id = self.alloc_id();
                 let paragraph_id = self.alloc_id();
-                row.push(Cell {
-                    id: cell_id,
-                    paragraphs: vec![Paragraph {
+                row.push(Cell::new(
+                    cell_id,
+                    vec![Paragraph {
                         id: paragraph_id,
                         ..Paragraph::default()
                     }],
-                    fill: [255, 255, 255],
-                });
+                    [255, 255, 255],
+                ));
             }
             cells.push(row);
         }
@@ -1138,6 +1218,7 @@ impl Doc {
             rows: cells,
             column_widths: vec![width; columns],
             border_color: [100, 110, 120],
+            borderless: false,
         });
         Ok(id)
     }
@@ -1156,10 +1237,10 @@ impl Doc {
             .tables
             .get_mut(index)
             .ok_or("not_found: таблица не найдена")?;
-        let columns = table.rows.iter().map(Vec::len).max().unwrap_or(0).max(1);
+        let columns = table.grid_columns().max(1);
         // Imported tables may be ragged; editing makes them rectangular.
         for row in &mut table.rows {
-            while row.len() < columns {
+            while row.iter().map(Cell::span).sum::<usize>() < columns {
                 row.push(empty_cell(&mut next, [255, 255, 255]));
             }
         }
@@ -1178,8 +1259,21 @@ impl Doc {
                     .get(at.saturating_sub(1))
                     .map(|row| row.iter().map(|c| c.fill).collect())
                     .unwrap_or_default();
-                let row = (0..columns)
-                    .map(|i| empty_cell(&mut next, fills.get(i).copied().unwrap_or([255; 3])))
+                // The new row copies the merged-cell layout of the row above.
+                let spans: Vec<u16> = table
+                    .rows
+                    .get(at.saturating_sub(1))
+                    .map(|row| row.iter().map(|c| c.span.max(1)).collect())
+                    .unwrap_or_else(|| vec![1; columns]);
+                let row = spans
+                    .iter()
+                    .enumerate()
+                    .map(|(i, span)| {
+                        let mut cell =
+                            empty_cell(&mut next, fills.get(i).copied().unwrap_or([255; 3]));
+                        cell.span = *span;
+                        cell
+                    })
                     .collect();
                 table.rows.insert(at, row);
             }
@@ -1189,11 +1283,30 @@ impl Doc {
                 }
                 let at = at.min(columns);
                 for row in &mut table.rows {
+                    // `at` is a grid column: split points inside a merged cell widen it.
+                    let mut start = 0;
+                    let mut index = row.len();
+                    let mut inside = None;
+                    for (i, cell) in row.iter().enumerate() {
+                        if start == at {
+                            index = i;
+                            break;
+                        }
+                        if at < start + cell.span() {
+                            inside = Some(i);
+                            break;
+                        }
+                        start += cell.span();
+                    }
+                    if let Some(cell) = inside.and_then(|i| row.get_mut(i)) {
+                        cell.span = cell.span.saturating_add(1);
+                        continue;
+                    }
                     let fill = row
-                        .get(at.saturating_sub(1))
+                        .get(index.saturating_sub(1))
                         .map(|c| c.fill)
                         .unwrap_or([255; 3]);
-                    row.insert(at.min(row.len()), empty_cell(&mut next, fill));
+                    row.insert(index, empty_cell(&mut next, fill));
                 }
                 let width = table
                     .column_widths
@@ -1220,14 +1333,33 @@ impl Doc {
                     remove = true;
                 } else {
                     for row in &mut table.rows {
-                        if at < row.len() {
-                            row.remove(at);
+                        let mut start = 0;
+                        let mut hit = None;
+                        for (i, cell) in row.iter().enumerate() {
+                            if at < start + cell.span() {
+                                hit = Some(i);
+                                break;
+                            }
+                            start += cell.span();
+                        }
+                        if let Some(i) = hit {
+                            if let Some(cell) = row.get_mut(i).filter(|c| c.span > 1) {
+                                cell.span -= 1;
+                            } else {
+                                row.remove(i);
+                            }
                         }
                     }
+                    table.rows.retain(|row| !row.is_empty());
                     if at < table.column_widths.len() {
                         table.column_widths.remove(at);
                     }
                 }
+            }
+        }
+        if let Some(first) = table.rows.first_mut() {
+            for cell in first {
+                cell.merged = false;
             }
         }
         if remove {
@@ -1235,6 +1367,106 @@ impl Doc {
         }
         self.next_id = next;
         Ok(!remove)
+    }
+    /// Removes a page that holds no text, tables or images: its empty paragraphs and
+    /// the page breaks that create it. Returns `false` when the page has content.
+    pub fn delete_empty_page(&mut self, page: usize) -> bool {
+        let layout = self.layout();
+        if layout.pages.len() < 2 || page >= layout.pages.len() {
+            return false;
+        }
+        if layout.cells.iter().any(|c| c.page == page)
+            || layout.pages.get(page).is_some_and(|p| {
+                p.items
+                    .iter()
+                    .any(|item| matches!(item, Primitive::Image { .. }))
+            })
+        {
+            return false;
+        }
+        let blank = |text: &str| text.chars().all(char::is_whitespace);
+        let on_page: Vec<usize> = {
+            let mut v: Vec<usize> = layout
+                .rows
+                .iter()
+                .filter(|r| r.page == page)
+                .map(|r| r.paragraph)
+                .collect();
+            v.dedup();
+            v
+        };
+        // Text on the page means it is not empty.
+        if layout
+            .rows
+            .iter()
+            .filter(|r| r.page == page)
+            .any(|r| r.segments.iter().any(|s| !blank(&s.text)))
+        {
+            return false;
+        }
+        let anchors = |id: u64, doc: &Doc| {
+            doc.tables.iter().any(|t| t.after_paragraph_id == id)
+                || doc.images.iter().any(|i| i.after_paragraph_id == id)
+        };
+        let mut changed = false;
+        // Hard page breaks at the end of a paragraph push its empty remainder onto the page.
+        for &pi in &on_page {
+            if let Some(p) = self.paragraphs.get_mut(pi) {
+                let text = p.text();
+                if let Some(cut) = text.rfind('\u{000c}')
+                    && text.get(cut..).is_some_and(blank)
+                {
+                    let keep = text
+                        .get(..cut)
+                        .map(|s| s.chars().count())
+                        .unwrap_or_default();
+                    let format = p.format_at(keep);
+                    let runs = p.slice(0, keep);
+                    p.runs = runs;
+                    if p.runs.is_empty() {
+                        p.runs.push(Run {
+                            text: String::new(),
+                            format,
+                        });
+                    }
+                    p.normalize();
+                    changed = true;
+                }
+            }
+        }
+        // Paragraphs that start on the page and are blank are removed entirely.
+        let first_rows: Vec<usize> = on_page
+            .iter()
+            .copied()
+            .filter(|pi| {
+                layout
+                    .rows
+                    .iter()
+                    .find(|r| r.paragraph == *pi)
+                    .is_some_and(|r| r.page == page)
+            })
+            .collect();
+        let mut remove = Vec::new();
+        for &pi in &first_rows {
+            if let Some(p) = self.paragraphs.get(pi)
+                && blank(&p.text())
+                && !anchors(p.id, self)
+            {
+                remove.push(pi);
+            }
+        }
+        // Keep one paragraph; tables before the page stay anchored to a live paragraph.
+        if remove.len() >= self.paragraphs.len() {
+            remove.pop();
+        }
+        for pi in remove.into_iter().rev() {
+            self.paragraphs.remove(pi);
+            changed = true;
+        }
+        if changed {
+            self.normalize();
+        }
+        changed
     }
     pub fn delete_table(&mut self, table_id: u64) -> Result<(), String> {
         let before = self.tables.len();
@@ -1715,7 +1947,7 @@ fn table_lines(cell: &Cell, width: f32) -> Vec<Row> {
 }
 fn render_table(layout: &mut Layout, setup: &PageSetup, table: &Table, y: &mut f32) {
     let usable_width = setup.width - setup.margin_left - setup.margin_right;
-    let columns = table.rows.iter().map(Vec::len).max().unwrap_or_default();
+    let columns = table.grid_columns();
     if columns == 0 {
         return;
     }
@@ -1736,13 +1968,41 @@ fn render_table(layout: &mut Layout, setup: &PageSetup, table: &Table, y: &mut f
         }
     }
     for (row_index, cells) in table.rows.iter().enumerate() {
+        let starts = table.grid_starts(row_index);
+        let next_starts = table.grid_starts(row_index + 1);
+        // Width of a cell = sum of the grid columns it spans.
+        let cell_widths: Vec<f32> = cells
+            .iter()
+            .zip(&starts)
+            .map(|(cell, start)| {
+                widths
+                    .iter()
+                    .skip(*start)
+                    .take(cell.span())
+                    .sum::<f32>()
+                    .max(12.0)
+            })
+            .collect();
+        // A merged cell below continues this one: no line between them.
+        let continued: Vec<bool> = starts
+            .iter()
+            .map(|start| {
+                table.rows.get(row_index + 1).is_some_and(|below| {
+                    next_starts
+                        .iter()
+                        .position(|s| s == start)
+                        .and_then(|i| below.get(i))
+                        .is_some_and(|c| c.merged)
+                })
+            })
+            .collect();
         let cell_lines: Vec<Vec<Row>> = cells
             .iter()
             .enumerate()
             .map(|(ci, cell)| {
                 table_lines(
                     cell,
-                    widths
+                    cell_widths
                         .get(ci)
                         .copied()
                         .unwrap_or(usable_width / columns as f32),
@@ -1783,9 +2043,13 @@ fn render_table(layout: &mut Layout, setup: &PageSetup, table: &Table, y: &mut f
             }
             let page_index = layout.pages.len().saturating_sub(1);
             if let Some(page) = layout.pages.last_mut() {
-                let mut x = setup.margin_left;
                 for (ci, cell) in cells.iter().enumerate() {
-                    let width = widths
+                    let x = setup.margin_left
+                        + widths
+                            .iter()
+                            .take(starts.get(ci).copied().unwrap_or_default())
+                            .sum::<f32>();
+                    let width = cell_widths
                         .get(ci)
                         .copied()
                         .unwrap_or(usable_width / columns as f32);
@@ -1806,12 +2070,19 @@ fn render_table(layout: &mut Layout, setup: &PageSetup, table: &Table, y: &mut f
                         h: row_height,
                         color: cell.fill,
                     });
-                    for (a, b, c, d) in [
-                        (x, *y, x + width, *y),
-                        (x, *y + row_height, x + width, *y + row_height),
-                        (x, *y, x, *y + row_height),
-                        (x + width, *y, x + width, *y + row_height),
-                    ] {
+                    let edges = [
+                        (!cell.merged, (x, *y, x + width, *y)),
+                        (
+                            !continued.get(ci).copied().unwrap_or_default(),
+                            (x, *y + row_height, x + width, *y + row_height),
+                        ),
+                        (true, (x, *y, x, *y + row_height)),
+                        (true, (x + width, *y, x + width, *y + row_height)),
+                    ];
+                    for (visible, (a, b, c, d)) in edges {
+                        if !visible || table.borderless {
+                            continue;
+                        }
                         page.items.push(Primitive::Line {
                             x1: a,
                             y1: b,
@@ -1821,7 +2092,18 @@ fn render_table(layout: &mut Layout, setup: &PageSetup, table: &Table, y: &mut f
                             color: table.border_color,
                         });
                     }
-                    let mut slot_y = *y + 5.0;
+                    let content: f32 = (line_offset..line_offset + count)
+                        .filter(|li| cell_lines.get(ci).is_some_and(|lines| *li < lines.len()))
+                        .map(|li| heights.get(li).copied().unwrap_or(8.0))
+                        .sum();
+                    let free = (row_height - 10.0 - content).max(0.0);
+                    let mut slot_y = *y
+                        + 5.0
+                        + match cell.v_align {
+                            VAlign::Top => 0.0,
+                            VAlign::Center => free / 2.0,
+                            VAlign::Bottom => free,
+                        };
                     for li in line_offset..line_offset + count {
                         if let Some(row) = cell_lines.get(ci).and_then(|lines| lines.get(li)) {
                             let mut positioned = row.clone();
@@ -1834,7 +2116,6 @@ fn render_table(layout: &mut Layout, setup: &PageSetup, table: &Table, y: &mut f
                         }
                         slot_y += heights.get(li).copied().unwrap_or(8.0);
                     }
-                    x += width;
                 }
             }
             *y += row_height;
@@ -1850,6 +2131,75 @@ fn render_table(layout: &mut Layout, setup: &PageSetup, table: &Table, y: &mut f
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn splitting_a_paragraph_keeps_its_table_after_the_text() -> Result<(), String> {
+        let mut doc = Doc::from_text("ab");
+        let anchor = doc.paragraphs.first().ok_or("p")?.id;
+        doc.add_table(anchor, 1, 1)?;
+        let at = Position {
+            paragraph: 0,
+            offset: 1,
+        };
+        doc.replace_range(
+            at, at, "
+", None,
+        )?;
+        let tail = doc.paragraphs.get(1).ok_or("tail")?.id;
+        assert_eq!(doc.tables.first().map(|t| t.after_paragraph_id), Some(tail));
+        Ok(())
+    }
+    #[test]
+    fn empty_page_is_deleted_but_content_is_kept() {
+        let mut doc = Doc::from_text(
+            "Текст
+
+
+Конец",
+        );
+        if let Some(p) = doc.paragraphs.get_mut(1) {
+            p.page_break_before = true;
+        }
+        if let Some(p) = doc.paragraphs.get_mut(3) {
+            p.page_break_before = true;
+        }
+        assert_eq!(doc.layout().pages.len(), 3);
+        assert!(!doc.delete_empty_page(0), "page with text stays");
+        assert!(doc.delete_empty_page(1));
+        assert_eq!(doc.layout().pages.len(), 2);
+        assert_eq!(
+            doc.plain_text().trim(),
+            "Текст
+Конец"
+        );
+    }
+    #[test]
+    fn column_edits_respect_merged_cells() -> Result<(), String> {
+        let mut doc = Doc::from_text("a");
+        let anchor = doc.paragraphs.first().ok_or("p")?.id;
+        let id = doc.add_table(anchor, 2, 3)?;
+        if let Some(row) = doc.tables.first_mut().and_then(|t| t.rows.first_mut()) {
+            row.truncate(2);
+            if let Some(cell) = row.first_mut() {
+                cell.span = 2;
+            }
+        }
+        doc.edit_table(id, TableEdit::InsertColumn(1))?;
+        let t = doc.tables.first().ok_or("t")?;
+        assert_eq!(t.grid_columns(), 4);
+        assert_eq!(
+            t.rows.first().and_then(|r| r.first()).map(|c| c.span),
+            Some(3)
+        );
+        assert_eq!(t.rows.get(1).map(Vec::len), Some(4));
+        doc.edit_table(id, TableEdit::DeleteColumn(0))?;
+        let t = doc.tables.first().ok_or("t")?;
+        assert_eq!(t.grid_columns(), 3);
+        assert_eq!(
+            t.rows.first().and_then(|r| r.first()).map(|c| c.span),
+            Some(2)
+        );
+        Ok(())
+    }
     #[test]
     fn empty_table_cell_format_survives_frames_and_first_input() -> Result<(), String> {
         let mut doc = Doc::from_text("anchor");
