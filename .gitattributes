@@ -1,0 +1,9 @@
+# Audited hashes must stay identical after checkout on every OS.
+* text=auto eol=lf
+*.svg text eol=lf
+Cargo.lock text eol=lf
+*.ttf binary
+*.otf binary
+*.png binary
+*.jpg binary
+*.zip binary

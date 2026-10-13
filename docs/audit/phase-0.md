@@ -19,6 +19,8 @@
 
 ## Красная команда первого прохода
 
+Windows CI первого asset/CRDT прогона выявил CRLF checkout: SVG SHA256 и frozen Cargo.lock SHA256 расходились с audited bytes. Сборки остановлены корректно (runs 38338911562/38338911510). Исправление: .gitattributes с LF для текста и binary для TTF; проверки не ослаблены. Требуется успешный повторный Windows CI.
+
 Spec checker подвергнут purposeful corruption: hard platform text change, untracked new clause, done without evidence, empty test route. Все четыре детектируются. Это не red team runtime импорт/гонки/MCP: этих runtime components пока нет.
 
 Новые риски: stale MCP2025spec corrected to2026-07-28, SDK/client compatibility unverified; history compaction vs offline/time machine; atomic apply_ops vs irreversible side-effects; origin/role/cursor/Unicode semantics missing.

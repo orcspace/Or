@@ -7,6 +7,7 @@ on:
       - 'tools/audit_crdt_dependencies.py'
       - 'docs/dependencies/crdt-spike.json'
       - '.github/workflows/crdt-spike.yml'
+      - '.gitattributes'
   workflow_dispatch:
 
 permissions:
