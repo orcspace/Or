@@ -141,6 +141,9 @@ pub struct App {
     error: String,
     show_settings: bool,
     show_ai: bool,
+    /// 0 = chat, 1 = AI change review.
+    ai_tab: usize,
+    chat: crate::chat::Chat,
     palette: bool,
     query: String,
     palette_query: String,
@@ -222,6 +225,8 @@ impl App {
             error: font_error,
             show_settings: false,
             show_ai: std::env::args().any(|a| a == "--ui-smoke-compact"),
+            ai_tab: 0,
+            chat: crate::chat::Chat::new(),
             palette: false,
             query: String::new(),
             palette_query: String::new(),
@@ -837,7 +842,7 @@ impl App {
             if r.reply.is_closed() || Instant::now() > r.deadline {
                 continue;
             }
-            if !self.allowed.contains(&r.client) {
+            if !self.allowed.contains(&r.client) && !self.chat.owns(&r.client) {
                 self.clients.insert(r.client);
                 let _ = r.reply.send(Err(
                     "needs_confirmation: разрешите клиент в окне TrineDocs".into()
@@ -1766,7 +1771,7 @@ impl eframe::App for App {
                                     .selected(self.show_ai)
                                     .frame_when_inactive(false),
                             )
-                            .on_hover_text("Изменения AI и откат")
+                            .on_hover_text("AI-чат и изменения")
                             .clicked()
                         {
                             self.show_ai = !self.show_ai;
@@ -1909,26 +1914,78 @@ impl eframe::App for App {
             });
         }
         if self.show_ai {
+            let pending_changes = self
+                .tabs
+                .iter()
+                .find(|t| Some(t.id) == self.active)
+                .map_or(0, |t| t.ai.iter().filter(|c| !c.accepted).count());
+            let document = self
+                .tabs
+                .iter()
+                .find(|t| Some(t.id) == self.active)
+                .map(|t| crate::chat::Context {
+                    id: t.id,
+                    title: t.title.clone(),
+                    kind: t.document.kind(),
+                });
             egui::Panel::right("ai-review")
-                .default_size(270.0)
+                .default_size(340.0)
+                .min_size(260.0)
+                .frame(
+                    egui::Frame::new()
+                        .fill(ui.visuals().panel_fill)
+                        .inner_margin(egui::Margin::symmetric(12, 10)),
+                )
                 .show(ui, |ui| {
-                    ui.heading("Изменения AI");
+                    let changes = if pending_changes > 0 {
+                        format!("Изменения · {pending_changes}")
+                    } else {
+                        "Изменения".into()
+                    };
+                    crate::chrome::tabs(ui, &mut self.ai_tab, &["Чат", &changes]);
+                    ui.add_space(6.0);
+                    if self.ai_tab == 0 {
+                        self.chat.show(ui, document, self.settings.mcp);
+                        return;
+                    }
                     if let Some(t) = self.tabs.iter_mut().find(|t| Some(t.id) == self.active) {
                         let mut reject = None;
-                        for c in t.ai.clone().iter().rev() {
-                            if !c.accepted {
-                                ui.label(&c.label);
-                                ui.horizontal(|ui| {
-                                    if ui.button("Принять").clicked()
-                                        && let Some(v) = t.ai.iter_mut().find(|v| v.id == c.id)
-                                    {
-                                        v.accepted = true;
+                        if pending_changes == 0 {
+                            ui.add_space(16.0);
+                            ui.label(
+                                egui::RichText::new("Нет непринятых правок AI.")
+                                    .color(crate::chrome::muted(ui)),
+                            );
+                        }
+                        let mut accept_all = false;
+                        if pending_changes > 1 && ui.button("Принять все").clicked() {
+                            accept_all = true;
+                        }
+                        egui::ScrollArea::vertical()
+                            .id_salt("ai-changes")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                for c in t.ai.clone().iter().rev() {
+                                    if !c.accepted {
+                                        ui.add(egui::Label::new(&c.label).wrap());
+                                        ui.horizontal(|ui| {
+                                            if ui.button("Принять").clicked()
+                                                && let Some(v) =
+                                                    t.ai.iter_mut().find(|v| v.id == c.id)
+                                            {
+                                                v.accepted = true;
+                                            }
+                                            if ui.button("Откатить").clicked() {
+                                                reject = Some(c.id)
+                                            }
+                                        });
+                                        ui.separator();
                                     }
-                                    if ui.button("Откатить").clicked() {
-                                        reject = Some(c.id)
-                                    }
-                                });
-                                ui.separator();
+                                }
+                            });
+                        if accept_all {
+                            for v in &mut t.ai {
+                                v.accepted = true;
                             }
                         }
                         if let Some(id) = reject {
@@ -2576,6 +2633,8 @@ mod shell_input_tests {
             error: font_error,
             show_settings: false,
             show_ai: false,
+            ai_tab: 0,
+            chat: crate::chat::Chat::new(),
             palette: false,
             query: String::new(),
             palette_query: String::new(),

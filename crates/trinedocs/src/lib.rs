@@ -1,4 +1,5 @@
 pub mod app;
+pub mod chat;
 pub mod chrome;
 pub mod clipboard;
 pub mod docs;
