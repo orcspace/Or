@@ -141,9 +141,14 @@ fn round_half_away(n: f64, decimals: usize) -> f64 {
     let scale = 10f64.powi(decimals.min(15) as i32);
     round_scaled(n * scale) / scale
 }
+/// Float noise allowed around `x`: a few ulps, capped so that at 15+ significant digits
+/// (where one ulp is a sizeable fraction) real fractions are not mistaken for noise.
+fn noise(x: f64) -> f64 {
+    (8.0 * f64::EPSILON * x.abs().max(1.0)).min(1e-3)
+}
 /// Rounds to an integer, treating values within float noise of .5 as the tie.
 pub fn round_scaled(scaled: f64) -> f64 {
-    let tie = (scaled.fract().abs() - 0.5).abs() <= 8.0 * f64::EPSILON * scaled.abs().max(1.0);
+    let tie = (scaled.fract().abs() - 0.5).abs() <= noise(scaled);
     if tie {
         scaled.trunc() + scaled.signum()
     } else {
@@ -152,7 +157,7 @@ pub fn round_scaled(scaled: f64) -> f64 {
 }
 /// An integer when `x` is one up to float noise (0.3/0.1 = 2.9999999999999996 is 3).
 pub fn snap(x: f64) -> f64 {
-    if (x - x.round()).abs() <= 8.0 * f64::EPSILON * x.abs().max(1.0) {
+    if (x - x.round()).abs() <= noise(x) {
         x.round()
     } else {
         x
