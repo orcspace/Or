@@ -375,6 +375,83 @@ pub struct Layout {
     pub cells: Vec<CellBox>,
 }
 
+/// Row/column edits of a Docs table, shared by the editor ribbon and MCP.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TableEdit {
+    InsertRow(usize),
+    InsertColumn(usize),
+    DeleteRow(usize),
+    DeleteColumn(usize),
+}
+fn empty_cell(next: &mut u64, fill: [u8; 3]) -> Cell {
+    let id = *next;
+    let paragraph = next.saturating_add(1);
+    *next = next.saturating_add(2);
+    Cell {
+        id,
+        paragraphs: vec![Paragraph {
+            id: paragraph,
+            ..Paragraph::default()
+        }],
+        fill,
+    }
+}
+/// Plain text of a cell, paragraphs separated by line breaks.
+pub fn cell_text(cell: &Cell) -> String {
+    cell.paragraphs
+        .iter()
+        .map(Paragraph::text)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+/// Replaces the text of a cell, keeping formats and IDs of unchanged parts.
+pub fn edit_cell_text(cell: &mut Cell, text: &str, next_id: &mut u64) {
+    let mut nested = Doc {
+        paragraphs: cell.paragraphs.clone(),
+        next_id: *next_id,
+        ..Doc::default()
+    };
+    let old = nested.plain_text();
+    let old_chars: Vec<char> = old.chars().collect();
+    let new_chars: Vec<char> = text.chars().collect();
+    let prefix = old_chars
+        .iter()
+        .zip(&new_chars)
+        .take_while(|(a, b)| a == b)
+        .count();
+    let suffix = old_chars
+        .iter()
+        .rev()
+        .zip(new_chars.iter().rev())
+        .take(old_chars.len().min(new_chars.len()).saturating_sub(prefix))
+        .take_while(|(a, b)| a == b)
+        .count();
+    fn position_at(paragraphs: &[Paragraph], mut offset: usize) -> Position {
+        for (paragraph, p) in paragraphs.iter().enumerate() {
+            let len = p.len();
+            if offset <= len {
+                return Position { paragraph, offset };
+            }
+            offset = offset.saturating_sub(len + 1);
+        }
+        let paragraph = paragraphs.len().saturating_sub(1);
+        Position {
+            paragraph,
+            offset: paragraphs.last().map(Paragraph::len).unwrap_or_default(),
+        }
+    }
+    let a = position_at(&nested.paragraphs, prefix);
+    let b = position_at(&nested.paragraphs, old_chars.len().saturating_sub(suffix));
+    let inserted: String = new_chars
+        .iter()
+        .skip(prefix)
+        .take(new_chars.len().saturating_sub(prefix + suffix))
+        .collect();
+    if nested.replace_range(a, b, &inserted, None).is_ok() {
+        cell.paragraphs = nested.paragraphs;
+        *next_id = nested.next_id;
+    }
+}
 pub fn char_width(ch: char, format: &TextFormat) -> f32 {
     thread_local! {
         static LAST: std::cell::RefCell<Option<(String, bool, bool, std::sync::Arc<std::collections::HashMap<char, f32>>)>> =
@@ -400,16 +477,9 @@ pub fn char_width(ch: char, format: &TextFormat) -> f32 {
             }
         }
     });
-    let index = usize::from(format.bold) + usize::from(format.italic) * 2;
     let size = format.size.clamp(4.0, 144.0) * if format.script != 0 { 0.75 } else { 1.0 };
     if ch == '\t' {
-        return metrics
-            .get(index)
-            .and_then(|m| m.get(&' '))
-            .copied()
-            .unwrap_or(0.3)
-            * size
-            * 4.0;
+        return metrics.get(&' ').copied().unwrap_or(0.3) * size * 4.0;
     }
     metrics.get(&ch).copied().unwrap_or_else(|| {
         if ch.is_whitespace() {
@@ -1063,6 +1133,139 @@ impl Doc {
             column_widths: vec![width; columns],
             border_color: [100, 110, 120],
         });
+        Ok(id)
+    }
+    /// Applies a row/column edit. Returns `Ok(false)` when the last row or
+    /// column was deleted and the whole table was therefore removed.
+    pub fn edit_table(&mut self, table_id: u64, edit: TableEdit) -> Result<bool, String> {
+        let usable = self.page.width - self.page.margin_left - self.page.margin_right;
+        let index = self
+            .tables
+            .iter()
+            .position(|t| t.id == table_id)
+            .ok_or("not_found: таблица не найдена")?;
+        let mut next = self.next_id;
+        let mut remove = false;
+        let table = self
+            .tables
+            .get_mut(index)
+            .ok_or("not_found: таблица не найдена")?;
+        let columns = table.rows.iter().map(Vec::len).max().unwrap_or(0).max(1);
+        // Imported tables may be ragged; editing makes them rectangular.
+        for row in &mut table.rows {
+            while row.len() < columns {
+                row.push(empty_cell(&mut next, [255, 255, 255]));
+            }
+        }
+        if table.column_widths.len() < columns {
+            table.column_widths.resize(columns, usable / columns as f32);
+        }
+        table.column_widths.truncate(columns);
+        match edit {
+            TableEdit::InsertRow(at) => {
+                if table.rows.len() >= 1000 {
+                    return Err("too_large: не более 1000 строк".into());
+                }
+                let at = at.min(table.rows.len());
+                let fills: Vec<[u8; 3]> = table
+                    .rows
+                    .get(at.saturating_sub(1))
+                    .map(|row| row.iter().map(|c| c.fill).collect())
+                    .unwrap_or_default();
+                let row = (0..columns)
+                    .map(|i| empty_cell(&mut next, fills.get(i).copied().unwrap_or([255; 3])))
+                    .collect();
+                table.rows.insert(at, row);
+            }
+            TableEdit::InsertColumn(at) => {
+                if columns >= 64 {
+                    return Err("too_large: не более 64 столбцов".into());
+                }
+                let at = at.min(columns);
+                for row in &mut table.rows {
+                    let fill = row
+                        .get(at.saturating_sub(1))
+                        .map(|c| c.fill)
+                        .unwrap_or([255; 3]);
+                    row.insert(at.min(row.len()), empty_cell(&mut next, fill));
+                }
+                let width = table
+                    .column_widths
+                    .get(at.saturating_sub(1))
+                    .copied()
+                    .unwrap_or(usable / columns as f32);
+                table.column_widths.insert(at, width);
+            }
+            TableEdit::DeleteRow(at) => {
+                if at >= table.rows.len() {
+                    return Err("invalid_range: строка не найдена".into());
+                }
+                if table.rows.len() == 1 {
+                    remove = true;
+                } else {
+                    table.rows.remove(at);
+                }
+            }
+            TableEdit::DeleteColumn(at) => {
+                if at >= columns {
+                    return Err("invalid_range: столбец не найден".into());
+                }
+                if columns == 1 {
+                    remove = true;
+                } else {
+                    for row in &mut table.rows {
+                        if at < row.len() {
+                            row.remove(at);
+                        }
+                    }
+                    if at < table.column_widths.len() {
+                        table.column_widths.remove(at);
+                    }
+                }
+            }
+        }
+        if remove {
+            self.tables.remove(index);
+        }
+        self.next_id = next;
+        Ok(!remove)
+    }
+    pub fn delete_table(&mut self, table_id: u64) -> Result<(), String> {
+        let before = self.tables.len();
+        self.tables.retain(|t| t.id != table_id);
+        if self.tables.len() == before {
+            return Err("not_found: таблица не найдена".into());
+        }
+        Ok(())
+    }
+    pub fn table_cell_mut(
+        &mut self,
+        table_id: u64,
+        row: usize,
+        column: usize,
+    ) -> Option<&mut Cell> {
+        self.tables
+            .iter_mut()
+            .find(|t| t.id == table_id)?
+            .rows
+            .get_mut(row)?
+            .get_mut(column)
+    }
+    /// Replaces the text of a cell, keeping formats and IDs of unchanged parts.
+    pub fn set_cell_text(
+        &mut self,
+        table_id: u64,
+        row: usize,
+        column: usize,
+        text: &str,
+    ) -> Result<u64, String> {
+        let mut next = self.next_id;
+        let cell = self
+            .table_cell_mut(table_id, row, column)
+            .ok_or("invalid_range: ячейка не найдена")?;
+        edit_cell_text(cell, text, &mut next);
+        let id = cell.id;
+        self.next_id = next;
         Ok(id)
     }
     pub fn outline(&self) -> Vec<(u64, String, String)> {

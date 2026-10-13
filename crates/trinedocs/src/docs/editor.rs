@@ -525,13 +525,6 @@ fn active_cell<'a>(doc: &'a mut Doc, cursor: Option<TableCursor>) -> Option<&'a 
         .get_mut(cursor.row)?
         .get_mut(cursor.column)
 }
-fn cell_text(cell: &Cell) -> String {
-    cell.paragraphs
-        .iter()
-        .map(Paragraph::text)
-        .collect::<Vec<_>>()
-        .join("\n")
-}
 fn table_columns(table: &Table) -> usize {
     table.rows.iter().map(Vec::len).max().unwrap_or_default()
 }
@@ -549,121 +542,71 @@ enum TableCommand {
     DeleteColumn,
     DeleteTable,
 }
+/// Leaves a removed table: the caret goes to the paragraph the table followed.
+fn leave_table(doc: &Doc, state: &mut EditorState, anchor: Option<u64>) {
+    state.table_cell = None;
+    if let Some(paragraph) = anchor.and_then(|id| doc.paragraphs.iter().position(|p| p.id == id)) {
+        let offset = doc
+            .paragraphs
+            .get(paragraph)
+            .map(Paragraph::len)
+            .unwrap_or_default();
+        state.move_to(doc, Position { paragraph, offset }, false);
+    }
+}
 fn table_command(doc: &mut Doc, state: &mut EditorState, command: TableCommand) {
     let Some(cursor) = state.table_cell else {
         return;
     };
-    let mut next = doc.next_id;
-    let fallback_width = {
-        let columns = doc
-            .tables
-            .iter()
-            .find(|t| t.id == cursor.table)
-            .map(table_columns)
-            .unwrap_or(1);
-        default_column_width(doc, columns + 1)
+    let anchor = doc
+        .tables
+        .iter()
+        .find(|t| t.id == cursor.table)
+        .map(|t| t.after_paragraph_id);
+    let (edit, target) = match command {
+        TableCommand::RowAbove => (TableEdit::InsertRow(cursor.row), cursor),
+        TableCommand::RowBelow => (
+            TableEdit::InsertRow(cursor.row + 1),
+            TableCursor {
+                row: cursor.row + 1,
+                ..cursor
+            },
+        ),
+        TableCommand::ColumnLeft => (TableEdit::InsertColumn(cursor.column), cursor),
+        TableCommand::ColumnRight => (
+            TableEdit::InsertColumn(cursor.column + 1),
+            TableCursor {
+                column: cursor.column + 1,
+                ..cursor
+            },
+        ),
+        TableCommand::DeleteRow => (TableEdit::DeleteRow(cursor.row), cursor),
+        TableCommand::DeleteColumn => (TableEdit::DeleteColumn(cursor.column), cursor),
+        TableCommand::DeleteTable => {
+            if let Err(error) = doc.delete_table(cursor.table) {
+                state.message = Some(error);
+            }
+            leave_table(doc, state, anchor);
+            return;
+        }
     };
-    let mut remove_table = command == TableCommand::DeleteTable;
-    if let Some(table) = table_mut(doc, cursor.table) {
-        let columns = table_columns(table).max(1);
-        // Imported tables may be ragged; make them rectangular before editing.
-        for row in &mut table.rows {
-            while row.len() < columns {
-                row.push(new_cell(&mut next));
-            }
+    match doc.edit_table(cursor.table, edit) {
+        Ok(true) => {
+            let (rows, columns) = doc
+                .tables
+                .iter()
+                .find(|t| t.id == cursor.table)
+                .map(|t| (t.rows.len(), table_columns(t)))
+                .unwrap_or((1, 1));
+            state.table_cell = Some(TableCursor {
+                row: target.row.min(rows.saturating_sub(1)),
+                column: target.column.min(columns.saturating_sub(1)),
+                ..cursor
+            });
         }
-        match command {
-            TableCommand::RowAbove | TableCommand::RowBelow if table.rows.len() < 1000 => {
-                let at = cursor.row + usize::from(command == TableCommand::RowBelow);
-                let fills: Vec<[u8; 3]> = table
-                    .rows
-                    .get(cursor.row)
-                    .map(|row| row.iter().map(|c| c.fill).collect())
-                    .unwrap_or_default();
-                let row = (0..columns)
-                    .map(|i| {
-                        let mut cell = new_cell(&mut next);
-                        cell.fill = fills.get(i).copied().unwrap_or([255, 255, 255]);
-                        cell
-                    })
-                    .collect();
-                table.rows.insert(at.min(table.rows.len()), row);
-                state.table_cell = Some(TableCursor { row: at, ..cursor });
-            }
-            TableCommand::ColumnLeft | TableCommand::ColumnRight if columns < 64 => {
-                let at = cursor.column + usize::from(command == TableCommand::ColumnRight);
-                for row in &mut table.rows {
-                    let cell = new_cell(&mut next);
-                    row.insert(at.min(row.len()), cell);
-                }
-                if table.column_widths.len() < columns {
-                    table.column_widths.resize(columns, fallback_width);
-                }
-                let width = table
-                    .column_widths
-                    .get(cursor.column)
-                    .copied()
-                    .unwrap_or(fallback_width);
-                table
-                    .column_widths
-                    .insert(at.min(table.column_widths.len()), width);
-                state.table_cell = Some(TableCursor {
-                    column: at,
-                    ..cursor
-                });
-            }
-            TableCommand::DeleteRow => {
-                if table.rows.len() <= 1 {
-                    remove_table = true;
-                } else {
-                    table.rows.remove(cursor.row.min(table.rows.len() - 1));
-                    state.table_cell = Some(TableCursor {
-                        row: cursor.row.min(table.rows.len() - 1),
-                        ..cursor
-                    });
-                }
-            }
-            TableCommand::DeleteColumn => {
-                if columns <= 1 {
-                    remove_table = true;
-                } else {
-                    for row in &mut table.rows {
-                        if cursor.column < row.len() && row.len() > 1 {
-                            row.remove(cursor.column);
-                        }
-                    }
-                    if cursor.column < table.column_widths.len() {
-                        table.column_widths.remove(cursor.column);
-                    }
-                    state.table_cell = Some(TableCursor {
-                        column: cursor.column.min(columns - 2),
-                        ..cursor
-                    });
-                }
-            }
-            _ => {}
-        }
+        Ok(false) => leave_table(doc, state, anchor),
+        Err(error) => state.message = Some(error),
     }
-    if remove_table {
-        let anchor = doc
-            .tables
-            .iter()
-            .find(|t| t.id == cursor.table)
-            .map(|t| t.after_paragraph_id);
-        doc.tables.retain(|t| t.id != cursor.table);
-        state.table_cell = None;
-        if let Some(paragraph) =
-            anchor.and_then(|id| doc.paragraphs.iter().position(|p| p.id == id))
-        {
-            let offset = doc
-                .paragraphs
-                .get(paragraph)
-                .map(Paragraph::len)
-                .unwrap_or_default();
-            state.move_to(doc, Position { paragraph, offset }, false);
-        }
-    }
-    doc.next_id = next;
 }
 /// Moves to the next/previous cell; Tab in the last cell adds a row, as in Word.
 fn step_cell(doc: &mut Doc, state: &mut EditorState, forward: bool) {
@@ -1798,68 +1741,6 @@ fn format_cell(cell: &mut Cell, apply: impl Fn(&mut TextFormat)) {
         for run in &mut paragraph.runs {
             apply(&mut run.format);
         }
-    }
-}
-fn edit_cell_text(cell: &mut Cell, text: &str, next_id: &mut u64) {
-    let mut nested = Doc {
-        paragraphs: cell.paragraphs.clone(),
-        next_id: *next_id,
-        ..Doc::default()
-    };
-    let old = nested.plain_text();
-    let old_chars: Vec<char> = old.chars().collect();
-    let new_chars: Vec<char> = text.chars().collect();
-    let prefix = old_chars
-        .iter()
-        .zip(&new_chars)
-        .take_while(|(a, b)| a == b)
-        .count();
-    let suffix = old_chars
-        .iter()
-        .rev()
-        .zip(new_chars.iter().rev())
-        .take(old_chars.len().min(new_chars.len()).saturating_sub(prefix))
-        .take_while(|(a, b)| a == b)
-        .count();
-    fn position_at(paragraphs: &[Paragraph], mut offset: usize) -> Position {
-        for (paragraph, p) in paragraphs.iter().enumerate() {
-            let len = p.len();
-            if offset <= len {
-                return Position { paragraph, offset };
-            }
-            offset = offset.saturating_sub(len + 1);
-        }
-        let paragraph = paragraphs.len().saturating_sub(1);
-        Position {
-            paragraph,
-            offset: paragraphs.last().map(Paragraph::len).unwrap_or_default(),
-        }
-    }
-    let a = position_at(&nested.paragraphs, prefix);
-    let b = position_at(&nested.paragraphs, old_chars.len().saturating_sub(suffix));
-    let inserted: String = new_chars
-        .iter()
-        .skip(prefix)
-        .take(new_chars.len().saturating_sub(prefix + suffix))
-        .collect();
-    if nested.replace_range(a, b, &inserted, None).is_ok() {
-        cell.paragraphs = nested.paragraphs;
-        *next_id = nested.next_id;
-    }
-}
-fn take_id(next: &mut u64) -> u64 {
-    let id = *next;
-    *next = next.saturating_add(1);
-    id
-}
-fn new_cell(next: &mut u64) -> Cell {
-    Cell {
-        id: take_id(next),
-        paragraphs: vec![Paragraph {
-            id: take_id(next),
-            ..Paragraph::default()
-        }],
-        fill: [255, 255, 255],
     }
 }
 /// Screen rectangle of a laid-out table cell (part).

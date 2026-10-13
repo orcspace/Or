@@ -455,6 +455,7 @@ mod tests {
                     color: [0, 0, 0],
                     bold: true,
                     italic: false,
+                    font: String::new(),
                 },
             ],
         };
