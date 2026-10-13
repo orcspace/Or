@@ -1488,6 +1488,13 @@ mod tests {
         );
         assert_eq!(sheet.cell(2, 1).map(|c| &c.fmt), Some(&fmt));
         assert_eq!(sheet.charts.len(), 1);
+        let again = read(&write(&restored, "xlsx")?, "xlsx")?;
+        let (a, b) = (
+            restored.active_sheet().ok_or("Нет листа")?,
+            again.active_sheet().ok_or("Нет листа")?,
+        );
+        assert_eq!(a.cells, b.cells, "второе поколение xlsx отличается");
+        assert_eq!(a.charts.len(), b.charts.len());
         Ok(())
     }
     #[test]

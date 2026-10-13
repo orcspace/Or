@@ -1532,6 +1532,71 @@ mod tests {
         }
     }
     #[test]
+    fn docx_rich_formatting_and_pictures_survive_two_generations() -> Result<(), String> {
+        let mut doc = Doc::from_text("Заголовок\nТекст абзаца\nПункт списка");
+        doc.page.footer = "Подвал".into();
+        doc.page.margin_left = 90.0;
+        doc.page.page_numbers = true;
+        if let Some(p) = doc.paragraphs.get_mut(0) {
+            p.style = "Heading1".into();
+        }
+        if let Some(p) = doc.paragraphs.get_mut(1) {
+            p.align = Align::Justify;
+            p.spacing_after = 12.0;
+            p.first_indent = 18.0;
+            if let Some(r) = p.runs.first_mut() {
+                r.format.italic = true;
+                r.format.underline = true;
+                r.format.strike = true;
+                r.format.size = 14.0;
+                r.format.font = "Arial".into();
+            }
+        }
+        if let Some(p) = doc.paragraphs.get_mut(2) {
+            p.list = List::Bullet;
+        }
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(4, 2)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .map_err(|e| e.to_string())?;
+        let anchor = doc.paragraphs.get(1).map(|p| p.id).ok_or("paragraph")?;
+        let id = doc.alloc_id();
+        doc.images.push(AnchoredImage {
+            id,
+            after_paragraph_id: anchor,
+            bytes: png.into_inner(),
+            width: 200.0,
+            height: 100.0,
+            alt: "Схема".into(),
+        });
+        let first = read(&write(&doc, "docx")?, "docx")?;
+        let second = read(&write(&first, "docx")?, "docx")?;
+        assert_eq!(first, second, "второе поколение docx отличается от первого");
+        assert_eq!(first.plain_text(), doc.plain_text());
+        assert_eq!(first.page.footer, "Подвал");
+        assert_eq!(first.images.len(), 1);
+        assert_eq!(
+            first
+                .images
+                .first()
+                .map(|i| (i.width.round(), i.height.round())),
+            Some((200.0, 100.0))
+        );
+        assert_eq!(
+            first.paragraphs.first().map(|p| p.style.as_str()),
+            Some("Heading1")
+        );
+        assert_eq!(first.paragraphs.get(2).map(|p| p.list), Some(List::Bullet));
+        let body = first.paragraphs.get(1).ok_or("body")?;
+        assert_eq!(body.align, Align::Justify);
+        assert!(body.runs.first().is_some_and(|r| r.format.italic
+            && r.format.underline
+            && r.format.strike
+            && r.format.size == 14.0
+            && r.format.font == "Arial"));
+        Ok(())
+    }
+    #[test]
     fn xml_ignores_outer_whitespace_and_rejects_extra_roots() {
         let root = xml(b"<?xml version=\"1.0\"?>\n  <document><body/></document>\n");
         assert_eq!(root.ok().map(|n| n.name), Some("document".into()));

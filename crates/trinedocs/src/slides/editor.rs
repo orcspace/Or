@@ -862,10 +862,9 @@ fn ribbon(ui: &mut egui::Ui, deck: &mut Deck, state: &mut State) -> bool {
                             }
                         });
                         if crate::chrome::tool(ui, "✎", "Редактировать текст", false).clicked()
+                            && let Some(id) = state.selected.first().copied()
                         {
-                            if let Some(id) = state.selected.first().copied() {
-                                begin_edit(state, id, Some((0, 0)));
-                            }
+                            begin_edit(state, id, Some((0, 0)));
                         }
                         if crate::chrome::tool(ui, "🗑", "Удалить объект · Delete", false).clicked()
                         {
