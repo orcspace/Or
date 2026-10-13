@@ -1321,7 +1321,7 @@ impl App {
                         }
                     }
                     ui.add_space(28.0);
-                    ui.label(egui::RichText::new(&format!("TrineDocs {} · поддержка всех возможностей Microsoft Office пока неполная.", env!("CARGO_PKG_VERSION"))).color(crate::chrome::muted(ui)).size(11.0));
+                    ui.label(egui::RichText::new(format!("TrineDocs {} · поддержка всех возможностей Microsoft Office пока неполная.", env!("CARGO_PKG_VERSION"))).color(crate::chrome::muted(ui)).size(11.0));
                 });
             });
         });
