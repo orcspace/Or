@@ -1,0 +1,8 @@
+{
+  "case": "merge",
+  "converged": true,
+  "local_undo": true,
+  "elapsed_ms": 12.701,
+  "peak_working_set_sampled_bytes": 8814592,
+  "memory_method": "OS peak working set sampled every 10ms; final sub-10ms spike may be missed"
+}

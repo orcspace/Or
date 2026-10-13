@@ -1,0 +1,16 @@
+{
+  "case": "history",
+  "os": "windows",
+  "architecture": "x86_64",
+  "create_ms": 1650.1447,
+  "snapshot_ms": 149.61679999999998,
+  "import_ms": 2.2435,
+  "open_ms": 2.2864999999999998,
+  "snapshot_bytes": 4073477,
+  "shallow_bytes": 320,
+  "shallow_ms": 0.1495,
+  "operations": 1000000,
+  "changes": 735,
+  "peak_working_set_sampled_bytes": 80994304,
+  "memory_method": "OS peak working set sampled every 10ms; final sub-10ms spike may be missed"
+}

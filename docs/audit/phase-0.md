@@ -15,11 +15,11 @@
 | Window themes/ru-en/a11y/IME |не проверено|real Windows11 GUI absent; Mac deferred|
 | Signed installer |нет|signing identity/model pending; no fake signature|
 | Performance |не измерено|no native OS bench, no1.5s/16ms/fps claims|
-| Mandatory spikes |CRDT частично выполнен|4 tests и Linux development measurements; Windows CI готов; остальные 6 plans; phase1 blocked layout/target CRDT acceptance|
+| Mandatory spikes |CRDT частично выполнен|4 tests и Linux development measurements; Windows CI прошёл, raw host/measurements сохранены; остальные 6 plans; phase1 blocked layout/target CRDT acceptance|
 
 ## Красная команда первого прохода
 
-Windows CI первого asset/CRDT прогона выявил CRLF checkout: SVG SHA256 и frozen Cargo.lock SHA256 расходились с audited bytes. Сборки остановлены корректно (runs 38338911562/38338911510). Исправление: .gitattributes с LF для текста и binary для TTF; проверки не ослаблены. Требуется успешный повторный Windows CI.
+Windows CI первого asset/CRDT прогона выявил CRLF checkout: SVG SHA256 и frozen Cargo.lock SHA256 расходились с audited bytes. Сборки остановлены корректно (runs 38338911562/38338911510). Исправление: .gitattributes с LF для текста и binary для TTF; проверки не ослаблены. Повторный core Windows CI прошёл: https://github.com/orcspace/Or/actions/runs/38339267241 (17 tests, assets, registry, fmt, clippy). CRDT Windows CI также прошёл: https://github.com/orcspace/Or/actions/runs/38339267237 ; 4 tests, raw host/measurements сохранены.
 
 Spec checker подвергнут purposeful corruption: hard platform text change, untracked new clause, done without evidence, empty test route. Все четыре детектируются. Это не red team runtime импорт/гонки/MCP: этих runtime components пока нет.
 

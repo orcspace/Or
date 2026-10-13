@@ -1,0 +1,16 @@
+{
+  "case": "docs",
+  "os": "windows",
+  "architecture": "x86_64",
+  "create_ms": 5.0992,
+  "snapshot_ms": 4.988099999999999,
+  "import_ms": 0.34440000000000004,
+  "open_ms": 8.5058,
+  "snapshot_bytes": 80051,
+  "shallow_bytes": 46956,
+  "shallow_ms": 3.5453,
+  "operations": 260300,
+  "changes": 100,
+  "peak_working_set_sampled_bytes": 15343616,
+  "memory_method": "OS peak working set sampled every 10ms; final sub-10ms spike may be missed"
+}

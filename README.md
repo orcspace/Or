@@ -36,7 +36,7 @@ Toolchain закреплён в `rust-toolchain.toml`. Сейчас у core не
 2. QML-привязки используют JavaScript, а JavaScript полностью запрещён: [ADR-0003](docs/decisions/0003-qml-javascript.md). Толкование запрета меняет только владелец.
 3. Документированный Mica API требует build 22621 при минимуме 22000: [ADR-0007](docs/decisions/0007-mica-minimum-build.md).
 
-Ни один редактор, импорт/экспорт, MCP-транспорт или sync-сервер пока не считается реализованным. CRDT-спайк запущен в Linux development-среде; Windows CI измеряется отдельно и не заменяет Windows 11 GUI-приёмку. Остальные обязательные спайки остаются планами.
+Ни один редактор, импорт/экспорт, MCP-транспорт или sync-сервер пока не считается реализованным. CRDT-спайк запущен в Linux development-среде; Windows CI ядра и CRDT прошёл (21 тест); raw measurements сохранены в docs/spikes/results/windows-ci-run.json. Это не заменяет Windows 11 GUI-приёмку. Остальные обязательные спайки остаются планами.
 
 ## Лицензия проекта
 

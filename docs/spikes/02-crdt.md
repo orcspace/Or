@@ -26,3 +26,20 @@ open_ms включает import и первый полный обход восс
 Можно продолжать исследование Loro; полноценный go не доказан. Не измерены целевой RSS, распределение задержек, старые offline peers после shallow compaction, случайные property-based правки и длинная история undo. Map history требует второго сценария rich-text editing. Shallow 320 байт не означает сохранение машины времени.
 
 Windows workflow записывает host/CPU/OS и sampled peak working set каждые 10 мс; последний короткий пик может быть пропущен. После целевых Windows 11 и history/compaction данных обновить ADR-0011; сравнивать Yrs при no-go. Отсутствие данных не заменять оценками.
+
+## Windows CI: измеренный результат
+
+[Прогон 38339267237](https://github.com/orcspace/Or/actions/runs/38339267237) успешен, source commit 2ef720272a2b0448202c493df8c6b919f2367fec. Четыре CRDT tests прошли; release build занял 2 мин 30 с. Это время только optimized build после предыдущей dev/test сборки, а не полная cold build.
+
+Стенд: Microsoft Windows Server 2025 Datacenter, build 26100, AMD EPYC 7763 64-Core Processor, 4 видимых logical CPUs, 16771836 KiB RAM, x86_64. Windows Server — инфраструктурная проверка, не поддерживаемая клиентская платформа и не Windows 11 приёмка.
+
+| Workload | Создание, мс | Открытие с чтением, мс | Sampled peak, MiB |
+|---|---:|---:|---:|
+| docs | 5.099 | 8.506 | 14.633 |
+| sheets | 191.272 | 255.466 | 73.496 |
+| slides | 3.391 | 3.241 | 2.152 |
+| history | 1650.145 | 2.286 | 77.242 |
+
+Три реплики + local undo: 12.701 мс, convergence=true, local_undo=true. Один прогон, никакого p95/GUI fps из этих чисел не выводится. Sampled peak — Windows OS peak working set, опрашиваемый каждые 10 мс; короткий финальный пик мог быть пропущен. Сопоставление с бюджетом полноценного редактора некорректно: здесь нет Qt, layout, картинок, calc и render.
+
+[Raw JSON со стендом и provenance](results/windows-ci-run.json). Все ограничения предыдущего раздела сохраняются; go/no-go для продукта не вынесен.

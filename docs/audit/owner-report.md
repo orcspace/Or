@@ -1,8 +1,8 @@
 # Отчёт владельцу — 2026-10-13
 
-В orcspace/Or есть спецификация, 442 требования, матрица 350 функций, аудит/ADR, Rust workspace, токены темы, 8 шрифтов и 36 SVG с лицензиями и SHA-256. Локально прошли 13 Rust core tests, 4 теста реестра и 4 CRDT tests: **21 тест**. Окна/EXE нет, фаза 0 не принята. Mac отложен; работа до фазы 9 разрешена, критерии приёмки сохранены.
+В orcspace/Or есть спецификация, 442 требования, матрица 350 функций, аудит/ADR, Rust workspace, токены темы, 8 шрифтов и 36 SVG с лицензиями и SHA-256. Локально и в Windows CI прошли 13 Rust core tests, 4 теста реестра и 4 CRDT tests: **21 тест**. Окна/EXE нет, фаза 0 не принята. Mac отложен; работа до фазы 9 разрешена, критерии приёмки сохранены.
 
-CRDT-спайк частично выполнен: три реплики, форматирование, local-only undo; измерены 100k ячеек и миллион Map-правок в development Linux. Windows CI запускается отдельно. Go/no-go не объявлен: нужны целевые измерения, история rich text, compaction/offline и спайк вёрстки. Фаза 1 закрыта.
+CRDT-спайк частично выполнен: три реплики, форматирование, local-only undo; измерены 100k ячеек и миллион Map-правок в development Linux. Core Windows CI прошёл: https://github.com/orcspace/Or/actions/runs/38339267241 . CRDT Windows CI также прошёл: https://github.com/orcspace/Or/actions/runs/38339267237 . Raw JSON и стенд сохранены в docs/spikes/results/windows-ci-run.json. Go/no-go не объявлен: нужны целевые измерения, история rich text, compaction/offline и спайк вёрстки. Фаза 1 закрыта.
 
 Три решения для окна:
 

@@ -1,6 +1,6 @@
 # Зависимости и лицензии
 
-Runtime core сейчас **без внешних Cargo dependencies**, внешние assets не включены. Qt/CXX-Qt/Skia и остальные ниже — кандидаты стека, не установлены. Отсутствие dependency в Cargo.lock не освобождает будущие packages/fonts/media от проверки.
+Production core сейчас **без внешних Cargo dependencies**. Включены Inter/JetBrains Mono и Lucide assets; Loro и его зависимости используются только изолированным CRDT-экспериментом. Qt/CXX-Qt/Skia и остальные ниже — кандидаты, не установлены. Отсутствие dependency в production Cargo.lock не освобождает packages/fonts/media от проверки.
 
 | Компонент | Pin / состояние | Лицензия/доказательство | Допуск |
 |---|---|---|---|
@@ -10,14 +10,14 @@ Runtime core сейчас **без внешних Cargo dependencies**, внеш
 | Qt Graphs/Quick3D/CanvasPainter/HTTPServer/NetworkAuthorization и прочие GPL-only |не подключать|official GPL-only list (FACT-013)|запрещены current license policy |
 | Qt Charts/PDF/WebEngine/Multimedia/SVG/PrintSupport |не подключены|per-module exact6.12 check pending; WebEngine запрещён архитектурно|не подтверждено |
 | CXX-Qt/cxx/cxx-qt-lib/build |candidate0.10.0; transitive pins pending|LICENSE exact crates ещё проверить|не подключено |
-| Loro/Yrs |pending exact versions|LICENSE crates + transitive pending|не подключено |
+| Loro/Yrs |Loro1.16.2 в isolated spike; Yrs pending|LoroMIT, crate/LICENSE прочитан;156 declared licenses в dependencies/crdt-spike.md; source notices transitive pending|не production graph |
 | IronCalc |release0.8 fact; crate pin pending|LICENSE/source + transitive pending|не подключено |
 | skia-safe/Skia/HarfBuzz |pending|source licenses/notices/SBOM pending|не подключено |
 | quick-xml/zip/tokio/rusqlite/tracing/rmcp/axum |pending|per-crate LICENSE + transitive Cargo tree pending|не подключено |
 | PostgreSQL/S3 SDK/SQLite amalgamation |pending|specific versions/deployment licenses pending|не подключено |
 | LibreOffice |on-demand candidate|distribution/source/license audit pending|не скачивается |
 | Sparkle/WinSparkle/MSIX tooling |ADR choice pending|exact releases licenses/terms pending|не подключено |
-| Lucide/Inter/JetBrains Mono |задание: ISC/OFL; exact pin не выбран|license files ещё не читаны|assets не включены |
+| Lucide/Inter/JetBrains Mono |1.48.0 /4.1 /2.304|ISC/OFL-1.1, exact notices в assets; manifests/SHA256 verified|36 SVG и8 TTF включены; Qt integration pending |
 | Carlito/Caladea/Liberation |pending|OFL/embedding rights должны проверяться по actual files|не включены |
 | ffmpeg |P2 separate process|лицензия зависит от build flags; exact binary/config pending|не включён |
 

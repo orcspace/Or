@@ -1,0 +1,16 @@
+{
+  "case": "slides",
+  "os": "windows",
+  "architecture": "x86_64",
+  "create_ms": 3.3907999999999996,
+  "snapshot_ms": 2.5317,
+  "import_ms": 0.2653,
+  "open_ms": 3.2411,
+  "snapshot_bytes": 23933,
+  "shallow_bytes": 13534,
+  "shallow_ms": 1.5008000000000001,
+  "operations": 10500,
+  "changes": 4,
+  "peak_working_set_sampled_bytes": 2256896,
+  "memory_method": "OS peak working set sampled every 10ms; final sub-10ms spike may be missed"
+}
