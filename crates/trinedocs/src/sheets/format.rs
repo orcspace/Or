@@ -139,14 +139,24 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
 /// fractions such as 1.005 sit just below the tie).
 fn round_half_away(n: f64, decimals: usize) -> f64 {
     let scale = 10f64.powi(decimals.min(15) as i32);
-    let scaled = n * scale;
+    round_scaled(n * scale) / scale
+}
+/// Rounds to an integer, treating values within float noise of .5 as the tie.
+pub fn round_scaled(scaled: f64) -> f64 {
     let tie = (scaled.fract().abs() - 0.5).abs() <= 8.0 * f64::EPSILON * scaled.abs().max(1.0);
-    let rounded = if tie {
+    if tie {
         scaled.trunc() + scaled.signum()
     } else {
         scaled.round()
-    };
-    rounded / scale
+    }
+}
+/// An integer when `x` is one up to float noise (0.3/0.1 = 2.9999999999999996 is 3).
+pub fn snap(x: f64) -> f64 {
+    if (x - x.round()).abs() <= 8.0 * f64::EPSILON * x.abs().max(1.0) {
+        x.round()
+    } else {
+        x
+    }
 }
 fn fixed(n: f64, decimals: usize) -> String {
     format!("{:.decimals$}", round_half_away(n, decimals))

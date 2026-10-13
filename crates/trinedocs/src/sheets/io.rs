@@ -214,13 +214,9 @@ pub fn parse_csv(text: &str, separator: char) -> Result<Vec<Vec<String>>, String
             }
         } else if c == '"' && cell.is_empty() && !after_quote {
             quoted = true;
-        } else if after_quote {
-            if c != ' ' && c != '\t' {
-                return Err("CSV: неожиданный символ после кавычки".into());
-            }
-        } else if c == '"' {
-            return Err("CSV: кавычка внутри неэкранированного поля".into());
         } else {
+            // Like Excel, stray quotes and text after a closing quote are kept as text:
+            // `5" pipe` and `"x"z` are common in pasted text.
             cell.push(c);
         }
         if cell.len() > 32767 {
@@ -900,7 +896,13 @@ fn builtin(id: u32) -> String {
         11 => "0.00E+00",
         12 => "# ?/?",
         13 => "# ??/??",
-        14 => "mm-dd-yy",
+        // Built-in ids 5-8 and 37-40 are locale currency/accounting formats.
+        5 | 37 => "#,##0 ;(#,##0)",
+        6 | 38 => "#,##0 ;[Red](#,##0)",
+        7 | 39 => "#,##0.00;(#,##0.00)",
+        8 | 40 => "#,##0.00;[Red](#,##0.00)",
+        // Id 14 is the system short date; TrineDocs follows the Russian locale.
+        14 => "dd.mm.yyyy",
         15 => "d-mmm-yy",
         16 => "d-mmm",
         17 => "mmm-yy",
@@ -908,7 +910,11 @@ fn builtin(id: u32) -> String {
         19 => "h:mm:ss",
         20 => "h:mm",
         21 => "h:mm:ss",
-        22 => "m/d/yy h:mm",
+        22 => "dd.mm.yyyy h:mm",
+        45 => "mm:ss",
+        46 => "[h]:mm:ss",
+        47 => "mm:ss.0",
+        48 => "##0.0E+0",
         49 => "@",
         _ => "General",
     }
@@ -924,10 +930,19 @@ fn styles(bytes: &[u8]) -> Result<Vec<CellFormat>, String> {
     let mut current_font = CellFormat::default();
     let mut current_fill = None;
     loop {
-        match reader.read_event().map_err(|e| e.to_string())? {
+        let event = reader.read_event().map_err(|e| e.to_string())?;
+        let empty = matches!(event, Event::Empty(_));
+        match event {
             Event::Start(e) | Event::Empty(e) => {
                 let tag = local(&e);
                 let a = attrs(&e, &reader)?;
+                // `<font/>` and `<fill/>` have no end tag but still take an index.
+                if empty && tag == "font" && section == "fonts" {
+                    fonts.push(CellFormat::default());
+                }
+                if empty && tag == "fill" && section == "fills" {
+                    fills.push(None);
+                }
                 if matches!(tag.as_str(), "fonts" | "fills" | "cellXfs" | "cellStyleXfs") {
                     section = tag.clone();
                 }
@@ -1649,7 +1664,14 @@ mod tests {
         ];
         assert_eq!(parse_csv(&to_csv(&rows, ';'), ';'), Ok(rows));
         assert!(parse_csv("\"unclosed", ',').is_err());
-        assert!(parse_csv("\"x\"z", ',').is_err());
+        assert_eq!(parse_csv("\"x\"z", ','), Ok(vec![vec!["xz".to_string()]]));
+        assert_eq!(
+            parse_csv("5\" pipe\tОн сказал \"да\"", '\t'),
+            Ok(vec![vec![
+                "5\" pipe".to_string(),
+                "Он сказал \"да\"".to_string()
+            ]])
+        );
         assert_eq!(
             parse_csv("a,b,\r\n", ','),
             Ok(vec![vec!["a".into(), "b".into(), "".into()]])

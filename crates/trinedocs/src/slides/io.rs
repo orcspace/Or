@@ -233,20 +233,172 @@ fn relationships(bytes: Option<&Vec<u8>>, base: &str) -> Result<BTreeMap<String,
     }
     Ok(rels)
 }
-fn color(node: Option<&Node>, fallback: [u8; 3]) -> [u8; 3] {
-    let Some(value) = node
-        .and_then(|n| n.descend("srgbClr"))
-        .map(|n| n.attr("val"))
-    else {
-        return fallback;
-    };
-    if value.len() != 6 || !value.is_ascii() {
-        return fallback;
+/// Colours and fonts of a PowerPoint theme. Scheme colours are reachable by their own names
+/// and by the default colour map aliases (`tx1` = `dk1`, `bg1` = `lt1`, ...).
+#[derive(Default)]
+struct Look {
+    colors: BTreeMap<String, [u8; 3]>,
+    major: String,
+    minor: String,
+}
+impl Look {
+    fn read(theme: Option<&Node>) -> Self {
+        let mut look = Self::default();
+        let Some(theme) = theme else {
+            return look;
+        };
+        if let Some(scheme) = theme.descend("clrScheme") {
+            for entry in &scheme.children {
+                let value = entry
+                    .child("srgbClr")
+                    .map(|n| n.attr("val"))
+                    .or_else(|| entry.child("sysClr").map(|n| n.attr("lastClr")));
+                if let Some(rgb) = value.and_then(parse_hex) {
+                    look.colors.insert(entry.name.clone(), rgb);
+                }
+            }
+        }
+        for (alias, name) in [
+            ("tx1", "dk1"),
+            ("bg1", "lt1"),
+            ("tx2", "dk2"),
+            ("bg2", "lt2"),
+        ] {
+            if let Some(rgb) = look.colors.get(name).copied() {
+                look.colors.insert(alias.into(), rgb);
+            }
+        }
+        let face = |kind: &str| {
+            theme
+                .descend(kind)
+                .and_then(|n| n.child("latin"))
+                .map(|n| n.attr("typeface").trim())
+                .filter(|face| !face.is_empty() && face.len() <= 64)
+                .map(str::to_string)
+                .unwrap_or_default()
+        };
+        look.major = face("majorFont");
+        look.minor = face("minorFont");
+        look
     }
-    let Ok(number) = u32::from_str_radix(value, 16) else {
+    /// Resolves `+mj-lt` / `+mn-lt` theme font references.
+    fn font(&self, face: &str) -> Option<String> {
+        let face = face.trim();
+        let resolved = match face {
+            "+mj-lt" => self.major.as_str(),
+            "+mn-lt" => self.minor.as_str(),
+            _ => face,
+        };
+        (!resolved.is_empty() && !resolved.starts_with('+') && resolved.len() <= 64)
+            .then(|| resolved.to_string())
+    }
+}
+fn parse_hex(value: &str) -> Option<[u8; 3]> {
+    if value.len() != 6 || !value.is_ascii() {
+        return None;
+    }
+    let number = u32::from_str_radix(value, 16).ok()?;
+    Some([(number >> 16) as u8, (number >> 8) as u8, number as u8])
+}
+fn color(node: Option<&Node>, look: &Look, fallback: [u8; 3]) -> [u8; 3] {
+    let Some(node) = node else {
         return fallback;
     };
-    [(number >> 16) as u8, (number >> 8) as u8, number as u8]
+    node.descend("srgbClr")
+        .and_then(|n| parse_hex(n.attr("val")))
+        .or_else(|| {
+            node.descend("schemeClr")
+                .and_then(|n| look.colors.get(n.attr("val")).copied())
+        })
+        .or_else(|| {
+            node.descend("sysClr")
+                .and_then(|n| parse_hex(n.attr("lastClr")))
+        })
+        .unwrap_or(fallback)
+}
+/// Placeholder type and index of a shape (`p:nvSpPr/p:nvPr/p:ph`).
+fn placeholder(shape: &Node) -> Option<(&str, &str)> {
+    let ph = shape
+        .children
+        .iter()
+        .find(|n| n.name.starts_with("nv"))?
+        .child("nvPr")?
+        .child("ph")?;
+    Some((ph.attr("type"), ph.attr("idx")))
+}
+fn placeholder_class(kind: &str) -> &str {
+    match kind {
+        "title" | "ctrTitle" => "title",
+        "dt" | "ftr" | "sldNum" | "hdr" | "pic" | "chart" | "tbl" => kind,
+        _ => "body",
+    }
+}
+/// Geometry a placeholder without its own `a:xfrm` inherits from the layout, then the master.
+fn inherited_xfrm<'a>(shape: &Node, sources: &[&'a Node]) -> Option<&'a Node> {
+    let (kind, idx) = placeholder(shape)?;
+    let mut candidates = Vec::new();
+    for (level, &source) in sources.iter().enumerate() {
+        candidates.clear();
+        source.all("sp", &mut candidates);
+        let by_index = if level == 0 && !idx.is_empty() {
+            candidates
+                .iter()
+                .find(|c| placeholder(c).is_some_and(|(_, i)| i == idx))
+        } else {
+            None
+        };
+        let found = by_index.or_else(|| {
+            candidates.iter().find(|c| {
+                placeholder(c).is_some_and(|(t, _)| placeholder_class(t) == placeholder_class(kind))
+            })
+        });
+        let xfrm = found
+            .copied()
+            .and_then(|n| n.child("spPr"))
+            .and_then(|n| n.child("xfrm"))
+            .filter(|n| n.child("off").is_some() && n.child("ext").is_some());
+        if xfrm.is_some() {
+            return xfrm;
+        }
+    }
+    None
+}
+/// Shapes of a shape tree with group transforms folded in; `[sx, sy, dx, dy]` maps child EMU
+/// coordinates to slide EMU coordinates (`slide = s * child + d`).
+fn flatten<'a>(
+    tree: &'a Node,
+    map: [f32; 4],
+    depth: usize,
+    out: &mut Vec<(&'a Node, [f32; 4])>,
+    rotated_groups: &mut bool,
+) {
+    for shape in &tree.children {
+        if shape.name != "grpSp" {
+            out.push((shape, map));
+            continue;
+        }
+        if depth >= 16 {
+            continue;
+        }
+        let mut inner = map;
+        if let Some(x) = shape.child("grpSpPr").and_then(|n| n.child("xfrm")) {
+            let value = |child: &str, key: &str| x.child(child).map_or(0.0, |n| n.number(key, 0.0));
+            let (cx, cy) = (value("ext", "cx"), value("ext", "cy"));
+            let (chx, chy) = (value("chExt", "cx"), value("chExt", "cy"));
+            let sx = if chx > 0.0 { cx / chx } else { 1.0 };
+            let sy = if chy > 0.0 { cy / chy } else { 1.0 };
+            let dx = value("off", "x") - value("chOff", "x") * sx;
+            let dy = value("off", "y") - value("chOff", "y") * sy;
+            inner = [
+                map[0] * sx,
+                map[1] * sy,
+                map[0] * dx + map[2],
+                map[1] * dy + map[3],
+            ];
+            *rotated_groups |= x.number("rot", 0.0) != 0.0;
+        }
+        flatten(shape, inner, depth + 1, out, rotated_groups);
+    }
 }
 fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
     let parts = read_zip(bytes)?;
@@ -266,6 +418,15 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
     )?;
     let rels = relationships(parts.get("ppt/_rels/presentation.xml.rels"), "ppt")?;
     let mut deck = Deck::empty();
+    let mut parsed: BTreeMap<String, Node> = BTreeMap::new();
+    let mut looks: BTreeMap<String, Look> = BTreeMap::new();
+    let no_look = Look::default();
+    let mut themed = false;
+    let mut approximated = 0_usize;
+    let rels_of = |path: &str| {
+        let (base, name) = path.rsplit_once('/').unwrap_or(("", path));
+        relationships(parts.get(&format!("{base}/_rels/{name}.rels")), base)
+    };
     if let Some(size) = presentation.child("sldSz") {
         deck.width = size.number("cx", 12192000.0) / 12700.0;
         deck.height = size.number("cy", 6858000.0) / 12700.0;
@@ -283,7 +444,7 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
         let mut slide = Slide {
             id,
             title: format!("Слайд {}", index + 1),
-            hidden: xml.attr("show") == "0",
+            hidden: matches!(xml.attr("show"), "0" | "false"),
             ..Slide::default()
         };
         let named_title = xml
@@ -293,38 +454,150 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
         if let Some(title) = named_title {
             slide.title = title.into();
         }
-        slide.background = color(xml.descend("bg"), [255, 255, 255]);
-        let (base, name) = target.rsplit_once('/').ok_or("Некорректный путь слайда")?;
-        let slide_rels = relationships(parts.get(&format!("{base}/_rels/{name}.rels")), base)?;
+        if !target.contains('/') {
+            return Err("Некорректный путь слайда".into());
+        }
+        let slide_rels = rels_of(target.as_str())?;
+        // The layout and its master supply placeholder geometry, the background and the theme.
+        let mut chain = Vec::new();
+        if let Some(layout) = slide_rels.values().find(|p| p.contains("/slideLayouts/")) {
+            chain.push(layout.clone());
+            if let Some(master) = rels_of(layout.as_str())?
+                .values()
+                .find(|p| p.contains("/slideMasters/"))
+            {
+                chain.push(master.clone());
+            }
+        }
+        for path in &chain {
+            if !parsed.contains_key(path)
+                && let Some(bytes) = parts.get(path)
+            {
+                parsed.insert(path.clone(), parse(bytes)?);
+            }
+        }
+        let master = chain.get(1).cloned().unwrap_or_default();
+        if !master.is_empty() && !looks.contains_key(&master) {
+            let theme = rels_of(master.as_str())?
+                .values()
+                .find(|p| p.contains("/theme/"))
+                .and_then(|p| parts.get(p))
+                .map(|bytes| parse(bytes))
+                .transpose()?;
+            looks.insert(master.clone(), Look::read(theme.as_ref()));
+        }
+        let look = looks.get(&master).unwrap_or(&no_look);
+        let sources: Vec<&Node> = chain.iter().filter_map(|p| parsed.get(p)).collect();
+        if !themed && !look.colors.is_empty() {
+            themed = true;
+            for (name, slot) in [
+                ("dk1", &mut deck.theme.foreground),
+                ("lt1", &mut deck.theme.background),
+                ("accent1", &mut deck.theme.accent),
+            ] {
+                if let Some(rgb) = look.colors.get(name) {
+                    *slot = *rgb;
+                }
+            }
+            if !look.minor.is_empty() {
+                deck.theme.font.clone_from(&look.minor);
+            }
+        }
+        let background = std::iter::once(&xml)
+            .chain(sources.iter().copied())
+            .find_map(|n| n.child("cSld").and_then(|c| c.child("bg")));
+        slide.background = color(background, look, [255, 255, 255]);
+        let text_color = look.colors.get("tx1").copied().unwrap_or([31, 41, 55]);
+        let mut titled = false;
         if let Some(tree) = xml.descend("spTree") {
-            for shape in &tree.children {
+            let mut shapes = Vec::new();
+            let mut rotated_groups = false;
+            flatten(
+                tree,
+                [1.0, 1.0, 0.0, 0.0],
+                0,
+                &mut shapes,
+                &mut rotated_groups,
+            );
+            if rotated_groups {
+                deck.warnings.push(
+                    "Поворот групп PowerPoint не импортируется; объекты групп размещены без поворота"
+                        .into(),
+                );
+            }
+            for (shape, map) in shapes {
                 if !matches!(shape.name.as_str(), "sp" | "pic" | "cxnSp" | "graphicFrame") {
-                    if shape.name == "grpSp" {
-                        deck.warnings
-                            .push("Вложенные группы PowerPoint пока не импортируются".into());
-                    }
                     continue;
                 }
                 let mut element = Element {
                     id: deck.allocate_id(),
+                    color: text_color,
                     ..Element::default()
                 };
-                if let Some(transform) = shape.descend("xfrm") {
+                let own = shape
+                    .descend("xfrm")
+                    .filter(|n| n.child("off").is_some() || n.child("ext").is_some());
+                let mut flip = (false, false);
+                if let Some(transform) = own.or_else(|| inherited_xfrm(shape, &sources)) {
                     if let Some(offset) = transform.child("off") {
-                        element.x = offset.number("x", 0.0) / 12700.0;
-                        element.y = offset.number("y", 0.0) / 12700.0;
+                        element.x = (map[0] * offset.number("x", 0.0) + map[2]) / 12700.0;
+                        element.y = (map[1] * offset.number("y", 0.0) + map[3]) / 12700.0;
                     }
                     if let Some(size) = transform.child("ext") {
-                        element.w = (size.number("cx", 1270000.0) / 12700.0).max(1.0);
-                        element.h = (size.number("cy", 1270000.0) / 12700.0).max(1.0);
+                        element.w = (map[0] * size.number("cx", 1270000.0) / 12700.0).max(1.0);
+                        element.h = (map[1] * size.number("cy", 1270000.0) / 12700.0).max(1.0);
                     }
                     element.rotation = transform.number("rot", 0.0) / 60000.0;
+                    flip = (
+                        matches!(transform.attr("flipH"), "1" | "true"),
+                        matches!(transform.attr("flipV"), "1" | "true"),
+                    );
                 }
                 let props = shape.child("spPr");
-                element.fill = color(props.and_then(|n| n.child("solidFill")), element.fill);
-                element.stroke = color(props.and_then(|n| n.child("ln")), element.stroke);
-                if let Some(line) = props.and_then(|n| n.child("ln")) {
-                    element.stroke_width = line.number("w", 12700.0) / 12700.0;
+                let style = shape.child("style");
+                if matches!(shape.name.as_str(), "sp" | "cxnSp") {
+                    // Explicit shape properties win over the theme style references (p:style).
+                    let explicit = props.and_then(|n| {
+                        n.children.iter().find(|c| {
+                            matches!(
+                                c.name.as_str(),
+                                "solidFill" | "gradFill" | "pattFill" | "noFill"
+                            )
+                        })
+                    });
+                    let fill = match explicit {
+                        Some(n) if n.name == "noFill" => None,
+                        Some(n) => Some(n),
+                        None => style.and_then(|n| n.child("fillRef")),
+                    };
+                    element.fill = color(fill, look, element.fill);
+                    let line = props.and_then(|n| n.child("ln"));
+                    let line_ref = style
+                        .and_then(|n| n.child("lnRef"))
+                        .filter(|n| n.attr("idx") != "0");
+                    element.stroke = color(line.or(line_ref), look, element.stroke);
+                    element.stroke_width = match line {
+                        Some(line) if line.child("noFill").is_some() => 0.0,
+                        Some(line)
+                            if line.child("solidFill").is_none()
+                                && line.child("gradFill").is_none()
+                                && line_ref.is_none() =>
+                        {
+                            0.0
+                        }
+                        Some(line) => line.number("w", 12700.0) / 12700.0,
+                        None if line_ref.is_some() => 1.0,
+                        None => 0.0,
+                    }
+                    .clamp(0.0, 300.0);
+                } else {
+                    element.fill =
+                        color(props.and_then(|n| n.child("solidFill")), look, element.fill);
+                    element.stroke = color(props.and_then(|n| n.child("ln")), look, element.stroke);
+                    if let Some(line) = props.and_then(|n| n.child("ln")) {
+                        element.stroke_width =
+                            (line.number("w", 12700.0) / 12700.0).clamp(0.0, 300.0);
+                    }
                 }
                 if shape.name == "pic" {
                     let target = shape
@@ -388,25 +661,72 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
                         element.kind = ElementKind::Chart { values, labels };
                     }
                 } else {
-                    element.kind = match shape
-                        .descend("prstGeom")
-                        .map(|n| n.attr("prst"))
-                        .unwrap_or("")
-                    {
-                        "ellipse" => ElementKind::Ellipse,
-                        "line" => ElementKind::Line,
-                        "rightArrow" => ElementKind::Arrow,
-                        "rect" | "roundRect" => ElementKind::Rect,
+                    let geometry = shape.descend("prstGeom").map(|n| n.attr("prst"));
+                    element.kind = match geometry {
+                        _ if shape.name == "cxnSp" => ElementKind::Line,
+                        Some("ellipse" | "donut" | "flowChartConnector") => ElementKind::Ellipse,
+                        Some("line" | "straightConnector1") => ElementKind::Line,
+                        Some("rightArrow" | "leftArrow" | "upArrow" | "downArrow") => {
+                            ElementKind::Arrow
+                        }
+                        Some(
+                            "rect" | "roundRect" | "flowChartProcess" | "flowChartAlternateProcess",
+                        ) => ElementKind::Rect,
+                        Some(other) if !other.is_empty() => {
+                            approximated += 1;
+                            ElementKind::Rect
+                        }
+                        None if shape.descend("custGeom").is_some() => {
+                            approximated += 1;
+                            ElementKind::Rect
+                        }
                         _ => ElementKind::Text,
                     };
-                    if matches!(element.kind, ElementKind::Line)
-                        && props
+                    // Block arrows become a line arrow through the middle of their frame.
+                    match geometry {
+                        Some("rightArrow" | "leftArrow") => {
+                            element.y += element.h / 2.0;
+                            element.h = 1.0;
+                            if geometry == Some("leftArrow") {
+                                element.rotation += 180.0;
+                            }
+                        }
+                        Some("upArrow" | "downArrow") => {
+                            element.x += element.w / 2.0;
+                            element.w = 1.0;
+                            if geometry == Some("upArrow") {
+                                element.rotation += 180.0;
+                            }
+                        }
+                        _ => {}
+                    }
+                    let arrow_end = |end: &str| {
+                        props
                             .and_then(|n| n.child("ln"))
-                            .and_then(|n| n.child("tailEnd"))
+                            .and_then(|n| n.child(end))
                             .is_some_and(|n| n.attr("type") != "none" && !n.attr("type").is_empty())
+                    };
+                    if matches!(element.kind, ElementKind::Line)
+                        && (arrow_end("tailEnd") || arrow_end("headEnd"))
                     {
                         element.kind = ElementKind::Arrow;
+                        if !arrow_end("tailEnd") {
+                            // Only the start has an arrowhead: the arrow points backwards.
+                            flip = (!flip.0, !flip.1);
+                        }
                     }
+                    // A flipped line runs along the other diagonal; the model expresses that as a
+                    // rotation of the top-left → bottom-right diagonal around the frame centre.
+                    if matches!(element.kind, ElementKind::Line | ElementKind::Arrow)
+                        && (flip.0 || flip.1)
+                    {
+                        let sx = if flip.0 { -1.0 } else { 1.0 };
+                        let sy = if flip.1 { -1.0 } else { 1.0 };
+                        let turn =
+                            (element.h * sy).atan2(element.w * sx) - element.h.atan2(element.w);
+                        element.rotation += turn.to_degrees();
+                    }
+                    element.rotation = element.rotation.rem_euclid(360.0);
                     if !matches!(element.kind, ElementKind::Line | ElementKind::Arrow)
                         && props.and_then(|n| n.child("noFill")).is_some()
                         && shape.child("txBody").is_some()
@@ -422,34 +742,69 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
                         .map(Node::text_content)
                         .collect::<Vec<_>>()
                         .join("\n");
-                    if let Some(props) = body.descend("rPr").or_else(|| body.descend("defRPr")) {
-                        element.font_size = (props.number("sz", 2800.0) / 100.0).max(1.0);
-                        element.bold = props.attr("b") == "1";
-                        element.italic = props.attr("i") == "1";
-                        element.color = color(Some(props), element.color);
-                        if let Some(latin) = props.descend("latin") {
-                            let face = latin.attr("typeface").trim();
-                            if !face.is_empty() && !face.starts_with('+') && face.len() <= 64 {
-                                element.font = face.into();
-                            }
-                        }
+                    let class = placeholder(shape).map(|(t, _)| placeholder_class(t));
+                    let is_title = class == Some("title");
+                    // PowerPoint defaults: title placeholder 44 pt, other placeholders 28 pt,
+                    // ordinary text boxes 18 pt.
+                    let default_size = match class {
+                        Some("title") => 44.0,
+                        Some(_) => 28.0,
+                        None => 18.0,
+                    };
+                    let props = body.descend("rPr").or_else(|| body.descend("defRPr"));
+                    element.font_size = props
+                        .map_or(default_size, |p| {
+                            p.number("sz", default_size * 100.0) / 100.0
+                        })
+                        .clamp(1.0, 300.0);
+                    if let Some(props) = props {
+                        element.bold = matches!(props.attr("b"), "1" | "true");
+                        element.italic = matches!(props.attr("i"), "1" | "true");
+                    }
+                    let text_fill = props
+                        .and_then(|p| p.child("solidFill"))
+                        .or_else(|| style.and_then(|n| n.child("fontRef")));
+                    element.color = color(text_fill, look, element.color);
+                    let theme_face = if is_title { &look.major } else { &look.minor };
+                    if let Some(face) = props
+                        .and_then(|p| p.child("latin"))
+                        .and_then(|latin| look.font(latin.attr("typeface")))
+                        .or_else(|| (!theme_face.is_empty()).then(|| theme_face.clone()))
+                    {
+                        element.font = face;
                     }
                     if named_title.is_none()
-                        && slide.elements.is_empty()
                         && !element.text.is_empty()
+                        && (is_title || (!titled && slide.elements.is_empty()))
                     {
                         slide.title = element.text.lines().next().unwrap_or("").into();
+                        titled |= is_title;
                     }
                 }
                 slide.elements.push(element);
             }
         }
-        if let Some(transition) = xml.child("transition") {
+        // PowerPoint 2010+ wraps transitions in mc:AlternateContent; the fallback holds the
+        // classic effect, the p14 choice the exact duration.
+        let alternate = xml
+            .children
+            .iter()
+            .find(|n| n.name == "AlternateContent" && n.descend("transition").is_some());
+        let choice = alternate
+            .and_then(|n| n.child("Choice"))
+            .and_then(|n| n.child("transition"));
+        let fallback = alternate
+            .and_then(|n| n.child("Fallback"))
+            .and_then(|n| n.child("transition"));
+        if let Some(transition) = xml.child("transition").or(fallback).or(choice) {
             slide.transition.effect = transition
                 .children
-                .first()
-                .map(|n| n.name.clone())
-                .unwrap_or_else(|| "none".into());
+                .iter()
+                .map(|n| n.name.as_str())
+                .find(|name| !matches!(*name, "sndAc" | "extLst"))
+                .map(|name| if name == "cut" { "none" } else { name })
+                .unwrap_or("none")
+                .to_string();
             if !matches!(
                 slide.transition.effect.as_str(),
                 "none" | "fade" | "push" | "wipe"
@@ -460,20 +815,38 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
                 ));
                 slide.transition.effect = "none".into();
             }
-            slide.transition.duration = match transition.attr("spd") {
-                "slow" => 1.0,
-                "fast" => 0.25,
+            let exact = [Some(transition), choice]
+                .into_iter()
+                .flatten()
+                .find_map(|n| n.attr("dur").parse::<f32>().ok())
+                .filter(|ms| ms.is_finite() && *ms > 0.0);
+            slide.transition.duration = match (exact, transition.attr("spd")) {
+                (Some(ms), _) => (ms / 1000.0).clamp(0.01, 3600.0),
+                (None, "slow") => 1.0,
+                (None, "fast") => 0.25,
                 _ => 0.5,
             };
             slide.transition.advance_after = transition
                 .attr("advTm")
                 .parse::<f32>()
                 .ok()
-                .map(|v| v / 1000.0);
+                .filter(|v| v.is_finite() && *v > 0.0)
+                .map(|v| (v / 1000.0).clamp(0.001, 86400.0));
         }
         for path in slide_rels.values().filter(|p| p.contains("/notesSlides/")) {
             if let Some(bytes) = parts.get(path) {
-                slide.notes = parse(bytes)?.paragraph_text();
+                // Only the notes body: the slide image and the slide number placeholders are
+                // not part of the speaker notes.
+                let notes = parse(bytes)?;
+                let mut shapes = Vec::new();
+                notes.all("sp", &mut shapes);
+                slide.notes = shapes
+                    .iter()
+                    .filter(|s| placeholder(s).is_some_and(|(t, _)| t == "body"))
+                    .filter_map(|s| s.child("txBody"))
+                    .map(|body| body.paragraph_text())
+                    .collect::<Vec<_>>()
+                    .join("\n");
             }
         }
         if xml.child("timing").is_some() {
@@ -481,6 +854,11 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
                 .push("Внешние анимации PowerPoint не воспроизводятся; timing не сохранён".into());
         }
         deck.slides.push(slide);
+    }
+    if approximated > 0 {
+        deck.warnings.push(format!(
+            "Фигуры PowerPoint без аналога заменены прямоугольниками: {approximated}"
+        ));
     }
     deck.warnings.push("Импорт внешнего PPTX: часть стилей, мастеров, групп и эффектов может быть потеряна. Сохраняйте копию.".into());
     deck.validate()?;
@@ -543,8 +921,14 @@ fn xfrm(e: &Element, prefix: &str) -> String {
 }
 fn text_body(e: &Element) -> String {
     let paragraphs = e.text.split('\n').map(|line| format!("<a:p><a:r><a:rPr lang=\"ru-RU\" sz=\"{}\" b=\"{}\" i=\"{}\"><a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill><a:latin typeface=\"{}\"/></a:rPr><a:t xml:space=\"preserve\">{}</a:t></a:r><a:endParaRPr lang=\"ru-RU\"/></a:p>", (e.font_size * 100.0) as u32, u8::from(e.bold), u8::from(e.italic), hex(e.color), xml_escape(&e.font), xml_escape(line))).collect::<String>();
+    // Only text boxes grow with their text; shapes keep the frame the user drew.
+    let fit = if matches!(e.kind, ElementKind::Text) {
+        "<a:spAutoFit/>"
+    } else {
+        ""
+    };
     format!(
-        "<p:txBody><a:bodyPr wrap=\"square\"><a:spAutoFit/></a:bodyPr><a:lstStyle/>{paragraphs}</p:txBody>"
+        "<p:txBody><a:bodyPr wrap=\"square\">{fit}</a:bodyPr><a:lstStyle/>{paragraphs}</p:txBody>"
     )
 }
 fn shape_xml(e: &Element, id: usize) -> String {
@@ -565,7 +949,8 @@ fn shape_xml(e: &Element, id: usize) -> String {
             hex(e.fill)
         )
     };
-    let line = if matches!(e.kind, ElementKind::Text) {
+    // A zero width outline is "no line": PowerPoint draws w="0" as a hairline.
+    let line = if matches!(e.kind, ElementKind::Text) || e.stroke_width <= 0.0 {
         "<a:ln><a:noFill/></a:ln>".into()
     } else {
         format!(
@@ -594,7 +979,35 @@ fn table_xml(e: &Element, id: usize, cells: &[Vec<String>]) -> String {
     let grid = (0..cols)
         .map(|_| format!("<a:gridCol w=\"{}\"/>", emu(e.w / cols as f32)))
         .collect::<String>();
-    let rows = cells.iter().map(|row| { let values = (0..cols).map(|col| format!("<a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz=\"{}\"/><a:t>{}</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc>", (e.font_size * 100.0) as u32, xml_escape(row.get(col).map(String::as_str).unwrap_or("")))).collect::<String>(); format!("<a:tr h=\"{}\">{values}</a:tr>", emu(e.h / cells.len().max(1) as f32)) }).collect::<String>();
+    // Each line of a cell is its own paragraph, as PowerPoint stores it.
+    let paragraphs = |text: &str| {
+        text.split('\n')
+            .map(|line| {
+                format!(
+                    "<a:p><a:r><a:rPr lang=\"ru-RU\" sz=\"{}\"/><a:t xml:space=\"preserve\">{}</a:t></a:r></a:p>",
+                    (e.font_size * 100.0) as u32,
+                    xml_escape(line.trim_end_matches('\r'))
+                )
+            })
+            .collect::<String>()
+    };
+    let rows = cells
+        .iter()
+        .map(|row| {
+            let values = (0..cols)
+                .map(|col| {
+                    format!(
+                        "<a:tc><a:txBody><a:bodyPr/><a:lstStyle/>{}</a:txBody><a:tcPr/></a:tc>",
+                        paragraphs(row.get(col).map(String::as_str).unwrap_or(""))
+                    )
+                })
+                .collect::<String>();
+            format!(
+                "<a:tr h=\"{}\">{values}</a:tr>",
+                emu(e.h / cells.len().max(1) as f32)
+            )
+        })
+        .collect::<String>();
     format!(
         "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"{id}\" name=\"Table {id}\"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>{}<a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/table\"><a:tbl><a:tblPr firstRow=\"1\" bandRow=\"1\"/><a:tblGrid>{grid}</a:tblGrid>{rows}</a:tbl></a:graphicData></a:graphic></p:graphicFrame>",
         xfrm(e, "p")
@@ -1047,6 +1460,133 @@ mod tests {
         let imported = read(&write_zip(parts.into_iter().collect())?, "pptx")?;
         assert!(imported.warnings.iter().any(|s| s.contains("изображение")));
         assert!(imported.validate().is_ok());
+        Ok(())
+    }
+    const NS: &str = "xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"";
+    fn rels(entries: &[(&str, &str)]) -> Vec<u8> {
+        let body = entries
+            .iter()
+            .map(|(id, target)| {
+                format!("<Relationship Id=\"{id}\" Type=\"x\" Target=\"{target}\"/>")
+            })
+            .collect::<String>();
+        format!("<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">{body}</Relationships>").into_bytes()
+    }
+    /// A PowerPoint-like package: slide → layout → master → theme, plus a notes page.
+    fn external_deck(slide: &str) -> Result<Deck, String> {
+        let part = |path: &str, xml: String| (path.to_string(), xml.into_bytes());
+        let parts = vec![
+            part("ppt/presentation.xml", format!("<p:presentation {NS}><p:sldIdLst><p:sldId id=\"256\" r:id=\"rId1\"/></p:sldIdLst><p:sldSz cx=\"12192000\" cy=\"6858000\"/></p:presentation>")),
+            ("ppt/_rels/presentation.xml.rels".into(), rels(&[("rId1", "slides/slide1.xml")])),
+            part("ppt/slides/slide1.xml", slide.to_string()),
+            ("ppt/slides/_rels/slide1.xml.rels".into(), rels(&[("rId1", "../slideLayouts/slideLayout1.xml"), ("rId2", "../notesSlides/notesSlide1.xml")])),
+            part("ppt/slideLayouts/slideLayout1.xml", format!("<p:sldLayout {NS}><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"T\"/><p:cNvSpPr/><p:nvPr><p:ph type=\"title\"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"1270000\" y=\"635000\"/><a:ext cx=\"10160000\" cy=\"1270000\"/></a:xfrm></p:spPr></p:sp></p:spTree></p:cSld></p:sldLayout>")),
+            ("ppt/slideLayouts/_rels/slideLayout1.xml.rels".into(), rels(&[("rId1", "../slideMasters/slideMaster1.xml")])),
+            part("ppt/slideMasters/slideMaster1.xml", format!("<p:sldMaster {NS}><p:cSld><p:bg><p:bgPr><a:solidFill><a:schemeClr val=\"bg2\"/></a:solidFill></p:bgPr></p:bg><p:spTree><p:sp><p:nvSpPr><p:cNvPr id=\"3\" name=\"B\"/><p:cNvSpPr/><p:nvPr><p:ph type=\"body\" idx=\"1\"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"1270000\" y=\"2540000\"/><a:ext cx=\"10160000\" cy=\"3810000\"/></a:xfrm></p:spPr></p:sp></p:spTree></p:cSld></p:sldMaster>")),
+            ("ppt/slideMasters/_rels/slideMaster1.xml.rels".into(), rels(&[("rId1", "../theme/theme1.xml")])),
+            part("ppt/theme/theme1.xml", "<a:theme xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"><a:themeElements><a:clrScheme name=\"T\"><a:dk1><a:sysClr val=\"windowText\" lastClr=\"000000\"/></a:dk1><a:lt1><a:sysClr val=\"window\" lastClr=\"FFFFFF\"/></a:lt1><a:dk2><a:srgbClr val=\"1F497D\"/></a:dk2><a:lt2><a:srgbClr val=\"EEECE1\"/></a:lt2><a:accent1><a:srgbClr val=\"4F81BD\"/></a:accent1></a:clrScheme><a:fontScheme name=\"T\"><a:majorFont><a:latin typeface=\"Georgia\"/></a:majorFont><a:minorFont><a:latin typeface=\"Verdana\"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>".into()),
+            part("ppt/notesSlides/notesSlide1.xml", format!("<p:notes {NS}><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"N\"/><p:cNvSpPr/><p:nvPr><p:ph type=\"sldNum\" idx=\"5\"/></p:nvPr></p:nvSpPr><p:txBody><a:p><a:fld type=\"slidenum\"><a:t>1</a:t></a:fld></a:p></p:txBody></p:sp><p:sp><p:nvSpPr><p:cNvPr id=\"3\" name=\"Body\"/><p:cNvSpPr/><p:nvPr><p:ph type=\"body\" idx=\"1\"/></p:nvPr></p:nvSpPr><p:txBody><a:p><a:r><a:t>Говорить медленно</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:notes>")),
+        ];
+        read(&write_zip(parts)?, "pptx")
+    }
+    #[test]
+    fn external_pptx_inherits_layout_master_and_theme() -> Result<(), String> {
+        let slide = format!(
+            "<p:sld {NS} show=\"false\"><p:cSld><p:spTree><p:nvGrpSpPr/><p:grpSpPr/>\
+             <p:sp><p:nvSpPr><p:cNvPr id=\"3\" name=\"TB\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"1270000\" cy=\"254000\"/></a:xfrm><a:prstGeom prst=\"rect\"/><a:noFill/></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:t>Подпись</a:t></a:r></a:p></p:txBody></p:sp>\
+             <p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"Title\"/><p:cNvSpPr/><p:nvPr><p:ph type=\"title\"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:p><a:r><a:t>Квартальный отчёт</a:t></a:r></a:p></p:txBody></p:sp>\
+             </p:spTree></p:cSld></p:sld>"
+        );
+        let deck = external_deck(&slide)?;
+        let slide = deck.slides.first().ok_or("slide")?;
+        assert!(slide.hidden);
+        assert_eq!(slide.title, "Квартальный отчёт");
+        assert_eq!(slide.background, [238, 236, 225]);
+        assert_eq!(slide.notes, "Говорить медленно");
+        assert_eq!(deck.theme.font, "Verdana");
+        assert_eq!(deck.theme.accent, [79, 129, 189]);
+        let caption = slide.elements.first().ok_or("caption")?;
+        assert!(matches!(caption.kind, ElementKind::Text));
+        assert_eq!(
+            (caption.font.as_str(), caption.font_size),
+            ("Verdana", 18.0)
+        );
+        let title = slide.elements.get(1).ok_or("title")?;
+        assert_eq!(
+            (title.x, title.y, title.w, title.h),
+            (100.0, 50.0, 800.0, 100.0)
+        );
+        assert_eq!((title.font.as_str(), title.font_size), ("Georgia", 44.0));
+        assert_eq!(title.color, [0, 0, 0]);
+        Ok(())
+    }
+    #[test]
+    fn external_pptx_groups_flips_outline_and_transition() -> Result<(), String> {
+        let slide = format!(
+            "<p:sld {NS}><p:cSld><p:spTree><p:nvGrpSpPr/><p:grpSpPr/>\
+             <p:grpSp><p:nvGrpSpPr><p:cNvPr id=\"4\" name=\"G\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x=\"1270000\" y=\"1270000\"/><a:ext cx=\"2540000\" cy=\"2540000\"/><a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"1270000\" cy=\"1270000\"/></a:xfrm></p:grpSpPr>\
+             <p:sp><p:nvSpPr><p:cNvPr id=\"5\" name=\"R\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"635000\" y=\"0\"/><a:ext cx=\"635000\" cy=\"635000\"/></a:xfrm><a:prstGeom prst=\"rect\"/><a:solidFill><a:schemeClr val=\"accent1\"/></a:solidFill><a:ln w=\"25400\"><a:noFill/></a:ln></p:spPr></p:sp></p:grpSp>\
+             <p:cxnSp><p:nvCxnSpPr><p:cNvPr id=\"6\" name=\"L\"/><p:cNvCxnSpPr/><p:nvPr/></p:nvCxnSpPr><p:spPr><a:xfrm flipH=\"1\"><a:off x=\"0\" y=\"0\"/><a:ext cx=\"1270000\" cy=\"1270000\"/></a:xfrm><a:prstGeom prst=\"line\"/><a:ln w=\"12700\"><a:solidFill><a:srgbClr val=\"FF0000\"/></a:solidFill></a:ln></p:spPr></p:cxnSp>\
+             </p:spTree></p:cSld>\
+             <mc:AlternateContent xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" xmlns:p14=\"http://schemas.microsoft.com/office/powerpoint/2010/main\"><mc:Choice Requires=\"p14\"><p:transition spd=\"slow\" p14:dur=\"1200\"><p14:prism/></p:transition></mc:Choice><mc:Fallback><p:transition spd=\"slow\"><p:fade/></p:transition></mc:Fallback></mc:AlternateContent></p:sld>"
+        );
+        let deck = external_deck(&slide)?;
+        assert!(!deck.warnings.iter().any(|w| w.contains("Поворот групп")));
+        let slide = deck.slides.first().ok_or("slide")?;
+        let rect = slide.elements.first().ok_or("rect")?;
+        assert!(matches!(rect.kind, ElementKind::Rect));
+        assert_eq!(
+            (rect.x, rect.y, rect.w, rect.h),
+            (200.0, 100.0, 100.0, 100.0)
+        );
+        assert_eq!(rect.fill, [79, 129, 189]);
+        assert_eq!(rect.stroke_width, 0.0);
+        let line = slide.elements.get(1).ok_or("line")?;
+        assert!(matches!(line.kind, ElementKind::Line));
+        let [x1, y1, x2, y2] = super::super::model::line_points(line);
+        assert!((x1 - 100.0).abs() < 0.01 && y1.abs() < 0.01, "{x1} {y1}");
+        assert!(x2.abs() < 0.01 && (y2 - 100.0).abs() < 0.01, "{x2} {y2}");
+        assert_eq!(line.stroke, [255, 0, 0]);
+        assert_eq!(slide.transition.effect, "fade");
+        assert!((slide.transition.duration - 1.2).abs() < 0.001);
+        Ok(())
+    }
+    #[test]
+    fn pptx_export_no_outline_and_multiline_cells_roundtrip() -> Result<(), String> {
+        let mut deck = Deck::default();
+        let id = deck.add_slide("blank");
+        let rect = deck.add_element(id, ElementKind::Rect)?;
+        deck.add_element(
+            id,
+            ElementKind::Table {
+                cells: vec![vec!["Строка 1\nСтрока 2".into(), "B".into()]],
+            },
+        )?;
+        if let Some(e) = deck
+            .slide_mut(id)
+            .and_then(|s| s.elements.iter_mut().find(|e| e.id == rect))
+        {
+            e.stroke_width = 0.0;
+        }
+        let mut parts = read_zip(&write(&deck, "pptx")?)?;
+        let slide_xml =
+            String::from_utf8(parts.get("ppt/slides/slide2.xml").ok_or("slide")?.clone())
+                .map_err(|e| e.to_string())?;
+        assert!(!slide_xml.contains("<a:ln w=\"0\""));
+        assert!(slide_xml.contains("<a:t xml:space=\"preserve\">Строка 2</a:t>"));
+        parts.remove("customXml/trinedocs-deck.json");
+        let imported = read(&write_zip(parts.into_iter().collect())?, "pptx")?;
+        let slide = imported.slides.get(1).ok_or("slide")?;
+        let rect = slide
+            .elements
+            .iter()
+            .find(|e| matches!(e.kind, ElementKind::Rect))
+            .ok_or("rect")?;
+        assert_eq!(rect.stroke_width, 0.0);
+        assert!(slide.elements.iter().any(|e| matches!(
+            &e.kind,
+            ElementKind::Table { cells } if cells.first().and_then(|r| r.first()).map(String::as_str) == Some("Строка 1\nСтрока 2")
+        )));
         Ok(())
     }
 }

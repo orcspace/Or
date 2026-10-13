@@ -1372,11 +1372,15 @@ impl<'a> Engine<'a> {
                 }
                 let scale = 10f64.powf(digits);
                 let x = n(0)? * scale;
+                // Like Excel, 2.675 rounds to 2.68 although its binary value is below the tie.
                 num(match name {
-                    "ROUND" => x.round() / scale,
-                    "ROUNDUP" => x.signum() * x.abs().ceil() / scale,
-                    _ => x.trunc() / scale,
-                })
+                    "ROUND" => super::format::round_scaled(x),
+                    "ROUNDUP" => {
+                        let x = super::format::snap(x);
+                        x.signum() * x.abs().ceil()
+                    }
+                    _ => super::format::snap(x).trunc(),
+                } / scale)
             }
             "MOD" | "POWER" | "LOG" | "ATAN2" | "QUOTIENT" | "MROUND" | "CEILING"
             | "CEILING.MATH" | "CEILING.PRECISE" | "FLOOR" | "FLOOR.MATH" | "FLOOR.PRECISE" => {
@@ -1423,7 +1427,7 @@ impl<'a> Engine<'a> {
                         } else if y == 0.0 {
                             num(0.0)
                         } else {
-                            num((x / y).round() * y)
+                            num(super::format::round_scaled(x / y) * y)
                         }
                     }
                     _ => {
@@ -1431,7 +1435,7 @@ impl<'a> Engine<'a> {
                             return num(0.0);
                         }
                         let sig = y.abs();
-                        let ratio = x / sig;
+                        let ratio = super::format::snap(x / sig);
                         let away = default_n(2, 0.0)? != 0.0 && x < 0.0;
                         num(if name.starts_with("CEILING") {
                             if away {
@@ -1773,7 +1777,13 @@ impl<'a> Engine<'a> {
                     let group = a.get(2).map(Grid::text).unwrap_or(",".into());
                     s = s.replace(&group, "").replace(&decimal, ".");
                 } else {
-                    s = s.replace(' ', "").replace(',', ".");
+                    s = s.replace([' ', '\u{a0}'], "");
+                    // With both separators the later one is the decimal mark: 1,000.5 / 1.000,5.
+                    s = match (s.rfind(','), s.rfind('.')) {
+                        (Some(comma), Some(dot)) if dot > comma => s.replace(',', ""),
+                        (Some(_), Some(_)) => s.replace('.', "").replace(',', "."),
+                        _ => s.replace(',', "."),
+                    };
                 }
                 num(s.parse::<f64>().map_err(|_| "#VALUE!")? / divisor)
             }
@@ -1806,8 +1816,12 @@ impl<'a> Engine<'a> {
             }
             "INDEX" => {
                 arity(2, 3)?;
-                let r = n(1)?.trunc();
-                let c = default_n(2, 1.0)?.trunc();
+                let mut r = n(1)?.trunc();
+                let mut c = default_n(2, 1.0)?.trunc();
+                // In a single row the only index counts columns: INDEX(A1:C1,2) is B1.
+                if a.len() == 2 && a[0].rows == 1 {
+                    (r, c) = (1.0, r);
+                }
                 if r < 1.0 || c < 1.0 {
                     return Err("#REF!".into());
                 }
@@ -2349,6 +2363,7 @@ fn compare(a: &Value, b: &Value) -> std::cmp::Ordering {
         (Value::Empty, Value::Text(b)) => String::new().cmp(&b.to_lowercase()),
         (Value::Text(a), Value::Empty) => a.to_lowercase().cmp(&String::new()),
         (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
+        (Value::Error(a), Value::Error(b)) => a.cmp(b),
         (Value::Empty, Value::Empty) => std::cmp::Ordering::Equal,
         _ => {
             let kind = |v: &Value| match v {
@@ -2416,6 +2431,19 @@ fn criterion(value: &Value, criteria: &Value) -> bool {
         return if op == "=" { empty } else { !empty };
     }
     let target = literal(rest);
+    // A criterion only matches values of its own kind: ">5" skips text and blanks, while
+    // numbers stored as text still count as numbers.
+    let coerced;
+    let value = match (&target, value) {
+        (Value::Number(_), Value::Text(s)) => {
+            coerced = literal(s);
+            &coerced
+        }
+        _ => value,
+    };
+    if std::mem::discriminant(value) != std::mem::discriminant(&target) {
+        return op == "<>";
+    }
     if matches!(op, "=" | "<>") && matches!(target, Value::Text(_)) {
         let matches = wildcard(
             &rest.to_lowercase().chars().collect::<Vec<_>>(),

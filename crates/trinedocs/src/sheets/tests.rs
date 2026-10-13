@@ -108,6 +108,10 @@ fn numeric_formula_corpus() -> Result<(), String> {
         ("=EVEN(3)", 4.0),
         ("=ODD(4)", 5.0),
         ("=ROUND(1.235,2)", 1.24),
+        ("=ROUND(2.675,2)", 2.68),
+        ("=ROUNDUP(0.1+0.2,1)", 0.3),
+        ("=FLOOR(0.3,0.1)", 0.3),
+        ("=MROUND(0.15,0.1)", 0.2),
         ("=ROUNDUP(-1.231,2)", -1.24),
         ("=ROUNDDOWN(-1.239,2)", -1.23),
         ("=TRUNC(-1.9)", -1.0),
@@ -149,6 +153,9 @@ fn numeric_formula_corpus() -> Result<(), String> {
         ("=ROW(A2)", 2.0),
         ("=COLUMN(B2)", 2.0),
         ("=INDEX(A1:C3,2,3)", 20.0),
+        ("=INDEX(D1:F1,2)", 20.0),
+        ("=VALUE(\"1,000.5\")", 1000.5),
+        ("=VALUE(\"1.000,5\")", 1000.5),
         ("=MATCH(2,A1:A3,0)", 2.0),
         ("=XMATCH(2,A1:A3)", 2.0),
         ("=VLOOKUP(2,A1:C3,3,FALSE)", 20.0),
@@ -210,6 +217,8 @@ fn text_boolean_and_errors() -> Result<(), String> {
     let text = &[
         ("=\"a\"&\"b\"", "ab"),
         ("=CONCAT(\"a\",\"b\")", "ab"),
+        ("=0.1+0.2&\"\"", "0.3"),
+        ("=TEXT(2.5,\"0\")", "3"),
         ("=CONCATENATE(\"a\",\"b\")", "ab"),
         ("=TEXTJOIN(\"-\",TRUE,\"a\",\"\",\"b\")", "a-b"),
         ("=LOWER(\"ABCЁ\")", "abcё"),
@@ -444,6 +453,39 @@ fn compare_types_and_empty_criteria() -> Result<(), String> {
         formula::evaluate(&b, id, "=COUNTIF(A1:A3,\"<>\")"),
         Value::Number(1.0)
     );
+    Ok(())
+}
+
+#[test]
+fn criteria_skip_other_kinds_of_values() -> Result<(), String> {
+    let mut b = Book::default();
+    let id = b.active_id();
+    // 7, text, a number stored as text, a blank and 3.
+    b.set_range(
+        id,
+        0,
+        0,
+        &[
+            vec!["7".into()],
+            vec!["abc".into()],
+            vec!["'9".into()],
+            vec!["".into()],
+            vec!["3".into()],
+        ],
+    )?;
+    for (input, expected) in [
+        ("=COUNTIF(A1:A5,\">5\")", 2.0),
+        ("=COUNTIF(A1:A5,\"<5\")", 1.0),
+        ("=COUNTIF(A1:A5,\"<>7\")", 4.0),
+        ("=COUNTIF(A1:A5,\">a\")", 1.0),
+        ("=SUMIF(A1:A5,\"<5\")", 3.0),
+    ] {
+        assert_eq!(
+            formula::evaluate(&b, id, input),
+            Value::Number(expected),
+            "{input}"
+        );
+    }
     Ok(())
 }
 

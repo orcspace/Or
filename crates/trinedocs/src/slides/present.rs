@@ -15,6 +15,8 @@ pub struct Presentation {
     pointer: bool,
     notes: bool,
     blank: u8,
+    /// The black "end of slide show" screen after the last slide.
+    ended: bool,
     strokes: Vec<Vec<Pos2>>,
 }
 impl Presentation {
@@ -46,6 +48,7 @@ impl Presentation {
         self.click_times.clear();
         self.strokes.clear();
         self.blank = 0;
+        self.ended = false;
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
         ctx.request_repaint();
     }
@@ -58,18 +61,34 @@ impl Presentation {
         self.click_times.clear();
         self.strokes.clear();
         self.blank = 0;
+        self.ended = false;
     }
-    fn next(&mut self, deck: &Deck, time: f64) {
-        let count = deck
-            .slides
-            .get(self.index)
+    fn click_steps(deck: &Deck, index: usize) -> usize {
+        deck.slides
+            .get(index)
             .map(|s| {
                 s.elements
                     .iter()
                     .filter(|e| e.animation.effect != "none" && e.animation.trigger == "on_click")
                     .count()
             })
-            .unwrap_or(0);
+            .unwrap_or(0)
+    }
+    fn finish(&mut self) {
+        self.ended = true;
+        self.blank = 1;
+    }
+    fn next(&mut self, deck: &Deck, time: f64) {
+        if self.ended {
+            self.active = false;
+            return;
+        }
+        if self.blank != 0 {
+            // B / W blanking: the first advance only brings the slide back.
+            self.blank = 0;
+            return;
+        }
+        let count = Self::click_steps(deck, self.index);
         if self.clicks < count {
             self.clicks += 1;
             self.click_times.push((time - self.slide_started) as f32);
@@ -85,10 +104,22 @@ impl Presentation {
         {
             self.move_to(deck, index, time);
         } else {
-            self.blank = 1;
+            self.finish();
         }
     }
     fn previous(&mut self, deck: &Deck, time: f64) {
+        if self.ended || self.blank != 0 {
+            // Back from the end screen (or a blanked screen) shows the slide again.
+            self.ended = false;
+            self.blank = 0;
+            return;
+        }
+        if self.clicks > 0 {
+            // Like PowerPoint, "back" first undoes the last on-click animation step.
+            self.clicks -= 1;
+            self.click_times.pop();
+            return;
+        }
         if let Some(index) = deck
             .slides
             .iter()
@@ -99,6 +130,9 @@ impl Presentation {
             .map(|(i, _)| i)
         {
             self.move_to(deck, index, time);
+            // The previous slide comes back fully built, with its animations already shown.
+            self.clicks = Self::click_steps(deck, index);
+            self.click_times = vec![-1.0e6; self.clicks];
         }
     }
 }
@@ -184,6 +218,15 @@ pub fn show(ui: &mut egui::Ui, deck: &Deck, state: &mut Presentation) {
                             Color32::BLACK
                         },
                     );
+                    if state.ended {
+                        painter.text(
+                            outer.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "Конец показа слайдов. Щёлкните, чтобы выйти.",
+                            egui::FontId::proportional(22.0),
+                            Color32::from_gray(200),
+                        );
+                    }
                 } else {
                     if progress < 1.0
                         && let Some(previous) = state.previous.and_then(|id| deck.slide(id))
@@ -252,7 +295,7 @@ pub fn show(ui: &mut egui::Ui, deck: &Deck, state: &mut Presentation) {
                         {
                             state.move_to(deck, index, time);
                         } else {
-                            state.blank = 1;
+                            state.finish();
                         }
                     }
                     for points in &state.strokes {
@@ -341,6 +384,10 @@ pub fn show(ui: &mut egui::Ui, deck: &Deck, state: &mut Presentation) {
                 ui.small("Второй монитор: пока не поддерживается");
             });
     }
+    if !state.active {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        return;
+    }
     ctx.request_repaint();
 }
 #[cfg(test)]
@@ -377,6 +424,38 @@ mod tests {
         assert_eq!(state.clicks, 1);
         state.next(&deck, 2.0);
         assert_eq!(state.index, 1);
+        // Back returns to the first slide fully built; a second back undoes the click step.
+        state.previous(&deck, 3.0);
+        assert_eq!((state.index, state.clicks), (0, 1));
+        state.previous(&deck, 4.0);
+        assert_eq!((state.index, state.clicks), (0, 0));
+    }
+    #[test]
+    fn end_screen_then_exit_and_back() {
+        let deck = Deck::default();
+        let mut state = Presentation {
+            active: true,
+            ..Presentation::default()
+        };
+        state.next(&deck, 1.0);
+        assert!(state.ended && state.active && state.blank == 1);
+        state.previous(&deck, 2.0);
+        assert!(!state.ended && state.blank == 0 && state.index == 0);
+        state.next(&deck, 3.0);
+        state.next(&deck, 4.0);
+        assert!(!state.active);
+    }
+    #[test]
+    fn blanked_screen_advance_only_unblanks() {
+        let mut deck = Deck::default();
+        deck.add_slide("blank");
+        let mut state = Presentation {
+            active: true,
+            blank: 2,
+            ..Presentation::default()
+        };
+        state.next(&deck, 1.0);
+        assert_eq!((state.index, state.blank), (0, 0));
     }
     #[test]
     fn empty_hidden_presentations_do_not_start() {

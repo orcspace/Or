@@ -990,16 +990,26 @@ fn read_section(
             let n = xml(bytes)?;
             let mut depth = 0usize;
             let mut text = String::new();
-            fn visible_header(n: &Node, depth: &mut usize, out: &mut String) {
+            fn visible_header(
+                n: &Node,
+                depth: &mut usize,
+                gap: &mut &'static str,
+                out: &mut String,
+            ) {
                 if matches!(
                     n.name.as_str(),
                     "fldSimple" | "del" | "moveFrom" | "pPr" | "rPr"
                 ) {
                     return;
                 }
-                // Paragraphs and tabs keep words apart on the single header line.
+                // Paragraphs and tabs keep words apart on the single header line; the gap is
+                // written only before following text, so author spaces survive a round trip.
                 if (n.name == "p" || n.name == "tab") && !out.is_empty() && !out.ends_with(' ') {
-                    out.push_str(if n.name == "tab" { "    " } else { "  " });
+                    *gap = if n.name == "tab" || *gap == "    " {
+                        "    "
+                    } else {
+                        "  "
+                    };
                 }
                 if n.name == "fldChar" {
                     match n.attr("fldCharType") {
@@ -1008,15 +1018,19 @@ fn read_section(
                         _ => {}
                     }
                 } else if n.name == "t" && *depth == 0 {
-                    out.push_str(&n.text_content());
+                    let text = n.text_content();
+                    if !text.is_empty() {
+                        out.push_str(gap);
+                        *gap = "";
+                        out.push_str(&text);
+                    }
                 } else {
                     for child in &n.children {
-                        visible_header(child, depth, out);
+                        visible_header(child, depth, gap, out);
                     }
                 }
             }
-            visible_header(&n, &mut depth, &mut text);
-            let text = text.trim().to_string();
+            visible_header(&n, &mut depth, &mut "", &mut text);
             if header {
                 doc.page.header = text;
             } else {

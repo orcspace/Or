@@ -226,6 +226,7 @@ impl Deck {
                 bold: true,
                 text: "Заголовок".into(),
                 color: self.theme.foreground,
+                font: self.theme.font.clone(),
                 ..Element::default()
             });
             let body_id = self.allocate_id();
@@ -241,6 +242,7 @@ impl Deck {
                     "Текст слайда".into()
                 },
                 color: self.theme.foreground,
+                font: self.theme.font.clone(),
                 ..Element::default()
             });
         }
@@ -257,6 +259,7 @@ impl Deck {
             kind,
             color: self.theme.foreground,
             fill: self.theme.accent,
+            font: self.theme.font.clone(),
             ..Element::default()
         };
         match &element.kind {
@@ -563,6 +566,9 @@ impl Deck {
                 if element.fill == old.accent {
                     element.fill = theme.accent;
                 }
+                if element.font == old.font {
+                    element.font.clone_from(&theme.font);
+                }
             }
         }
         self.theme = theme;
@@ -766,11 +772,12 @@ impl Deck {
             match &element.kind {
                 ElementKind::Text => {}
                 ElementKind::Line | ElementKind::Arrow if element.stroke_width > 0.0 => {
+                    let [x1, y1, x2, y2] = line_points(element);
                     items.push(Primitive::Line {
-                        x1: element.x,
-                        y1: element.y,
-                        x2: element.x + element.w,
-                        y2: element.y + element.h,
+                        x1,
+                        y1,
+                        x2,
+                        y2,
                         width: element.stroke_width,
                         color: element.stroke,
                     })
@@ -978,11 +985,11 @@ impl Deck {
             }
             if matches!(element.kind, ElementKind::Arrow) && element.stroke_width > 0.0 {
                 let angle = std::f32::consts::TAU / 10.0;
-                let tip_x = element.x + element.w;
-                let tip_y = element.y + element.h;
+                let [x1, y1, tip_x, tip_y] = line_points(element);
+                let (w, h) = (tip_x - x1, tip_y - y1);
                 for a in [angle, -angle] {
-                    let dx = (element.w * a.cos() - element.h * a.sin()) / 4.0;
-                    let dy = (element.w * a.sin() + element.h * a.cos()) / 4.0;
+                    let dx = (w * a.cos() - h * a.sin()) / 4.0;
+                    let dy = (w * a.sin() + h * a.cos()) / 4.0;
                     items.push(Primitive::Line {
                         x1: tip_x,
                         y1: tip_y,
@@ -1000,6 +1007,16 @@ impl Deck {
             items,
         }
     }
+}
+
+/// End points `[x1, y1, x2, y2]` of a line or arrow: the frame diagonal from the top-left to
+/// the bottom-right corner, turned by the element rotation around the frame centre.
+pub fn line_points(e: &Element) -> [f32; 4] {
+    let (cx, cy) = (e.x + e.w / 2.0, e.y + e.h / 2.0);
+    let (sin, cos) = e.rotation.to_radians().sin_cos();
+    let (hx, hy) = (e.w / 2.0, e.h / 2.0);
+    let (rx, ry) = (hx * cos - hy * sin, hx * sin + hy * cos);
+    [cx - rx, cy - ry, cx + rx, cy + ry]
 }
 
 fn layout_line_budget(text: &str, width: f32, size: f32) -> usize {

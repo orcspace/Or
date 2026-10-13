@@ -703,10 +703,20 @@ fn ribbon(ui: &mut egui::Ui, deck: &mut Deck, state: &mut State) -> bool {
                         }
                         if crate::chrome::tool(ui, "🗑", "Удалить слайд", false).clicked()
                         {
+                            let position = deck
+                                .slides
+                                .iter()
+                                .position(|slide| slide.id == state.slide_id)
+                                .unwrap_or(0);
                             match deck.delete_slide(state.slide_id) {
                                 Ok(()) => {
-                                    state.slide_id =
-                                        deck.slides.first().map(|slide| slide.id).unwrap_or(0);
+                                    // Stay in place: the next slide, or the previous one at the end.
+                                    state.slide_id = deck
+                                        .slides
+                                        .get(position)
+                                        .or_else(|| deck.slides.last())
+                                        .map(|slide| slide.id)
+                                        .unwrap_or(0);
                                     state.selected.clear();
                                     state.edit_text = None;
                                     changed = true;
@@ -2200,10 +2210,13 @@ fn paint_element(
             painter.add(shape);
         }
         ElementKind::Line | ElementKind::Arrow => {
+            let [x1, y1, x2, y2] = super::model::line_points(e);
+            let start = origin + Vec2::new(x1, y1) * scale;
+            let end = origin + Vec2::new(x2, y2) * scale;
             if matches!(e.kind, ElementKind::Arrow) {
-                painter.arrow(rect.min, rect.size(), stroke);
+                painter.arrow(start, end - start, stroke);
             } else {
-                painter.line_segment([rect.min, rect.max], stroke);
+                painter.line_segment([start, end], stroke);
             }
         }
         ElementKind::Image { bytes } => {
@@ -2228,12 +2241,20 @@ fn paint_element(
                 Some(handle)
             });
             if let Some(texture) = texture {
-                painter.image(
-                    texture.id(),
+                let mut mesh = egui::Mesh::with_texture(texture.id());
+                mesh.add_rect_with_uv(
                     rect,
                     Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                     Color32::WHITE,
                 );
+                if e.rotation != 0.0 {
+                    let turn = egui::emath::Rot2::from_angle(e.rotation.to_radians());
+                    let center = rect.center();
+                    for vertex in &mut mesh.vertices {
+                        vertex.pos = center + turn * (vertex.pos - center);
+                    }
+                }
+                painter.add(mesh);
             } else {
                 painter.rect_stroke(rect, 0.0, stroke, StrokeKind::Inside);
                 painter.text(
