@@ -1314,14 +1314,14 @@ impl App {
                                 if let Err(e) = self.settings.save() { self.error = e; }
                             }
                             None => {
-                                if response.on_hover_text(p.display().to_string()).clicked() {
+                                if response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(p.display().to_string()).clicked() {
                                     self.send(Job::Open(p.clone()));
                                 }
                             }
                         }
                     }
                     ui.add_space(28.0);
-                    ui.label(egui::RichText::new("Предварительная сборка · поддержка всех возможностей Microsoft Office ещё не завершена.").color(crate::chrome::muted(ui)).size(11.0));
+                    ui.label(egui::RichText::new(&format!("TrineDocs {} · поддержка всех возможностей Microsoft Office пока неполная.", env!("CARGO_PKG_VERSION"))).color(crate::chrome::muted(ui)).size(11.0));
                 });
             });
         });
