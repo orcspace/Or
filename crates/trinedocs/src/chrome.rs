@@ -55,11 +55,11 @@ pub fn border(ui: &Ui) -> Color32 {
     palette(ui.visuals().dark_mode).border
 }
 /// Applies the shell style; cheap to call every frame (re-applied only on change).
-pub fn style(ctx: &egui::Context, kind: &str) {
+pub fn style(ctx: &egui::Context, kind: &str, reduced_motion: bool) {
     let key = egui::Id::new("trinedocs-style");
-    let wanted = (kind.to_string(), ctx.theme());
+    let wanted = (kind.to_string(), ctx.theme(), reduced_motion);
     if ctx
-        .data(|d| d.get_temp::<(String, egui::Theme)>(key))
+        .data(|d| d.get_temp::<(String, egui::Theme, bool)>(key))
         .as_ref()
         == Some(&wanted)
     {
@@ -130,7 +130,6 @@ pub fn style(ctx: &egui::Context, kind: &str) {
         v.widgets.hovered.bg_stroke = Stroke::new(1.0, accent.gamma_multiply(0.55));
         v.widgets.active.bg_fill = p.pressed;
         v.widgets.active.weak_bg_fill = p.pressed;
-        v.widgets.active.bg_stroke = Stroke::new(1.0, p.border);
         v.widgets.active.bg_stroke = Stroke::new(1.0, accent);
         v.widgets.open.bg_fill = p.hover;
         v.widgets.open.weak_bg_fill = p.hover;
@@ -140,7 +139,7 @@ pub fn style(ctx: &egui::Context, kind: &str) {
         style.spacing.menu_margin = egui::Margin::same(4);
         style.spacing.combo_height = 360.0;
         style.spacing.tooltip_width = 360.0;
-        style.animation_time = 0.12;
+        style.animation_time = if reduced_motion { 0.0 } else { 0.12 };
         style.interaction.tooltip_delay = 0.45;
         style.interaction.show_tooltips_only_when_still = true;
         v.slider_trailing_fill = true;
@@ -610,6 +609,16 @@ pub fn alignment_button(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn motion_setting_updates_style_without_restart() {
+        let ctx = egui::Context::default();
+        super::style(&ctx, "docs", false);
+        assert_eq!(ctx.global_style().animation_time, 0.12);
+        super::style(&ctx, "docs", true);
+        assert_eq!(ctx.global_style().animation_time, 0.0);
+        super::style(&ctx, "docs", false);
+        assert_eq!(ctx.global_style().animation_time, 0.12);
+    }
     #[test]
     fn ribbon_leaves_space_for_content_at_both_window_widths() -> Result<(), String> {
         for width in [780.0, 1250.0] {

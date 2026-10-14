@@ -186,6 +186,31 @@ pub struct Worker {
 pub fn stamp(p: &Path) -> Option<SystemTime> {
     std::fs::metadata(p).ok().and_then(|m| m.modified().ok())
 }
+fn export_unchanged(
+    path: &Path,
+    expected: Option<SystemTime>,
+    export: impl FnOnce() -> Result<Vec<u8>, String>,
+) -> Result<Vec<u8>, String> {
+    fn checked_stamp(path: &Path) -> Result<Option<SystemTime>, String> {
+        match std::fs::metadata(path) {
+            Ok(metadata) => metadata
+                .modified()
+                .map(Some)
+                .map_err(|error| error.to_string()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+    let before = checked_stamp(path)?;
+    if expected.is_some() && before != expected {
+        return Err("Файл изменён на диске: сохраните копию или перезагрузите".into());
+    }
+    let bytes = export()?;
+    if checked_stamp(path)? != before {
+        return Err("Файл изменился во время экспорта: сохраните копию или перезагрузите".into());
+    }
+    Ok(bytes)
+}
 fn open_event(path: PathBuf, reload: Option<ReloadTarget>) -> Event {
     let path = std::fs::canonicalize(&path).unwrap_or(path);
     let lock = if reload.is_some() {
@@ -257,8 +282,10 @@ impl Worker {
                                 "dotx",
                                 "docm",
                                 "xlsm",
+                                "xltx",
                                 "ppsx",
                                 "potx",
+                                "pptm",
                                 "html",
                                 "htm",
                                 "txt",
@@ -352,17 +379,9 @@ impl Worker {
                                 }
                                 Some(FileLock::acquire(&path)?)
                             };
-                            if expected.is_some() && stamp(&path) != expected {
-                                return Err(
-                                    "Файл изменён на диске: сохраните копию или перезагрузите"
-                                        .into(),
-                                );
-                            }
-                            let bytes =
-                                crate::native::export(&document, &crate::native::extension(&path))?;
-                            if expected.is_some() && stamp(&path) != expected {
-                                return Err("Файл изменился во время экспорта: сохраните копию или перезагрузите".into());
-                            }
+                            let bytes = export_unchanged(&path, expected, || {
+                                crate::native::export(&document, &crate::native::extension(&path))
+                            })?;
                             crate::util::atomic_write(&path, &bytes, backup)?;
                             let lock = if !copy && !export { lock } else { None };
                             if print {
@@ -439,6 +458,41 @@ mod lock_tests {
         let dir = std::env::temp_dir().join(name);
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         Ok(dir)
+    }
+    #[test]
+    fn save_as_detects_target_creation_or_modification_during_export() -> Result<(), String> {
+        let dir = directory()?;
+        let path = dir.join("target.docx");
+        assert!(
+            export_unchanged(&path, None, || {
+                std::fs::write(&path, b"other application").map_err(|e| e.to_string())?;
+                Ok(b"our export".to_vec())
+            })
+            .is_err()
+        );
+        assert_eq!(
+            std::fs::read(&path).map_err(|e| e.to_string())?,
+            b"other application"
+        );
+        let before = stamp(&path).ok_or("Missing timestamp")?;
+        assert!(
+            export_unchanged(&path, None, || {
+                let file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&path)
+                    .map_err(|e| e.to_string())?;
+                file.set_modified(before + std::time::Duration::from_secs(5))
+                    .map_err(|e| e.to_string())?;
+                Ok(b"our export".to_vec())
+            })
+            .is_err()
+        );
+        assert_eq!(
+            export_unchanged(&path, stamp(&path), || Ok(b"unchanged".to_vec()))?,
+            b"unchanged"
+        );
+        std::fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+        Ok(())
     }
     #[test]
     fn explicit_stale_lock_takeover_is_guarded_and_released() -> Result<(), String> {

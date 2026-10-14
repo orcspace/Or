@@ -39,7 +39,7 @@ pub fn write(deck: &Deck, ext: &str) -> Result<Vec<u8>, String> {
                     s.title,
                     s.elements
                         .iter()
-                        .map(|e| e.text.as_str())
+                        .map(element_text)
                         .collect::<Vec<_>>()
                         .join("\n"),
                     s.notes
@@ -56,17 +56,65 @@ pub fn write(deck: &Deck, ext: &str) -> Result<Vec<u8>, String> {
                     format!(
                         "<section><h1>{}</h1>{}<aside>{}</aside></section>",
                         xml_escape(&s.title),
-                        s.elements
-                            .iter()
-                            .map(|e| format!("<p>{}</p>", xml_escape(&e.text)))
-                            .collect::<String>(),
+                        s.elements.iter().map(element_html).collect::<String>(),
                         xml_escape(&s.notes)
                     )
                 })
                 .collect::<String>();
-            Ok(format!("<!doctype html><html lang=\"ru\"><meta charset=\"utf-8\"><title>TrineDocs Slides</title><style>section{{min-height:80vh;padding:4rem;break-after:page}}aside{{color:#666}}</style><body>{body}</body></html>").into_bytes())
+            Ok(format!("<!doctype html><html lang=\"ru\"><meta charset=\"utf-8\"><title>TrineDocs Slides</title><style>section{{min-height:80vh;padding:4rem;break-after:page}}p,td,aside{{white-space:pre-wrap}}table{{border-collapse:collapse}}td{{border:1px solid #ccc;padding:.5rem}}aside{{color:#666}}</style><body>{body}</body></html>").into_bytes())
         }
         _ => Err(format!("Экспорт .{ext} ещё не поддерживается")),
+    }
+}
+fn element_text(element: &Element) -> String {
+    let content = match &element.kind {
+        ElementKind::Table { cells } => cells
+            .iter()
+            .map(|row| row.join("\t"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        ElementKind::Chart { values, labels } => (0..values.len().max(labels.len()))
+            .map(|index| {
+                format!(
+                    "{}\t{}",
+                    labels
+                        .get(index)
+                        .cloned()
+                        .unwrap_or_else(|| (index + 1).to_string()),
+                    values
+                        .get(index)
+                        .map(ToString::to_string)
+                        .unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    };
+    if content.is_empty() {
+        element.text.clone()
+    } else if element.text.is_empty() {
+        content
+    } else {
+        format!("{}\n{content}", element.text)
+    }
+}
+fn element_html(element: &Element) -> String {
+    if let ElementKind::Table { cells } = &element.kind {
+        let rows = cells
+            .iter()
+            .map(|row| {
+                format!(
+                    "<tr>{}</tr>",
+                    row.iter()
+                        .map(|cell| format!("<td>{}</td>", xml_escape(cell)))
+                        .collect::<String>()
+                )
+            })
+            .collect::<String>();
+        format!("<p>{}</p><table>{rows}</table>", xml_escape(&element.text))
+    } else {
+        format!("<p>{}</p>", xml_escape(&element_text(element)))
     }
 }
 #[derive(Default, Debug)]
@@ -1264,6 +1312,37 @@ fn write_pptx(deck: &Deck) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn text_and_html_export_preserve_tables_and_charts() -> Result<(), String> {
+        let mut deck = Deck::empty();
+        let slide = deck.add_slide("blank");
+        deck.add_element(
+            slide,
+            ElementKind::Table {
+                cells: vec![vec!["A&B".into(), "<2>\n次".into()]],
+            },
+        )?;
+        deck.add_element(
+            slide,
+            ElementKind::Chart {
+                values: vec![-12.5, 0.0],
+                labels: vec!["Продажи".into(), "Расходы".into(), "Без значения".into()],
+            },
+        )?;
+        for extension in ["txt", "md"] {
+            let text =
+                String::from_utf8(write(&deck, extension)?).map_err(|error| error.to_string())?;
+            assert!(text.contains("A&B\t<2>\n次"));
+            assert!(text.contains("Продажи\t-12.5"));
+            assert!(text.contains("Расходы\t0"));
+            assert!(text.contains("Без значения\t"));
+        }
+        let html = String::from_utf8(write(&deck, "html")?).map_err(|error| error.to_string())?;
+        assert!(html.contains("<td>A&amp;B</td><td>&lt;2&gt;\n次</td>"));
+        assert!(html.contains("Продажи\t-12.5"));
+        assert!(html.contains("white-space:pre-wrap"));
+        Ok(())
+    }
     #[test]
     fn pptx_roundtrip_preserves_model() {
         let mut deck = Deck::default();

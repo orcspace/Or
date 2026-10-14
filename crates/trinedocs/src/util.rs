@@ -54,12 +54,12 @@ pub fn atomic_write(path: &Path, bytes: &[u8], backup: bool) -> Result<(), Strin
         std::process::id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
+    let mut f = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .map_err(|e| e.to_string())?;
     let result = (|| {
-        let mut f = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)
-            .map_err(|e| e.to_string())?;
         f.write_all(bytes)
             .and_then(|_| f.sync_all())
             .map_err(|e| e.to_string())?;

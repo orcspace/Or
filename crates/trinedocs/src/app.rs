@@ -27,6 +27,27 @@ enum Pending {
         export: bool,
     },
 }
+fn palette_commands(has_document: bool, query: &str) -> Vec<(&'static str, &'static str)> {
+    let query = query.trim().to_lowercase();
+    [
+        ("docs", "Создать документ"),
+        ("sheets", "Создать таблицу"),
+        ("slides", "Создать презентацию"),
+        ("open", "Открыть файл · Ctrl+O"),
+        ("settings", "Настройки"),
+        ("save", "Сохранить · Ctrl+S"),
+        ("saveas", "Сохранить как…"),
+        ("copy", "Сохранить копию…"),
+        ("pdf", "Экспорт в PDF"),
+        ("close", "Закрыть документ · Ctrl+W"),
+    ]
+    .into_iter()
+    .filter(|(key, label)| {
+        (has_document || matches!(*key, "docs" | "sheets" | "slides" | "open" | "settings"))
+            && label.to_lowercase().contains(&query)
+    })
+    .collect()
+}
 fn fresh_tab_id(tabs: &[Tab], next_id: u64) -> Result<(u64, u64), String> {
     let following = next_id.checked_add(1).ok_or("Исчерпаны ID документов")?;
     if next_id == 0 || tabs.iter().any(|t| t.id == next_id) {
@@ -540,6 +561,14 @@ impl App {
         };
         match self.worker.send(job) {
             Ok(()) => {
+                if !copy
+                    && !export
+                    && let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id)
+                {
+                    tab.last_edit = Instant::now()
+                        .checked_sub(std::time::Duration::from_secs(2))
+                        .unwrap_or_else(Instant::now);
+                }
                 self.saving.insert(id);
                 self.status = "Сохранение…".into();
             }
@@ -670,7 +699,8 @@ impl App {
                     }
                     if self.tabs.iter().find(|t| t.id == id).is_some_and(|t| {
                         crate::native::extension(&path) != t.document.extension()
-                            && crate::native::extension(&path) != "pdf"
+                            && (crate::native::extension(&path) != "pdf"
+                                || matches!(&t.document, Document::Slides(deck) if deck.slides.iter().any(|s| s.elements.iter().any(|e| e.rotation != 0.0))))
                     }) {
                         self.pending = Some(Pending::SaveFormat {
                             id,
@@ -873,11 +903,20 @@ impl App {
     }
     fn mcp_requests(&mut self, ctx: &egui::Context) {
         // Agents often send bursts of small edits; drain them in one frame.
+        let started = Instant::now();
         for _ in 0..64 {
+            if started.elapsed() >= std::time::Duration::from_millis(4) {
+                ctx.request_repaint();
+                break;
+            }
             let Some(r) = self.bridge.as_ref().and_then(|b| b.try_recv().ok()) else {
                 break;
             };
             if r.reply.is_closed() || Instant::now() > r.deadline {
+                continue;
+            }
+            if !self.settings.mcp {
+                let _ = r.reply.send(Err("permission_denied: MCP отключён".into()));
                 continue;
             }
             if !self.allowed.contains(&r.client) && !self.chat.owns(&r.client) {
@@ -885,10 +924,6 @@ impl App {
                 let _ = r.reply.send(Err(
                     "needs_confirmation: разрешите клиент в окне TrineDocs".into()
                 ));
-                continue;
-            }
-            if !self.settings.mcp {
-                let _ = r.reply.send(Err("permission_denied: MCP отключён".into()));
                 continue;
             }
             if !crate::mcp::tools::read_only(&r.tool) && self.pending.is_some() {
@@ -907,12 +942,20 @@ impl App {
                 let _ = r.reply.send(Err("invalid_args: mode/base_version".into()));
                 continue;
             }
+            if !crate::mcp::tools::names().contains(&r.tool.as_str()) {
+                let _ = r
+                    .reply
+                    .send(Err("unsupported_feature: неизвестный инструмент MCP".into()));
+                continue;
+            }
+            let dry_run = r.args.get("mode").and_then(Value::as_str) == Some("dry_run");
             let id = r.args.get("document_id").and_then(Value::as_u64);
             if id.is_some_and(|id| !self.tabs.iter().any(|t| t.id == id)) {
                 let _ = r.reply.send(Err("not_found: документ не открыт".into()));
                 continue;
             }
             if !crate::mcp::tools::read_only(&r.tool)
+                && !dry_run
                 && let Some(target) = id.or(self.active)
                 && let Err(e) = self.flush_pending(target)
             {
@@ -936,7 +979,7 @@ impl App {
             if matches!(
                 r.tool.as_str(),
                 "save_document" | "close_document" | "open_document" | "export"
-            ) && r.args.get("mode").and_then(Value::as_str) == Some("dry_run")
+            ) && dry_run
             {
                 let _ = r.reply.send(Ok(json!({"applied":false})));
                 continue;
@@ -1046,6 +1089,11 @@ impl App {
                 continue;
             }
             let result = (|| -> Result<Value, String> {
+                if !self.settings.mcp
+                    || (!self.allowed.contains(&request.client) && !self.chat.owns(&request.client))
+                {
+                    return Err("permission_denied: доступ MCP отозван".into());
+                }
                 let id = request
                     .args
                     .get("document_id")
@@ -1084,6 +1132,7 @@ impl App {
         }
     }
     fn tick(&mut self, ctx: &egui::Context) {
+        self.chat.poll();
         let previous_active = self.active;
         self.mcp_saves.retain(|_, reply| !reply.is_closed());
         if self.exit_after_save && self.close_after_save.is_none() && self.pending.is_none() {
@@ -1224,7 +1273,7 @@ impl App {
                         }
                     });
                     ui.add_space(32.0);
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         for (index, label) in ["Недавние", "Закреплённые"].into_iter().enumerate() {
                             let selected = filter % 2 == index;
                             let text = egui::RichText::new(label).size(15.0);
@@ -1243,27 +1292,25 @@ impl App {
                                 filter = index;
                             }
                         }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.add(egui::Button::new("📂  Открыть…").min_size(egui::vec2(0.0, 30.0))).on_hover_text("Ctrl+O").clicked() {
-                                self.send(Job::PickOpen);
-                            }
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.query)
-                                    .hint_text("🔍  Поиск")
-                                    .desired_width(220.0)
-                                    .margin(egui::Margin::symmetric(10, 6)),
-                            );
-                        });
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.query)
+                                .hint_text("Поиск файлов")
+                                .desired_width((width - 380.0).clamp(120.0, 220.0))
+                                .margin(egui::Margin::symmetric(10, 6)),
+                        );
+                        if crate::chrome::icon_button(ui, crate::chrome::Icon::Open, "Открыть файл · Ctrl+O", true).clicked() {
+                            self.send(Job::PickOpen);
+                        }
                     });
                     ui.add_space(6.0);
                     let list: Vec<PathBuf> = if filter % 2 == 1 { self.settings.pinned.clone() } else { self.settings.recent.clone() };
-                    let q = self.query.to_lowercase();
+                    let q = self.query.trim().to_lowercase();
                     let shown: Vec<&PathBuf> = list.iter().filter(|p| p.to_string_lossy().to_lowercase().contains(&q)).collect();
                     if shown.is_empty() {
                         ui.add_space(24.0);
                         ui.vertical_centered(|ui| {
-                            ui.label(egui::RichText::new(if filter % 2 == 1 { "Нет закреплённых файлов" } else if q.is_empty() { "Здесь появятся ваши файлы" } else { "Ничего не найдено" }).strong());
-                            ui.label(egui::RichText::new(if filter % 2 == 1 { "Нажмите ☆ рядом с файлом, чтобы закрепить его." } else { "Создайте файл или перетащите его в окно." }).color(crate::chrome::muted(ui)));
+                            ui.label(egui::RichText::new(if !q.is_empty() { "Ничего не найдено" } else if filter % 2 == 1 { "Нет закреплённых файлов" } else { "Здесь появятся ваши файлы" }).strong());
+                            ui.label(egui::RichText::new(if !q.is_empty() { "Попробуйте другое имя или путь." } else if filter % 2 == 1 { "Нажмите ☆ рядом с файлом, чтобы закрепить его." } else { "Создайте файл или перетащите его в окно." }).color(crate::chrome::muted(ui)));
                         });
                     } else {
                         ui.horizontal(|ui| {
@@ -1276,6 +1323,7 @@ impl App {
                         let pin = self.settings.pinned.contains(p);
                         let row = ui.allocate_ui(egui::vec2(width, 48.0), |ui| {
                             let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 48.0), egui::Sense::click());
+                            response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), p.display().to_string()));
                             let hovered = ui.rect_contains_pointer(rect);
                             if hovered {
                                 ui.painter().rect_filled(rect, 6.0, crate::chrome::hover_fill(ui));
@@ -1285,9 +1333,10 @@ impl App {
                             crate::chrome::badge(&mut child, glyph, color, 28.0);
                             child.add_space(10.0);
                             child.vertical(|ui| {
+                                ui.set_width((width - 122.0).max(40.0));
                                 ui.spacing_mut().item_spacing.y = 0.0;
-                                ui.label(egui::RichText::new(p.file_name().map(|s| s.to_string_lossy()).unwrap_or_default()).size(13.5));
-                                ui.label(egui::RichText::new(p.parent().map(|d| d.display().to_string()).unwrap_or_default()).color(crate::chrome::muted(ui)).size(11.0));
+                                ui.add(egui::Label::new(egui::RichText::new(p.file_name().map(|s| s.to_string_lossy()).unwrap_or_default()).size(13.5)).truncate());
+                                ui.add(egui::Label::new(egui::RichText::new(p.parent().map(|d| d.display().to_string()).unwrap_or_default()).color(crate::chrome::muted(ui)).size(11.0)).truncate());
                             });
                             let mut action = None;
                             child.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1374,12 +1423,22 @@ impl App {
                                         return;
                                     }
                                 };
-                                self.next_id = following;
                                 let mut t = Tab::new(id, s.document.clone(), s.title.clone(), None);
                                 t.saved_version = u64::MAX;
+                                if !self.recovery.restore(s.id, crate::recovery::Snapshot {
+                                    id,
+                                    title: t.title.clone(),
+                                    path: None,
+                                    version: t.version,
+                                    document: t.document.clone(),
+                                }) {
+                                    self.error = "Не удалось поставить восстановление в очередь; исходный снимок сохранён.".into();
+                                    return;
+                                }
+                                self.next_id = following;
+                                self.snapshot_versions.insert(id, t.version);
                                 self.tabs.push(t);
                                 self.active = Some(id);
-                                self.recovery.clear(s.id);
                                 self.recoveries.retain(|r| r.id != s.id);
                             }
                         });
@@ -1412,7 +1471,7 @@ impl App {
                 ui.horizontal(|ui| { if ui.button("Разблокировать сохранение").clicked(){action=1}
                 if ui.button("Отмена").clicked(){action=3} });
             },Some(Pending::Register(p))=>{ui.label(format!("Добавить сервер trinedocs в {}",p.path.display()));ui.label("Остальные записи сохранятся. Существующая запись trinedocs не заменяется.");ui.monospace(&p.change);ui.horizontal(|ui|{if ui.button("Добавить").clicked(){action=1}
-if ui.button("Отмена").clicked(){action=3}});},Some(Pending::SaveFormat{id,..})=>{if let Some(t)=self.tabs.iter().find(|t|t.id==*id){match &t.document{Document::Docs(d)=>{for loss in &d.losses{ui.colored_label(egui::Color32::YELLOW,loss);}},Document::Slides(d)=>{for loss in d.export_warnings(){ui.colored_label(egui::Color32::YELLOW,loss);}},_=>{}}}ui.label("В этом формате сохраняется только содержимое, которое он поддерживает; остальное (форматирование, таблицы, рисунки) может быть потеряно. Для полного сохранения выберите формат Office (.docx, .xlsx, .pptx).");ui.horizontal(|ui|{if ui.button("Продолжить").clicked(){action=1}
+if ui.button("Отмена").clicked(){action=3}});},Some(Pending::SaveFormat{id,..})=>{if let Some(t)=self.tabs.iter().find(|t|t.id==*id){match &t.document{Document::Docs(d)=>{for loss in &d.losses{ui.label(loss);}},Document::Slides(d)=>{for loss in d.export_warnings(){ui.label(loss);}},_=>{}}}ui.label("Экспорт сохраняет только возможности выбранного формата. Форматирование и объекты могут измениться или исчезнуть. Для редактируемой копии выберите .docx, .xlsx или .pptx; ограничения Office-экспорта также остаются.");ui.horizontal(|ui|{if ui.button("Продолжить").clicked(){action=1}
 if ui.button("Отмена").clicked(){action=3}});}
             _=>{ui.label("Сохранить изменения?");ui.horizontal(|ui|{if ui.button("Сохранить").clicked(){action=1}
 if ui.button("Не сохранять").clicked(){action=2}
@@ -1528,6 +1587,7 @@ if ui.button("Отмена").clicked(){action=3}});}}
                     {
                         changed = true;
                         self.allowed.clear();
+                        self.clients.clear();
                         if self.settings.mcp && self.mcp.is_none() {
                             let (m, b) = crate::mcp::Handle::start(ctx.clone());
                             self.mcp = Some(m);
@@ -1585,9 +1645,13 @@ if ui.button("Отмена").clicked(){action=3}});}}
                 .default_width(440.0)
                 .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 96.0))
                 .show(ctx, |ui| {
+                    let query_id = egui::Id::new("command-palette-query");
+                    let enter = ctx.memory(|m| m.focused() == Some(query_id))
+                        && ctx
+                            .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
                     let response = ui.add(
                         egui::TextEdit::singleline(&mut self.palette_query)
-                            .id(egui::Id::new("command-palette-query"))
+                            .id(query_id)
                             .hint_text("Найти действие…")
                             .desired_width(400.0),
                     );
@@ -1595,24 +1659,47 @@ if ui.button("Отмена").clicked(){action=3}});}}
                         response.request_focus();
                         self.palette_focus = false;
                     }
-                    let q = self.palette_query.to_lowercase();
-                    for (k, l) in [
-                        ("docs", "Создать документ"),
-                        ("sheets", "Создать таблицу"),
-                        ("slides", "Создать презентацию"),
-                    ] {
-                        if l.to_lowercase().contains(&q) && ui.button(l).clicked() {
-                            self.create(k);
-                            self.palette = false;
+                    let commands = palette_commands(self.current().is_some(), &self.palette_query);
+                    let mut picked = None;
+                    for (index, &(key, label)) in commands.iter().enumerate() {
+                        if ui
+                            .add_sized(
+                                [ui.available_width(), 28.0],
+                                egui::Button::new(label).frame_when_inactive(false),
+                            )
+                            .clicked()
+                            || (enter && index == 0)
+                        {
+                            picked = Some(key);
                         }
                     }
-                    if ui.button("Открыть файл").clicked() {
-                        self.send(Job::PickOpen);
-                        self.palette = false;
+                    if commands.is_empty() {
+                        ui.weak("Команды не найдены");
                     }
-                    if ui.button("Настройки").clicked() {
-                        self.show_settings = true;
+                    if let Some(key) = picked {
+                        match key {
+                            "docs" | "sheets" | "slides" => self.create(key),
+                            "open" => self.send(Job::PickOpen),
+                            "settings" => self.show_settings = true,
+                            "close" => {
+                                if let Some(id) = self.active {
+                                    self.close(id);
+                                }
+                            }
+                            _ => {
+                                if let Some(id) = self.active {
+                                    self.save(
+                                        id,
+                                        key == "copy",
+                                        key == "pdf",
+                                        key == "saveas",
+                                        if key == "pdf" { Some("pdf") } else { None },
+                                    );
+                                }
+                            }
+                        }
                         self.palette = false;
+                        ctx.memory_mut(|m| m.surrender_focus(response.id));
                     }
                 });
             self.palette &= open;
@@ -1657,7 +1744,7 @@ impl eframe::App for App {
             _ => egui::ThemePreference::System,
         });
         let kind = self.current().map(|t| t.document.kind()).unwrap_or("docs");
-        crate::chrome::style(&ctx, kind);
+        crate::chrome::style(&ctx, kind, self.settings.reduced_motion);
         ui.set_style(ctx.global_style());
         let mut command = None;
         let mut reject_ai = None;
@@ -2292,6 +2379,9 @@ fn new_card(
         egui::vec2(width, preview_height + 34.0),
         egui::Sense::click(),
     );
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+    });
     let painter = ui.painter();
     let preview = egui::Rect::from_min_size(rect.min, egui::vec2(width, preview_height));
     let hovered = response.hovered();
@@ -2653,6 +2743,111 @@ mod reload_tests {
 mod shell_input_tests {
     use super::*;
     use eframe::App as _;
+    #[test]
+    fn disabled_mcp_rejects_unknown_clients_without_approval_prompt() -> Result<(), String> {
+        let mut app = fixture()?;
+        let mut response = mcp_request(&mut app, "list_documents", json!({}))?;
+        app.settings.mcp = false;
+        app.allowed.clear();
+        let ctx = app.editor_ctx.clone();
+        app.mcp_requests(&ctx);
+        assert!(
+            response
+                .try_recv()
+                .map_err(|e| e.to_string())?
+                .is_err_and(|e| e.starts_with("permission_denied:"))
+        );
+        assert!(app.clients.is_empty());
+        Ok(())
+    }
+    #[test]
+    fn rotated_slides_pdf_export_requires_confirmation() -> Result<(), String> {
+        let mut app = fixture()?;
+        let mut deck = crate::slides::model::Deck::default();
+        let slide = deck.slides.first().ok_or("slide")?.id;
+        let element = deck.add_element(slide, crate::slides::model::ElementKind::Rect)?;
+        deck.slide_mut(slide)
+            .and_then(|s| s.elements.iter_mut().find(|e| e.id == element))
+            .ok_or("element")?
+            .rotation = 45.0;
+        app.tabs[0].document = Document::Slides(deck);
+        worker_event(
+            &mut app,
+            Event::PickedSave {
+                id: 10,
+                path: std::env::temp_dir().join("rotated-slides.pdf"),
+                copy: false,
+                export: true,
+            },
+        )?;
+        app.events();
+        assert!(matches!(
+            app.pending,
+            Some(Pending::SaveFormat { id: 10, .. })
+        ));
+        assert!(!app.saving.contains(&10));
+        Ok(())
+    }
+    #[test]
+    fn palette_enter_runs_filtered_command_without_editing_document() -> Result<(), String> {
+        let mut app = fixture()?;
+        focus_page(&mut app)?;
+        let before = text(&app);
+        app.palette = true;
+        app.palette_focus = true;
+        app.palette_query = "  НАСТРОЙКИ  ".into();
+        frame(&mut app, vec![]);
+        frame(&mut app, vec![]);
+        frame(
+            &mut app,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(app.show_settings);
+        assert!(!app.palette);
+        assert_eq!(text(&app), before);
+        assert!(palette_commands(false, "сохранить").is_empty());
+        assert!(palette_commands(true, "несуществующая команда").is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn home_long_paths_leave_file_actions_within_viewport() -> Result<(), String> {
+        for width in [480.0, 780.0, 1250.0] {
+            let mut app = fixture()?;
+            app.active = None;
+            app.settings.recent = vec![PathBuf::from(format!(
+                "C:/{}{}.docx",
+                "long-directory/".repeat(30),
+                "name".repeat(60)
+            ))];
+            let ctx = app.editor_ctx.clone();
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, 820.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    app.home(ui);
+                    assert!(
+                        ui.min_rect().right() <= width + 1.0,
+                        "home overflow at {width}: {:?}",
+                        ui.min_rect()
+                    );
+                },
+            );
+            output.textures_delta.clear();
+        }
+        Ok(())
+    }
     fn fixture() -> Result<App, String> {
         let ctx = egui::Context::default();
         crate::fonts::install(&ctx)?;
@@ -2825,6 +3020,97 @@ mod shell_input_tests {
         let (sender, receiver) = std::sync::mpsc::channel();
         app.worker.rx = receiver;
         sender.send(event).map_err(|error| error.to_string())
+    }
+    #[test]
+    fn mcp_dry_run_and_unknown_tools_preserve_pending_sheet_input() -> Result<(), String> {
+        for tool in ["sheets_write_range", "unknown_tool"] {
+            let mut app = fixture()?;
+            app.active = Some(11);
+            frame(&mut app, vec![]);
+            let canvas_id = egui::Id::new(("sheets-editor", 11_u64)).with("canvas");
+            app.editor_ctx
+                .memory_mut(|memory| memory.request_focus(canvas_id));
+            frame(&mut app, vec![egui::Event::Text("draft".into())]);
+            let tab = app
+                .tabs
+                .iter()
+                .find(|tab| tab.id == 11)
+                .ok_or("sheet tab")?;
+            let before = tab.document.clone();
+            let version = tab.version;
+            let undo = tab.undo.len();
+            let sheet_id = match &before {
+                Document::Sheets(book) => book.active_id(),
+                _ => return Err("sheet kind".into()),
+            };
+            let mut response = mcp_request(
+                &mut app,
+                tool,
+                json!({
+                    "document_id":11, "sheet_id":sheet_id, "row":0, "col":1,
+                    "values":[["agent"]],
+                    "mode":if tool == "sheets_write_range" { "dry_run" } else { "apply" }
+                }),
+            )?;
+            let ctx = app.editor_ctx.clone();
+            app.mcp_requests(&ctx);
+            let result = response.try_recv().map_err(|error| error.to_string())?;
+            if tool == "sheets_write_range" {
+                assert_eq!(result?["applied"], false);
+            } else {
+                assert!(result.is_err_and(|error| error.starts_with("unsupported_feature")));
+            }
+            let tab = app
+                .tabs
+                .iter()
+                .find(|tab| tab.id == 11)
+                .ok_or("sheet tab")?;
+            assert_eq!(tab.document, before);
+            assert_eq!(tab.version, version);
+            assert_eq!(tab.undo.len(), undo);
+            app.flush_pending(11)?;
+            let tab = app
+                .tabs
+                .iter()
+                .find(|tab| tab.id == 11)
+                .ok_or("sheet tab")?;
+            let Document::Sheets(book) = &tab.document else {
+                return Err("sheet kind".into());
+            };
+            assert_eq!(
+                book.active_sheet()
+                    .and_then(|sheet| sheet.cell(0, 0))
+                    .map(|cell| cell.input.as_str()),
+                Some("draft")
+            );
+            assert_eq!(tab.version, version + 1);
+        }
+        Ok(())
+    }
+    #[test]
+    fn queued_mcp_close_rechecks_revoked_permission() -> Result<(), String> {
+        for disable_mcp in [false, true] {
+            let mut app = fixture()?;
+            let mut response = mcp_request(&mut app, "close_document", json!({"document_id":10}))?;
+            let ctx = app.editor_ctx.clone();
+            app.mcp_requests(&ctx);
+            assert_eq!(app.pending_mcp_closes.len(), 1);
+            if disable_mcp {
+                app.settings.mcp = false;
+            } else {
+                app.allowed.clear();
+            }
+            app.finish_mcp_closes();
+            assert!(
+                response
+                    .try_recv()
+                    .map_err(|error| error.to_string())?
+                    .is_err_and(|error| error.starts_with("permission_denied"))
+            );
+            assert!(app.tabs.iter().any(|tab| tab.id == 10));
+            assert!(app.pending.is_none());
+        }
+        Ok(())
     }
     fn second_doc(app: &mut App) -> Result<(), String> {
         let tab = app

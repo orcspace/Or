@@ -1,4 +1,224 @@
 use super::{formula, model::*};
+#[test]
+fn numbervalue_uses_locale_and_validates_separators() -> Result<(), String> {
+    let mut book = Book::default();
+    let id = book.active_id();
+    for (input, expected) in [
+        ("=NUMBERVALUE(\"1 234,5\")", Value::Number(1234.5)),
+        ("=NUMBERVALUE(\"\")", Value::Number(0.0)),
+        (
+            "=NUMBERVALUE(\"1.234,5\",\",extra\",\".extra\")",
+            Value::Number(1234.5),
+        ),
+        (
+            "=NUMBERVALUE(\"1.2,3\",\".\",\",\")",
+            Value::Error("#VALUE!".into()),
+        ),
+        (
+            "=NUMBERVALUE(\"1.5\",\".\",\".\")",
+            Value::Error("#VALUE!".into()),
+        ),
+        (
+            "=NUMBERVALUE(\"1.5\",\"\",\",\")",
+            Value::Error("#VALUE!".into()),
+        ),
+    ] {
+        book.set_cell(id, 0, 0, input)?;
+        assert_eq!(
+            book.active_sheet()
+                .and_then(|sheet| sheet.cell(0, 0))
+                .map(|cell| &cell.value),
+            Some(&expected),
+            "{input}"
+        );
+    }
+    book.locale_ru = false;
+    book.set_cell(id, 0, 0, "=NUMBERVALUE(\"1,234.5\")")?;
+    assert_eq!(
+        book.active_sheet()
+            .and_then(|sheet| sheet.cell(0, 0))
+            .map(|cell| &cell.value),
+        Some(&Value::Number(1234.5))
+    );
+    Ok(())
+}
+#[test]
+fn ctrl_arrow_data_edge_follows_excel_blocks() -> Result<(), String> {
+    let book = seeded()?;
+    let sheet = book.active_sheet().ok_or("sheet")?;
+    assert_eq!(sheet.data_edge(0, 0, 1, 0), (2, 0));
+    assert_eq!(sheet.data_edge(2, 0, 1, 0), (MAX_ROWS - 1, 0));
+    assert_eq!(sheet.data_edge(2, 3, -1, 0), (1, 3));
+    assert_eq!(sheet.data_edge(9, 0, -1, 0), (2, 0));
+    assert_eq!(sheet.data_edge(0, 0, -1, 0), (0, 0));
+    assert_eq!(sheet.data_edge(0, 0, 0, 1), (0, 5));
+    assert_eq!(sheet.data_edge(0, 5, 0, 1), (0, MAX_COLS - 1));
+    assert_eq!(sheet.data_edge(2, 9, 0, -1), (2, 2));
+    assert_eq!(sheet.data_edge(1, 0, 0, -1), (1, 0));
+    Ok(())
+}
+#[test]
+fn subtotal_skips_nested_subtotals_and_hidden_rows() -> Result<(), String> {
+    let mut book = seeded()?;
+    let id = book.active_id();
+    book.set_cell(id, 3, 0, "=SUBTOTAL(9,A1:A3)")?;
+    book.set_cell(id, 4, 0, "=ПРОМЕЖУТОЧНЫЕ.ИТОГИ(9;A1:A4)")?;
+    let value = |book: &Book, row| {
+        book.active_sheet()
+            .and_then(|sheet| sheet.cell(row, 0))
+            .map(|cell| cell.value.clone())
+    };
+    assert_eq!(value(&book, 3), Some(Value::Number(6.0)));
+    assert_eq!(value(&book, 4), Some(Value::Number(6.0)));
+    book.sheets.get_mut(0).ok_or("sheet")?.hidden_rows.insert(1);
+    assert_eq!(
+        formula::evaluate(&book, id, "=SUBTOTAL(109,A1:A3)"),
+        Value::Number(4.0)
+    );
+    assert_eq!(
+        formula::evaluate(&book, id, "=SUBTOTAL(9,A1:A3)"),
+        Value::Number(6.0)
+    );
+    Ok(())
+}
+#[test]
+fn images_follow_structural_edits_without_losing_data() -> Result<(), String> {
+    let mut book = Book::default();
+    let id = book.active_id();
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgba8(2, 2)
+        .write_to(&mut png, image::ImageFormat::Png)
+        .map_err(|error| error.to_string())?;
+    book.add_image(id, 3, 4, png.into_inner())?;
+    book.edit_dimension(id, 1, 2, true, false)?;
+    book.edit_dimension(id, 2, 3, false, false)?;
+    let picture = book
+        .active_sheet()
+        .and_then(|sheet| sheet.images.first())
+        .ok_or("image")?;
+    assert_eq!((picture.row, picture.col), (5, 7));
+    let bytes = picture.bytes.clone();
+    book.edit_dimension(id, 4, 2, true, true)?;
+    book.edit_dimension(id, 6, 2, false, true)?;
+    let picture = book
+        .active_sheet()
+        .and_then(|sheet| sheet.images.first())
+        .ok_or("image")?;
+    assert_eq!((picture.row, picture.col), (4, 6));
+    assert_eq!(picture.bytes, bytes);
+    for rows in [true, false] {
+        if let Some(picture) = book
+            .active_sheet_mut()
+            .and_then(|sheet| sheet.images.first_mut())
+        {
+            if rows {
+                picture.row = MAX_ROWS - 1;
+            } else {
+                picture.col = MAX_COLS - 1;
+            }
+        }
+        let before = book.clone();
+        assert!(book.edit_dimension(id, 0, 1, rows, false).is_err());
+        assert_eq!(book, before);
+    }
+    book.validate()?;
+    Ok(())
+}
+
+#[test]
+fn invalid_formats_and_failed_replace_leave_book_unchanged() -> Result<(), String> {
+    let mut book = Book::default();
+    let id = book.active_id();
+    book.set_cell(id, 0, 0, "a")?;
+    book.set_cell(id, 0, 1, &"a".repeat(16384))?;
+    let before = book.clone();
+    assert!(book.replace_all(id, "a", "aa").is_err());
+    assert_eq!(book, before);
+    for size in [0.0, 500.0, f32::INFINITY] {
+        assert!(
+            book.set_format(
+                id,
+                Range::new(0, 0, 1, 1),
+                CellFormat {
+                    size,
+                    ..CellFormat::default()
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(book, before);
+    }
+    assert_eq!(book.replace_all(id, "missing", "x")?, 0);
+    assert_eq!(book.replace_all(id, "a", "z")?, 2);
+    assert_eq!(
+        book.active_sheet()
+            .and_then(|sheet| sheet.cell(0, 0))
+            .map(|cell| &cell.value),
+        Some(&Value::Text("z".into()))
+    );
+    book.validate()?;
+    Ok(())
+}
+
+#[test]
+fn limited_search_returns_first_matches_in_grid_order() -> Result<(), String> {
+    let mut book = Book::default();
+    let id = book.active_id();
+    for (row, col) in [(9, 0), (1, 1), (1, 0), (0, 25)] {
+        book.set_cell(id, row, col, "match")?;
+    }
+    assert!(book.find(id, "match", false, 0)?.is_empty());
+    let positions: Vec<_> = book
+        .find(id, "match", false, 2)?
+        .into_iter()
+        .map(|(r, c, _, _)| (r, c))
+        .collect();
+    assert_eq!(positions, vec![(0, 25), (1, 0)]);
+    Ok(())
+}
+
+#[test]
+fn sheet_deletion_and_reorder_keep_a_visible_active_sheet() -> Result<(), String> {
+    let mut book = Book::default();
+    let first = book.active_id();
+    let hidden = book.add_sheet("Hidden")?;
+    if let Some(sheet) = book.sheet_by_id_mut(hidden) {
+        sheet.hidden = true;
+    }
+    let before = book.clone();
+    assert!(book.delete_sheet(first).is_err());
+    assert_eq!(book, before);
+    book.move_sheet(hidden, 0)?;
+    assert_eq!(book.active_id(), first);
+    let visible = book.add_sheet("Visible")?;
+    book.delete_sheet(first)?;
+    assert_eq!(book.active_id(), visible);
+    book.validate()?;
+    Ok(())
+}
+
+#[test]
+fn canonical_formula_length_is_checked_before_any_mutation() -> Result<(), String> {
+    let mut book = Book::default();
+    let id = book.active_id();
+    book.set_cell(id, 0, 0, "x")?;
+    let input = format!("=И(\"{}\")", "a".repeat(32760));
+    assert_eq!(input.len(), 32767);
+    assert_eq!(formula::canonicalize(&input).len(), 32768);
+    let before = book.clone();
+    assert!(book.set_input(id, 1, 0, &input).is_err());
+    assert_eq!(book, before);
+    assert!(
+        book.set_range(id, 0, 0, &[vec!["changed".into(), input.clone()]])
+            .is_err()
+    );
+    assert_eq!(book, before);
+    assert!(book.replace_all(id, "x", &input).is_err());
+    assert_eq!(book, before);
+    book.validate()?;
+    Ok(())
+}
+
 fn seeded() -> Result<Book, String> {
     let mut book = Book::default();
     let id = book.active_id();
@@ -196,6 +416,60 @@ fn numeric_formula_corpus() -> Result<(), String> {
         ("=TYPE(\"text\")", 2.0),
         ("=TYPE(TRUE)", 4.0),
         ("=TYPE(NA())", 16.0),
+        ("=MAXIFS(C1:C3,B1:B3,\"red\")", 30.0),
+        ("=MINIFS(C1:C3,B1:B3,\"red\",A1:A3,\">1\")", 30.0),
+        ("=МАКСЕСЛИ(C1:C3;B1:B3;\"green\")", 0.0),
+        ("=MAXA(A1:A3,TRUE)", 3.0),
+        ("=MINA(A1:B3)", 0.0),
+        ("=TRIMMEAN(A1:A3,0.7)", 2.0),
+        (
+            "=SKEW(1,2,3,10)",
+            2.0 / 3.0 * 180.0 / (50.0f64 / 3.0).powf(1.5),
+        ),
+        (
+            "=KURT(1,2,3,10)",
+            20.0 / 6.0 * 1394.0 / (50.0f64 / 3.0).powi(2) - 13.5,
+        ),
+        ("=CORREL(A1:A3,C1:C3)", 1.0),
+        ("=PEARSON(A1:A3,C1:C3)", 1.0),
+        ("=RSQ(C1:C3,A1:A3)", 1.0),
+        ("=SLOPE(C1:C3,A1:A3)", 10.0),
+        ("=INTERCEPT(C1:C3,A1:A3)", 0.0),
+        ("=COVAR(A1:A3,C1:C3)", 20.0 / 3.0),
+        ("=COVARIANCE.S(A1:A3,C1:C3)", 10.0),
+        ("=NPER(0,-10,100)", 10.0),
+        ("=NPER(0.05,PMT(0.05,12,1000),1000)", 12.0),
+        ("=RATE(12,PMT(0.05,12,1000),1000)", 0.05),
+        ("=IPMT(0.1,1,3,8000)", -800.0),
+        ("=IPMT(0.1,1,3,8000,0,1)", 0.0),
+        (
+            "=PPMT(0.1,1,3,8000)+PPMT(0.1,2,3,8000)+PPMT(0.1,3,3,8000)",
+            -8000.0,
+        ),
+        (
+            "=PPMT(0.1,1,3,8000,0,1)+PPMT(0.1,2,3,8000,0,1)+PPMT(0.1,3,3,8000,0,1)",
+            -8000.0,
+        ),
+        (
+            "=PPMT(0.1,2,3,8000)+IPMT(0.1,2,3,8000)-PMT(0.1,3,8000)",
+            0.0,
+        ),
+        ("=ARABIC(\"MCMXCIV\")", 1994.0),
+        ("=ARABIC(\"-xiv\")", -14.0),
+        ("=BIN2DEC(\"1111111111\")", -1.0),
+        ("=BIN2DEC(101)", 5.0),
+        ("=HEX2DEC(\"ff\")", 255.0),
+        ("=OCT2DEC(\"17\")", 15.0),
+        ("=DECIMAL(\"zz\",36)", 1295.0),
+        ("=WEEKNUM(DATE(2024,1,7))", 2.0),
+        ("=WEEKNUM(DATE(2024,1,7),2)", 1.0),
+        ("=ISOWEEKNUM(DATE(2021,1,1))", 53.0),
+        ("=WEEKNUM(DATE(2021,1,4),21)", 1.0),
+        ("=DAYS360(DATE(2024,1,1),DATE(2024,12,31))", 360.0),
+        ("=DAYS360(DATE(2024,1,31),DATE(2024,3,31),TRUE)", 60.0),
+        ("=SUBTOTAL(9,A1:A3)", 6.0),
+        ("=SUBTOTAL(1,C1:C3)", 20.0),
+        ("=SUBTOTAL(103,A1:B3)", 6.0),
     ];
     for &(input, expected) in cases {
         let actual = formula::evaluate(&b, id, input);
@@ -237,6 +511,20 @@ fn text_boolean_and_errors() -> Result<(), String> {
         ("=CHAR(65)", "A"),
         ("=UNICHAR(1105)", "ё"),
         ("=T(\"yes\")", "yes"),
+        ("=TEXTBEFORE(\"a-b-c\",\"-\")", "a"),
+        ("=TEXTAFTER(\"a-b-c\",\"-\",-1)", "c"),
+        ("=TEXTAFTER(\"a-b-c\",\"-\",2)", "c"),
+        ("=TEXTBEFORE(\"aXbxc\",\"x\",2,1)", "aXb"),
+        ("=TEXTBEFORE(\"a-b\",\"-\",2,0,1)", "a-b"),
+        ("=TEXTAFTER(\"abc\",\"-\",1,0,0,\"none\")", "none"),
+        ("=ТЕКСТПОСЛЕ(\"ёж-ик\";\"-\")", "ик"),
+        ("=ROMAN(1994)", "MCMXCIV"),
+        ("=ROMAN(0)", ""),
+        ("=DEC2BIN(-1)", "1111111111"),
+        ("=DEC2HEX(255,4)", "00FF"),
+        ("=DEC2OCT(8)", "10"),
+        ("=BASE(255,16)", "FF"),
+        ("=BASE(5,2,8)", "00000101"),
     ];
     for &(input, expected) in text {
         assert_eq!(
@@ -285,6 +573,17 @@ fn text_boolean_and_errors() -> Result<(), String> {
         ("=REPT(\"x\",-1)", "#VALUE!"),
         ("=VLOOKUP(99,A1:C3,3,FALSE)", "#N/A"),
         ("=LOG(1,1)", "#NUM!"),
+        ("=TEXTBEFORE(\"abc\",\"-\")", "#N/A"),
+        ("=TEXTBEFORE(\"abc\",\"b\",0)", "#VALUE!"),
+        ("=DEC2BIN(512)", "#NUM!"),
+        ("=DEC2HEX(255,1)", "#NUM!"),
+        ("=HEX2DEC(\"XYZ\")", "#NUM!"),
+        ("=ROMAN(4000)", "#VALUE!"),
+        ("=ARABIC(\"ABC\")", "#VALUE!"),
+        ("=SUBTOTAL(12,A1:A3)", "#VALUE!"),
+        ("=MAXIFS(C1:C3,B1:B2,\"red\")", "#VALUE!"),
+        ("=SLOPE(A1:A3,G1:G3)", "#DIV/0!"),
+        ("=SKEW(1,2)", "#DIV/0!"),
     ] {
         assert_eq!(
             formula::evaluate(&b, id, input),

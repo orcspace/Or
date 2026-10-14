@@ -193,7 +193,9 @@ pub fn open(path: &Path) -> Result<Document, String> {
         "xlsx" | "xlsm" | "xltx" | "xls" | "xlsb" | "ods" | "csv" | "tsv" => {
             Document::Sheets(crate::sheets::io::read(&bytes, &ext)?)
         }
-        "pptx" | "ppsx" | "potx" => Document::Slides(crate::slides::io::read(&bytes, &ext)?),
+        "pptx" | "ppsx" | "potx" | "pptm" => {
+            Document::Slides(crate::slides::io::read(&bytes, &ext)?)
+        }
         _ => return Err(format!("Формат .{ext} пока не поддерживается")),
     };
     doc.validate()?;
@@ -201,6 +203,8 @@ pub fn open(path: &Path) -> Result<Document, String> {
 }
 pub fn export(doc: &Document, ext: &str) -> Result<Vec<u8>, String> {
     doc.validate()?;
+    let normalized = ext.trim_start_matches('.').to_ascii_lowercase();
+    let ext = normalized.as_str();
     if ext == doc.native_extension() {
         return encode(doc);
     }
@@ -248,6 +252,24 @@ mod tests {
             br#"{"version":999,"document":{"kind":"docs","data":{}}}"#.to_vec(),
         )])?;
         assert!(decode(&b).is_err());
+        Ok(())
+    }
+    #[test]
+    fn export_normalizes_native_and_rendered_extensions() -> Result<(), String> {
+        let doc = Document::create("slides")?;
+        assert_eq!(decode(&export(&doc, ".TRINESLIDE")?)?, doc);
+        assert!(export(&doc, ".PDF")?.starts_with(b"%PDF"));
+        assert!(export(&doc, ".PNG")?.starts_with(b"\x89PNG"));
+        Ok(())
+    }
+    #[test]
+    fn macro_enabled_presentations_open_as_slides() -> Result<(), String> {
+        let path = std::env::temp_dir().join(format!("trinedocs-pptm-{}.PPTM", std::process::id()));
+        let doc = Document::create("slides")?;
+        crate::util::atomic_write(&path, &export(&doc, "pptx")?, false)?;
+        let result = open(&path);
+        std::fs::remove_file(path).map_err(|error| error.to_string())?;
+        assert_eq!(result?, doc);
         Ok(())
     }
     #[test]

@@ -21,7 +21,7 @@ pub fn read_zip(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, String> {
             continue;
         }
         let name = f.name().to_string();
-        if f.enclosed_name().is_none() || name.contains('\\') {
+        if f.enclosed_name().is_none() || !safe_name(&name) {
             return Err("Небезопасное имя ZIP".into());
         }
         total = total.checked_add(f.size()).ok_or("Размер ZIP переполнен")?;
@@ -36,7 +36,10 @@ pub fn read_zip(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, String> {
             .take(MAX_FILE as u64 + 1)
             .read_to_end(&mut content)
             .map_err(|e| e.to_string())?;
-        if content.len() > MAX_FILE || out.insert(name, content).is_some() {
+        if content.len() as u64 != f.size()
+            || content.len() > MAX_FILE
+            || out.insert(name, content).is_some()
+        {
             return Err("Недопустимый ZIP".into());
         }
     }
@@ -49,14 +52,7 @@ pub fn write_zip(parts: Vec<(String, Vec<u8>)>) -> Result<Vec<u8>, String> {
     let mut total = 0u64;
     let mut names = std::collections::BTreeSet::new();
     for (name, data) in &parts {
-        if name.contains('\\')
-            || name.contains('\0')
-            || name.is_empty()
-            || std::path::Path::new(name)
-                .components()
-                .any(|c| !matches!(c, std::path::Component::Normal(_)))
-            || !names.insert(name)
-        {
+        if !safe_name(name) || !names.insert(name) {
             return Err("Недопустимое имя/дубликат ZIP".into());
         }
         total = total.saturating_add(data.len() as u64);
@@ -85,6 +81,11 @@ pub fn write_zip(parts: Vec<(String, Vec<u8>)>) -> Result<Vec<u8>, String> {
     }
     Ok(bytes)
 }
+fn safe_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains(['\\', '\0', ':'])
+        && name.split('/').all(|part| !matches!(part, "" | "." | ".."))
+}
 pub fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -104,6 +105,26 @@ mod tests {
     #[test]
     fn rejects_traversal() -> Result<(), String> {
         assert!(write_zip(vec![("../bad".into(), vec![0])]).is_err());
+        Ok(())
+    }
+    #[test]
+    fn reader_and_writer_reject_ambiguous_archive_names() -> Result<(), String> {
+        for name in [
+            "a/../b.xml",
+            "a/./b.xml",
+            "a//b.xml",
+            "/absolute.xml",
+            "C:/drive.xml",
+            "a\\b.xml",
+        ] {
+            assert!(write_zip(vec![(name.into(), b"text".to_vec())]).is_err());
+            let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .map_err(|e| e.to_string())?;
+            zip.write_all(b"text").map_err(|e| e.to_string())?;
+            let bytes = zip.finish().map_err(|e| e.to_string())?.into_inner();
+            assert!(read_zip(&bytes).is_err(), "{name}");
+        }
         Ok(())
     }
 }

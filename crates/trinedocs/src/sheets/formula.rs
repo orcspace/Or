@@ -274,6 +274,41 @@ fn alias(name: &str) -> String {
         "ИСТИНА" => "TRUE",
         "ЛОЖЬ" => "FALSE",
         "НД" => "NA",
+        "МАКСЕСЛИ" => "MAXIFS",
+        "МИНЕСЛИ" => "MINIFS",
+        "МАКСА" => "MAXA",
+        "МИНА" => "MINA",
+        "УРЕЗСРЕДНЕЕ" => "TRIMMEAN",
+        "СКОС" => "SKEW",
+        "ЭКСЦЕСС" => "KURT",
+        "КОРРЕЛ" => "CORREL",
+        "ПИРСОН" => "PEARSON",
+        "КВПИРСОН" => "RSQ",
+        "НАКЛОН" => "SLOPE",
+        "ОТРЕЗОК" => "INTERCEPT",
+        "КОВАР" => "COVAR",
+        "КОВАРИАЦИЯ.Г" => "COVARIANCE.P",
+        "КОВАРИАЦИЯ.В" => "COVARIANCE.S",
+        "ТЕКСТДО" => "TEXTBEFORE",
+        "ТЕКСТПОСЛЕ" => "TEXTAFTER",
+        "КПЕР" => "NPER",
+        "СТАВКА" => "RATE",
+        "ПРПЛТ" => "IPMT",
+        "ОСПЛТ" => "PPMT",
+        "РИМСКОЕ" => "ROMAN",
+        "АРАБСКОЕ" => "ARABIC",
+        "ДЕС.В.ДВ" => "DEC2BIN",
+        "ДЕС.В.ВОСЬМ" => "DEC2OCT",
+        "ДЕС.В.ШЕСТН" => "DEC2HEX",
+        "ДВ.В.ДЕС" => "BIN2DEC",
+        "ВОСЬМ.В.ДЕС" => "OCT2DEC",
+        "ШЕСТН.В.ДЕС" => "HEX2DEC",
+        "ОСНОВАНИЕ" => "BASE",
+        "ДЕС" => "DECIMAL",
+        "НОМНЕДЕЛИ" => "WEEKNUM",
+        "НОМНЕДЕЛИ.ISO" => "ISOWEEKNUM",
+        "ДНЕЙ360" => "DAYS360",
+        "ПРОМЕЖУТОЧНЫЕ.ИТОГИ" => "SUBTOTAL",
         _ => return name.to_uppercase(),
     }
     .into()
@@ -915,6 +950,40 @@ impl<'a> Engine<'a> {
             Expr::Call(name, args) => self.call(name, args, sheet, row, col),
         }
     }
+    /// SUBTOTAL ignores cells holding nested SUBTOTAL results and, for codes 101–111, rows
+    /// the user has hidden.
+    fn skip_subtotal_cells(
+        &self,
+        grid: &mut Grid,
+        target: Option<&str>,
+        range: &Range,
+        sheet: usize,
+        hidden: bool,
+    ) {
+        let index = match target {
+            Some(name) => self
+                .book
+                .sheets
+                .iter()
+                .position(|s| s.name.to_lowercase() == name.to_lowercase()),
+            None => Some(sheet),
+        };
+        let Some(source) = index.and_then(|i| self.book.sheets.get(i)) else {
+            return;
+        };
+        let cols = grid.cols.max(1);
+        for (i, value) in grid.values.iter_mut().enumerate() {
+            let r = range.r0 + (i / cols) as u32;
+            let c = range.c0 + (i % cols) as u32;
+            let nested = source.cell(r, c).is_some_and(|cell| {
+                let input = cell.input.to_uppercase();
+                input.contains("SUBTOTAL(") || input.contains("ПРОМЕЖУТОЧНЫЕ.ИТОГИ(")
+            });
+            if nested || (hidden && source.hidden_rows.contains(&r)) {
+                *value = Value::Empty;
+            }
+        }
+    }
     fn call(
         &mut self,
         name: &str,
@@ -1016,14 +1085,46 @@ impl<'a> Engine<'a> {
                 evaluated.push(Grid::scalar(Value::Empty));
                 continue;
             }
-            let value = self.eval(expr, sheet, row, col);
+            let mut value = self.eval(expr, sheet, row, col);
+            if name == "SUBTOTAL"
+                && index > 0
+                && let (Ok(grid), Expr::Reference(target, range)) = (&mut value, expr)
+            {
+                let hidden = evaluated
+                    .first()
+                    .and_then(|code| code.number().ok())
+                    .is_some_and(|code| code >= 100.0);
+                self.skip_subtotal_cells(grid, target.as_deref(), range, sheet, hidden);
+            }
             evaluated.push(if name.starts_with("IS") || name == "TYPE" {
                 value.unwrap_or_else(|e| Grid::scalar(Value::Error(e)))
             } else {
                 value?
             });
         }
-        let a = evaluated.as_slice();
+        let (name, a) = if name == "SUBTOTAL" {
+            if evaluated.len() < 2 {
+                return Err("#VALUE!".into());
+            }
+            let code = evaluated[0].number()?.trunc();
+            let function = match code as i64 {
+                1 | 101 => "AVERAGE",
+                2 | 102 => "COUNT",
+                3 | 103 => "COUNTA",
+                4 | 104 => "MAX",
+                5 | 105 => "MIN",
+                6 | 106 => "PRODUCT",
+                7 | 107 => "STDEV",
+                8 | 108 => "STDEVP",
+                9 | 109 => "SUM",
+                10 | 110 => "VAR",
+                11 | 111 => "VARP",
+                _ => return Err("#VALUE!".into()),
+            };
+            (function, &evaluated[1..])
+        } else {
+            (name, evaluated.as_slice())
+        };
         let n = |i: usize| -> CalcResult<f64> { a.get(i).ok_or("#VALUE!")?.number() };
         let default_n = |i: usize, v: f64| -> CalcResult<f64> {
             if let Some(g) = a.get(i) {
@@ -1773,9 +1874,42 @@ impl<'a> Engine<'a> {
                     divisor *= 100.0;
                 }
                 if name == "NUMBERVALUE" {
-                    let decimal = a.get(1).map(Grid::text).unwrap_or(".".into());
-                    let group = a.get(2).map(Grid::text).unwrap_or(",".into());
-                    s = s.replace(&group, "").replace(&decimal, ".");
+                    let decimal = a
+                        .get(1)
+                        .map(Grid::text)
+                        .unwrap_or_else(|| if self.book.locale_ru { "," } else { "." }.into());
+                    let group = a
+                        .get(2)
+                        .map(Grid::text)
+                        .unwrap_or_else(|| if self.book.locale_ru { "\u{a0}" } else { "," }.into());
+                    let decimal = decimal.chars().next().ok_or("#VALUE!")?;
+                    let group = group.chars().next().ok_or("#VALUE!")?;
+                    if decimal == group {
+                        return Err("#VALUE!".into());
+                    }
+                    let mut normalized = String::new();
+                    let mut fractional = false;
+                    for c in s.chars().filter(|c| !matches!(*c, ' ' | '\u{a0}')) {
+                        if c == decimal {
+                            if fractional {
+                                return Err("#VALUE!".into());
+                            }
+                            fractional = true;
+                            normalized.push('.');
+                        } else if c == group {
+                            if fractional {
+                                return Err("#VALUE!".into());
+                            }
+                        } else if c.is_ascii_digit() || matches!(c, '+' | '-' | 'e' | 'E') {
+                            normalized.push(c);
+                        } else {
+                            return Err("#VALUE!".into());
+                        }
+                    }
+                    if normalized.is_empty() {
+                        return num(0.0);
+                    }
+                    s = normalized;
                 } else {
                     s = s.replace([' ', '\u{a0}'], "");
                     // With both separators the later one is the decimal mark: 1,000.5 / 1.000,5.
@@ -2290,6 +2424,480 @@ impl<'a> Engine<'a> {
                     num((n(0)? - n(1)?) * (life - period + 1.0) * 2.0 / (life * (life + 1.0)))
                 }
             }
+            "NPER" => {
+                arity(3, 5)?;
+                let rate = n(0)?;
+                let payment = n(1)?;
+                let present = n(2)?;
+                let future = default_n(3, 0.0)?;
+                let kind = default_n(4, 0.0)?;
+                if rate == 0.0 {
+                    if payment == 0.0 {
+                        return Err("#NUM!".into());
+                    }
+                    return num(-(present + future) / payment);
+                }
+                let z = payment * (1.0 + rate * kind) / rate;
+                let ratio = (z - future) / (present + z);
+                if !ratio.is_finite() || ratio <= 0.0 || rate <= -1.0 {
+                    return Err("#NUM!".into());
+                }
+                num(ratio.ln() / (1.0 + rate).ln())
+            }
+            "RATE" => {
+                arity(3, 6)?;
+                let periods = n(0)?;
+                let payment = n(1)?;
+                let present = n(2)?;
+                let future = default_n(3, 0.0)?;
+                let kind = default_n(4, 0.0)?;
+                let mut rate = default_n(5, 0.1)?;
+                if periods <= 0.0 {
+                    return Err("#NUM!".into());
+                }
+                let balance = |r: f64| -> f64 {
+                    if r.abs() < 1e-12 {
+                        present + payment * periods + future
+                    } else {
+                        let growth = (1.0 + r).powf(periods);
+                        present * growth + payment * (1.0 + r * kind) * (growth - 1.0) / r + future
+                    }
+                };
+                for _ in 0..100 {
+                    let step = 1e-7;
+                    let slope = (balance(rate + step) - balance(rate - step)) / (2.0 * step);
+                    if slope == 0.0 || !slope.is_finite() {
+                        break;
+                    }
+                    let next = rate - balance(rate) / slope;
+                    if !next.is_finite() || next <= -1.0 {
+                        break;
+                    }
+                    if (next - rate).abs() < 1e-10 {
+                        return num(next);
+                    }
+                    rate = next;
+                }
+                Err("#NUM!".into())
+            }
+            "IPMT" | "PPMT" => {
+                arity(4, 6)?;
+                let rate = n(0)?;
+                let period = n(1)?.trunc();
+                let periods = n(2)?;
+                let present = n(3)?;
+                let future = default_n(4, 0.0)?;
+                let kind = default_n(5, 0.0)?;
+                if period < 1.0 || period > periods.ceil() || rate <= -1.0 {
+                    return Err("#NUM!".into());
+                }
+                let annuity = |r: f64, count: f64| -> f64 {
+                    if r == 0.0 {
+                        count
+                    } else {
+                        ((1.0 + r).powf(count) - 1.0) / r * (1.0 + r * kind)
+                    }
+                };
+                let total = annuity(rate, periods);
+                if total == 0.0 {
+                    return Err("#DIV/0!".into());
+                }
+                let payment = -(present * (1.0 + rate).powf(periods) + future) / total;
+                // Balance after `count` periods with the FV sign convention.
+                let fv = |count: f64| -> f64 {
+                    -(present * (1.0 + rate).powf(count) + payment * annuity(rate, count))
+                };
+                let interest = if period == 1.0 {
+                    if kind != 0.0 { 0.0 } else { -present * rate }
+                } else if kind != 0.0 {
+                    (fv(period - 2.0) - payment) * rate
+                } else {
+                    fv(period - 1.0) * rate
+                };
+                num(if name == "IPMT" {
+                    interest
+                } else {
+                    payment - interest
+                })
+            }
+            "MAXIFS" | "MINIFS" => {
+                if a.len() < 3 || a.len().is_multiple_of(2) {
+                    return Err("#VALUE!".into());
+                }
+                let target = &a[0];
+                let pairs = a[1..].as_chunks::<2>().0;
+                if pairs
+                    .iter()
+                    .any(|p| p[0].values.len() != target.values.len())
+                {
+                    return Err("#VALUE!".into());
+                }
+                let mut best: Option<f64> = None;
+                for (i, value) in target.values.iter().enumerate() {
+                    if !pairs.iter().all(|p| {
+                        p[0].values
+                            .get(i)
+                            .is_some_and(|v| criterion(v, &p[1].first()))
+                    }) {
+                        continue;
+                    }
+                    match value {
+                        Value::Number(x) => {
+                            best = Some(match best {
+                                Some(b) if name == "MAXIFS" => b.max(*x),
+                                Some(b) => b.min(*x),
+                                None => *x,
+                            });
+                        }
+                        Value::Error(e) => return Err(e.clone()),
+                        _ => (),
+                    }
+                }
+                num(best.unwrap_or(0.0))
+            }
+            "MAXA" | "MINA" => {
+                arity(1, 255)?;
+                let vals = numbers(a, true)?;
+                let pick = if name == "MAXA" { f64::max } else { f64::min };
+                num(vals.into_iter().reduce(pick).unwrap_or(0.0))
+            }
+            "TRIMMEAN" => {
+                arity(2, 2)?;
+                let mut vals = numbers(&a[..1], false)?;
+                let percent = n(1)?;
+                if vals.is_empty() || !(0.0..1.0).contains(&percent) {
+                    return Err("#NUM!".into());
+                }
+                vals.sort_by(f64::total_cmp);
+                let trim = (vals.len() as f64 * percent).floor() as usize / 2;
+                let kept = &vals[trim..vals.len() - trim];
+                num(kept.iter().sum::<f64>() / kept.len() as f64)
+            }
+            "SKEW" | "KURT" => {
+                arity(1, 255)?;
+                let vals = numbers(a, false)?;
+                let count = vals.len() as f64;
+                let minimum = if name == "SKEW" { 3.0 } else { 4.0 };
+                if count < minimum {
+                    return Err("#DIV/0!".into());
+                }
+                let mean = vals.iter().sum::<f64>() / count;
+                let sd =
+                    (vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (count - 1.0)).sqrt();
+                if sd == 0.0 {
+                    return Err("#DIV/0!".into());
+                }
+                let moment = |power: i32| {
+                    vals.iter()
+                        .map(|v| ((v - mean) / sd).powi(power))
+                        .sum::<f64>()
+                };
+                num(if name == "SKEW" {
+                    count / ((count - 1.0) * (count - 2.0)) * moment(3)
+                } else {
+                    count * (count + 1.0) / ((count - 1.0) * (count - 2.0) * (count - 3.0))
+                        * moment(4)
+                        - 3.0 * (count - 1.0).powi(2) / ((count - 2.0) * (count - 3.0))
+                })
+            }
+            "CORREL" | "PEARSON" | "RSQ" | "SLOPE" | "INTERCEPT" | "COVAR" | "COVARIANCE.P"
+            | "COVARIANCE.S" => {
+                arity(2, 2)?;
+                if a[0].values.len() != a[1].values.len() {
+                    return Err("#N/A".into());
+                }
+                let mut pairs = Vec::new();
+                for (y, x) in a[0].values.iter().zip(&a[1].values) {
+                    match (y, x) {
+                        (Value::Error(e), _) | (_, Value::Error(e)) => return Err(e.clone()),
+                        (Value::Number(y), Value::Number(x)) => pairs.push((*y, *x)),
+                        _ => (),
+                    }
+                }
+                if pairs.is_empty() {
+                    return Err("#DIV/0!".into());
+                }
+                let count = pairs.len() as f64;
+                let mean_y = pairs.iter().map(|p| p.0).sum::<f64>() / count;
+                let mean_x = pairs.iter().map(|p| p.1).sum::<f64>() / count;
+                let sxy = pairs
+                    .iter()
+                    .map(|(y, x)| (x - mean_x) * (y - mean_y))
+                    .sum::<f64>();
+                let sxx = pairs.iter().map(|p| (p.1 - mean_x).powi(2)).sum::<f64>();
+                let syy = pairs.iter().map(|p| (p.0 - mean_y).powi(2)).sum::<f64>();
+                match name {
+                    "COVAR" | "COVARIANCE.P" => num(sxy / count),
+                    "COVARIANCE.S" => {
+                        if pairs.len() < 2 {
+                            Err("#DIV/0!".into())
+                        } else {
+                            num(sxy / (count - 1.0))
+                        }
+                    }
+                    "SLOPE" | "INTERCEPT" => {
+                        if sxx == 0.0 {
+                            return Err("#DIV/0!".into());
+                        }
+                        let slope = sxy / sxx;
+                        num(if name == "SLOPE" {
+                            slope
+                        } else {
+                            mean_y - slope * mean_x
+                        })
+                    }
+                    _ => {
+                        let scale = (sxx * syy).sqrt();
+                        if scale == 0.0 {
+                            return Err("#DIV/0!".into());
+                        }
+                        let r = sxy / scale;
+                        num(if name == "RSQ" { r * r } else { r })
+                    }
+                }
+            }
+            "TEXTBEFORE" | "TEXTAFTER" => {
+                arity(2, 6)?;
+                let chars: Vec<char> = text(0)?.chars().collect();
+                let delimiter = text(1)?;
+                let instance = default_n(2, 1.0)?.trunc();
+                let insensitive = default_n(3, 0.0)? != 0.0;
+                let match_end = default_n(4, 0.0)? != 0.0;
+                let len = chars.len();
+                if instance == 0.0 || instance.abs() > len.max(1) as f64 {
+                    return Err("#VALUE!".into());
+                }
+                let fold = |c: char| -> char {
+                    if insensitive {
+                        c.to_lowercase().next().unwrap_or(c)
+                    } else {
+                        c
+                    }
+                };
+                let hay: Vec<char> = chars.iter().map(|c| fold(*c)).collect();
+                let needle: Vec<char> = delimiter.chars().map(fold).collect();
+                let mut found: Vec<(usize, usize)> = Vec::new();
+                if needle.is_empty() {
+                    found.push(if instance > 0.0 { (0, 0) } else { (len, len) });
+                } else {
+                    let mut i = 0;
+                    while i + needle.len() <= len {
+                        if hay[i..i + needle.len()] == needle[..] {
+                            found.push((i, i + needle.len()));
+                            i += needle.len();
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    if match_end {
+                        if instance > 0.0 {
+                            found.push((len, len));
+                        } else {
+                            found.insert(0, (0, 0));
+                        }
+                    }
+                }
+                let wanted = instance.abs() as usize;
+                let hit = if instance > 0.0 {
+                    found.get(wanted - 1)
+                } else {
+                    found
+                        .len()
+                        .checked_sub(wanted)
+                        .and_then(|index| found.get(index))
+                };
+                match hit {
+                    Some(&(start, end)) => string(if name == "TEXTBEFORE" {
+                        chars[..start].iter().collect()
+                    } else {
+                        chars[end..].iter().collect()
+                    }),
+                    None => match a.get(5) {
+                        Some(fallback) => Ok(Grid::scalar(fallback.first())),
+                        None => Err("#N/A".into()),
+                    },
+                }
+            }
+            "ROMAN" => {
+                arity(1, 1)?;
+                let x = n(0)?.trunc();
+                if !(0.0..=3999.0).contains(&x) {
+                    return Err("#VALUE!".into());
+                }
+                let mut rest = x as u32;
+                let mut out = String::new();
+                for (value, symbol) in ROMAN {
+                    while rest >= value {
+                        out.push_str(symbol);
+                        rest -= value;
+                    }
+                }
+                string(out)
+            }
+            "ARABIC" => {
+                arity(1, 1)?;
+                let source = text(0)?;
+                let trimmed = source.trim();
+                let (negative, digits) = match trimmed.strip_prefix('-') {
+                    Some(rest) => (true, rest),
+                    None => (false, trimmed),
+                };
+                if digits.len() > 255 {
+                    return Err("#VALUE!".into());
+                }
+                let values = digits
+                    .chars()
+                    .map(|c| match c.to_ascii_uppercase() {
+                        'I' => Ok(1.0),
+                        'V' => Ok(5.0),
+                        'X' => Ok(10.0),
+                        'L' => Ok(50.0),
+                        'C' => Ok(100.0),
+                        'D' => Ok(500.0),
+                        'M' => Ok(1000.0),
+                        _ => Err("#VALUE!".to_string()),
+                    })
+                    .collect::<CalcResult<Vec<f64>>>()?;
+                let mut total = 0.0;
+                for (i, value) in values.iter().enumerate() {
+                    if values.get(i + 1).is_some_and(|next| next > value) {
+                        total -= value;
+                    } else {
+                        total += value;
+                    }
+                }
+                num(if negative { -total } else { total })
+            }
+            "DEC2BIN" | "DEC2OCT" | "DEC2HEX" => {
+                arity(1, 2)?;
+                let (radix, bits) = radix_bits(name);
+                let x = n(0)?.trunc();
+                let limit = 2f64.powi(bits - 1);
+                if x < -limit || x >= limit {
+                    return Err("#NUM!".into());
+                }
+                // Negative numbers use the 10-digit two's complement form, as Excel does.
+                let value = (if x < 0.0 { x + 2.0 * limit } else { x }) as u64;
+                let digits = to_base(value, radix);
+                if x < 0.0 {
+                    return string(digits);
+                }
+                match a.get(1).filter(|g| g.first() != Value::Empty) {
+                    Some(places) => {
+                        let places = places.number()?.trunc();
+                        if places < digits.len() as f64 || places > 10.0 {
+                            return Err("#NUM!".into());
+                        }
+                        string(format!("{digits:0>width$}", width = places as usize))
+                    }
+                    None => string(digits),
+                }
+            }
+            "BIN2DEC" | "OCT2DEC" | "HEX2DEC" => {
+                arity(1, 1)?;
+                let (radix, bits) = radix_bits(name);
+                let source = text(0)?;
+                let digits = source.trim();
+                if digits.len() > 10 || !digits.chars().all(|c| c.is_digit(radix)) {
+                    return Err("#NUM!".into());
+                }
+                let value = if digits.is_empty() {
+                    0
+                } else {
+                    u64::from_str_radix(digits, radix).map_err(|_| "#NUM!".to_string())?
+                };
+                let limit = 1u64 << (bits - 1);
+                num(if value >= limit {
+                    value as f64 - 2.0 * limit as f64
+                } else {
+                    value as f64
+                })
+            }
+            "BASE" => {
+                arity(2, 3)?;
+                let x = n(0)?.trunc();
+                let radix = n(1)?.trunc();
+                let width = default_n(2, 0.0)?.trunc();
+                if !(0.0..9007199254740992.0).contains(&x)
+                    || !(2.0..=36.0).contains(&radix)
+                    || !(0.0..=255.0).contains(&width)
+                {
+                    return Err("#NUM!".into());
+                }
+                let digits = to_base(x as u64, radix as u32);
+                string(format!("{digits:0>width$}", width = width as usize))
+            }
+            "DECIMAL" => {
+                arity(2, 2)?;
+                let source = text(0)?;
+                let radix = n(1)?.trunc();
+                if !(2.0..=36.0).contains(&radix) {
+                    return Err("#NUM!".into());
+                }
+                let radix = radix as u32;
+                let digits = source.trim();
+                if digits.len() > 255 || !digits.chars().all(|c| c.is_digit(radix)) {
+                    return Err("#NUM!".into());
+                }
+                if digits.is_empty() {
+                    return num(0.0);
+                }
+                num(u64::from_str_radix(digits, radix).map_err(|_| "#NUM!".to_string())? as f64)
+            }
+            "WEEKNUM" | "ISOWEEKNUM" => {
+                arity(1, if name == "WEEKNUM" { 2 } else { 1 })?;
+                let serial = n(0)?.floor();
+                if !(1.0..=2958465.0).contains(&serial) {
+                    return Err("#NUM!".into());
+                }
+                let day = serial as i64;
+                let mode = default_n(1, 1.0)? as i64;
+                if name == "ISOWEEKNUM" || mode == 21 {
+                    // ISO 8601: the week belongs to the year that holds its Thursday.
+                    let thursday = day - (day - 2).rem_euclid(7) + 3;
+                    let (year, _, _) = serial_date(thursday as f64);
+                    let jan1 = date_serial(year, 1, 1) as i64;
+                    return num(((thursday - jan1) / 7 + 1) as f64);
+                }
+                let first = match mode {
+                    1 | 17 => 0,
+                    2 | 11 => 1,
+                    12..=16 => mode - 10,
+                    _ => return Err("#NUM!".into()),
+                };
+                let (year, _, _) = serial_date(serial);
+                let jan1 = date_serial(year, 1, 1) as i64;
+                let offset = ((jan1 - 1).rem_euclid(7) - first).rem_euclid(7);
+                num(((day - jan1 + offset) / 7 + 1) as f64)
+            }
+            "DAYS360" => {
+                arity(2, 3)?;
+                let start = n(0)?.floor();
+                let end = n(1)?.floor();
+                if !(0.0..=2958465.0).contains(&start) || !(0.0..=2958465.0).contains(&end) {
+                    return Err("#NUM!".into());
+                }
+                let european = a.get(2).map(Grid::boolean).transpose()?.unwrap_or(false);
+                let (y1, m1, mut d1) = serial_date(start);
+                let (y2, mut m2, mut d2) = serial_date(end);
+                if european {
+                    d1 = d1.min(30);
+                    d2 = d2.min(30);
+                } else {
+                    if d1 == days_in_month(y1, m1) {
+                        d1 = 30;
+                    }
+                    if d2 == 31 {
+                        if d1 < 30 {
+                            d2 = 1;
+                            m2 += 1;
+                        } else {
+                            d2 = 30;
+                        }
+                    }
+                }
+                num(((y2 - y1) * 360 + (m2 - m1) * 30 + d2 - d1) as f64)
+            }
             _ => Err("#NAME?".into()),
         }
     }
@@ -2518,6 +3126,45 @@ fn conditional(name: &str, a: &[Grid]) -> CalcResult<f64> {
     } else {
         Ok(result)
     }
+}
+const ROMAN: [(u32, &str); 13] = [
+    (1000, "M"),
+    (900, "CM"),
+    (500, "D"),
+    (400, "CD"),
+    (100, "C"),
+    (90, "XC"),
+    (50, "L"),
+    (40, "XL"),
+    (10, "X"),
+    (9, "IX"),
+    (5, "V"),
+    (4, "IV"),
+    (1, "I"),
+];
+/// Radix and two's-complement width of the Excel DEC2x/x2DEC families.
+fn radix_bits(name: &str) -> (u32, i32) {
+    match name {
+        "DEC2BIN" | "BIN2DEC" => (2, 10),
+        "DEC2OCT" | "OCT2DEC" => (8, 30),
+        _ => (16, 40),
+    }
+}
+fn to_base(mut value: u64, radix: u32) -> String {
+    if value == 0 {
+        return "0".into();
+    }
+    let mut digits = Vec::new();
+    while value > 0 {
+        let digit = (value % u64::from(radix)) as u32;
+        digits.push(
+            char::from_digit(digit, radix)
+                .unwrap_or('0')
+                .to_ascii_uppercase(),
+        );
+        value /= u64::from(radix);
+    }
+    digits.iter().rev().collect()
 }
 fn gcd(mut a: u64, mut b: u64) -> u64 {
     while b != 0 {

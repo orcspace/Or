@@ -242,7 +242,9 @@ pub fn font_bytes(bold: bool, italic: bool) -> Result<Vec<u8>, String> {
         _ => ["arial.ttf", "segoeui.ttf"],
     };
     for name in names {
-        if let Ok(bytes) = std::fs::read(root.join(name)) {
+        if let Ok(bytes) = crate::util::read_limited(&root.join(name), MAX_FONT_FILE as usize)
+            && ttf_parser::Face::parse(&bytes, 0).is_ok()
+        {
             return Ok(bytes);
         }
     }
@@ -250,7 +252,9 @@ pub fn font_bytes(bold: bool, italic: bool) -> Result<Vec<u8>, String> {
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
     ] {
-        if let Ok(b) = std::fs::read(name) {
+        if let Ok(b) = crate::util::read_limited(std::path::Path::new(name), MAX_FONT_FILE as usize)
+            && ttf_parser::Face::parse(&b, 0).is_ok()
+        {
             return Ok(b);
         }
     }

@@ -1880,23 +1880,39 @@ fn toggle_find(ui: &mut egui::Ui, state: &mut EditorState, canvas_id: egui::Id) 
 fn find_bar(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id: egui::Id) {
     let query_id = find_field_id(canvas_id, false);
     let replacement_id = find_field_id(canvas_id, true);
+    if ui.is_enabled()
+        && ui.memory(|m| m.has_focus(query_id) || m.has_focus(replacement_id))
+        && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape))
+    {
+        state.show_find = false;
+        state.find_focus = None;
+        ui.memory_mut(|m| m.request_focus(canvas_id));
+        return;
+    }
     if let Some(replacement) = state.find_focus.take() {
         ui.memory_mut(|m| m.request_focus(find_field_id(canvas_id, replacement)));
     }
     ui.horizontal_wrapped(|ui| {
         ui.label("Найти:");
-        ui.add(
-            egui::TextEdit::singleline(&mut state.search)
-                .id(query_id)
-                .desired_width(170.0),
-        );
+        if ui
+            .add(
+                egui::TextEdit::singleline(&mut state.search)
+                    .id(query_id)
+                    .desired_width(170.0),
+            )
+            .changed()
+        {
+            state.match_index = 0;
+        }
         ui.label("Заменить:");
         ui.add(
             egui::TextEdit::singleline(&mut state.replacement)
                 .id(replacement_id)
                 .desired_width(170.0),
         );
-        ui.checkbox(&mut state.case_sensitive, "Регистр");
+        if ui.checkbox(&mut state.case_sensitive, "Регистр").changed() {
+            state.match_index = 0;
+        }
         let matches = doc.find(&state.search, state.case_sensitive);
         ui.label(format!("{} совпадений", matches.len()));
         if ui
@@ -1943,8 +1959,14 @@ fn replace_current_match(doc: &mut Doc, state: &mut EditorState) -> bool {
     {
         return false;
     }
-    let replacement = state.replacement.clone();
-    state.insert(doc, &replacement)
+    let (start, end) = state.range();
+    match doc.replace_range(start, end, &state.replacement, None) {
+        Ok(position) => {
+            state.move_to(doc, position, false);
+            true
+        }
+        Err(_) => false,
+    }
 }
 fn object_panels(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState) {
     let enabled = ui.is_enabled();
@@ -2178,12 +2200,17 @@ fn handle_event(
             }
         }
         Event::Paste(text) => {
+            if text.is_empty() {
+                return;
+            }
             let copied = ui
                 .ctx()
                 .data_mut(|d| d.get_temp::<Clipboard>(clipboard_id()))
                 .filter(|c| c.text == text);
             let (a, _) = state.range();
-            state.insert(doc, &text);
+            if !state.insert(doc, &text) {
+                return;
+            }
             if let Some(copy) = copied {
                 for (i, p) in copy.paragraphs.iter().enumerate() {
                     let pi = a.paragraph + i;
@@ -2205,6 +2232,11 @@ fn handle_event(
                         offset = end;
                     }
                 }
+                state.typing = doc
+                    .paragraphs
+                    .get(state.cursor.paragraph)
+                    .map(|p| p.format_at(state.cursor.offset))
+                    .unwrap_or_default();
             }
         }
         Event::Copy | Event::Cut => {
@@ -2359,14 +2391,7 @@ fn handle_event(
                         state.insert(doc, "");
                     }
                 }
-                Key::Enter => {
-                    if state.insert(doc, if modifiers.shift { "\u{000b}" } else { "\n" })
-                        && ctrl
-                        && let Some(p) = doc.paragraphs.get_mut(state.cursor.paragraph)
-                    {
-                        p.page_break_before = true;
-                    }
-                }
+                Key::Enter => insert_break(doc, state, modifiers.shift, ctrl),
                 Key::Tab => {
                     if let Some(p) = doc
                         .paragraphs
@@ -2392,6 +2417,37 @@ fn handle_event(
             }
         }
         _ => {}
+    }
+}
+fn insert_break(doc: &mut Doc, state: &mut EditorState, soft: bool, page: bool) {
+    let paragraph = doc.paragraphs.get(state.cursor.paragraph);
+    if !soft
+        && !page
+        && !state.selected()
+        && paragraph.is_some_and(|p| p.is_empty() && p.list != List::None)
+    {
+        if let Some(p) = doc.paragraphs.get_mut(state.cursor.paragraph) {
+            p.list = List::None;
+            p.list_level = 0;
+        }
+        return;
+    }
+    let body_after_heading = !soft
+        && !page
+        && !state.selected()
+        && paragraph.is_some_and(|p| {
+            state.cursor.offset == p.len() && (p.style.starts_with("Heading") || p.style == "Title")
+        });
+    if state.insert(doc, if soft { "\u{000b}" } else { "\n" })
+        && let Some(p) = doc.paragraphs.get_mut(state.cursor.paragraph)
+    {
+        if body_after_heading {
+            p.set_style("Normal");
+            state.typing = p.format_at(0);
+        }
+        if page {
+            p.page_break_before = true;
+        }
     }
 }
 fn commit_ime(doc: &mut Doc, state: &mut EditorState, text: &str) {
@@ -2792,6 +2848,83 @@ mod tests {
     }
 
     #[test]
+    fn empty_paste_preserves_selected_unicode_text() {
+        let ctx = egui::Context::default();
+        let mut doc = Doc::from_text("Привет 😀");
+        let before = doc.clone();
+        let mut state = EditorState {
+            anchor: Position::default(),
+            cursor: Position {
+                paragraph: 0,
+                offset: 8,
+            },
+            ..EditorState::default()
+        };
+        let range = state.range();
+        let layout = doc.layout();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let canvas = ui.id().with("empty-paste");
+            ui.memory_mut(|memory| memory.request_focus(canvas));
+            handle_event(
+                ui,
+                &mut doc,
+                &layout,
+                &mut state,
+                canvas,
+                Event::Paste(String::new()),
+            );
+        });
+        output.textures_delta.clear();
+        assert_eq!(doc, before);
+        assert_eq!(state.range(), range);
+    }
+    #[test]
+    fn search_replace_uses_match_format_instead_of_stale_typing() {
+        let mut doc = Doc::from_text("");
+        doc.paragraphs[0].runs = vec![
+            Run {
+                text: "plain ".into(),
+                format: TextFormat::default(),
+            },
+            Run {
+                text: "needle".into(),
+                format: TextFormat {
+                    italic: true,
+                    ..TextFormat::default()
+                },
+            },
+        ];
+        let mut state = EditorState {
+            search: "needle".into(),
+            replacement: "замена".into(),
+            anchor: Position {
+                paragraph: 0,
+                offset: 6,
+            },
+            cursor: Position {
+                paragraph: 0,
+                offset: 12,
+            },
+            ..EditorState::default()
+        };
+        assert!(replace_current_match(&mut doc, &mut state));
+        assert_eq!(doc.plain_text(), "plain замена");
+        assert!(
+            doc.paragraphs[0]
+                .runs
+                .last()
+                .is_some_and(|run| run.format.italic)
+        );
+        assert!(state.typing.italic);
+        assert!(state.insert(&mut doc, "!"));
+        assert!(
+            doc.paragraphs[0]
+                .runs
+                .last()
+                .is_some_and(|run| run.text == "замена!" && run.format.italic)
+        );
+    }
+    #[test]
     fn replace_does_not_delete_a_previous_unrelated_selection() {
         let mut doc = Doc::from_text("keep target");
         let mut state = EditorState {
@@ -2901,6 +3034,10 @@ mod tests {
                 && p.runs.iter().any(|r| r.text == "italic" && r.format.italic))
         );
         target.validate()?;
+        assert!(
+            to.typing.italic,
+            "typing after rich paste must follow its final run"
+        );
         // A later clipboard change with other text must not inherit rich formatting.
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
             let canvas = ui.id().with("target");
@@ -3230,6 +3367,62 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn enter_finishes_empty_lists_and_starts_body_after_headings() {
+        let mut doc = Doc::from_text("");
+        doc.paragraphs[0].list = List::Bullet;
+        doc.paragraphs[0].list_level = 3;
+        let mut state = EditorState::default();
+        insert_break(&mut doc, &mut state, false, false);
+        assert_eq!(doc.paragraphs.len(), 1);
+        assert_eq!(doc.paragraphs[0].list, List::None);
+        assert_eq!(doc.paragraphs[0].list_level, 0);
+
+        doc = Doc::from_text("Heading");
+        doc.paragraphs[0].set_style("Heading1");
+        state.move_to(
+            &doc,
+            Position {
+                paragraph: 0,
+                offset: 7,
+            },
+            false,
+        );
+        insert_break(&mut doc, &mut state, false, false);
+        assert_eq!(doc.paragraphs[0].style, "Heading1");
+        assert_eq!(doc.paragraphs[1].style, "Normal");
+        assert!(!doc.paragraphs[1].keep_next);
+        assert!(!state.typing.bold);
+        assert_eq!(state.typing.size, 11.0);
+        assert!(state.insert(&mut doc, "Body"));
+        assert_eq!(doc.plain_text(), "Heading\nBody");
+    }
+    #[test]
+    fn soft_breaks_keep_heading_style_and_page_breaks_keep_lists() {
+        let mut doc = Doc::from_text("Heading");
+        doc.paragraphs[0].set_style("Heading1");
+        let mut state = EditorState::default();
+        state.move_to(
+            &doc,
+            Position {
+                paragraph: 0,
+                offset: 7,
+            },
+            false,
+        );
+        insert_break(&mut doc, &mut state, true, false);
+        assert_eq!(doc.paragraphs.len(), 1);
+        assert_eq!(doc.paragraphs[0].text(), "Heading\u{000b}");
+        assert_eq!(doc.paragraphs[0].style, "Heading1");
+
+        doc = Doc::from_text("");
+        doc.paragraphs[0].list = List::Number;
+        state.move_to(&doc, Position::default(), false);
+        insert_break(&mut doc, &mut state, false, true);
+        assert_eq!(doc.paragraphs.len(), 2);
+        assert_eq!(doc.paragraphs[1].list, List::Number);
+        assert!(doc.paragraphs[1].page_break_before);
+    }
     #[test]
     fn empty_ime_commit_preserves_user_selection() {
         let mut doc = Doc::from_text("selected text");
