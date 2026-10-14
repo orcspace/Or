@@ -147,13 +147,8 @@ pub fn show(ui: &mut egui::Ui, deck: &mut Deck) -> bool {
     if ui.is_enabled()
         && let Some(png) = crate::clipboard::take_image(ui.ctx())
     {
-        // Copied TrineDocs objects without text leave no text on the clipboard: paste them.
-        if !state.clipboard.is_empty() && state.clipboard.iter().all(|e| e.text.is_empty()) {
-            changed |= paste_selection(deck, &mut state);
-        } else {
-            let slide_id = state.slide_id;
-            changed |= insert_image(deck, &mut state, slide_id, png.to_vec());
-        }
+        let slide_id = state.slide_id;
+        changed |= insert_image(deck, &mut state, slide_id, png.to_vec());
     }
     if state.image_job.is_some() {
         ui.ctx()
@@ -421,7 +416,7 @@ pub fn show(ui: &mut egui::Ui, deck: &mut Deck) -> bool {
                     Err(error) => state.error = error,
                 }
             }
-        } else if key(egui::Key::V) {
+        } else if key(egui::Key::V) && owns_system_clipboard(&state) {
             changed |= paste_selection(deck, &mut state);
         }
         if key(egui::Key::D) {
@@ -660,10 +655,10 @@ fn ribbon(ui: &mut egui::Ui, deck: &mut Deck, state: &mut State) -> bool {
                         .on_hover_text("Вставить объекты, текст или рисунок · Ctrl+V")
                         .clicked()
                     {
-                        if state.clipboard.is_empty() {
-                            crate::clipboard::paste(ui.ctx());
-                        } else {
+                        if owns_system_clipboard(state) {
                             changed |= paste_selection(deck, state);
+                        } else {
+                            crate::clipboard::paste(ui.ctx());
                         }
                     }
                     ui.add_enabled_ui(has_selection, |ui| {
@@ -1276,6 +1271,20 @@ fn paste_selection(deck: &mut Deck, state: &mut State) -> bool {
     }
     true
 }
+fn clipboard_text(elements: &[Element]) -> String {
+    elements
+        .iter()
+        .map(|element| element.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+fn owns_system_clipboard(state: &State) -> bool {
+    !state.clipboard.is_empty()
+        && arboard::Clipboard::new()
+            .ok()
+            .and_then(|mut clipboard| clipboard.get_text().ok())
+            .is_some_and(|text| text == clipboard_text(&state.clipboard))
+}
 fn delete_selection(deck: &mut Deck, state: &mut State) -> bool {
     let mut changed = false;
     for id in state.selected.clone() {
@@ -1759,6 +1768,45 @@ fn inline_editor(
     }
     changed | response.changed()
 }
+fn select_object(slide: &Slide, state: &mut State, id: u64, additive: bool, clicked: bool) {
+    let Some(element) = slide.element(id) else {
+        return;
+    };
+    let members = slide
+        .elements
+        .iter()
+        .filter(|candidate| {
+            candidate.id == id
+                || element
+                    .group
+                    .is_some_and(|group| candidate.group == Some(group))
+        })
+        .map(|element| element.id)
+        .collect::<Vec<_>>();
+    if additive && clicked && state.selected.contains(&id) {
+        state
+            .selected
+            .retain(|selected| !members.contains(selected));
+        state.edit_text = None;
+        return;
+    }
+    if !additive && !state.selected.contains(&id) {
+        state.selected.clear();
+    }
+    state.selected.extend(members);
+    state.selected.sort_unstable();
+    state.selected.dedup();
+}
+fn snapped_drag_delta(original: &[(u64, f32, f32, f32, f32)], delta: Vec2, grid: bool) -> Vec2 {
+    if grid && let Some((_, x, y, _, _)) = original.first() {
+        Vec2::new(
+            ((x + delta.x) / 24.0).round() * 24.0 - x,
+            ((y + delta.y) / 24.0).round() * 24.0 - y,
+        )
+    } else {
+        delta
+    }
+}
 fn canvas(
     ui: &mut egui::Ui,
     slide: &mut Slide,
@@ -1831,23 +1879,13 @@ fn canvas(
         let was_selected = state.selected.contains(&element.id);
         if hit.clicked() || hit.drag_started() {
             response.request_focus();
-            if !state.selected.contains(&element.id) {
-                if !ui.input(|i| i.modifiers.ctrl || i.modifiers.shift) {
-                    state.selected.clear();
-                }
-                state.selected.push(element.id);
-            }
-            if let Some(group) = element.group {
-                state.selected.extend(
-                    slide
-                        .elements
-                        .iter()
-                        .filter(|e| e.group == Some(group))
-                        .map(|e| e.id),
-                );
-                state.selected.sort_unstable();
-                state.selected.dedup();
-            }
+            select_object(
+                slide,
+                state,
+                element.id,
+                ui.input(|i| i.modifiers.ctrl || i.modifiers.shift),
+                hit.clicked(),
+            );
         }
         if hit.clicked() && state.edit_text.is_some_and(|id| id != element.id) {
             state.edit_text = None;
@@ -1863,7 +1901,8 @@ fn canvas(
                     | ElementKind::Ellipse
                     | ElementKind::Table { .. }
             );
-        if hit.double_clicked() || reclick {
+        if (hit.double_clicked() && !ui.input(|i| i.modifiers.ctrl || i.modifiers.shift)) || reclick
+        {
             let cell = hit
                 .interact_pointer_pos()
                 .and_then(|pos| table_cell_at(element, object, pos));
@@ -1878,12 +1917,15 @@ fn canvas(
                 .collect();
         }
         if hit.dragged() {
-            let delta = hit.total_drag_delta().unwrap_or(Vec2::ZERO) / scale;
+            let delta = snapped_drag_delta(
+                &state.drag_original,
+                hit.total_drag_delta().unwrap_or(Vec2::ZERO) / scale,
+                state.grid,
+            );
             for (id, x, y, _, _) in &state.drag_original {
                 if let Some(e) = slide.element_mut(*id) {
-                    let step = if state.grid { 24.0 } else { 1.0 };
-                    e.x = ((x + delta.x) / step).round() * step;
-                    e.y = ((y + delta.y) / step).round() * step;
+                    e.x = x + delta.x;
+                    e.y = y + delta.y;
                     changed = true;
                 }
             }
@@ -2754,6 +2796,72 @@ mod tests {
         assert!(pasted.iter().all(|element| element.group == pasted_group
             && !copied.iter().any(|old| old.id == element.id)));
         assert!(deck.validate().is_ok());
+    }
+    #[test]
+    fn additive_click_deselects_whole_group_without_deselecting_on_drag() -> Result<(), String> {
+        let mut deck = Deck::empty();
+        let slide_id = deck.add_slide("blank");
+        let first = deck.add_element(slide_id, ElementKind::Rect)?;
+        let second = deck.add_element(slide_id, ElementKind::Rect)?;
+        let third = deck.add_element(slide_id, ElementKind::Rect)?;
+        let group = deck.allocate_id();
+        let slide = deck.slide_mut(slide_id).ok_or("slide")?;
+        slide.element_mut(first).ok_or("first")?.group = Some(group);
+        slide.element_mut(second).ok_or("second")?.group = Some(group);
+        let mut state = State::default();
+        select_object(slide, &mut state, first, false, true);
+        assert_eq!(state.selected, vec![first, second]);
+        select_object(slide, &mut state, third, true, true);
+        select_object(slide, &mut state, first, true, false);
+        assert_eq!(state.selected, vec![first, second, third]);
+        select_object(slide, &mut state, first, true, true);
+        assert_eq!(state.selected, vec![third]);
+        Ok(())
+    }
+    #[test]
+    fn grid_drag_preserves_fractional_spacing_between_group_members() {
+        let original = [
+            (1, 12.5, 13.25, 100.0, 100.0),
+            (2, 43.75, 69.5, 100.0, 100.0),
+        ];
+        let delta = snapped_drag_delta(&original, Vec2::new(17.0, 20.0), true);
+        assert_eq!(
+            (original[0].1 + delta.x, original[0].2 + delta.y),
+            (24.0, 24.0)
+        );
+        assert_eq!((original[1].1 + delta.x) - (original[0].1 + delta.x), 31.25);
+        assert_eq!((original[1].2 + delta.y) - (original[0].2 + delta.y), 56.25);
+        assert_eq!(
+            snapped_drag_delta(&original, Vec2::new(0.25, 0.5), false),
+            Vec2::new(0.25, 0.5)
+        );
+    }
+    #[test]
+    fn external_picture_paste_overrides_stale_copied_shapes() -> Result<(), String> {
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx)?;
+        let mut deck = Deck::empty();
+        let slide = deck.add_slide("blank");
+        let shape = deck.add_element(slide, ElementKind::Rect)?;
+        clicked_object(&ctx, &mut deck, shape)?;
+        editor_frame(
+            &ctx,
+            &mut deck,
+            vec![egui::Event::Copy],
+            egui::Modifiers::NONE,
+            false,
+        )?;
+        let source = image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255]));
+        let mut png = std::io::Cursor::new(Vec::new());
+        source
+            .write_to(&mut png, image::ImageFormat::Png)
+            .map_err(|error| error.to_string())?;
+        crate::clipboard::offer(&ctx, png.into_inner());
+        editor_frame(&ctx, &mut deck, Vec::new(), egui::Modifiers::NONE, false)?;
+        let elements = &deck.slide(slide).ok_or("slide")?.elements;
+        assert_eq!(elements.len(), 2);
+        assert!(matches!(elements[1].kind, ElementKind::Image { .. }));
+        deck.validate()
     }
     #[test]
     fn duplication_preserves_groups_layer_order_and_clipboard() -> Result<(), String> {

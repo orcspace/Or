@@ -1,5 +1,48 @@
 use super::{formula, model::*};
 #[test]
+fn numbervalue_uses_locale_and_validates_separators() -> Result<(), String> {
+    let mut book = Book::default();
+    let id = book.active_id();
+    for (input, expected) in [
+        ("=NUMBERVALUE(\"1 234,5\")", Value::Number(1234.5)),
+        ("=NUMBERVALUE(\"\")", Value::Number(0.0)),
+        (
+            "=NUMBERVALUE(\"1.234,5\",\",extra\",\".extra\")",
+            Value::Number(1234.5),
+        ),
+        (
+            "=NUMBERVALUE(\"1.2,3\",\".\",\",\")",
+            Value::Error("#VALUE!".into()),
+        ),
+        (
+            "=NUMBERVALUE(\"1.5\",\".\",\".\")",
+            Value::Error("#VALUE!".into()),
+        ),
+        (
+            "=NUMBERVALUE(\"1.5\",\"\",\",\")",
+            Value::Error("#VALUE!".into()),
+        ),
+    ] {
+        book.set_cell(id, 0, 0, input)?;
+        assert_eq!(
+            book.active_sheet()
+                .and_then(|sheet| sheet.cell(0, 0))
+                .map(|cell| &cell.value),
+            Some(&expected),
+            "{input}"
+        );
+    }
+    book.locale_ru = false;
+    book.set_cell(id, 0, 0, "=NUMBERVALUE(\"1,234.5\")")?;
+    assert_eq!(
+        book.active_sheet()
+            .and_then(|sheet| sheet.cell(0, 0))
+            .map(|cell| &cell.value),
+        Some(&Value::Number(1234.5))
+    );
+    Ok(())
+}
+#[test]
 fn images_follow_structural_edits_without_losing_data() -> Result<(), String> {
     let mut book = Book::default();
     let id = book.active_id();

@@ -1773,9 +1773,42 @@ impl<'a> Engine<'a> {
                     divisor *= 100.0;
                 }
                 if name == "NUMBERVALUE" {
-                    let decimal = a.get(1).map(Grid::text).unwrap_or(".".into());
-                    let group = a.get(2).map(Grid::text).unwrap_or(",".into());
-                    s = s.replace(&group, "").replace(&decimal, ".");
+                    let decimal = a
+                        .get(1)
+                        .map(Grid::text)
+                        .unwrap_or_else(|| if self.book.locale_ru { "," } else { "." }.into());
+                    let group = a
+                        .get(2)
+                        .map(Grid::text)
+                        .unwrap_or_else(|| if self.book.locale_ru { "\u{a0}" } else { "," }.into());
+                    let decimal = decimal.chars().next().ok_or("#VALUE!")?;
+                    let group = group.chars().next().ok_or("#VALUE!")?;
+                    if decimal == group {
+                        return Err("#VALUE!".into());
+                    }
+                    let mut normalized = String::new();
+                    let mut fractional = false;
+                    for c in s.chars().filter(|c| !matches!(*c, ' ' | '\u{a0}')) {
+                        if c == decimal {
+                            if fractional {
+                                return Err("#VALUE!".into());
+                            }
+                            fractional = true;
+                            normalized.push('.');
+                        } else if c == group {
+                            if fractional {
+                                return Err("#VALUE!".into());
+                            }
+                        } else if c.is_ascii_digit() || matches!(c, '+' | '-' | 'e' | 'E') {
+                            normalized.push(c);
+                        } else {
+                            return Err("#VALUE!".into());
+                        }
+                    }
+                    if normalized.is_empty() {
+                        return num(0.0);
+                    }
+                    s = normalized;
                 } else {
                     s = s.replace([' ', '\u{a0}'], "");
                     // With both separators the later one is the decimal mark: 1,000.5 / 1.000,5.

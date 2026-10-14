@@ -161,21 +161,49 @@ impl Presentation {
         }
         true
     }
+    fn sync_slide(&mut self, deck: &Deck, time: f64) -> bool {
+        if let Some(id) = self.slide_id {
+            let Some(index) = deck.slides.iter().position(|slide| slide.id == id) else {
+                self.active = false;
+                return false;
+            };
+            self.index = index;
+        }
+        let Some(slide) = deck.slides.get(self.index) else {
+            self.active = false;
+            return false;
+        };
+        if slide.hidden {
+            let visible = deck
+                .slides
+                .iter()
+                .enumerate()
+                .skip(self.index + 1)
+                .find(|(_, slide)| !slide.hidden)
+                .map(|(index, _)| index)
+                .or_else(|| {
+                    deck.slides
+                        .iter()
+                        .enumerate()
+                        .take(self.index)
+                        .rev()
+                        .find(|(_, slide)| !slide.hidden)
+                        .map(|(index, _)| index)
+                });
+            let Some(index) = visible else {
+                self.active = false;
+                return false;
+            };
+            self.move_to(deck, index, time);
+            self.previous = None;
+        }
+        true
+    }
 }
 pub fn show(ui: &mut egui::Ui, deck: &Deck, state: &mut Presentation) {
     let ctx = ui.ctx().clone();
     let time = ctx.input(|i| i.time);
-    if let Some(id) = state.slide_id {
-        if let Some(index) = deck.slides.iter().position(|slide| slide.id == id) {
-            state.index = index;
-        } else {
-            state.active = false;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
-            return;
-        }
-    }
-    if deck.slides.get(state.index).is_none() {
-        state.active = false;
+    if !state.sync_slide(deck, time) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
         return;
     }
@@ -426,6 +454,53 @@ pub fn show(ui: &mut egui::Ui, deck: &Deck, state: &mut Presentation) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn live_hide_reorder_and_delete_keep_presentation_identity_safe() -> Result<(), String> {
+        let mut deck = Deck::empty();
+        let first = deck.add_slide("blank");
+        let second = deck.add_slide("blank");
+        let third = deck.add_slide("blank");
+        let mut state = Presentation {
+            active: true,
+            ..Presentation::default()
+        };
+        state.move_to(&deck, 1, 0.0);
+        deck.move_slide(second, 0)?;
+        assert!(state.sync_slide(&deck, 1.0));
+        assert_eq!((state.index, state.slide_id), (0, Some(second)));
+        deck.slide_mut(second).ok_or("second")?.hidden = true;
+        assert!(state.sync_slide(&deck, 2.0));
+        assert_eq!(
+            (state.slide_id, state.slide_started, state.previous),
+            (Some(first), 2.0, None)
+        );
+        deck.slide_mut(first).ok_or("first")?.hidden = true;
+        assert!(state.sync_slide(&deck, 3.0));
+        assert_eq!(state.slide_id, Some(third));
+        deck.delete_slide(third)?;
+        assert!(!state.sync_slide(&deck, 4.0));
+        assert!(!state.active);
+        Ok(())
+    }
+    #[test]
+    fn hiding_last_slide_falls_back_to_visible_previous_and_all_hidden_exits() -> Result<(), String>
+    {
+        let mut deck = Deck::empty();
+        let first = deck.add_slide("blank");
+        let last = deck.add_slide("blank");
+        let mut state = Presentation {
+            active: true,
+            ..Presentation::default()
+        };
+        state.move_to(&deck, 1, 0.0);
+        deck.slide_mut(last).ok_or("last")?.hidden = true;
+        assert!(state.sync_slide(&deck, 1.0));
+        assert_eq!(state.slide_id, Some(first));
+        deck.slide_mut(first).ok_or("first")?.hidden = true;
+        assert!(!state.sync_slide(&deck, 2.0));
+        assert!(!state.active);
+        Ok(())
+    }
     #[test]
     fn automatic_advance_skips_hidden_and_resets_slide_clock() -> Result<(), String> {
         let mut deck = Deck::default();

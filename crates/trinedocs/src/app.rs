@@ -942,12 +942,20 @@ impl App {
                 let _ = r.reply.send(Err("invalid_args: mode/base_version".into()));
                 continue;
             }
+            if !crate::mcp::tools::names().contains(&r.tool.as_str()) {
+                let _ = r
+                    .reply
+                    .send(Err("unsupported_feature: неизвестный инструмент MCP".into()));
+                continue;
+            }
+            let dry_run = r.args.get("mode").and_then(Value::as_str) == Some("dry_run");
             let id = r.args.get("document_id").and_then(Value::as_u64);
             if id.is_some_and(|id| !self.tabs.iter().any(|t| t.id == id)) {
                 let _ = r.reply.send(Err("not_found: документ не открыт".into()));
                 continue;
             }
             if !crate::mcp::tools::read_only(&r.tool)
+                && !dry_run
                 && let Some(target) = id.or(self.active)
                 && let Err(e) = self.flush_pending(target)
             {
@@ -971,7 +979,7 @@ impl App {
             if matches!(
                 r.tool.as_str(),
                 "save_document" | "close_document" | "open_document" | "export"
-            ) && r.args.get("mode").and_then(Value::as_str) == Some("dry_run")
+            ) && dry_run
             {
                 let _ = r.reply.send(Ok(json!({"applied":false})));
                 continue;
@@ -1081,6 +1089,11 @@ impl App {
                 continue;
             }
             let result = (|| -> Result<Value, String> {
+                if !self.settings.mcp
+                    || (!self.allowed.contains(&request.client) && !self.chat.owns(&request.client))
+                {
+                    return Err("permission_denied: доступ MCP отозван".into());
+                }
                 let id = request
                     .args
                     .get("document_id")
@@ -3007,6 +3020,97 @@ mod shell_input_tests {
         let (sender, receiver) = std::sync::mpsc::channel();
         app.worker.rx = receiver;
         sender.send(event).map_err(|error| error.to_string())
+    }
+    #[test]
+    fn mcp_dry_run_and_unknown_tools_preserve_pending_sheet_input() -> Result<(), String> {
+        for tool in ["sheets_write_range", "unknown_tool"] {
+            let mut app = fixture()?;
+            app.active = Some(11);
+            frame(&mut app, vec![]);
+            let canvas_id = egui::Id::new(("sheets-editor", 11_u64)).with("canvas");
+            app.editor_ctx
+                .memory_mut(|memory| memory.request_focus(canvas_id));
+            frame(&mut app, vec![egui::Event::Text("draft".into())]);
+            let tab = app
+                .tabs
+                .iter()
+                .find(|tab| tab.id == 11)
+                .ok_or("sheet tab")?;
+            let before = tab.document.clone();
+            let version = tab.version;
+            let undo = tab.undo.len();
+            let sheet_id = match &before {
+                Document::Sheets(book) => book.active_id(),
+                _ => return Err("sheet kind".into()),
+            };
+            let mut response = mcp_request(
+                &mut app,
+                tool,
+                json!({
+                    "document_id":11, "sheet_id":sheet_id, "row":0, "col":1,
+                    "values":[["agent"]],
+                    "mode":if tool == "sheets_write_range" { "dry_run" } else { "apply" }
+                }),
+            )?;
+            let ctx = app.editor_ctx.clone();
+            app.mcp_requests(&ctx);
+            let result = response.try_recv().map_err(|error| error.to_string())?;
+            if tool == "sheets_write_range" {
+                assert_eq!(result?["applied"], false);
+            } else {
+                assert!(result.is_err_and(|error| error.starts_with("unsupported_feature")));
+            }
+            let tab = app
+                .tabs
+                .iter()
+                .find(|tab| tab.id == 11)
+                .ok_or("sheet tab")?;
+            assert_eq!(tab.document, before);
+            assert_eq!(tab.version, version);
+            assert_eq!(tab.undo.len(), undo);
+            app.flush_pending(11)?;
+            let tab = app
+                .tabs
+                .iter()
+                .find(|tab| tab.id == 11)
+                .ok_or("sheet tab")?;
+            let Document::Sheets(book) = &tab.document else {
+                return Err("sheet kind".into());
+            };
+            assert_eq!(
+                book.active_sheet()
+                    .and_then(|sheet| sheet.cell(0, 0))
+                    .map(|cell| cell.input.as_str()),
+                Some("draft")
+            );
+            assert_eq!(tab.version, version + 1);
+        }
+        Ok(())
+    }
+    #[test]
+    fn queued_mcp_close_rechecks_revoked_permission() -> Result<(), String> {
+        for disable_mcp in [false, true] {
+            let mut app = fixture()?;
+            let mut response = mcp_request(&mut app, "close_document", json!({"document_id":10}))?;
+            let ctx = app.editor_ctx.clone();
+            app.mcp_requests(&ctx);
+            assert_eq!(app.pending_mcp_closes.len(), 1);
+            if disable_mcp {
+                app.settings.mcp = false;
+            } else {
+                app.allowed.clear();
+            }
+            app.finish_mcp_closes();
+            assert!(
+                response
+                    .try_recv()
+                    .map_err(|error| error.to_string())?
+                    .is_err_and(|error| error.starts_with("permission_denied"))
+            );
+            assert!(app.tabs.iter().any(|tab| tab.id == 10));
+            assert!(app.pending.is_none());
+        }
+        Ok(())
     }
     fn second_doc(app: &mut App) -> Result<(), String> {
         let tab = app

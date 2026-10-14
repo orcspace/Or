@@ -1959,8 +1959,14 @@ fn replace_current_match(doc: &mut Doc, state: &mut EditorState) -> bool {
     {
         return false;
     }
-    let replacement = state.replacement.clone();
-    state.insert(doc, &replacement)
+    let (start, end) = state.range();
+    match doc.replace_range(start, end, &state.replacement, None) {
+        Ok(position) => {
+            state.move_to(doc, position, false);
+            true
+        }
+        Err(_) => false,
+    }
 }
 fn object_panels(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState) {
     let enabled = ui.is_enabled();
@@ -2194,12 +2200,17 @@ fn handle_event(
             }
         }
         Event::Paste(text) => {
+            if text.is_empty() {
+                return;
+            }
             let copied = ui
                 .ctx()
                 .data_mut(|d| d.get_temp::<Clipboard>(clipboard_id()))
                 .filter(|c| c.text == text);
             let (a, _) = state.range();
-            state.insert(doc, &text);
+            if !state.insert(doc, &text) {
+                return;
+            }
             if let Some(copy) = copied {
                 for (i, p) in copy.paragraphs.iter().enumerate() {
                     let pi = a.paragraph + i;
@@ -2221,6 +2232,11 @@ fn handle_event(
                         offset = end;
                     }
                 }
+                state.typing = doc
+                    .paragraphs
+                    .get(state.cursor.paragraph)
+                    .map(|p| p.format_at(state.cursor.offset))
+                    .unwrap_or_default();
             }
         }
         Event::Copy | Event::Cut => {
@@ -2832,6 +2848,83 @@ mod tests {
     }
 
     #[test]
+    fn empty_paste_preserves_selected_unicode_text() {
+        let ctx = egui::Context::default();
+        let mut doc = Doc::from_text("Привет 😀");
+        let before = doc.clone();
+        let mut state = EditorState {
+            anchor: Position::default(),
+            cursor: Position {
+                paragraph: 0,
+                offset: 8,
+            },
+            ..EditorState::default()
+        };
+        let range = state.range();
+        let layout = doc.layout();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let canvas = ui.id().with("empty-paste");
+            ui.memory_mut(|memory| memory.request_focus(canvas));
+            handle_event(
+                ui,
+                &mut doc,
+                &layout,
+                &mut state,
+                canvas,
+                Event::Paste(String::new()),
+            );
+        });
+        output.textures_delta.clear();
+        assert_eq!(doc, before);
+        assert_eq!(state.range(), range);
+    }
+    #[test]
+    fn search_replace_uses_match_format_instead_of_stale_typing() {
+        let mut doc = Doc::from_text("");
+        doc.paragraphs[0].runs = vec![
+            Run {
+                text: "plain ".into(),
+                format: TextFormat::default(),
+            },
+            Run {
+                text: "needle".into(),
+                format: TextFormat {
+                    italic: true,
+                    ..TextFormat::default()
+                },
+            },
+        ];
+        let mut state = EditorState {
+            search: "needle".into(),
+            replacement: "замена".into(),
+            anchor: Position {
+                paragraph: 0,
+                offset: 6,
+            },
+            cursor: Position {
+                paragraph: 0,
+                offset: 12,
+            },
+            ..EditorState::default()
+        };
+        assert!(replace_current_match(&mut doc, &mut state));
+        assert_eq!(doc.plain_text(), "plain замена");
+        assert!(
+            doc.paragraphs[0]
+                .runs
+                .last()
+                .is_some_and(|run| run.format.italic)
+        );
+        assert!(state.typing.italic);
+        assert!(state.insert(&mut doc, "!"));
+        assert!(
+            doc.paragraphs[0]
+                .runs
+                .last()
+                .is_some_and(|run| run.text == "замена!" && run.format.italic)
+        );
+    }
+    #[test]
     fn replace_does_not_delete_a_previous_unrelated_selection() {
         let mut doc = Doc::from_text("keep target");
         let mut state = EditorState {
@@ -2941,6 +3034,10 @@ mod tests {
                 && p.runs.iter().any(|r| r.text == "italic" && r.format.italic))
         );
         target.validate()?;
+        assert!(
+            to.typing.italic,
+            "typing after rich paste must follow its final run"
+        );
         // A later clipboard change with other text must not inherit rich formatting.
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
             let canvas = ui.id().with("target");

@@ -1043,7 +1043,11 @@ impl Doc {
         if a.offset > first.len() || b.offset > last.len() {
             return Err("Недопустимый диапазон текста".into());
         }
-        let fmt = format.unwrap_or_else(|| first.format_at(a.offset));
+        let fmt = format.unwrap_or_else(|| {
+            // Insertion follows the character before the caret; replacement follows
+            // the first deleted character, including matches at a run boundary.
+            first.format_at(a.offset + usize::from(a != b))
+        });
         let prefix = first.slice(0, a.offset);
         let suffix = last.slice(b.offset, last.len());
         let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
@@ -2793,6 +2797,49 @@ mod tests {
             r.format.size = 144.0;
         }
         assert!(doc.validate().is_err());
+    }
+    #[test]
+    fn replacement_at_run_boundaries_preserves_the_matched_format() -> Result<(), String> {
+        let mut doc = Doc::from_text("");
+        doc.paragraphs[0].runs = vec![
+            Run {
+                text: "prefix ".into(),
+                format: TextFormat::default(),
+            },
+            Run {
+                text: "needle".into(),
+                format: TextFormat {
+                    bold: true,
+                    color: [200, 0, 0],
+                    ..TextFormat::default()
+                },
+            },
+            Run {
+                text: " suffix".into(),
+                format: TextFormat::default(),
+            },
+        ];
+        assert_eq!(doc.replace_all("needle", "новый", true), 1);
+        assert_eq!(doc.plain_text(), "prefix новый suffix");
+        assert!(
+            doc.paragraphs[0]
+                .runs
+                .iter()
+                .any(|r| r.text == "новый" && r.format.bold && r.format.color == [200, 0, 0])
+        );
+        assert!(
+            doc.paragraphs[0]
+                .runs
+                .first()
+                .is_some_and(|r| !r.format.bold)
+        );
+        assert!(
+            doc.paragraphs[0]
+                .runs
+                .last()
+                .is_some_and(|r| !r.format.bold)
+        );
+        doc.validate()
     }
     #[test]
     fn replacement_is_non_overlapping() {

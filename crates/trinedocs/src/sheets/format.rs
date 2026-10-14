@@ -87,12 +87,15 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
     }
     let percent = bare.chars().filter(|c| *c == '%').count();
     let mut n = numeric * 100f64.powi(percent as i32);
-    let first = section
-        .char_indices()
+    let tokens = outside_tokens(&section);
+    let first = tokens
+        .iter()
+        .copied()
         .find(|(_, c)| matches!(c, '0' | '#' | '?'))
         .map(|(i, _)| i);
-    let last = section
-        .char_indices()
+    let last = tokens
+        .iter()
+        .copied()
         .rev()
         .find(|(_, c)| matches!(c, '0' | '#' | '?'))
         .map(|(i, c)| i + c.len_utf8());
@@ -104,6 +107,9 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
     let tail = section.get(end..).unwrap_or("");
     let scale = tail.chars().take_while(|c| *c == ',').count();
     n /= 1000f64.powi(scale as i32);
+    if !n.is_finite() {
+        return "#NUM!".into();
+    }
     let decimals = pattern
         .split('.')
         .nth(1)
@@ -139,7 +145,12 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
 /// fractions such as 1.005 sit just below the tie).
 fn round_half_away(n: f64, decimals: usize) -> f64 {
     let scale = 10f64.powi(decimals.min(15) as i32);
-    round_scaled(n * scale) / scale
+    let scaled = n * scale;
+    if scaled.is_finite() {
+        round_scaled(scaled) / scale
+    } else {
+        n
+    }
 }
 /// Float noise allowed around `x`: a few ulps, capped so that at 15+ significant digits
 /// (where one ulp is a sizeable fraction) real fractions are not mistaken for noise.
@@ -255,15 +266,27 @@ fn split_sections(code: &str) -> Vec<String> {
 fn unquote(code: &str) -> String {
     let mut out = String::new();
     let mut skip = false;
+    let mut quote = false;
+    let mut escape = false;
     for c in code.chars() {
+        if escape {
+            out.push(c);
+            escape = false;
+            continue;
+        }
         if skip {
             skip = false;
             continue;
         }
-        if c == '"' || c == '\\' {
+        if c == '"' {
+            quote = !quote;
             continue;
         }
-        if c == '_' || c == '*' {
+        if !quote && c == '\\' {
+            escape = true;
+            continue;
+        }
+        if !quote && (c == '_' || c == '*') {
             skip = true;
             continue;
         }
@@ -272,16 +295,30 @@ fn unquote(code: &str) -> String {
     out
 }
 fn outside_quotes(code: &str) -> String {
+    outside_tokens(code).into_iter().map(|(_, c)| c).collect()
+}
+fn outside_tokens(code: &str) -> Vec<(usize, char)> {
     let mut quote = false;
     let mut escape = false;
-    let mut result = String::new();
-    for c in code.chars() {
-        if c == '"' && !escape {
-            quote = !quote;
-        } else if !quote && !escape {
-            result.push(c);
+    let mut skip = false;
+    let mut result = Vec::new();
+    for (index, c) in code.char_indices() {
+        if escape || skip {
+            escape = false;
+            skip = false;
+            continue;
         }
-        escape = c == '\\' && !escape;
+        if c == '"' {
+            quote = !quote;
+        } else if !quote {
+            if c == '\\' {
+                escape = true;
+            } else if c == '_' || c == '*' {
+                skip = true;
+            } else {
+                result.push((index, c));
+            }
+        }
     }
     result
 }
@@ -323,8 +360,20 @@ fn date_display(serial: f64, code: &str) -> String {
     if !(0.0..=2958465.99999).contains(&serial) {
         return "#NUM!".into();
     }
-    let (y, m, d) = serial_date(serial);
     let seconds = (serial.fract() * 86400.0).round() as u32;
+    let date_tokens = outside_quotes(&code.to_ascii_lowercase());
+    let has_time = date_tokens.chars().any(|c| c == 'h' || c == 's');
+    let has_date = date_tokens.chars().any(|c| c == 'y' || c == 'd');
+    let date_serial = serial.floor()
+        + if has_date && has_time && seconds >= 86400 {
+            1.0
+        } else {
+            0.0
+        };
+    if date_serial > 2958465.0 {
+        return "#NUM!".into();
+    }
+    let (y, m, d) = serial_date(date_serial);
     let hour = (seconds / 3600) % 24;
     let minute = (seconds / 60) % 60;
     let second = seconds % 60;
@@ -464,6 +513,49 @@ fn date_display(serial: f64, code: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn quoted_and_escaped_format_literals_do_not_become_placeholders() {
+        for (format, expected) in [
+            ("\"v0 \"0.00", "v0 12.34"),
+            ("0.00\" 000\"", "12.34 000"),
+            ("\\00.00", "012.34"),
+            ("\"A_B*% \"0.00", "A_B*% 12.34"),
+            ("0.00\\\"", "12.34\""),
+        ] {
+            assert_eq!(
+                display(&Value::Number(12.34), format, false),
+                expected,
+                "{format}"
+            );
+        }
+    }
+    #[test]
+    fn finite_large_numbers_do_not_overflow_decimal_rounding() {
+        let rendered = display(&Value::Number(1e308), "0.00", false);
+        assert!(rendered.ends_with(".00"));
+        assert!(!rendered.contains("inf"));
+        assert_eq!(display(&Value::Number(1e308), "0.00%", false), "#NUM!");
+    }
+    #[test]
+    fn rounded_midnight_keeps_calendar_date_consistent() {
+        let serial = super::super::formula::date_serial(2026, 10, 13) + 86399.9 / 86400.0;
+        assert_eq!(
+            display(&Value::Number(serial), "yyyy-mm-dd hh:mm:ss", false),
+            "2026-10-14 00:00:00"
+        );
+        assert_eq!(
+            display(&Value::Number(serial), "yyyy-mm-dd", false),
+            "2026-10-13"
+        );
+        assert_eq!(
+            display(
+                &Value::Number(59.0 + 86399.9 / 86400.0),
+                "yyyy-mm-dd hh:mm:ss",
+                false
+            ),
+            "1900-02-29 00:00:00"
+        );
+    }
     #[test]
     fn formats() {
         let cases = [
