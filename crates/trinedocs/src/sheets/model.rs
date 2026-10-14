@@ -263,6 +263,55 @@ impl Sheet {
             .filter_map(|k| parse_address(k))
             .fold((0, 0), |(r, c), (rr, cc)| (r.max(rr), c.max(cc)))
     }
+    /// Excel Ctrl+Arrow target: the end of the current data block, the start of the next
+    /// block, or the sheet edge when nothing else lies in that direction.
+    pub fn data_edge(&self, row: u32, col: u32, d_row: i8, d_col: i8) -> (u32, u32) {
+        let vertical = d_row != 0;
+        let forward = if vertical { d_row > 0 } else { d_col > 0 };
+        let (pos, limit) = if vertical {
+            (row, MAX_ROWS - 1)
+        } else {
+            (col, MAX_COLS - 1)
+        };
+        let filled: BTreeSet<u32> = self
+            .cells
+            .iter()
+            .filter(|(_, cell)| !cell.input.is_empty())
+            .filter_map(|(key, _)| parse_address(key))
+            .filter(|&(r, c)| if vertical { c == col } else { r == row })
+            .map(|(r, c)| if vertical { r } else { c })
+            .collect();
+        let step = |p: u32| -> Option<u32> {
+            if forward {
+                (p < limit).then_some(p + 1)
+            } else {
+                p.checked_sub(1)
+            }
+        };
+        let target = match step(pos) {
+            None => pos,
+            Some(next) if filled.contains(&pos) && filled.contains(&next) => {
+                let mut end = next;
+                while let Some(after) = step(end).filter(|p| filled.contains(p)) {
+                    end = after;
+                }
+                end
+            }
+            Some(next) => {
+                let found = if forward {
+                    filled.range(next..).next().copied()
+                } else {
+                    filled.range(..=next).next_back().copied()
+                };
+                found.unwrap_or(if forward { limit } else { 0 })
+            }
+        };
+        if vertical {
+            (target, col)
+        } else {
+            (row, target)
+        }
+    }
     pub fn display(&self, row: u32, col: u32, locale_ru: bool) -> String {
         self.cell(row, col)
             .map(|c| super::format::display(&c.value, &c.fmt.number, locale_ru))

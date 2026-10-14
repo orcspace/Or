@@ -1626,18 +1626,83 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                                 state.scroll_to_selection = true;
                                 continue;
                             }
-                            let step = if modifiers.ctrl { 20 } else { 1 };
+                            if modifiers.ctrl && key == Key::A {
+                                // Excel: first Ctrl+A selects the data region, the next one the sheet.
+                                let (last_row, last_col) =
+                                    book.active_sheet().map(Sheet::extent).unwrap_or_default();
+                                let selection = &mut book.selection;
+                                let region = (0, 0, last_row, last_col);
+                                let current = selection.range();
+                                let whole = current.r0 == 0
+                                    && current.c0 == 0
+                                    && current.r1 == last_row
+                                    && current.c1 == last_col;
+                                let (r1, c1) = if whole {
+                                    (MAX_ROWS - 1, MAX_COLS - 1)
+                                } else {
+                                    (region.2, region.3)
+                                };
+                                selection.anchor_row = region.0;
+                                selection.anchor_col = region.1;
+                                selection.row = r1;
+                                selection.col = c1;
+                                continue;
+                            }
+                            if key == Key::Space && (modifiers.ctrl || modifiers.shift) {
+                                // Ctrl+Space selects whole columns, Shift+Space whole rows.
+                                let range = book.selection.range();
+                                let selection = &mut book.selection;
+                                if modifiers.ctrl {
+                                    selection.anchor_row = 0;
+                                    selection.row = MAX_ROWS - 1;
+                                    selection.anchor_col = range.c0;
+                                    selection.col = range.c1;
+                                } else {
+                                    selection.anchor_col = 0;
+                                    selection.col = MAX_COLS - 1;
+                                    selection.anchor_row = range.r0;
+                                    selection.row = range.r1;
+                                }
+                                continue;
+                            }
+                            let edge = |book: &Book, d_row: i8, d_col: i8| {
+                                book.active_sheet()
+                                    .map(|sheet| {
+                                        sheet.data_edge(
+                                            book.selection.row,
+                                            book.selection.col,
+                                            d_row,
+                                            d_col,
+                                        )
+                                    })
+                                    .unwrap_or((book.selection.row, book.selection.col))
+                            };
+                            let jump = if modifiers.ctrl {
+                                match key {
+                                    Key::ArrowUp => Some(edge(book, -1, 0)),
+                                    Key::ArrowDown => Some(edge(book, 1, 0)),
+                                    Key::ArrowLeft => Some(edge(book, 0, -1)),
+                                    Key::ArrowRight => Some(edge(book, 0, 1)),
+                                    _ => None,
+                                }
+                            } else {
+                                None
+                            };
                             let selection = &mut book.selection;
                             match key {
-                                Key::ArrowUp => selection.row = selection.row.saturating_sub(step),
+                                _ if jump.is_some() => {
+                                    if let Some((r, c)) = jump {
+                                        selection.row = r;
+                                        selection.col = c;
+                                    }
+                                }
+                                Key::ArrowUp => selection.row = selection.row.saturating_sub(1),
                                 Key::ArrowDown => {
-                                    selection.row = (selection.row + step).min(MAX_ROWS - 1)
+                                    selection.row = (selection.row + 1).min(MAX_ROWS - 1)
                                 }
-                                Key::ArrowLeft => {
-                                    selection.col = selection.col.saturating_sub(step)
-                                }
+                                Key::ArrowLeft => selection.col = selection.col.saturating_sub(1),
                                 Key::ArrowRight => {
-                                    selection.col = (selection.col + step).min(MAX_COLS - 1)
+                                    selection.col = (selection.col + 1).min(MAX_COLS - 1)
                                 }
                                 Key::Home => {
                                     selection.col = 0;

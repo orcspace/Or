@@ -43,6 +43,45 @@ fn numbervalue_uses_locale_and_validates_separators() -> Result<(), String> {
     Ok(())
 }
 #[test]
+fn ctrl_arrow_data_edge_follows_excel_blocks() -> Result<(), String> {
+    let book = seeded()?;
+    let sheet = book.active_sheet().ok_or("sheet")?;
+    assert_eq!(sheet.data_edge(0, 0, 1, 0), (2, 0));
+    assert_eq!(sheet.data_edge(2, 0, 1, 0), (MAX_ROWS - 1, 0));
+    assert_eq!(sheet.data_edge(2, 3, -1, 0), (1, 3));
+    assert_eq!(sheet.data_edge(9, 0, -1, 0), (2, 0));
+    assert_eq!(sheet.data_edge(0, 0, -1, 0), (0, 0));
+    assert_eq!(sheet.data_edge(0, 0, 0, 1), (0, 5));
+    assert_eq!(sheet.data_edge(0, 5, 0, 1), (0, MAX_COLS - 1));
+    assert_eq!(sheet.data_edge(2, 9, 0, -1), (2, 2));
+    assert_eq!(sheet.data_edge(1, 0, 0, -1), (1, 0));
+    Ok(())
+}
+#[test]
+fn subtotal_skips_nested_subtotals_and_hidden_rows() -> Result<(), String> {
+    let mut book = seeded()?;
+    let id = book.active_id();
+    book.set_cell(id, 3, 0, "=SUBTOTAL(9,A1:A3)")?;
+    book.set_cell(id, 4, 0, "=ПРОМЕЖУТОЧНЫЕ.ИТОГИ(9;A1:A4)")?;
+    let value = |book: &Book, row| {
+        book.active_sheet()
+            .and_then(|sheet| sheet.cell(row, 0))
+            .map(|cell| cell.value.clone())
+    };
+    assert_eq!(value(&book, 3), Some(Value::Number(6.0)));
+    assert_eq!(value(&book, 4), Some(Value::Number(6.0)));
+    book.sheets.get_mut(0).ok_or("sheet")?.hidden_rows.insert(1);
+    assert_eq!(
+        formula::evaluate(&book, id, "=SUBTOTAL(109,A1:A3)"),
+        Value::Number(4.0)
+    );
+    assert_eq!(
+        formula::evaluate(&book, id, "=SUBTOTAL(9,A1:A3)"),
+        Value::Number(6.0)
+    );
+    Ok(())
+}
+#[test]
 fn images_follow_structural_edits_without_losing_data() -> Result<(), String> {
     let mut book = Book::default();
     let id = book.active_id();
@@ -377,6 +416,60 @@ fn numeric_formula_corpus() -> Result<(), String> {
         ("=TYPE(\"text\")", 2.0),
         ("=TYPE(TRUE)", 4.0),
         ("=TYPE(NA())", 16.0),
+        ("=MAXIFS(C1:C3,B1:B3,\"red\")", 30.0),
+        ("=MINIFS(C1:C3,B1:B3,\"red\",A1:A3,\">1\")", 30.0),
+        ("=МАКСЕСЛИ(C1:C3;B1:B3;\"green\")", 0.0),
+        ("=MAXA(A1:A3,TRUE)", 3.0),
+        ("=MINA(A1:B3)", 0.0),
+        ("=TRIMMEAN(A1:A3,0.7)", 2.0),
+        (
+            "=SKEW(1,2,3,10)",
+            2.0 / 3.0 * 180.0 / (50.0f64 / 3.0).powf(1.5),
+        ),
+        (
+            "=KURT(1,2,3,10)",
+            20.0 / 6.0 * 1394.0 / (50.0f64 / 3.0).powi(2) - 13.5,
+        ),
+        ("=CORREL(A1:A3,C1:C3)", 1.0),
+        ("=PEARSON(A1:A3,C1:C3)", 1.0),
+        ("=RSQ(C1:C3,A1:A3)", 1.0),
+        ("=SLOPE(C1:C3,A1:A3)", 10.0),
+        ("=INTERCEPT(C1:C3,A1:A3)", 0.0),
+        ("=COVAR(A1:A3,C1:C3)", 20.0 / 3.0),
+        ("=COVARIANCE.S(A1:A3,C1:C3)", 10.0),
+        ("=NPER(0,-10,100)", 10.0),
+        ("=NPER(0.05,PMT(0.05,12,1000),1000)", 12.0),
+        ("=RATE(12,PMT(0.05,12,1000),1000)", 0.05),
+        ("=IPMT(0.1,1,3,8000)", -800.0),
+        ("=IPMT(0.1,1,3,8000,0,1)", 0.0),
+        (
+            "=PPMT(0.1,1,3,8000)+PPMT(0.1,2,3,8000)+PPMT(0.1,3,3,8000)",
+            -8000.0,
+        ),
+        (
+            "=PPMT(0.1,1,3,8000,0,1)+PPMT(0.1,2,3,8000,0,1)+PPMT(0.1,3,3,8000,0,1)",
+            -8000.0,
+        ),
+        (
+            "=PPMT(0.1,2,3,8000)+IPMT(0.1,2,3,8000)-PMT(0.1,3,8000)",
+            0.0,
+        ),
+        ("=ARABIC(\"MCMXCIV\")", 1994.0),
+        ("=ARABIC(\"-xiv\")", -14.0),
+        ("=BIN2DEC(\"1111111111\")", -1.0),
+        ("=BIN2DEC(101)", 5.0),
+        ("=HEX2DEC(\"ff\")", 255.0),
+        ("=OCT2DEC(\"17\")", 15.0),
+        ("=DECIMAL(\"zz\",36)", 1295.0),
+        ("=WEEKNUM(DATE(2024,1,7))", 2.0),
+        ("=WEEKNUM(DATE(2024,1,7),2)", 1.0),
+        ("=ISOWEEKNUM(DATE(2021,1,1))", 53.0),
+        ("=WEEKNUM(DATE(2021,1,4),21)", 1.0),
+        ("=DAYS360(DATE(2024,1,1),DATE(2024,12,31))", 360.0),
+        ("=DAYS360(DATE(2024,1,31),DATE(2024,3,31),TRUE)", 60.0),
+        ("=SUBTOTAL(9,A1:A3)", 6.0),
+        ("=SUBTOTAL(1,C1:C3)", 20.0),
+        ("=SUBTOTAL(103,A1:B3)", 6.0),
     ];
     for &(input, expected) in cases {
         let actual = formula::evaluate(&b, id, input);
@@ -418,6 +511,20 @@ fn text_boolean_and_errors() -> Result<(), String> {
         ("=CHAR(65)", "A"),
         ("=UNICHAR(1105)", "ё"),
         ("=T(\"yes\")", "yes"),
+        ("=TEXTBEFORE(\"a-b-c\",\"-\")", "a"),
+        ("=TEXTAFTER(\"a-b-c\",\"-\",-1)", "c"),
+        ("=TEXTAFTER(\"a-b-c\",\"-\",2)", "c"),
+        ("=TEXTBEFORE(\"aXbxc\",\"x\",2,1)", "aXb"),
+        ("=TEXTBEFORE(\"a-b\",\"-\",2,0,1)", "a-b"),
+        ("=TEXTAFTER(\"abc\",\"-\",1,0,0,\"none\")", "none"),
+        ("=ТЕКСТПОСЛЕ(\"ёж-ик\";\"-\")", "ик"),
+        ("=ROMAN(1994)", "MCMXCIV"),
+        ("=ROMAN(0)", ""),
+        ("=DEC2BIN(-1)", "1111111111"),
+        ("=DEC2HEX(255,4)", "00FF"),
+        ("=DEC2OCT(8)", "10"),
+        ("=BASE(255,16)", "FF"),
+        ("=BASE(5,2,8)", "00000101"),
     ];
     for &(input, expected) in text {
         assert_eq!(
@@ -466,6 +573,17 @@ fn text_boolean_and_errors() -> Result<(), String> {
         ("=REPT(\"x\",-1)", "#VALUE!"),
         ("=VLOOKUP(99,A1:C3,3,FALSE)", "#N/A"),
         ("=LOG(1,1)", "#NUM!"),
+        ("=TEXTBEFORE(\"abc\",\"-\")", "#N/A"),
+        ("=TEXTBEFORE(\"abc\",\"b\",0)", "#VALUE!"),
+        ("=DEC2BIN(512)", "#NUM!"),
+        ("=DEC2HEX(255,1)", "#NUM!"),
+        ("=HEX2DEC(\"XYZ\")", "#NUM!"),
+        ("=ROMAN(4000)", "#VALUE!"),
+        ("=ARABIC(\"ABC\")", "#VALUE!"),
+        ("=SUBTOTAL(12,A1:A3)", "#VALUE!"),
+        ("=MAXIFS(C1:C3,B1:B2,\"red\")", "#VALUE!"),
+        ("=SLOPE(A1:A3,G1:G3)", "#DIV/0!"),
+        ("=SKEW(1,2)", "#DIV/0!"),
     ] {
         assert_eq!(
             formula::evaluate(&b, id, input),
