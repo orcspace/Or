@@ -5,6 +5,7 @@ use egui::{Align2, Color32, Event, FontId, ImeEvent, Key, Pos2, Rect, Sense, Str
 struct Clipboard {
     text: String,
     paragraphs: Vec<Paragraph>,
+    complete: Vec<bool>,
 }
 struct ImageAsset {
     bytes: Vec<u8>,
@@ -34,6 +35,8 @@ struct EditorState {
     find_focus: Option<bool>,
     ribbon_tab: usize,
     table_cell: Option<TableCursor>,
+    table_page: Option<usize>,
+    preferred_x: Option<f32>,
     focus_cell: bool,
     stats: Option<(usize, usize)>,
     show_objects: bool,
@@ -63,6 +66,8 @@ impl Default for EditorState {
             find_focus: None,
             ribbon_tab: 0,
             table_cell: None,
+            table_page: None,
+            preferred_x: None,
             focus_cell: false,
             stats: None,
             show_objects: false,
@@ -95,6 +100,7 @@ impl EditorState {
         self.cursor != self.anchor
     }
     fn move_to(&mut self, doc: &Doc, pos: Position, extend: bool) {
+        self.preferred_x = None;
         self.cursor = doc.clamp_position(pos);
         if !extend {
             self.anchor = self.cursor;
@@ -111,6 +117,7 @@ impl EditorState {
         let (a, b) = self.range();
         match doc.replace_range(a, b, text, Some(self.typing.clone())) {
             Ok(pos) => {
+                self.preferred_x = None;
                 self.cursor = pos;
                 self.anchor = pos;
                 self.scroll_to_cursor = true;
@@ -234,7 +241,9 @@ pub fn show_with_edits(ui: &mut egui::Ui, doc: &mut Doc, edits: Option<&[TextEdi
         .data_mut(|d| d.get_temp::<EditorState>(state_id))
         .unwrap_or_default();
     let before = doc.clone();
-    poll_image(doc, &mut state);
+    if ui.is_enabled() {
+        poll_image(doc, &mut state);
+    }
     if ui.is_enabled()
         && let Some(png) = crate::clipboard::take_image(ui.ctx())
     {
@@ -369,11 +378,13 @@ pub fn show_with_edits(ui: &mut egui::Ui, doc: &mut Doc, edits: Option<&[TextEdi
                 )
             });
             if response.clicked() || response.drag_started() {
+                state.preferred_x = None;
                 let cell = response
                     .interact_pointer_pos()
                     .and_then(|p| cell_at(&layout, p, page_origin, scale, page_height, gap));
-                if let Some(cell) = cell {
+                if let Some((cell, page)) = cell {
                     state.table_cell = Some(cell);
+                    state.table_page = Some(page);
                     state.focus_cell = true;
                     state.format_painter = None;
                     sync_cell_typing(doc, &mut state);
@@ -384,6 +395,11 @@ pub fn show_with_edits(ui: &mut egui::Ui, doc: &mut Doc, edits: Option<&[TextEdi
                 if cell.is_none()
                     && let Some(pointer) = response.interact_pointer_pos()
                 {
+                    let pointer = if response.drag_started() {
+                        ui.input(|i| i.pointer.press_origin()).unwrap_or(pointer)
+                    } else {
+                        pointer
+                    };
                     let pos = hit_test(&layout, pointer, page_origin, scale, page_height, gap);
                     let shift = ui.input(|i| i.modifiers.shift);
                     if response.triple_clicked() {
@@ -406,11 +422,6 @@ pub fn show_with_edits(ui: &mut egui::Ui, doc: &mut Doc, edits: Option<&[TextEdi
                     } else {
                         state.move_to(doc, pos, shift);
                     }
-                    if let Some(fmt) = state.format_painter.take() {
-                        state.typing = fmt.clone();
-                        let (a, b) = state.range();
-                        doc.format_range(a, b, |f| *f = fmt.clone());
-                    }
                 }
             }
             if response.dragged()
@@ -419,11 +430,25 @@ pub fn show_with_edits(ui: &mut egui::Ui, doc: &mut Doc, edits: Option<&[TextEdi
             {
                 state.cursor = hit_test(&layout, pointer, page_origin, scale, page_height, gap);
                 state.scroll_to_cursor = false;
+                state.preferred_x = None;
+            }
+            if (response.drag_stopped() || response.clicked())
+                && state.selected()
+                && let Some(fmt) = state.format_painter.take()
+            {
+                state.typing = fmt.clone();
+                let (a, b) = state.range();
+                doc.format_range(a, b, |f| *f = fmt.clone());
             }
             let focused = response.has_focus();
             if response.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
             }
+            let active_row = layout.rows.iter().rev().find(|r| {
+                r.paragraph == state.cursor.paragraph
+                    && state.cursor.offset >= r.start
+                    && state.cursor.offset <= r.end
+            });
             // Compute the caret even outside the viewport so keyboard/outline navigation can scroll to it.
             cursor_rect = layout
                 .rows
@@ -498,6 +523,7 @@ pub fn show_with_edits(ui: &mut egui::Ui, doc: &mut Doc, edits: Option<&[TextEdi
                     if row.paragraph == state.cursor.paragraph
                         && state.cursor.offset >= row.start
                         && state.cursor.offset <= row.end
+                        && active_row.is_some_and(|active| std::ptr::eq(active, row))
                     {
                         let x = row_x(row, state.cursor.offset);
                         let rect = Rect::from_min_size(
@@ -561,7 +587,15 @@ pub fn show_with_edits(ui: &mut egui::Ui, doc: &mut Doc, edits: Option<&[TextEdi
     let (words, chars) = state.stats.unwrap_or_default();
     ui.horizontal(|ui| {
         ui.weak(format!(
-            "Страница {}  ·  {} слов  ·  {} знаков",
+            "Страница {} из {}  ·  {} слов  ·  {} знаков",
+            layout
+                .rows
+                .iter()
+                .rev()
+                .find(|r| r.paragraph == state.cursor.paragraph
+                    && state.cursor.offset >= r.start
+                    && state.cursor.offset <= r.end)
+                .map_or(1, |r| r.page + 1),
             layout.pages.len(),
             words,
             chars
@@ -784,6 +818,7 @@ fn step_cell(doc: &mut Doc, state: &mut EditorState, forward: bool) {
             ..cursor
         });
     }
+    state.table_page = None;
     state.focus_cell = true;
 }
 fn table_grid_picker(
@@ -1581,33 +1616,39 @@ fn table_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_i
         };
         if let Some(table) = table_mut(doc, cursor.table) {
             let columns = table_columns(table);
-            if table.column_widths.len() < columns {
-                table.column_widths.resize(columns, fallback);
-            }
+            let mut widths = table.column_widths.clone();
+            widths.resize(columns.max(widths.len()), fallback);
             let grid = table
                 .grid_starts(cursor.row)
                 .get(cursor.column)
                 .copied()
                 .unwrap_or(cursor.column);
-            if let Some(width) = table.column_widths.get_mut(grid) {
+            let mut widths_changed = false;
+            if let Some(width) = widths.get_mut(grid) {
                 ui.horizontal(|ui| {
                     ui.label("Ширина");
-                    ui.add(
-                        egui::DragValue::new(width)
-                            .range(12.0..=2000.0)
-                            .suffix(" pt"),
-                    );
+                    widths_changed |= ui
+                        .add(
+                            egui::DragValue::new(width)
+                                .range(12.0..=2000.0)
+                                .suffix(" pt"),
+                        )
+                        .changed();
                 });
             }
             if ui
                 .add(egui::Button::new("Выровнять ширину столбцов").frame_when_inactive(false))
                 .clicked()
             {
-                let total: f32 = table.column_widths.iter().take(columns).sum();
+                let total: f32 = widths.iter().take(columns).sum();
                 let each = total / columns.max(1) as f32;
-                for width in table.column_widths.iter_mut().take(columns) {
+                for width in widths.iter_mut().take(columns) {
                     *width = each;
                 }
+                widths_changed = true;
+            }
+            if widths_changed {
+                table.column_widths = widths;
             }
         }
     });
@@ -2033,15 +2074,20 @@ fn cell_at(
     scale: f32,
     page_height: f32,
     gap: f32,
-) -> Option<TableCursor> {
+) -> Option<(TableCursor, usize)> {
     layout
         .cells
         .iter()
         .find(|c| cell_box_rect(c, page_origin, scale, page_height, gap).contains(pointer))
-        .map(|c| TableCursor {
-            table: c.table,
-            row: c.row,
-            column: c.column,
+        .map(|c| {
+            (
+                TableCursor {
+                    table: c.table,
+                    row: c.row,
+                    column: c.column,
+                },
+                c.page,
+            )
         })
 }
 /// Makes the ribbon show the format of the active cell.
@@ -2070,7 +2116,7 @@ fn cell_editor(
         return;
     };
     let id = cell_editor_id(canvas_id);
-    if ui.memory(|m| m.has_focus(id)) {
+    if ui.is_enabled() && ui.memory(|m| m.has_focus(id)) {
         let (forward, back, escape) = ui.input_mut(|i| {
             (
                 i.consume_key(egui::Modifiers::NONE, Key::Tab),
@@ -2103,7 +2149,8 @@ fn cell_editor(
     let Some(rect) = layout
         .cells
         .iter()
-        .find(|c| c.table == cursor.table && c.row == cursor.row && c.column == cursor.column)
+        .filter(|c| c.table == cursor.table && c.row == cursor.row && c.column == cursor.column)
+        .min_by_key(|c| c.page.abs_diff(state.table_page.unwrap_or(c.page)))
         .map(|c| cell_box_rect(c, page_origin, scale, page_height, gap))
     else {
         // The cell is not laid out yet (new row/column): show it next frame.
@@ -2214,6 +2261,16 @@ fn handle_event(
             if let Some(copy) = copied {
                 for (i, p) in copy.paragraphs.iter().enumerate() {
                     let pi = a.paragraph + i;
+                    if copy.complete.get(i) == Some(&true)
+                        && (i > 0 || a.offset == 0)
+                        && let Some(target) = doc.paragraphs.get_mut(pi)
+                    {
+                        let id = target.id;
+                        let runs = std::mem::take(&mut target.runs);
+                        *target = p.clone();
+                        target.id = id;
+                        target.runs = runs;
+                    }
                     let mut offset = if i == 0 { a.offset } else { 0 };
                     for run in &p.runs {
                         let end = offset + run.text.chars().count();
@@ -2248,17 +2305,27 @@ fn handle_event(
             let text = doc.selected_text(a, b);
             ui.ctx().copy_text(text.clone());
             let mut paragraphs = Vec::new();
+            let mut complete = Vec::new();
             for pi in a.paragraph..=b.paragraph {
                 if let Some(p) = doc.paragraphs.get(pi) {
                     let from = if pi == a.paragraph { a.offset } else { 0 };
                     let to = if pi == b.paragraph { b.offset } else { p.len() };
                     let mut selected = p.clone();
                     selected.runs = selected_runs(p, from, to);
+                    complete.push(from == 0 && to == p.len());
                     paragraphs.push(selected);
                 }
             }
-            ui.ctx()
-                .data_mut(|d| d.insert_temp(clipboard_id(), Clipboard { text, paragraphs }));
+            ui.ctx().data_mut(|d| {
+                d.insert_temp(
+                    clipboard_id(),
+                    Clipboard {
+                        text,
+                        paragraphs,
+                        complete,
+                    },
+                )
+            });
             if cut && state.selected() {
                 state.insert(doc, "");
             }
@@ -2288,6 +2355,16 @@ fn handle_event(
             ..
         } => {
             let ctrl = modifiers.command || modifiers.ctrl;
+            let navigation_layout;
+            let layout = if matches!(
+                key,
+                Key::ArrowUp | Key::ArrowDown | Key::PageUp | Key::PageDown | Key::Home | Key::End
+            ) {
+                navigation_layout = doc.layout();
+                &navigation_layout
+            } else {
+                layout
+            };
             if ctrl {
                 match key {
                     Key::A => {
@@ -2346,8 +2423,21 @@ fn handle_event(
                         Key::PageUp => -25,
                         _ => 25,
                     };
-                    let pos = vertical(layout, state.cursor, delta);
+                    let x = state.preferred_x.unwrap_or_else(|| {
+                        layout
+                            .rows
+                            .iter()
+                            .rev()
+                            .find(|r| {
+                                r.paragraph == state.cursor.paragraph
+                                    && state.cursor.offset >= r.start
+                                    && state.cursor.offset <= r.end
+                            })
+                            .map_or(0.0, |r| row_x(r, state.cursor.offset))
+                    });
+                    let pos = vertical(layout, state.cursor, delta, x);
                     state.move_to(doc, pos, modifiers.shift);
+                    state.preferred_x = Some(x);
                 }
                 Key::Home | Key::End => {
                     let pos = if ctrl {
@@ -2365,7 +2455,7 @@ fn handle_event(
                             }
                         }
                     } else {
-                        let row = layout.rows.iter().find(|r| {
+                        let row = layout.rows.iter().rev().find(|r| {
                             r.paragraph == state.cursor.paragraph
                                 && state.cursor.offset >= r.start
                                 && state.cursor.offset <= r.end
@@ -2675,16 +2765,11 @@ fn hit_test(
     })
     .unwrap_or_default()
 }
-fn vertical(layout: &Layout, pos: Position, delta: isize) -> Position {
+fn vertical(layout: &Layout, pos: Position, delta: isize, x: f32) -> Position {
     let index = layout
         .rows
         .iter()
-        .position(|r| r.paragraph == pos.paragraph && pos.offset >= r.start && pos.offset <= r.end)
-        .unwrap_or_default();
-    let x = layout
-        .rows
-        .get(index)
-        .map(|r| row_x(r, pos.offset))
+        .rposition(|r| r.paragraph == pos.paragraph && pos.offset >= r.start && pos.offset <= r.end)
         .unwrap_or_default();
     let target =
         (index as isize + delta).clamp(0, layout.rows.len().saturating_sub(1) as isize) as usize;
@@ -2795,6 +2880,29 @@ fn today() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wrapped_boundary_navigation_uses_visible_row_and_remembers_x() {
+        let mut doc = Doc::from_text(&"word ".repeat(50));
+        doc.page.width = 240.0;
+        doc.page.margin_left = 24.0;
+        doc.page.margin_right = 24.0;
+        let layout = doc.layout();
+        assert!(layout.rows.len() > 2);
+        let row = &layout.rows[1];
+        let pos = Position {
+            paragraph: 0,
+            offset: row.start,
+        };
+        assert_eq!(
+            vertical(&layout, pos, -1, row.x).offset,
+            layout.rows[0].start
+        );
+        assert_eq!(
+            vertical(&layout, pos, 1, row.x).offset,
+            layout.rows[2].start
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -2955,6 +3063,9 @@ mod tests {
     fn rich_clipboard_crosses_document_tabs_and_does_not_reuse_ids() -> Result<(), String> {
         let ctx = egui::Context::default();
         let mut source = Doc::from_text("bold\nitalic");
+        source.paragraphs[1].align = Align::Right;
+        source.paragraphs[1].list = List::Number;
+        source.paragraphs[1].indent = 24.0;
         source.format_range(
             Position::default(),
             Position {
@@ -3022,6 +3133,10 @@ mod tests {
         });
         output.textures_delta.clear();
         assert_eq!(target.plain_text(), "startbold\nitalic");
+        assert_eq!(target.paragraphs[1].align, Align::Right);
+        assert_eq!(target.paragraphs[1].list, List::Number);
+        assert_eq!(target.paragraphs[1].indent, 24.0);
+        assert_eq!(target.paragraphs[0].align, Align::Left);
         assert_eq!(target.paragraphs.first().map(|p| p.id), Some(existing_id));
         assert!(
             target

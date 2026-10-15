@@ -169,6 +169,7 @@ pub struct App {
     query: String,
     palette_query: String,
     palette_focus: bool,
+    palette_selected: usize,
     palette_tail: Option<Vec<egui::Event>>,
     last_snapshot: Instant,
     last_watch: Instant,
@@ -253,6 +254,7 @@ impl App {
             query: String::new(),
             palette_query: String::new(),
             palette_focus: false,
+            palette_selected: 0,
             palette_tail: None,
             last_snapshot: Instant::now(),
             last_watch: Instant::now(),
@@ -311,6 +313,7 @@ impl App {
         ctx.memory_mut(|m| m.request_focus(id));
         self.palette = true;
         self.palette_focus = true;
+        self.palette_selected = 0;
     }
     fn tr<'a>(&self, s: &'a str) -> &'a str {
         crate::i18n::tr(s, &self.settings.language)
@@ -459,8 +462,10 @@ impl App {
     }
     fn fail_save(&mut self, id: u64, message: String) {
         self.error = message.clone();
-        self.close_after_save = None;
-        self.exit_after_save = false;
+        if self.close_after_save == Some(id) {
+            self.close_after_save = None;
+            self.exit_after_save = false;
+        }
         if let Some(reply) = self.mcp_saves.remove(&id) {
             let _ = reply.send(Err(message));
         }
@@ -533,6 +538,13 @@ impl App {
         let Some(t) = self.tabs.iter().find(|t| t.id == id) else {
             return;
         };
+        if copy && t.path.as_ref() == Some(&path) {
+            self.fail_save(
+                id,
+                "Для копии выберите другое имя или папку; исходный файл сохранён.".into(),
+            );
+            return;
+        }
         let expected = if t.path.as_ref() == Some(&path) {
             self.stamps.get(&id).copied().flatten()
         } else {
@@ -558,6 +570,7 @@ impl App {
             expected,
             print,
             owns_lock,
+            source_path: t.path.clone(),
         };
         match self.worker.send(job) {
             Ok(()) => {
@@ -572,15 +585,14 @@ impl App {
                 self.saving.insert(id);
                 self.status = "Сохранение…".into();
             }
-            Err(e) => {
-                self.error = e;
-                self.close_after_save = None;
-                self.exit_after_save = false;
-                if let Some(reply) = self.mcp_saves.remove(&id) {
-                    let _ = reply.send(Err(self.error.clone()));
-                }
-            }
+            Err(e) => self.fail_save(id, e),
         }
+    }
+    fn discard_session(&mut self) {
+        for tab in &self.tabs {
+            self.recovery.clear(tab.id);
+        }
+        self.snapshot_versions.clear();
     }
     fn retire_state(&mut self, id: u64) {
         if let Some(reply) = self.mcp_saves.remove(&id) {
@@ -762,6 +774,9 @@ impl App {
                     let id = commit_open(&mut self.tabs, &mut self.next_id, prepared);
                     self.deferred.push((id, "activate_external"));
                     self.settings.remember(path);
+                    if let Err(error) = self.worker.save_settings(self.settings.clone()) {
+                        self.error = error;
+                    }
                     self.status = if reload.is_some() {
                         "Файл перезагружен"
                     } else {
@@ -806,7 +821,17 @@ impl App {
                         }
                     }
                     self.settings.remember(path);
-                    self.status = "Сохранено".into();
+                    if let Err(error) = self.worker.save_settings(self.settings.clone()) {
+                        self.error = error;
+                    }
+                    self.status = if copy {
+                        "Копия сохранена"
+                    } else if export {
+                        "Экспорт завершён"
+                    } else {
+                        "Сохранено"
+                    }
+                    .into();
                     if let Some(reply) = self.mcp_saves.remove(&id) {
                         let _ = reply.send(Ok(json!({"applied":true,"version":version})));
                     }
@@ -830,18 +855,23 @@ impl App {
                 Event::Canceled { id } => {
                     if id == 0 {
                         self.opening = false;
+                        continue;
                     }
                     self.picking.remove(&id);
-                    self.close_after_save = None;
-                    self.exit_after_save = false;
+                    if self.close_after_save == Some(id) {
+                        self.close_after_save = None;
+                        self.exit_after_save = false;
+                    }
                     self.saving.remove(&id);
                     if let Some(reply) = self.mcp_saves.remove(&id) {
                         let _ = reply.send(Err("Отменено".into()));
                     }
                 }
                 Event::Error { message, id } => {
-                    self.close_after_save = None;
-                    self.exit_after_save = false;
+                    if id.is_some() && self.close_after_save == id {
+                        self.close_after_save = None;
+                        self.exit_after_save = false;
+                    }
                     if let Some(id) = id {
                         self.picking.remove(&id);
                         self.saving.remove(&id);
@@ -1152,7 +1182,7 @@ impl App {
         if let Some(e) = self.recovery.error() {
             self.status = format!("Ошибка восстановления: {e}");
         }
-        if self.last_snapshot.elapsed() >= crate::recovery::INTERVAL {
+        if !self.allow_exit && self.last_snapshot.elapsed() >= crate::recovery::INTERVAL {
             for t in &self.tabs {
                 if t.dirty()
                     && self.snapshot_versions.get(&t.id) != Some(&t.version)
@@ -1247,6 +1277,8 @@ impl App {
     fn home(&mut self, ui: &mut egui::Ui) {
         let filter_id = egui::Id::new("home-filter");
         let mut filter: usize = ui.data(|d| d.get_temp(filter_id)).unwrap_or_default();
+        let kind_id = egui::Id::new("home-kind");
+        let mut kind_filter: usize = ui.data(|d| d.get_temp(kind_id)).unwrap_or_default();
         egui::ScrollArea::vertical().id_salt("home").show(ui, |ui| {
             let width = ui.available_width().min(960.0);
             let inset = ((ui.available_width() - width) * 0.5).max(0.0);
@@ -1302,15 +1334,26 @@ impl App {
                             self.send(Job::PickOpen);
                         }
                     });
+                    ui.horizontal_wrapped(|ui| {
+                        for (index, label) in ["Все файлы", "Docs", "Sheets", "Slides"].into_iter().enumerate() {
+                            ui.selectable_value(&mut kind_filter, index, label);
+                        }
+                        if !self.query.is_empty() && crate::chrome::tool(ui, "×", "Очистить поиск", false).clicked() {
+                            self.query.clear();
+                        }
+                    });
                     ui.add_space(6.0);
                     let list: Vec<PathBuf> = if filter % 2 == 1 { self.settings.pinned.clone() } else { self.settings.recent.clone() };
                     let q = self.query.trim().to_lowercase();
-                    let shown: Vec<&PathBuf> = list.iter().filter(|p| p.to_string_lossy().to_lowercase().contains(&q)).collect();
+                    let shown: Vec<&PathBuf> = list.iter().filter(|p| {
+                        p.to_string_lossy().to_lowercase().contains(&q)
+                            && (kind_filter == 0 || file_kind(p) == Some(kind_filter))
+                    }).collect();
                     if shown.is_empty() {
                         ui.add_space(24.0);
                         ui.vertical_centered(|ui| {
-                            ui.label(egui::RichText::new(if !q.is_empty() { "Ничего не найдено" } else if filter % 2 == 1 { "Нет закреплённых файлов" } else { "Здесь появятся ваши файлы" }).strong());
-                            ui.label(egui::RichText::new(if !q.is_empty() { "Попробуйте другое имя или путь." } else if filter % 2 == 1 { "Нажмите ☆ рядом с файлом, чтобы закрепить его." } else { "Создайте файл или перетащите его в окно." }).color(crate::chrome::muted(ui)));
+                            ui.label(egui::RichText::new(if !q.is_empty() || kind_filter != 0 { "Ничего не найдено" } else if filter % 2 == 1 { "Нет закреплённых файлов" } else { "Здесь появятся ваши файлы" }).strong());
+                            ui.label(egui::RichText::new(if !q.is_empty() || kind_filter != 0 { "Измените имя, путь или тип файла." } else if filter % 2 == 1 { "Нажмите ☆ рядом с файлом, чтобы закрепить его." } else { "Создайте файл или перетащите его в окно." }).color(crate::chrome::muted(ui)));
                         });
                     } else {
                         ui.horizontal(|ui| {
@@ -1355,12 +1398,12 @@ impl App {
                         match action {
                             Some("pin") => {
                                 if pin { self.settings.pinned.retain(|v| v != p); } else { self.settings.pinned.push(p.clone()); }
-                                if let Err(e) = self.settings.save() { self.error = e; }
+                                if let Err(e) = self.worker.save_settings(self.settings.clone()) { self.error = e; }
                             }
                             Some(_) => {
                                 self.settings.recent.retain(|v| v != p);
                                 self.settings.pinned.retain(|v| v != p);
-                                if let Err(e) = self.settings.save() { self.error = e; }
+                                if let Err(e) = self.worker.save_settings(self.settings.clone()) { self.error = e; }
                             }
                             None => {
                                 if response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(p.display().to_string()).clicked() {
@@ -1374,7 +1417,10 @@ impl App {
                 });
             });
         });
-        ui.data_mut(|d| d.insert_temp(filter_id, filter));
+        ui.data_mut(|d| {
+            d.insert_temp(filter_id, filter);
+            d.insert_temp(kind_id, kind_filter);
+        });
     }
     fn dialogs(&mut self, ctx: &egui::Context) {
         if !self.error.is_empty() {
@@ -1522,6 +1568,7 @@ if ui.button("Отмена").clicked(){action=3}});}}
                         }
                     }
                     (Pending::Exit, 2) => {
+                        self.discard_session();
                         self.allow_exit = true;
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
@@ -1631,7 +1678,7 @@ if ui.button("Отмена").clicked(){action=3}});}}
             self.show_settings = open;
             if changed {
                 ctx.set_zoom_factor(self.settings.scale);
-                if let Err(e) = self.settings.save() {
+                if let Err(e) = self.worker.save_settings(self.settings.clone()) {
                     self.error = e
                 }
             }
@@ -1646,7 +1693,16 @@ if ui.button("Отмена").clicked(){action=3}});}}
                 .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 96.0))
                 .show(ctx, |ui| {
                     let query_id = egui::Id::new("command-palette-query");
-                    let enter = ctx.memory(|m| m.focused() == Some(query_id))
+                    let focused = ctx.memory(|m| m.focused() == Some(query_id));
+                    let down = focused
+                        && ctx.input_mut(|input| {
+                            input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)
+                        });
+                    let up = focused
+                        && ctx.input_mut(|input| {
+                            input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)
+                        });
+                    let enter = focused
                         && ctx
                             .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
                     let response = ui.add(
@@ -1659,16 +1715,31 @@ if ui.button("Отмена").clicked(){action=3}});}}
                         response.request_focus();
                         self.palette_focus = false;
                     }
+                    if response.changed() {
+                        self.palette_selected = 0;
+                    }
                     let commands = palette_commands(self.current().is_some(), &self.palette_query);
+                    if !commands.is_empty() {
+                        self.palette_selected = self.palette_selected.min(commands.len() - 1);
+                        if down {
+                            self.palette_selected = (self.palette_selected + 1) % commands.len();
+                        }
+                        if up {
+                            self.palette_selected =
+                                (self.palette_selected + commands.len() - 1) % commands.len();
+                        }
+                    }
                     let mut picked = None;
                     for (index, &(key, label)) in commands.iter().enumerate() {
                         if ui
                             .add_sized(
                                 [ui.available_width(), 28.0],
-                                egui::Button::new(label).frame_when_inactive(false),
+                                egui::Button::new(label)
+                                    .selected(index == self.palette_selected)
+                                    .frame_when_inactive(false),
                             )
                             .clicked()
-                            || (enter && index == 0)
+                            || (enter && index == self.palette_selected)
                         {
                             picked = Some(key);
                         }
@@ -1890,7 +1961,7 @@ impl eframe::App for App {
                         .clicked()
                         {
                             self.settings.theme = if dark { "light" } else { "dark" }.into();
-                            if let Err(e) = self.settings.save() {
+                            if let Err(e) = self.worker.save_settings(self.settings.clone()) {
                                 self.error = e;
                             }
                         }
@@ -1973,6 +2044,12 @@ impl eframe::App for App {
                                             }
                                         },
                                     );
+                                    let tab = tab.on_hover_text(
+                                        t.path
+                                            .as_ref()
+                                            .map(|path| path.display().to_string())
+                                            .unwrap_or_else(|| t.title.clone()),
+                                    );
                                     #[cfg(test)]
                                     self.shell_rects.insert((t.id, "activate"), tab.rect);
                                     if tab.clicked() {
@@ -2000,7 +2077,7 @@ impl eframe::App for App {
                     .inner_margin(egui::Margin::symmetric(12, 5)),
             )
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.small(&self.status);
                     if let Some(t) = self.current() {
                         ui.separator();
@@ -2092,7 +2169,7 @@ impl eframe::App for App {
                         if self.chat.show(ui, document, self.settings.mcp) {
                             (self.settings.chat_models, self.settings.chat_efforts) =
                                 self.chat.prefs();
-                            if let Err(e) = self.settings.save() {
+                            if let Err(e) = self.worker.save_settings(self.settings.clone()) {
                                 self.error = e;
                             }
                         }
@@ -2362,7 +2439,7 @@ impl eframe::App for App {
         self.dialogs(&ctx);
     }
     fn on_exit(&mut self, _: Option<&eframe::glow::Context>) {
-        let _ = self.settings.save();
+        let _ = self.worker.save_settings(self.settings.clone());
     }
 }
 
@@ -2510,13 +2587,34 @@ fn file_badge(path: &std::path::Path) -> (&'static str, egui::Color32) {
     }
 }
 /// Document tab of the shell: a rounded pill with a coloured kind marker.
+fn file_kind(path: &std::path::Path) -> Option<usize> {
+    match crate::native::extension(path).as_str() {
+        "docx" | "dotx" | "docm" | "trinedoc" | "txt" | "md" | "html" | "htm" | "lock" => Some(1),
+        "xlsx" | "xltx" | "xlsm" | "trinesheet" | "csv" | "tsv" | "xls" | "xlsb" | "ods" => Some(2),
+        "pptx" | "potx" | "ppsx" | "pptm" | "trineslide" => Some(3),
+        _ => None,
+    }
+}
 fn doc_tab(ui: &mut egui::Ui, label: &str, selected: bool, color: egui::Color32) -> egui::Response {
     let text = egui::RichText::new(label).size(12.5);
-    let response = ui.add(
+    let width = (ui
+        .painter()
+        .layout_no_wrap(
+            label.to_owned(),
+            egui::FontId::proportional(12.5),
+            ui.visuals().text_color(),
+        )
+        .size()
+        .x
+        + 2.0 * ui.spacing().button_padding.x)
+        .min(240.0);
+    let response = ui.add_sized(
+        [width, 26.0],
         egui::Button::new(if selected { text.strong() } else { text })
             .selected(selected)
             .frame_when_inactive(false)
             .corner_radius(6)
+            .truncate()
             .min_size(egui::vec2(0.0, 26.0)),
     );
     if color != egui::Color32::TRANSPARENT {
@@ -2869,7 +2967,7 @@ mod shell_input_tests {
             active: None,
             next_id,
             settings,
-            worker: Worker::start(ctx.clone()),
+            worker: Worker::start_for_test(ctx.clone()),
             recovery: crate::recovery::Recovery::start_for_test(std::env::temp_dir().join(
                 format!(
                     "TrineDocs-shell-{}",
@@ -2900,6 +2998,7 @@ mod shell_input_tests {
             query: String::new(),
             palette_query: String::new(),
             palette_focus: false,
+            palette_selected: 0,
             palette_tail: None,
             last_snapshot: Instant::now(),
             last_watch: Instant::now(),
@@ -3454,6 +3553,77 @@ mod shell_input_tests {
             } else {
                 assert_eq!(app.active, if id == 0 { None } else { Some(id) });
             }
+        }
+        Ok(())
+    }
+    #[test]
+    fn cancelling_another_picker_does_not_cancel_save_and_exit() -> Result<(), String> {
+        let mut app = fixture()?;
+        app.close_after_save = Some(10);
+        app.exit_after_save = true;
+        app.saving.insert(10);
+        app.picking.insert(11);
+        for id in [0, 11] {
+            worker_event(&mut app, Event::Canceled { id })?;
+            app.events();
+            assert_eq!(app.close_after_save, Some(10));
+            assert!(app.exit_after_save);
+            assert!(app.saving.contains(&10));
+        }
+        for id in [None, Some(11)] {
+            worker_event(
+                &mut app,
+                Event::Error {
+                    message: "Unrelated operation".into(),
+                    id,
+                },
+            )?;
+            app.events();
+            assert_eq!(app.close_after_save, Some(10));
+            assert!(app.exit_after_save);
+            assert!(app.saving.contains(&10));
+        }
+        app.fail_save(11, "Another save failed".into());
+        assert_eq!(app.close_after_save, Some(10));
+        assert!(app.exit_after_save);
+        Ok(())
+    }
+
+    #[test]
+    fn saving_a_copy_cannot_overwrite_the_active_source() -> Result<(), String> {
+        let mut app = fixture()?;
+        let path = std::env::temp_dir().join("TrineDocs-must-not-overwrite-source.docx");
+        app.tabs[0].path = Some(path.clone());
+        let original = app.tabs[0].document.clone();
+        app.write(10, path, true, false, false);
+        assert!(!app.error.is_empty());
+        assert!(!app.saving.contains(&10));
+        assert_eq!(app.tabs[0].document, original);
+        Ok(())
+    }
+
+    #[test]
+    fn discard_clears_durable_snapshots_of_open_tabs() -> Result<(), String> {
+        let mut app = fixture()?;
+        let root = std::env::temp_dir().join(format!(
+            "TrineDocs-discard-{}-{}",
+            std::process::id(),
+            app.next_id
+        ));
+        app.recovery = crate::recovery::Recovery::start_for_test(root.clone());
+        let tab = &app.tabs[0];
+        assert!(app.recovery.snapshot(crate::recovery::Snapshot {
+            id: tab.id,
+            title: tab.title.clone(),
+            path: None,
+            version: tab.version,
+            document: tab.document.clone(),
+        }));
+        app.discard_session();
+        drop(app);
+        assert!(!root.join("10.trinezip").exists());
+        if root.exists() {
+            std::fs::remove_dir_all(root).map_err(|error| error.to_string())?;
         }
         Ok(())
     }

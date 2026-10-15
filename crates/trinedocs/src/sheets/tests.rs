@@ -992,3 +992,161 @@ fn overlapping_native_merges_are_rejected() {
     }
     assert!(b.validate().is_ok());
 }
+
+#[test]
+fn review_aggregate_text_and_shape_semantics() -> Result<(), String> {
+    let mut book = Book::default();
+    let id = book.active_id();
+    book.set_range(
+        id,
+        0,
+        0,
+        &[
+            vec!["2".into(), "3".into()],
+            vec!["=\"\"".into(), "4".into()],
+        ],
+    )?;
+    for (input, expected) in [
+        ("=AVERAGEA(A1:A2)", Value::Number(1.0)),
+        ("=MINA(A1:A2)", Value::Number(0.0)),
+        ("=AVERAGEA(\"2\",4)", Value::Number(3.0)),
+        ("=MINA(\"2\",4)", Value::Number(2.0)),
+        ("=SUMPRODUCT(A1:A2,A1:B1)", Value::Error("#VALUE!".into())),
+        (
+            "=SUMIFS(A1:A2,A1:B1,\">0\")",
+            Value::Error("#VALUE!".into()),
+        ),
+        (
+            "=COUNTIFS(A1:A2,\">0\",A1:B1,\">0\")",
+            Value::Error("#VALUE!".into()),
+        ),
+        (
+            "=MAXIFS(A1:A2,A1:B1,\">0\")",
+            Value::Error("#VALUE!".into()),
+        ),
+        (
+            "=MINIFS(A1:A2,A1:B1,\">0\")",
+            Value::Error("#VALUE!".into()),
+        ),
+    ] {
+        assert_eq!(formula::evaluate(&book, id, input), expected, "{input}");
+    }
+    Ok(())
+}
+
+#[test]
+fn review_text_delimiter_defaults_and_lazy_fallback() {
+    let book = Book::default();
+    let id = book.active_id();
+    for (input, expected) in [
+        ("=TEXTBEFORE(\"\",\"-\")", Value::Text(String::new())),
+        ("=TEXTAFTER(\"\",\"-\")", Value::Text(String::new())),
+        (
+            "=TEXTBEFORE(\"a-b\",\"-\",1,0,0,1/0)",
+            Value::Text("a".into()),
+        ),
+        (
+            "=TEXTAFTER(\"a-b\",\"-\",1,0,0,1/0)",
+            Value::Text("b".into()),
+        ),
+        (
+            "=TEXTBEFORE(\"abc\",\"-\",1,0,0,\"missing\")",
+            Value::Text("missing".into()),
+        ),
+        (
+            "=TEXTBEFORE(\"a-b\",\"-\",1,2)",
+            Value::Error("#VALUE!".into()),
+        ),
+        (
+            "=TEXTAFTER(\"a-b\",\"-\",1,0,2)",
+            Value::Error("#VALUE!".into()),
+        ),
+    ] {
+        assert_eq!(formula::evaluate(&book, id, input), expected, "{input}");
+    }
+}
+
+#[test]
+fn review_combinatorics_and_radix_do_not_use_integer_storage_limits() {
+    let book = Book::default();
+    let id = book.active_id();
+    for (input, expected) in [
+        ("=COMBIN(1000,1)", 1000.0),
+        ("=COMBIN(1000,999)", 1000.0),
+        ("=COMBINA(1000,1)", 1000.0),
+        ("=COMBINA(0,0)", 1.0),
+        ("=PERMUT(1000,1)", 1000.0),
+        ("=DECIMAL(\"100000000000000000000\",10)", 1e20),
+    ] {
+        assert_eq!(
+            formula::evaluate(&book, id, input),
+            Value::Number(expected),
+            "{input}"
+        );
+    }
+    let expected = (1..=100).map(|i| 2.0 * f64::from(i)).product::<f64>();
+    assert_eq!(
+        formula::evaluate(&book, id, "=FACTDOUBLE(200)"),
+        Value::Number(expected)
+    );
+    assert_eq!(
+        formula::evaluate(&book, id, "=COMBIN(1E308,1E307)"),
+        Value::Error("#NUM!".into())
+    );
+    assert_eq!(
+        formula::evaluate(&book, id, "=FACTDOUBLE(301)"),
+        Value::Error("#NUM!".into())
+    );
+}
+
+#[test]
+fn review_legacy_rounding_preserves_significance_sign() {
+    let book = Book::default();
+    let id = book.active_id();
+    for (input, expected) in [
+        ("=CEILING(-2.5,-2)", Value::Number(-4.0)),
+        ("=FLOOR(-2.5,-2)", Value::Number(-2.0)),
+        ("=CEILING(2.5,-2)", Value::Error("#NUM!".into())),
+        ("=FLOOR(2.5,-2)", Value::Error("#NUM!".into())),
+        ("=CEILING(-2.5,2)", Value::Number(-2.0)),
+        ("=FLOOR(-2.5,2)", Value::Number(-4.0)),
+    ] {
+        assert_eq!(formula::evaluate(&book, id, input), expected, "{input}");
+    }
+}
+
+#[test]
+fn review_lookup_errors_and_empty_boolean_comparison() -> Result<(), String> {
+    let mut book = Book::default();
+    let id = book.active_id();
+    book.set_cell(id, 0, 0, "#DIV/0!")?;
+    for input in [
+        "=MATCH(A1,B1:B2,0)",
+        "=XMATCH(A1,B1:B2)",
+        "=VLOOKUP(A1,B1:C2,2,FALSE)",
+        "=HLOOKUP(A1,B1:C2,2,FALSE)",
+        "=XLOOKUP(A1,B1:B2,C1:C2,\"missing\")",
+    ] {
+        assert_eq!(
+            formula::evaluate(&book, id, input),
+            Value::Error("#DIV/0!".into()),
+            "{input}"
+        );
+    }
+    assert_eq!(formula::evaluate(&book, id, "=Z1=FALSE"), Value::Bool(true));
+    assert_eq!(formula::evaluate(&book, id, "=FALSE=Z1"), Value::Bool(true));
+    Ok(())
+}
+
+#[test]
+fn review_calendar_serial_zero_is_excel_january_day_zero() {
+    let book = Book::default();
+    let id = book.active_id();
+    for (input, expected) in [("=YEAR(0)", 1900.0), ("=MONTH(0)", 1.0), ("=DAY(0)", 0.0)] {
+        assert_eq!(
+            formula::evaluate(&book, id, input),
+            Value::Number(expected),
+            "{input}"
+        );
+    }
+}

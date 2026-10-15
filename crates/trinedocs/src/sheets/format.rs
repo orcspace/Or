@@ -18,10 +18,16 @@ pub const NUMBER_FORMATS: &[(&str, &str)] = &[
 ];
 pub fn display(value: &Value, code: &str, ru: bool) -> String {
     let Value::Number(number) = value else {
-        if let Value::Text(text) = value
-            && let Some(section) = split_sections(code).get(3)
-        {
-            return unquote(section).replace('@', text);
+        if let Value::Text(text) = value {
+            let sections = split_sections(code);
+            let section = sections.get(3).or_else(|| {
+                sections
+                    .first()
+                    .filter(|section| outside_quotes(section).contains('@'))
+            });
+            if let Some(section) = section {
+                return text_section(section, text);
+            }
         }
         return value.display();
     };
@@ -33,25 +39,40 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
     }
     let sections = split_sections(code);
     let negative = *number < 0.0;
-    let section = if *number == 0.0 && sections.len() > 2 {
-        &sections[2]
+    let conditional = sections
+        .iter()
+        .take(2)
+        .any(|section| condition(section, *number).is_some());
+    let section = if conditional {
+        sections
+            .iter()
+            .take(3)
+            .find(|section| condition(section, *number).unwrap_or(true))
+    } else if *number == 0.0 && sections.len() > 2 {
+        sections.get(2)
     } else if negative && sections.len() > 1 {
-        &sections[1]
+        sections.get(1)
     } else {
-        &sections[0]
+        sections.first()
+    };
+    let Some(section) = section else {
+        return String::new();
     };
     if section.is_empty() {
         return String::new();
     }
     let section = strip_brackets(section);
-    let numeric = if negative && sections.len() > 1 {
+    let numeric = if negative && sections.len() > 1 && !conditional {
         number.abs()
     } else {
         *number
     };
     let lower = section.to_ascii_lowercase();
     let bare = outside_quotes(&lower);
-    if bare.contains('y') || bare.contains('d') || bare.contains('h') || bare.contains('s') {
+    if bare
+        .chars()
+        .any(|c| matches!(c, 'y' | 'm' | 'd' | 'h' | 's'))
+    {
         return date_display(numeric, &section);
     }
     if bare.contains('/') && bare.contains('?') {
@@ -110,16 +131,18 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
     if !n.is_finite() {
         return "#NUM!".into();
     }
-    let decimals = pattern
+    let decimal_pattern: String = pattern
         .split('.')
         .nth(1)
-        .map(|s| {
-            s.chars()
-                .take_while(|c| matches!(c, '0' | '#' | '?'))
-                .count()
-        })
-        .unwrap_or(0)
-        .min(15);
+        .unwrap_or("")
+        .chars()
+        .take_while(|c| matches!(c, '0' | '#' | '?'))
+        .take(15)
+        .collect();
+    let decimals = decimal_pattern.len();
+    let integer_pattern = pattern.split(['.', 'E', 'e']).next().unwrap_or("");
+    let minimum_digits = integer_pattern.chars().filter(|c| *c == '0').count();
+    let fixed = || numeric_pattern(n, &decimal_pattern, minimum_digits);
     let rendered = if let Some(exponent) = pattern.to_uppercase().find('E') {
         let digits = pattern
             .get(exponent..)
@@ -130,9 +153,9 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
             .max(1);
         localize(&scientific(n, decimals, digits), ru)
     } else if pattern.split('.').next().is_some_and(|s| s.contains(',')) {
-        group(&fixed(n, decimals), ru)
+        group(&fixed(), ru)
     } else {
-        localize(&fixed(n, decimals), ru)
+        localize(&fixed(), ru)
     };
     format!(
         "{}{}{}",
@@ -322,15 +345,92 @@ fn outside_tokens(code: &str) -> Vec<(usize, char)> {
     }
     result
 }
+fn numeric_pattern(number: f64, decimals: &str, minimum_digits: usize) -> String {
+    let mut text = fixed(number, decimals.len());
+    let mandatory = decimals.rfind('0').map_or(0, |index| index + 1);
+    let optional = decimals.chars().rev().take_while(|c| *c == '#').count();
+    for _ in 0..optional.min(decimals.len() - mandatory) {
+        if text.ends_with('0') {
+            text.pop();
+        } else {
+            break;
+        }
+    }
+    if text.ends_with('.') {
+        text.pop();
+    }
+    let sign = usize::from(text.starts_with('-'));
+    let end = text.find('.').unwrap_or(text.len());
+    let digits = end - sign;
+    if digits < minimum_digits {
+        text.insert_str(sign, &"0".repeat(minimum_digits - digits));
+    } else if minimum_digits == 0 && text.get(sign..end) == Some("0") {
+        text.remove(sign);
+        if text == "-" {
+            text.clear();
+        }
+    }
+    text
+}
+fn text_section(code: &str, value: &str) -> String {
+    let mut result = String::new();
+    let mut start = 0;
+    for (index, token) in outside_tokens(code) {
+        if token == '@' {
+            result.push_str(&unquote(&code[start..index]));
+            result.push_str(value);
+            start = index + 1;
+        }
+    }
+    result.push_str(&unquote(&code[start..]));
+    result
+}
+fn condition(code: &str, number: f64) -> Option<bool> {
+    let tokens = outside_tokens(code);
+    let text: String = tokens.into_iter().map(|(_, c)| c).collect();
+    for tail in text.split('[').skip(1) {
+        let (clause, _) = tail.split_once(']')?;
+        for operator in ["<=", ">=", "<>", "=", "<", ">"] {
+            if let Some(value) = clause.strip_prefix(operator)
+                && let Ok(value) = value.parse::<f64>()
+            {
+                return Some(match operator {
+                    "<=" => number <= value,
+                    ">=" => number >= value,
+                    "<>" => number != value,
+                    "=" => number == value,
+                    "<" => number < value,
+                    _ => number > value,
+                });
+            }
+        }
+    }
+    None
+}
 fn strip_brackets(code: &str) -> String {
     let mut out = String::new();
     let mut bracket = String::new();
     let mut inside = false;
+    let mut quoted = false;
+    let mut escaped = false;
     for c in code.chars() {
-        if c == '[' {
+        if escaped {
+            out.push(c);
+            escaped = false;
+            continue;
+        }
+        if !inside && c == '\\' {
+            out.push(c);
+            escaped = true;
+            continue;
+        }
+        if !inside && c == '"' {
+            quoted = !quoted;
+        }
+        if !quoted && c == '[' {
             inside = true;
             bracket.clear();
-        } else if c == ']' {
+        } else if !quoted && c == ']' {
             inside = false;
             // `[$€-407]` is a currency symbol with a locale; `[$-F800]` has no symbol.
             if let Some(currency) = bracket.strip_prefix('$') {
@@ -471,7 +571,23 @@ fn date_display(serial: f64, code: &str) -> String {
                 }
                 _ => i64::from(second),
             };
-            if token == 'm' && !minutes && count >= 3 {
+            if token == 'd' && count >= 3 {
+                let weekday = (date_serial as i64 - 1).rem_euclid(7) as usize;
+                let names = if count == 3 {
+                    ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+                } else {
+                    [
+                        "Sunday",
+                        "Monday",
+                        "Tuesday",
+                        "Wednesday",
+                        "Thursday",
+                        "Friday",
+                        "Saturday",
+                    ]
+                };
+                out.push_str(names.get(weekday).copied().unwrap_or(""));
+            } else if token == 'm' && !minutes && count >= 3 {
                 let names = if count == 3 {
                     [
                         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct",
@@ -493,7 +609,12 @@ fn date_display(serial: f64, code: &str) -> String {
                         "December",
                     ]
                 };
-                out.push_str(names.get((m - 1) as usize).copied().unwrap_or(""));
+                let name = names.get((m - 1) as usize).copied().unwrap_or("");
+                if count == 5 {
+                    out.extend(name.chars().take(1));
+                } else {
+                    out.push_str(name);
+                }
             } else if count >= 2 {
                 out.push_str(&format!(
                     "{n:0width$}",
@@ -554,6 +675,55 @@ mod tests {
                 false
             ),
             "1900-02-29 00:00:00"
+        );
+    }
+
+    #[test]
+    fn review_number_placeholders_and_conditions() {
+        for (number, code, expected) in [
+            (12.0, "00000", "00012"),
+            (-12.0, "00000", "-00012"),
+            (12.3, "0.##", "12.3"),
+            (12.0, "0.0#", "12.0"),
+            (0.25, "#.##", ".25"),
+            (25.0, "[>=100]0;\"small\"", "small"),
+            (125.0, "[>=100]0;\"small\"", "125"),
+            (-25.0, "[>=100]0;[<0]0;\"small\"", "-25"),
+            (12.0, "\"[code] \"0", "[code] 12"),
+            (12.0, "\\[\\]0", "[]12"),
+        ] {
+            assert_eq!(
+                display(&Value::Number(number), code, false),
+                expected,
+                "{code}"
+            );
+        }
+    }
+    #[test]
+    fn review_calendar_tokens_and_text_placeholder() {
+        let serial = super::super::formula::date_serial(2024, 1, 1);
+        for (code, expected) in [
+            ("m", "1"),
+            ("mm", "01"),
+            ("mmm", "Jan"),
+            ("mmmm", "January"),
+            ("mmmmm", "J"),
+            ("ddd", "Mon"),
+            ("dddd", "Monday"),
+        ] {
+            assert_eq!(
+                display(&Value::Number(serial), code, false),
+                expected,
+                "{code}"
+            );
+        }
+        assert_eq!(
+            display(&Value::Text("Acme".into()), "\"Customer: \"@", false),
+            "Customer: Acme"
+        );
+        assert_eq!(
+            display(&Value::Text("Acme".into()), "0;0;0;\"@\" @", false),
+            "@ Acme"
         );
     }
     #[test]

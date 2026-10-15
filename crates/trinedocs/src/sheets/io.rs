@@ -782,6 +782,18 @@ fn read_excel(bytes: &[u8]) -> Result<Book, String> {
         preflight(&p)?;
         Some(p)
     };
+    let mut date_1904 = false;
+    if let Some(workbook) = parts
+        .as_ref()
+        .and_then(|parts| parts.get("xl/workbook.xml"))
+    {
+        each_tag(workbook, |tag, attributes| {
+            if tag == "workbookPr" {
+                date_1904 = xml_bool(attributes.get("date1904"), false);
+            }
+            Ok(())
+        })?;
+    }
     let mut imported = open_workbook_auto_from_rs(Cursor::new(bytes))
         .map_err(|e| format!("Не удалось прочитать книгу: {e}"))?;
     let names = imported.sheet_names().to_vec();
@@ -835,7 +847,7 @@ fn read_excel(bytes: &[u8]) -> Result<Book, String> {
                     Data::Int(n) => n.to_string(),
                     Data::Float(n) => n.to_string(),
                     Data::Bool(v) => if *v { "TRUE" } else { "FALSE" }.into(),
-                    Data::DateTime(d) => d.as_f64().to_string(),
+                    Data::DateTime(d) => normalized_datetime(d, date_1904).to_string(),
                     Data::DateTimeIso(s) | Data::DurationIso(s) => format!("'{s}"),
                     Data::Error(e) => e.to_string(),
                     Data::Empty => String::new(),
@@ -869,6 +881,19 @@ fn read_excel(bytes: &[u8]) -> Result<Book, String> {
     book.recalculate();
     book.validate()?;
     Ok(book)
+}
+fn normalized_datetime(value: &calamine::ExcelDateTime, date_1904: bool) -> f64 {
+    value.as_f64()
+        + if date_1904 && !value.is_duration() {
+            1462.0
+        } else {
+            0.0
+        }
+}
+fn xml_bool(value: Option<&String>, default: bool) -> bool {
+    value.map_or(default, |value| {
+        value == "1" || value.eq_ignore_ascii_case("true")
+    })
 }
 fn rgb(a: &BTreeMap<String, String>) -> Option<[u8; 3]> {
     let s = a.get("rgb")?;
@@ -966,13 +991,13 @@ fn styles(bytes: &[u8]) -> Result<Vec<CellFormat>, String> {
                                 current_font.size = v;
                             }
                         }
-                        "b" => current_font.bold = a.get("val").is_none_or(|s| s != "0"),
-                        "i" => current_font.italic = a.get("val").is_none_or(|s| s != "0"),
+                        "b" => current_font.bold = xml_bool(a.get("val"), true),
+                        "i" => current_font.italic = xml_bool(a.get("val"), true),
                         "u" => {
                             current_font.underline =
                                 a.get("val").is_none_or(|s| s != "none" && s != "0")
                         }
-                        "strike" => current_font.strike = a.get("val").is_none_or(|s| s != "0"),
+                        "strike" => current_font.strike = xml_bool(a.get("val"), true),
                         "color" => {
                             if let Some(color) = rgb(&a) {
                                 current_font.color = color;
@@ -1024,11 +1049,16 @@ fn styles(bytes: &[u8]) -> Result<Vec<CellFormat>, String> {
                         Some("right") => Align::Right,
                         _ => Align::General,
                     };
-                    fmt.wrap = a.get("wrapText").is_some_and(|s| s == "1");
-                    fmt.rotation = a
+                    fmt.wrap = xml_bool(a.get("wrapText"), false);
+                    let rotation: i16 = a
                         .get("textRotation")
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0);
+                    fmt.rotation = if (91..=180).contains(&rotation) {
+                        90 - rotation
+                    } else {
+                        rotation
+                    };
                 }
             }
             Event::End(e) => {
@@ -1051,8 +1081,14 @@ fn styles(bytes: &[u8]) -> Result<Vec<CellFormat>, String> {
     Ok(formats)
 }
 fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(), String> {
+    let workbook_rels = relationships("xl/workbook.xml", parts);
+    let style_path = workbook_rels
+        .values()
+        .find(|(kind, _)| kind.ends_with("/styles"))
+        .map(|(_, target)| target.as_str())
+        .unwrap_or("xl/styles.xml");
     let formats = parts
-        .get("xl/styles.xml")
+        .get(style_path)
         .map(|b| styles(b))
         .transpose()?
         .unwrap_or_default();
@@ -1062,14 +1098,7 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
             if tag == "Relationship"
                 && let (Some(id), Some(target)) = (a.get("Id"), a.get("Target"))
             {
-                targets.insert(
-                    id.clone(),
-                    if target.starts_with('/') {
-                        target.trim_start_matches('/').into()
-                    } else {
-                        format!("xl/{target}")
-                    },
-                );
+                targets.insert(id.clone(), resolve_target("xl/workbook.xml", target));
             }
             Ok(())
         })?;
@@ -1151,7 +1180,7 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
                         {
                             s.widths.insert(c, (w * 7.0 + 5.0).clamp(12.0, 1800.0));
                         }
-                        if a.get("hidden").is_some_and(|v| v == "1") {
+                        if xml_bool(a.get("hidden"), false) {
                             s.hidden_cols.insert(c);
                         }
                     }
@@ -1173,7 +1202,7 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
                         s.row_heights
                             .insert(r, (h * 96.0 / 72.0).clamp(12.0, 600.0));
                     }
-                    if a.get("hidden").is_some_and(|v| v == "1") {
+                    if xml_bool(a.get("hidden"), false) {
                         s.hidden_rows.insert(r);
                     }
                 }
@@ -1668,6 +1697,56 @@ fn write_xlsx(book: &Book) -> Result<Vec<u8>, String> {
 mod tests {
     use super::super::model::Range;
     use super::*;
+
+    #[test]
+    fn review_xlsx_rotation_and_boolean_values() -> Result<(), String> {
+        let formats = styles(br#"<styleSheet><fonts count="1"><font><b val="false"/><i val="0"/><strike val="false"/></font></fonts><cellXfs count="2"><xf fontId="0"><alignment textRotation="135" wrapText="true"/></xf><xf fontId="0"><alignment textRotation="180"/></xf></cellXfs></styleSheet>"#)?;
+        assert_eq!(formats.len(), 2);
+        assert_eq!(formats[0].rotation, -45);
+        assert_eq!(formats[1].rotation, -90);
+        assert!(formats[0].wrap);
+        assert!(!formats[0].bold && !formats[0].italic && !formats[0].strike);
+        formats[0].validate()?;
+        Ok(())
+    }
+
+    #[test]
+    fn review_metadata_resolves_relative_sheet_and_style_targets() -> Result<(), String> {
+        let mut book = Book::default();
+        book.sheets[0].name = "Sheet1".into();
+        let parts = BTreeMap::from([
+            ("xl/workbook.xml".into(), br#"<workbook xmlns:r="urn:r"><sheets><sheet name="Sheet1" r:id="s1"/></sheets></workbook>"#.to_vec()),
+            ("xl/_rels/workbook.xml.rels".into(), br#"<Relationships><Relationship Id="s1" Target="worksheets/../worksheets/custom.xml"/><Relationship Id="st" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles/custom.xml"/></Relationships>"#.to_vec()),
+            ("xl/styles/custom.xml".into(), br#"<styleSheet><fonts><font><b/></font></fonts><cellXfs><xf fontId="0"/></cellXfs></styleSheet>"#.to_vec()),
+            ("xl/worksheets/custom.xml".into(), br#"<worksheet><cols><col min="1" max="1" hidden="true"/></cols><sheetData><row r="1" hidden="true"><c r="A1" s="0"/></row></sheetData></worksheet>"#.to_vec()),
+        ]);
+        read_metadata(&mut book, &parts)?;
+        let sheet = book.active_sheet().ok_or("no sheet")?;
+        assert!(sheet.hidden_rows.contains(&0) && sheet.hidden_cols.contains(&0));
+        assert!(sheet.cell(0, 0).ok_or("missing styled cell")?.fmt.bold);
+        book.validate()?;
+        Ok(())
+    }
+
+    #[test]
+    fn review_1904_dates_normalize_but_durations_keep_their_value() {
+        use calamine::{ExcelDateTime, ExcelDateTimeType};
+        let value = ExcelDateTime::new(0.5, ExcelDateTimeType::DateTime, true);
+        assert_eq!(
+            normalized_datetime(&value, true),
+            super::super::formula::date_serial(1904, 1, 1) + 0.5
+        );
+        let duration = ExcelDateTime::new(2.5, ExcelDateTimeType::TimeDelta, true);
+        assert_eq!(normalized_datetime(&duration, true), 2.5);
+        let phantom = ExcelDateTime::new(60.25, ExcelDateTimeType::DateTime, false);
+        assert_eq!(normalized_datetime(&phantom, false), 60.25);
+        for raw in [1e308, -1.5] {
+            let extreme = ExcelDateTime::new(raw, ExcelDateTimeType::DateTime, false);
+            assert_eq!(normalized_datetime(&extreme, false), raw);
+        }
+        let negative = ExcelDateTime::new(-1.5, ExcelDateTimeType::DateTime, true);
+        assert_eq!(normalized_datetime(&negative, true), 1460.5);
+    }
     #[test]
     fn csv_roundtrip() {
         let rows = vec![

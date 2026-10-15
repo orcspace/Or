@@ -734,6 +734,17 @@ impl Doc {
             {
                 return Err("Недопустимая таблица Docs".into());
             }
+            if table
+                .cell_margin
+                .iter()
+                .any(|m| !m.is_finite() || !(0.0..=72.0).contains(m))
+                || table
+                    .row_heights
+                    .iter()
+                    .any(|h| !h.is_finite() || !(0.0..=1500.0).contains(h))
+            {
+                return Err("Недопустимые размеры/заголовки таблицы Docs".into());
+            }
             let columns = table.grid_columns().max(1);
             let widths: Vec<f64> = (0..columns)
                 .map(|i| {
@@ -1303,6 +1314,13 @@ impl Doc {
     /// Applies a row/column edit. Returns `Ok(false)` when the last row or
     /// column was deleted and the whole table was therefore removed.
     pub fn edit_table(&mut self, table_id: u64, edit: TableEdit) -> Result<bool, String> {
+        let mut candidate = self.clone();
+        let retained = candidate.edit_table_inner(table_id, edit)?;
+        candidate.validate()?;
+        *self = candidate;
+        Ok(retained)
+    }
+    fn edit_table_inner(&mut self, table_id: u64, edit: TableEdit) -> Result<bool, String> {
         let usable = self.page.width - self.page.margin_left - self.page.margin_right;
         let index = self
             .tables
@@ -1354,6 +1372,9 @@ impl Doc {
                     })
                     .collect();
                 table.rows.insert(at, row);
+                if at < table.header_rows {
+                    table.header_rows += 1;
+                }
                 if at <= table.row_heights.len() {
                     table.row_heights.insert(at, 0.0);
                 }
@@ -1404,6 +1425,9 @@ impl Doc {
                     remove = true;
                 } else {
                     table.rows.remove(at);
+                    if at < table.header_rows {
+                        table.header_rows -= 1;
+                    }
                     if at < table.row_heights.len() {
                         table.row_heights.remove(at);
                     }
@@ -1612,7 +1636,7 @@ impl Doc {
         let bottom = setup.height - setup.margin_bottom;
         let body = bottom - setup.margin_top;
         let mut y = setup.margin_top;
-        let mut list_number = 0;
+        let mut list_numbers = [0_usize; 9];
         for (pi, p) in doc.paragraphs.iter().enumerate() {
             let prev = pi.checked_sub(1).and_then(|i| doc.paragraphs.get(i));
             let next = doc.paragraphs.get(pi + 1);
@@ -1620,16 +1644,7 @@ impl Doc {
             if p.page_break_before && (y > setup.margin_top || pi > 0) {
                 next_page(&mut layout, setup, &mut y);
             }
-            if p.list == List::Number {
-                list_number += 1;
-            } else if p.list == List::None {
-                list_number = 0;
-            }
-            let marker = match p.list {
-                List::Bullet => "•".into(),
-                List::Number => format!("{list_number}."),
-                List::None => String::new(),
-            };
+            let marker = list_marker(p, &mut list_numbers);
             let indent = p.indent.max(0.0)
                 + f32::from(p.list_level) * 18.0
                 + if p.list != List::None { 18.0 } else { 0.0 };
@@ -2167,10 +2182,32 @@ fn line_breaks(heights: &[f32], start: f32, top: f32, bottom: f32, widow: bool) 
     }
     breaks
 }
+fn list_marker(p: &Paragraph, numbers: &mut [usize; 9]) -> String {
+    let level = usize::from(p.list_level).min(8);
+    match p.list {
+        List::None => {
+            numbers.fill(0);
+            String::new()
+        }
+        List::Bullet => {
+            numbers[level..].fill(0);
+            "•".into()
+        }
+        List::Number => {
+            numbers[level] += 1;
+            numbers[level + 1..].fill(0);
+            format!("{}.", numbers[level])
+        }
+    }
+}
 fn table_lines(cell: &Cell, width: f32, margin: [f32; 4]) -> Vec<Row> {
     let mut rows = Vec::new();
+    let mut list_numbers = [0_usize; 9];
     for (paragraph, p) in cell.paragraphs.iter().enumerate() {
-        let indent = p.indent.max(0.0) + f32::from(p.list_level) * 18.0;
+        let marker = list_marker(p, &mut list_numbers);
+        let indent = p.indent.max(0.0)
+            + f32::from(p.list_level) * 18.0
+            + if p.list != List::None { 18.0 } else { 0.0 };
         let available = (width - margin[1] - margin[3] - indent).max(1.0);
         let chars: Vec<(char, TextFormat)> = p
             .runs
@@ -2221,7 +2258,11 @@ fn table_lines(cell: &Cell, width: f32, margin: [f32; 4]) -> Vec<Row> {
                     indent,
                     justify,
                 ),
-                marker: String::new(),
+                marker: if li == 0 {
+                    marker.clone()
+                } else {
+                    String::new()
+                },
             });
         }
     }
@@ -2469,6 +2510,48 @@ fn table_row(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn failed_table_commands_leave_ragged_content_and_ids_unchanged() -> Result<(), String> {
+        let mut doc = Doc::from_text("table");
+        let anchor = doc.paragraphs[0].id;
+        doc.add_table(anchor, 2, 2)?;
+        doc.tables[0].rows[1].pop();
+        let id = doc.tables[0].id;
+        let before = doc.clone();
+        assert!(doc.edit_table(id, TableEdit::DeleteRow(99)).is_err());
+        assert_eq!(doc, before);
+        Ok(())
+    }
+    #[test]
+    fn nested_numbering_resumes_parent_and_restarts_children() {
+        let mut p = Paragraph {
+            list: List::Number,
+            ..Paragraph::default()
+        };
+        let mut numbers = [0; 9];
+        assert_eq!(list_marker(&p, &mut numbers), "1.");
+        p.list_level = 1;
+        assert_eq!(list_marker(&p, &mut numbers), "1.");
+        assert_eq!(list_marker(&p, &mut numbers), "2.");
+        p.list_level = 0;
+        assert_eq!(list_marker(&p, &mut numbers), "2.");
+        p.list_level = 1;
+        assert_eq!(list_marker(&p, &mut numbers), "1.");
+    }
+    #[test]
+    fn table_lists_render_markers_and_invalid_table_geometry_is_rejected() -> Result<(), String> {
+        let mut doc = Doc::from_text("table");
+        let anchor = doc.paragraphs[0].id;
+        doc.add_table(anchor, 1, 1)?;
+        doc.tables[0].rows[0][0].paragraphs[0].list = List::Bullet;
+        let lines = table_lines(&doc.tables[0].rows[0][0], 100.0, [5.0; 4]);
+        assert_eq!(lines[0].marker, "•");
+        doc.validate()?;
+        doc.tables[0].cell_margin[0] = f32::NAN;
+        assert!(doc.validate().is_err());
+        Ok(())
+    }
+
     use super::*;
     #[test]
     fn page_breaks_avoid_widows_and_orphans() {

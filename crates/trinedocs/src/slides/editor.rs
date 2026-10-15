@@ -121,19 +121,23 @@ pub fn show(ui: &mut egui::Ui, deck: &mut Deck) -> bool {
         return false;
     }
     let mut changed = false;
-    let image_result = state.image_job.as_ref().and_then(|job| {
-        let result = match job.result.lock() {
-            Ok(receiver) => match receiver.try_recv() {
-                Ok(result) => Some(result),
-                Err(std::sync::mpsc::TryRecvError::Empty) => None,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    Some(Err("Загрузка изображения прервана".into()))
-                }
-            },
-            Err(_) => Some(Err("Ошибка загрузки изображения".into())),
-        };
-        result.map(|result| (job.slide_id, result))
-    });
+    let image_result = state
+        .image_job
+        .as_ref()
+        .filter(|_| ui.is_enabled())
+        .and_then(|job| {
+            let result = match job.result.lock() {
+                Ok(receiver) => match receiver.try_recv() {
+                    Ok(result) => Some(result),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        Some(Err("Загрузка изображения прервана".into()))
+                    }
+                },
+                Err(_) => Some(Err("Ошибка загрузки изображения".into())),
+            };
+            result.map(|result| (job.slide_id, result))
+        });
     if let Some((slide_id, result)) = image_result {
         state.image_job = None;
         match result {
@@ -640,7 +644,17 @@ fn ribbon(ui: &mut egui::Ui, deck: &mut Deck, state: &mut State) -> bool {
     let current = deck
         .slide(state.slide_id)
         .and_then(|slide| slide.element(state.selected.first().copied()?))
-        .cloned();
+        .map(|e| Element {
+            font: e.font.clone(),
+            font_size: e.font_size,
+            bold: e.bold,
+            italic: e.italic,
+            color: e.color,
+            fill: e.fill,
+            stroke: e.stroke,
+            stroke_width: e.stroke_width,
+            ..Element::default()
+        });
     crate::chrome::tabs(
         ui,
         &mut state.ribbon_tab,
@@ -733,7 +747,7 @@ fn ribbon(ui: &mut egui::Ui, deck: &mut Deck, state: &mut State) -> bool {
                         }
                         let mut size = format.font_size;
                         if crate::chrome::size_picker(ui, "slides-size", &mut size) {
-                            let size = size.clamp(1.0, 400.0);
+                            let size = size.clamp(1.0, 300.0);
                             changed |= edit_selected(deck, state, |e| e.font_size = size);
                         }
                     });
@@ -764,7 +778,8 @@ fn ribbon(ui: &mut egui::Ui, deck: &mut Deck, state: &mut State) -> bool {
                             ("A−", false, "Уменьшить размер шрифта"),
                         ] {
                             if crate::chrome::tool(ui, glyph, tip, false).clicked() {
-                                let size = crate::chrome::step_size(format.font_size, grow);
+                                let size = crate::chrome::step_size(format.font_size, grow)
+                                    .clamp(1.0, 300.0);
                                 changed |= edit_selected(deck, state, |e| e.font_size = size);
                             }
                         }
@@ -858,7 +873,24 @@ fn ribbon(ui: &mut egui::Ui, deck: &mut Deck, state: &mut State) -> bool {
                                 ("Повернуть вправо на 90°", 90.0),
                                 ("Повернуть влево на 90°", -90.0),
                             ] {
-                                if ui.button(label).clicked() {
+                                let supported = deck.slide(state.slide_id).is_some_and(|slide| {
+                                    state.selected.iter().all(|id| {
+                                        slide.element(*id).is_some_and(|e| {
+                                            !matches!(
+                                                e.kind,
+                                                ElementKind::Table { .. }
+                                                    | ElementKind::Chart { .. }
+                                            )
+                                        })
+                                    })
+                                });
+                                if ui
+                                    .add_enabled(supported, egui::Button::new(label))
+                                    .on_disabled_hover_text(
+                                        "Поворот таблиц и диаграмм пока не поддерживается",
+                                    )
+                                    .clicked()
+                                {
                                     changed |= edit_selected(deck, state, |e| {
                                         e.rotation = (e.rotation + angle).rem_euclid(360.0);
                                     });
@@ -1400,7 +1432,12 @@ fn properties(ui: &mut egui::Ui, e: &mut Element) -> bool {
     });
     let rotation_supported = matches!(
         e.kind,
-        ElementKind::Text | ElementKind::Rect | ElementKind::Ellipse
+        ElementKind::Text
+            | ElementKind::Rect
+            | ElementKind::Ellipse
+            | ElementKind::Line
+            | ElementKind::Arrow
+            | ElementKind::Image { .. }
     );
     changed |= ui
         .add_enabled(
@@ -1663,6 +1700,7 @@ fn inline_editor(
     let font_size = e.font_size;
     let editor_id = ui.id().with(("slide_inline", e.id));
     let mut changed = false;
+    let focus_requested = std::mem::take(&mut state.edit_focus);
     let response = if let ElementKind::Table { cells } = &mut e.kind {
         if cells.is_empty() {
             cells.push(vec![String::new()]);
@@ -1724,8 +1762,7 @@ fn inline_editor(
             let target = if tab && shift {
                 index.checked_sub(1)
             } else if tab {
-                if index + 1 == rows * columns && rows < 1000 {
-                    cells.push(vec![String::new(); columns]);
+                if index + 1 == rows * columns && add_table_row(cells) {
                     changed = true;
                 }
                 Some(index + 1).filter(|i| *i < cells.len() * columns)
@@ -1742,7 +1779,7 @@ fn inline_editor(
                 None if enter => state.edit_text = None,
                 None => state.edit_focus = true,
             }
-        } else if response.lost_focus() && !state.edit_focus {
+        } else if response.lost_focus() && !focus_requested {
             state.edit_text = None;
         }
         response
@@ -1757,14 +1794,13 @@ fn inline_editor(
                 .text_color(color)
                 .desired_width(f32::INFINITY),
         );
-        if response.lost_focus() && !state.edit_focus {
+        if response.lost_focus() && !focus_requested {
             state.edit_text = None;
         }
         response
     };
-    if state.edit_focus {
+    if focus_requested {
         response.request_focus();
-        state.edit_focus = false;
     }
     changed | response.changed()
 }
@@ -1841,7 +1877,7 @@ fn canvas(
         }
     }
     for element in &slide.elements {
-        if state.edit_text == Some(element.id) {
+        if ui.is_enabled() && state.edit_text == Some(element.id) {
             // The in-place editor draws this text itself.
             let mut hidden = element.clone();
             match (&mut hidden.kind, state.edit_cell) {
@@ -1997,7 +2033,8 @@ fn canvas(
             }
         }
     }
-    if let Some(id) = state.edit_text
+    if ui.is_enabled()
+        && let Some(id) = state.edit_text
         && let Some(element) = slide.element_mut(id)
     {
         changed |= inline_editor(ui, rect.min, scale, element, state);
@@ -2191,7 +2228,8 @@ pub fn paint_slide(
     let mut previous_start = 0.0;
     let mut click_count = 0;
     for element in &slide.elements {
-        let mut element = element.clone();
+        let mut animated;
+        let mut rendered = element;
         let mut opacity = 1.0;
         if let Some((time, click_times)) = animation
             && element.animation.effect != "none"
@@ -2215,22 +2253,24 @@ pub fn paint_slide(
             let ease = 1.0 - (1.0 - progress).powi(3);
             match element.animation.effect.as_str() {
                 "fade" => opacity = ease,
-                "fly_in" => {
-                    element.x += (1.0 - ease) * deck.width;
-                    opacity = ease;
-                }
-                "zoom" => {
-                    let factor = 0.05 + 0.95 * ease;
-                    element.x += element.w * (1.0 - factor) / 2.0;
-                    element.y += element.h * (1.0 - factor) / 2.0;
-                    element.w *= factor;
-                    element.h *= factor;
+                "fly_in" | "zoom" => {
+                    animated = element.clone();
+                    if element.animation.effect == "fly_in" {
+                        animated.x += (1.0 - ease) * deck.width;
+                    } else {
+                        let factor = 0.05 + 0.95 * ease;
+                        animated.x += element.w * (1.0 - factor) / 2.0;
+                        animated.y += element.h * (1.0 - factor) / 2.0;
+                        animated.w *= factor;
+                        animated.h *= factor;
+                    }
+                    rendered = &animated;
                     opacity = ease;
                 }
                 _ => {}
             }
         }
-        paint_element(ctx, &painter, rect.min, scale, &element, opacity);
+        paint_element(ctx, &painter, rect.min, scale, rendered, opacity);
     }
 }
 fn paint_element(
@@ -2444,6 +2484,49 @@ fn paint_element(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn table_navigation_focuses_the_destination_cell() -> Result<(), String> {
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx)?;
+        let mut element = Element {
+            id: 1,
+            kind: ElementKind::Table {
+                cells: vec![vec!["a".into()], vec!["b".into()]],
+            },
+            ..Element::default()
+        };
+        let mut state = State::default();
+        begin_edit(&mut state, 1, Some((0, 0)));
+        {
+            let mut frame = |events| {
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        inline_editor(ui, Pos2::ZERO, 1.0, &mut element, &mut state);
+                    },
+                );
+                output.textures_delta.clear();
+            };
+            frame(vec![]);
+            frame(vec![input_key(egui::Key::ArrowDown, egui::Modifiers::NONE)]);
+        }
+        assert_eq!(state.edit_cell, Some((1, 0)));
+        assert!(
+            state.edit_focus,
+            "destination focus must survive the source field's frame"
+        );
+        Ok(())
+    }
+    #[test]
+    fn table_row_growth_stops_before_the_model_cell_budget() {
+        let mut cells = vec![vec![String::new(); 1000]; 100];
+        assert!(!add_table_row(&mut cells));
+        assert_eq!(cells.len(), 100);
+    }
+
     use super::*;
     fn input_key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
         egui::Event::Key {

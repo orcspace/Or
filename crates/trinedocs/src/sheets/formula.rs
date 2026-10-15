@@ -1081,7 +1081,9 @@ impl<'a> Engine<'a> {
         }
         let mut evaluated = Vec::new();
         for (index, expr) in args.iter().enumerate() {
-            if name == "XLOOKUP" && index == 3 {
+            if (name == "XLOOKUP" && index == 3)
+                || (matches!(name, "TEXTBEFORE" | "TEXTAFTER") && index == 5)
+            {
                 evaluated.push(Grid::scalar(Value::Empty));
                 continue;
             }
@@ -1446,7 +1448,8 @@ impl<'a> Engine<'a> {
                     "DEGREES" => x.to_degrees(),
                     "RADIANS" => x.to_radians(),
                     "FACT" | "FACTDOUBLE" => {
-                        if !(0.0..=170.0).contains(&x) {
+                        let limit = if name == "FACTDOUBLE" { 300.0 } else { 170.0 };
+                        if x < 0.0 || x.trunc() > limit {
                             return Err("#NUM!".into());
                         }
                         (1..=x.trunc() as u32)
@@ -1535,6 +1538,17 @@ impl<'a> Engine<'a> {
                         if y == 0.0 {
                             return num(0.0);
                         }
+                        if matches!(name, "CEILING" | "FLOOR") {
+                            if x > 0.0 && y < 0.0 {
+                                return Err("#NUM!".into());
+                            }
+                            let ratio = super::format::snap(x / y);
+                            return num(if name == "CEILING" {
+                                ratio.ceil() * y
+                            } else {
+                                ratio.floor() * y
+                            });
+                        }
                         let sig = y.abs();
                         let ratio = super::format::snap(x / sig);
                         let away = default_n(2, 0.0)? != 0.0 && x < 0.0;
@@ -1578,26 +1592,41 @@ impl<'a> Engine<'a> {
             "COMBIN" | "COMBINA" | "PERMUT" => {
                 arity(2, 2)?;
                 let mut total = n(0)?.trunc();
-                let pick = n(1)?.trunc();
+                let mut pick = n(1)?.trunc();
+                if total < 0.0 || pick < 0.0 {
+                    return Err("#NUM!".into());
+                }
+                if pick == 0.0 {
+                    return num(1.0);
+                }
                 if name == "COMBINA" {
                     total += pick - 1.0;
                 }
-                if total < 0.0 || pick < 0.0 || pick > total || total > 170.0 {
+                if !total.is_finite() || pick > total {
+                    return Err("#NUM!".into());
+                }
+                if name != "PERMUT" {
+                    pick = pick.min(total - pick);
+                }
+                // C(2048,1024) and 171! already exceed finite spreadsheet numbers.
+                if pick > if name == "PERMUT" { 170.0 } else { 1024.0 } {
                     return Err("#NUM!".into());
                 }
                 let mut result = 1.0;
                 for i in 0..pick as u32 {
-                    result *= total - f64::from(i);
-                    if name != "PERMUT" {
-                        result /= f64::from(i + 1);
-                    }
+                    let factor = if name == "PERMUT" {
+                        total - f64::from(i)
+                    } else {
+                        (total - f64::from(i)) / f64::from(i + 1)
+                    };
+                    result = finite(result * factor)?;
                 }
                 num(result)
             }
             "SUMPRODUCT" => {
                 arity(1, 255)?;
                 let count = a[0].values.len();
-                if a.iter().any(|g| g.values.len() != count) {
+                if a.iter().any(|g| g.rows != a[0].rows || g.cols != a[0].cols) {
                     return Err("#VALUE!".into());
                 }
                 let mut sum = 0.0;
@@ -1964,6 +1993,9 @@ impl<'a> Engine<'a> {
             "MATCH" | "XMATCH" => {
                 arity(2, if name == "MATCH" { 3 } else { 4 })?;
                 let needle = a[0].first();
+                if let Value::Error(error) = &needle {
+                    return Err(error.clone());
+                }
                 let mode_value = default_n(2, if name == "MATCH" { 1.0 } else { 0.0 })?;
                 let search_value = default_n(3, 1.0)?;
                 if a[1].rows > 1 && a[1].cols > 1
@@ -2014,6 +2046,9 @@ impl<'a> Engine<'a> {
             "VLOOKUP" | "HLOOKUP" => {
                 arity(3, 4)?;
                 let needle = a[0].first();
+                if let Value::Error(error) = &needle {
+                    return Err(error.clone());
+                }
                 let index = n(2)?.trunc();
                 let vertical = name == "VLOOKUP";
                 let table = &a[1];
@@ -2062,6 +2097,9 @@ impl<'a> Engine<'a> {
                 let mode = mode_value as i32;
                 let search = search_value as i32;
                 let needle = a[0].first();
+                if let Value::Error(error) = &needle {
+                    return Err(error.clone());
+                }
                 let mut indices: Vec<_> = (0..a[1].values.len()).collect();
                 if search < 0 {
                     indices.reverse();
@@ -2528,7 +2566,7 @@ impl<'a> Engine<'a> {
                 let pairs = a[1..].as_chunks::<2>().0;
                 if pairs
                     .iter()
-                    .any(|p| p[0].values.len() != target.values.len())
+                    .any(|p| p[0].rows != target.rows || p[0].cols != target.cols)
                 {
                     return Err("#VALUE!".into());
                 }
@@ -2661,11 +2699,19 @@ impl<'a> Engine<'a> {
                 let chars: Vec<char> = text(0)?.chars().collect();
                 let delimiter = text(1)?;
                 let instance = default_n(2, 1.0)?.trunc();
-                let insensitive = default_n(3, 0.0)? != 0.0;
-                let match_end = default_n(4, 0.0)? != 0.0;
+                let match_mode = default_n(3, 0.0)?;
+                let end_mode = default_n(4, 0.0)?;
+                if !matches!(match_mode, 0.0 | 1.0) || !matches!(end_mode, 0.0 | 1.0) {
+                    return Err("#VALUE!".into());
+                }
+                let insensitive = match_mode == 1.0;
+                let match_end = end_mode == 1.0;
                 let len = chars.len();
                 if instance == 0.0 || instance.abs() > len.max(1) as f64 {
                     return Err("#VALUE!".into());
+                }
+                if chars.is_empty() {
+                    return string(String::new());
                 }
                 let fold = |c: char| -> char {
                     if insensitive {
@@ -2712,8 +2758,8 @@ impl<'a> Engine<'a> {
                     } else {
                         chars[end..].iter().collect()
                     }),
-                    None => match a.get(5) {
-                        Some(fallback) => Ok(Grid::scalar(fallback.first())),
+                    None => match args.get(5) {
+                        Some(fallback) => self.eval(fallback, sheet, row, col),
                         None => Err("#N/A".into()),
                     },
                 }
@@ -2842,7 +2888,13 @@ impl<'a> Engine<'a> {
                 if digits.is_empty() {
                     return num(0.0);
                 }
-                num(u64::from_str_radix(digits, radix).map_err(|_| "#NUM!".to_string())? as f64)
+                let mut value = 0.0;
+                for digit in digits.chars() {
+                    value = finite(
+                        value * f64::from(radix) + f64::from(digit.to_digit(radix).ok_or("#NUM!")?),
+                    )?;
+                }
+                num(value)
             }
             "WEEKNUM" | "ISOWEEKNUM" => {
                 arity(1, if name == "WEEKNUM" { 2 } else { 1 })?;
@@ -2949,11 +3001,12 @@ fn numbers(grids: &[Grid], text_zero: bool) -> CalcResult<Vec<f64>> {
                 Value::Number(n) => vals.push(*n),
                 Value::Error(e) => return Err(e.clone()),
                 Value::Bool(b) if text_zero || !g.reference => vals.push(f64::from(u8::from(*b))),
-                Value::Text(s) if text_zero => {
-                    if s.is_empty() {
-                        continue;
-                    }
-                    vals.push(0.0);
+                Value::Text(_) if text_zero => {
+                    vals.push(if g.reference {
+                        0.0
+                    } else {
+                        value.number().unwrap_or(0.0)
+                    });
                 }
                 Value::Text(_) if !g.reference => vals.push(value.number()?),
                 _ => (),
@@ -2971,6 +3024,8 @@ fn compare(a: &Value, b: &Value) -> std::cmp::Ordering {
         (Value::Empty, Value::Text(b)) => String::new().cmp(&b.to_lowercase()),
         (Value::Text(a), Value::Empty) => a.to_lowercase().cmp(&String::new()),
         (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
+        (Value::Empty, Value::Bool(b)) => false.cmp(b),
+        (Value::Bool(a), Value::Empty) => a.cmp(&false),
         (Value::Error(a), Value::Error(b)) => a.cmp(b),
         (Value::Empty, Value::Empty) => std::cmp::Ordering::Equal,
         _ => {
@@ -3094,10 +3149,10 @@ fn conditional(name: &str, a: &[Grid]) -> CalcResult<f64> {
         }
         (a.get(2).unwrap_or(&a[0]), vec![(&a[0], &a[1])])
     };
-    if conditions
-        .iter()
-        .any(|(range, _)| range.values.len() != sum.values.len())
-    {
+    if conditions.iter().any(|(range, _)| {
+        range.values.len() != sum.values.len()
+            || plural && (range.rows != sum.rows || range.cols != sum.cols)
+    }) {
         return Err("#VALUE!".into());
     }
     let mut result = 0.0;
@@ -3191,6 +3246,9 @@ pub fn date_serial(year: i64, month: i64, day: i64) -> f64 {
 }
 pub fn serial_date(serial: f64) -> (i64, i64, i64) {
     let day = serial.floor() as i64;
+    if day == 0 {
+        return (1900, 1, 0);
+    }
     if day == 60 {
         return (1900, 2, 29);
     }
