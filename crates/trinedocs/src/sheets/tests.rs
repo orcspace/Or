@@ -507,7 +507,7 @@ fn text_boolean_and_errors() -> Result<(), String> {
         ("=SUBSTITUTE(\"abab\",\"a\",\"x\")", "xbxb"),
         ("=SUBSTITUTE(\"abab\",\"a\",\"x\",2)", "abxb"),
         ("=REPLACE(\"abcd\",2,2,\"XY\")", "aXYd"),
-        ("=TEXT(12.5,\"0.00\")", "12.50"),
+        ("=TEXT(12.5,\"0.00\")", "12,50"),
         ("=CHAR(65)", "A"),
         ("=UNICHAR(1105)", "ё"),
         ("=T(\"yes\")", "yes"),
@@ -1149,4 +1149,241 @@ fn review_calendar_serial_zero_is_excel_january_day_zero() {
             "{input}"
         );
     }
+}
+
+#[test]
+fn review2_reference_errors_are_not_reinterpreted_as_text_or_values() -> Result<(), String> {
+    let mut book = Book::default();
+    let id = book.active_id();
+    book.set_cell(id, 0, 0, "#DIV/0!")?;
+    book.set_cell(id, 0, 1, "=1")?;
+    for input in [
+        "=SWITCH(A1,1,10,99)",
+        "=SWITCH(1,A1,10,99)",
+        "=TEXT(A1,\"0\")",
+        "=NUMBERVALUE(\"1\",A1)",
+        "=NUMBERVALUE(\"1\",\".\",A1)",
+        "=COUNTIF(B1:B2,A1)",
+        "=SUMIFS(B1:B2,B1:B2,A1)",
+        "=MAXIFS(B1:B2,B1:B2,A1)",
+    ] {
+        assert_eq!(
+            formula::evaluate(&book, id, input),
+            Value::Error("#DIV/0!".into()),
+            "{input}"
+        );
+    }
+    assert_eq!(
+        formula::evaluate(&book, id, "=ISFORMULA('Missing'!B1)"),
+        Value::Error("#REF!".into())
+    );
+    assert_eq!(
+        formula::evaluate(&book, id, "=ISFORMULA(B1)"),
+        Value::Bool(true)
+    );
+    Ok(())
+}
+
+#[test]
+fn review2_formula_boundaries_keep_blank_cells_distinct_from_zero_results() -> Result<(), String> {
+    let mut book = Book::default();
+    let id = book.active_id();
+    book.set_cell(id, 0, 0, "=Z99")?;
+    for (input, expected) in [
+        ("=A1", Value::Number(0.0)),
+        ("=ISBLANK(A1)", Value::Bool(false)),
+        ("=ISBLANK(Z99)", Value::Bool(true)),
+        ("=COUNT(A1)", Value::Number(1.0)),
+        ("=COUNT(Z99)", Value::Number(0.0)),
+        ("=-0=0", Value::Bool(true)),
+        ("=-0<0", Value::Bool(false)),
+        ("=0>-0", Value::Bool(false)),
+    ] {
+        assert_eq!(formula::evaluate(&book, id, input), expected, "{input}");
+    }
+    Ok(())
+}
+
+#[test]
+fn review2_conditional_aggregates_project_from_the_top_left_sum_cell() -> Result<(), String> {
+    let mut book = Book::default();
+    let id = book.active_id();
+    book.set_range(
+        id,
+        0,
+        0,
+        &[
+            vec!["x".into(), "10".into(), "100".into()],
+            vec!["x".into(), "20".into(), "200".into()],
+        ],
+    )?;
+    for (input, expected) in [
+        ("=SUMIF(A1:A2,\"x\",B1)", 30.0),
+        ("=SUMIF(A1:A2,\"x\",B1:C1)", 30.0),
+        ("=SUMIF(A1:A2,\"x\",B1:C2)", 30.0),
+        ("=AVERAGEIF(A1:A2,\"x\",B1)", 15.0),
+        ("=AVERAGEIF(A1:A2,\"x\",B1:C1)", 15.0),
+    ] {
+        assert_eq!(
+            formula::evaluate(&book, id, input),
+            Value::Number(expected),
+            "{input}"
+        );
+    }
+    assert_eq!(
+        formula::evaluate(&book, id, "=SUMIF(A1:A2,\"x\",B1048576)"),
+        Value::Error("#REF!".into())
+    );
+    Ok(())
+}
+
+#[test]
+fn review2_locales_large_rounding_and_ooxml_function_prefixes() -> Result<(), String> {
+    let mut book = Book::default();
+    let id = book.active_id();
+    assert_eq!(
+        formula::evaluate(&book, id, "=TEXT(1.25,\"0.00\")"),
+        Value::Text("1,25".into())
+    );
+    assert_eq!(
+        formula::evaluate(&book, id, "=DATEVALUE(\"13/10/2026\")"),
+        Value::Number(formula::date_serial(2026, 10, 13))
+    );
+    book.locale_ru = false;
+    assert_eq!(
+        formula::evaluate(&book, id, "=TEXT(1.25,\"0.00\")"),
+        Value::Text("1.25".into())
+    );
+    assert_eq!(
+        formula::evaluate(&book, id, "=DATEVALUE(\"10/13/2026\")"),
+        Value::Number(formula::date_serial(2026, 10, 13))
+    );
+    for input in [
+        "=ROUND(1E308,2)",
+        "=ROUNDUP(1E308,2)",
+        "=ROUNDDOWN(1E308,2)",
+        "=TRUNC(1E308,2)",
+    ] {
+        assert_eq!(
+            formula::evaluate(&book, id, input),
+            Value::Number(1e308),
+            "{input}"
+        );
+    }
+    book.set_range(id, 0, 0, &[vec!["1".into(), "42".into()]])?;
+    assert_eq!(
+        formula::evaluate(&book, id, "=_xlfn.XLOOKUP(1,A1,B1)"),
+        Value::Number(42.0)
+    );
+    assert_eq!(
+        formula::canonicalize("=_xlfn._xlws.XLOOKUP(1,A1,B1)"),
+        "=XLOOKUP(1,A1,B1)"
+    );
+    for input in ["=TIME(32768,0,0)", "=TIME(0,32768,0)", "=TIME(0,0,32768)"] {
+        assert_eq!(
+            formula::evaluate(&book, id, input),
+            Value::Error("#NUM!".into()),
+            "{input}"
+        );
+    }
+    assert_eq!(
+        formula::evaluate(&book, id, "=TIME(27,0,0)"),
+        Value::Number(0.125)
+    );
+    Ok(())
+}
+
+#[test]
+fn review2_reverse_delimiter_search_and_nasd_month_ends() {
+    let book = Book::default();
+    let id = book.active_id();
+    for (input, expected) in [
+        (
+            "=TEXTBEFORE(\"ababa\",\"aba\",-1)",
+            Value::Text("ab".into()),
+        ),
+        (
+            "=TEXTAFTER(\"ababa\",\"aba\",-1)",
+            Value::Text(String::new()),
+        ),
+        ("=TEXTBEFORE(\"aaaaa\",\"aa\",-2)", Value::Text("a".into())),
+        (
+            "=TEXTBEFORE(\"ababa\",\"aba\",1)",
+            Value::Text(String::new()),
+        ),
+        (
+            "=DAYS360(DATE(2023,1,30),DATE(2023,2,28))",
+            Value::Number(30.0),
+        ),
+        (
+            "=DAYS360(DATE(2024,1,30),DATE(2024,2,29))",
+            Value::Number(30.0),
+        ),
+        (
+            "=DAYS360(DATE(2023,1,30),DATE(2023,2,28),TRUE)",
+            Value::Number(28.0),
+        ),
+    ] {
+        assert_eq!(formula::evaluate(&book, id, input), expected, "{input}");
+    }
+}
+
+#[test]
+fn review2_sort_compares_value_types_and_keeps_blanks_after_data() -> Result<(), String> {
+    let mut book = Book::default();
+    let id = book.active_id();
+    book.set_range(
+        id,
+        0,
+        0,
+        &[
+            vec!["10".into(), "number".into()],
+            vec!["'2".into(), "text".into()],
+            vec!["".into(), "blank".into()],
+            vec!["2".into(), "small".into()],
+        ],
+    )?;
+    let range = Range::new(0, 0, 3, 1);
+    book.sort(id, range, &[(0, false)], false)?;
+    let labels = |book: &Book| -> Result<Vec<String>, String> {
+        Ok(book
+            .read_range(id, 0, 1, 3, 1)?
+            .into_iter()
+            .map(|row| row[0].clone())
+            .collect())
+    };
+    assert_eq!(labels(&book)?, ["small", "number", "text", "blank"]);
+    book.sort(id, range, &[(0, true)], false)?;
+    assert_eq!(labels(&book)?, ["text", "number", "small", "blank"]);
+    Ok(())
+}
+
+#[test]
+fn review2_print_count_matches_hidden_cells_and_draws_both_decorations() -> Result<(), String> {
+    let mut book = Book::default();
+    let id = book.active_id();
+    book.set_cell(id, 0, 0, "visible")?;
+    book.set_cell(id, 100, 0, "hidden row")?;
+    book.set_cell(id, 0, 26, "hidden column")?;
+    let sheet = book.active_sheet_mut().ok_or("sheet")?;
+    sheet.hidden_rows.insert(100);
+    sheet.hidden_cols.insert(26);
+    let cell = sheet.cell_mut(0, 0).ok_or("cell")?;
+    cell.fmt.underline = true;
+    cell.fmt.strike = true;
+    let pages = book.pages();
+    assert_eq!(book.print_page_count(), pages.len());
+    assert_eq!(pages.len(), 1);
+    let decorations = pages[0]
+        .items
+        .iter()
+        .filter(|item| matches!(item, crate::render::Primitive::Line {width, ..} if *width == 0.5))
+        .count();
+    assert_eq!(decorations, 2);
+    book.active_sheet_mut()
+        .ok_or("sheet")?
+        .hidden_rows
+        .insert(0);
+    assert_eq!(book.print_page_count(), book.pages().len());
+    Ok(())
 }

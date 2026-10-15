@@ -175,7 +175,10 @@ fn lexer(input: &str) -> CalcResult<Vec<Token>> {
     Ok(out)
 }
 fn alias(name: &str) -> String {
-    match name.to_uppercase().as_str() {
+    let upper = name.to_uppercase();
+    let canonical = upper.strip_prefix("_XLFN.").unwrap_or(&upper);
+    let canonical = canonical.strip_prefix("_XLWS.").unwrap_or(canonical);
+    match canonical {
         "СУММ" => "SUM",
         "СРЗНАЧ" => "AVERAGE",
         "МИН" => "MIN",
@@ -309,7 +312,7 @@ fn alias(name: &str) -> String {
         "НОМНЕДЕЛИ.ISO" => "ISOWEEKNUM",
         "ДНЕЙ360" => "DAYS360",
         "ПРОМЕЖУТОЧНЫЕ.ИТОГИ" => "SUBTOTAL",
-        _ => return name.to_uppercase(),
+        _ => return canonical.into(),
     }
     .into()
 }
@@ -821,7 +824,7 @@ impl<'a> Engine<'a> {
             .unwrap_or_default();
         let value = if input.starts_with('=') {
             match parse(&input).and_then(|e| self.eval(&e, sheet, row, col)) {
-                Ok(grid) => grid.first(),
+                Ok(grid) => formula_result(grid.first()),
                 Err(e) => Value::Error(e),
             }
         } else {
@@ -1048,8 +1051,15 @@ impl<'a> Engine<'a> {
                 return Err("#VALUE!".into());
             }
             let v = self.eval(&args[0], sheet, row, col)?.first();
+            if let Value::Error(error) = &v {
+                return Err(error.clone());
+            }
             for pair in args[1..].as_chunks::<2>().0 {
-                if compare(&v, &self.eval(&pair[0], sheet, row, col)?.first()).is_eq() {
+                let candidate = self.eval(&pair[0], sheet, row, col)?.first();
+                if let Value::Error(error) = &candidate {
+                    return Err(error.clone());
+                }
+                if compare(&v, &candidate).is_eq() {
                     return self.eval(&pair[1], sheet, row, col);
                 }
             }
@@ -1087,6 +1097,27 @@ impl<'a> Engine<'a> {
                 evaluated.push(Grid::scalar(Value::Empty));
                 continue;
             }
+            let projected;
+            let expr = if matches!(name, "SUMIF" | "AVERAGEIF")
+                && index == 2
+                && let Expr::Reference(target, range) = expr
+            {
+                let criteria: &Grid = evaluated.first().ok_or("#VALUE!")?;
+                let r1 = range
+                    .r0
+                    .checked_add(criteria.rows as u32 - 1)
+                    .ok_or("#REF!")?;
+                let c1 = range
+                    .c0
+                    .checked_add(criteria.cols as u32 - 1)
+                    .ok_or("#REF!")?;
+                let range = Range::new(range.r0, range.c0, r1, c1);
+                range.validate().map_err(|_| "#REF!")?;
+                projected = Expr::Reference(target.clone(), range);
+                &projected
+            } else {
+                expr
+            };
             let mut value = self.eval(expr, sheet, row, col);
             if name == "SUBTOTAL"
                 && index > 0
@@ -1373,15 +1404,15 @@ impl<'a> Engine<'a> {
                     }
                     "ISFORMULA" => {
                         if let Some(Expr::Reference(target, r)) = args.first() {
-                            let si = target
-                                .as_ref()
-                                .and_then(|name| {
-                                    self.book
-                                        .sheets
-                                        .iter()
-                                        .position(|s| s.name.to_lowercase() == name.to_lowercase())
-                                })
-                                .unwrap_or(sheet);
+                            let si = match target {
+                                Some(name) => self
+                                    .book
+                                    .sheets
+                                    .iter()
+                                    .position(|s| s.name.to_lowercase() == name.to_lowercase())
+                                    .ok_or("#REF!")?,
+                                None => sheet,
+                            };
                             boolean(
                                 self.book
                                     .sheets
@@ -1475,7 +1506,12 @@ impl<'a> Engine<'a> {
                     return Err("#NUM!".into());
                 }
                 let scale = 10f64.powf(digits);
-                let x = n(0)? * scale;
+                let value = n(0)?;
+                let x = value * scale;
+                // A finite number this large already has no fractional digits to remove.
+                if !x.is_finite() && digits >= 0.0 {
+                    return num(value);
+                }
                 // Like Excel, 2.675 rounds to 2.68 although its binary value is below the tie.
                 num(match name {
                     "ROUND" => super::format::round_scaled(x),
@@ -1903,14 +1939,16 @@ impl<'a> Engine<'a> {
                     divisor *= 100.0;
                 }
                 if name == "NUMBERVALUE" {
-                    let decimal = a
-                        .get(1)
-                        .map(Grid::text)
-                        .unwrap_or_else(|| if self.book.locale_ru { "," } else { "." }.into());
-                    let group = a
-                        .get(2)
-                        .map(Grid::text)
-                        .unwrap_or_else(|| if self.book.locale_ru { "\u{a0}" } else { "," }.into());
+                    let decimal = if a.len() > 1 {
+                        text(1)?
+                    } else {
+                        if self.book.locale_ru { "," } else { "." }.into()
+                    };
+                    let group = if a.len() > 2 {
+                        text(2)?
+                    } else {
+                        if self.book.locale_ru { "\u{a0}" } else { "," }.into()
+                    };
                     let decimal = decimal.chars().next().ok_or("#VALUE!")?;
                     let group = group.chars().next().ok_or("#VALUE!")?;
                     if decimal == group {
@@ -1952,7 +1990,15 @@ impl<'a> Engine<'a> {
             }
             "TEXT" => {
                 arity(2, 2)?;
-                string(super::format::display(&a[0].first(), &text(1)?, false))
+                let value = a[0].first();
+                if let Value::Error(error) = value {
+                    return Err(error);
+                }
+                string(super::format::display(
+                    &value,
+                    &text(1)?,
+                    self.book.locale_ru,
+                ))
             }
             "CHAR" | "UNICHAR" => {
                 arity(1, 1)?;
@@ -2159,7 +2205,11 @@ impl<'a> Engine<'a> {
             }
             "TIME" => {
                 arity(3, 3)?;
-                let seconds = n(0)?.trunc() * 3600.0 + n(1)?.trunc() * 60.0 + n(2)?.trunc();
+                let parts = [n(0)?.trunc(), n(1)?.trunc(), n(2)?.trunc()];
+                if parts.iter().any(|part| *part > 32767.0) {
+                    return Err("#NUM!".into());
+                }
+                let seconds = parts[0] * 3600.0 + parts[1] * 60.0 + parts[2];
                 if seconds < 0.0 {
                     return Err("#NUM!".into());
                 }
@@ -2227,7 +2277,7 @@ impl<'a> Engine<'a> {
             "DATEVALUE" => {
                 arity(1, 1)?;
                 let s = text(0)?;
-                let pieces: Vec<_> = s.split(['-', '/', '.']).collect();
+                let pieces: Vec<_> = s.trim().split(['-', '/', '.']).collect();
                 if pieces.len() != 3 {
                     return Err("#VALUE!".into());
                 }
@@ -2237,8 +2287,10 @@ impl<'a> Engine<'a> {
                     .collect::<CalcResult<_>>()?;
                 let (y, m, d) = if pieces[0].len() == 4 {
                     (v[0], v[1], v[2])
-                } else {
+                } else if self.book.locale_ru {
                     (v[2], v[1], v[0])
+                } else {
+                    (v[2], v[0], v[1])
                 };
                 if !(1900..=9999).contains(&y)
                     || !(1..=12).contains(&m)
@@ -2564,6 +2616,11 @@ impl<'a> Engine<'a> {
                 }
                 let target = &a[0];
                 let pairs = a[1..].as_chunks::<2>().0;
+                for pair in pairs {
+                    if let Value::Error(error) = pair[1].first() {
+                        return Err(error);
+                    }
+                }
                 if pairs
                     .iter()
                     .any(|p| p[0].rows != target.rows || p[0].cols != target.cols)
@@ -2726,14 +2783,28 @@ impl<'a> Engine<'a> {
                 if needle.is_empty() {
                     found.push(if instance > 0.0 { (0, 0) } else { (len, len) });
                 } else {
-                    let mut i = 0;
-                    while i + needle.len() <= len {
-                        if hay[i..i + needle.len()] == needle[..] {
-                            found.push((i, i + needle.len()));
-                            i += needle.len();
-                        } else {
-                            i += 1;
+                    if instance > 0.0 {
+                        let mut i = 0;
+                        while i + needle.len() <= len {
+                            if hay[i..i + needle.len()] == needle[..] {
+                                found.push((i, i + needle.len()));
+                                i += needle.len();
+                            } else {
+                                i += 1;
+                            }
                         }
+                    } else {
+                        let mut end = len;
+                        while end >= needle.len() {
+                            let start = end - needle.len();
+                            if hay[start..end] == needle[..] {
+                                found.push((start, end));
+                                end = start;
+                            } else {
+                                end -= 1;
+                            }
+                        }
+                        found.reverse();
                     }
                     if match_end {
                         if instance > 0.0 {
@@ -2939,7 +3010,7 @@ impl<'a> Engine<'a> {
                     if d1 == days_in_month(y1, m1) {
                         d1 = 30;
                     }
-                    if d2 == 31 {
+                    if d2 == days_in_month(y2, m2) {
                         if d1 < 30 {
                             d2 = 1;
                             m2 += 1;
@@ -2952,6 +3023,13 @@ impl<'a> Engine<'a> {
             }
             _ => Err("#NAME?".into()),
         }
+    }
+}
+fn formula_result(value: Value) -> Value {
+    if value == Value::Empty {
+        Value::Number(0.0)
+    } else {
+        value
     }
 }
 fn finite(value: f64) -> CalcResult<f64> {
@@ -3017,9 +3095,15 @@ fn numbers(grids: &[Grid], text_zero: bool) -> CalcResult<Vec<f64>> {
 }
 fn compare(a: &Value, b: &Value) -> std::cmp::Ordering {
     match (a, b) {
-        (Value::Number(a), Value::Number(b)) => a.total_cmp(b),
-        (Value::Empty, Value::Number(b)) => 0f64.total_cmp(b),
-        (Value::Number(a), Value::Empty) => a.total_cmp(&0.0),
+        (Value::Number(a), Value::Number(b)) => {
+            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+        }
+        (Value::Empty, Value::Number(b)) => {
+            0f64.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+        }
+        (Value::Number(a), Value::Empty) => {
+            a.partial_cmp(&0.0).unwrap_or(std::cmp::Ordering::Equal)
+        }
         (Value::Text(a), Value::Text(b)) => a.to_lowercase().cmp(&b.to_lowercase()),
         (Value::Empty, Value::Text(b)) => String::new().cmp(&b.to_lowercase()),
         (Value::Text(a), Value::Empty) => a.to_lowercase().cmp(&String::new()),
@@ -3149,6 +3233,11 @@ fn conditional(name: &str, a: &[Grid]) -> CalcResult<f64> {
         }
         (a.get(2).unwrap_or(&a[0]), vec![(&a[0], &a[1])])
     };
+    for (_, criteria) in &conditions {
+        if let Value::Error(error) = criteria.first() {
+            return Err(error);
+        }
+    }
     if conditions.iter().any(|(range, _)| {
         range.values.len() != sum.values.len()
             || plural && (range.rows != sum.rows || range.cols != sum.cols)
@@ -3302,7 +3391,7 @@ pub fn evaluate(book: &Book, sheet: u64, input: &str) -> Value {
         return literal(input);
     }
     match parse(input).and_then(|expr| Engine::new(book).eval(&expr, si, 0, 0)) {
-        Ok(g) => g.first(),
+        Ok(g) => formula_result(g.first()),
         Err(e) => Value::Error(e),
     }
 }

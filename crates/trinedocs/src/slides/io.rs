@@ -421,6 +421,12 @@ fn flatten<'a>(
     rotated_groups: &mut bool,
 ) {
     for shape in &tree.children {
+        if shape.name == "AlternateContent" {
+            if let Some(branch) = shape.child("Fallback").or_else(|| shape.child("Choice")) {
+                flatten(branch, map, depth + 1, out, rotated_groups);
+            }
+            continue;
+        }
         if shape.name != "grpSp" {
             out.push((shape, map));
             continue;
@@ -448,6 +454,92 @@ fn flatten<'a>(
         flatten(shape, inner, depth + 1, out, rotated_groups);
     }
 }
+fn cached_points(node: &Node) -> Result<Vec<String>, String> {
+    let cache = ["numCache", "strCache", "numLit", "strLit"]
+        .iter()
+        .find_map(|name| node.descend(name))
+        .unwrap_or(node);
+    let declared = cache
+        .child("ptCount")
+        .map(|n| n.attr("val").parse::<usize>())
+        .transpose()
+        .map_err(|_| "Некорректное число точек диаграммы")?
+        .unwrap_or(0);
+    if declared > 10000 {
+        return Err("Слишком много точек диаграммы".into());
+    }
+    let mut points = vec![String::new(); declared];
+    for point in cache.children.iter().filter(|n| n.name == "pt") {
+        let index = point
+            .attr("idx")
+            .parse::<usize>()
+            .map_err(|_| "Некорректный индекс точки диаграммы")?;
+        if index >= 10000 {
+            return Err("Слишком большой индекс точки диаграммы".into());
+        }
+        if points.len() <= index {
+            points.resize_with(index + 1, String::new);
+        }
+        points[index] = point.child("v").map(|n| n.text.clone()).unwrap_or_default();
+    }
+    Ok(points)
+}
+fn apply_text_look(
+    body: &Node,
+    element: &mut Element,
+    look: &Look,
+    style: Option<&Node>,
+    default_size: f32,
+    title: bool,
+) {
+    let mut layers = Vec::new();
+    if let Some(defaults) = body.descend("defRPr") {
+        layers.push(defaults);
+    }
+    if let Some(direct) = body.descend("rPr").or_else(|| body.descend("endParaRPr")) {
+        layers.push(direct);
+    }
+    element.font_size = default_size;
+    for props in layers {
+        if !props.attr("sz").is_empty() {
+            element.font_size =
+                (props.number("sz", element.font_size * 100.0) / 100.0).clamp(1.0, 300.0);
+        }
+        if !props.attr("b").is_empty() {
+            element.bold = matches!(props.attr("b"), "1" | "true");
+        }
+        if !props.attr("i").is_empty() {
+            element.italic = matches!(props.attr("i"), "1" | "true");
+        }
+        element.color = color(props.child("solidFill"), look, element.color);
+        if let Some(font) = props
+            .child("latin")
+            .and_then(|latin| look.font(latin.attr("typeface")))
+        {
+            element.font = font;
+        }
+    }
+    if body
+        .descend("rPr")
+        .and_then(|p| p.child("solidFill"))
+        .is_none()
+        && body
+            .descend("defRPr")
+            .and_then(|p| p.child("solidFill"))
+            .is_none()
+    {
+        element.color = color(style.and_then(|n| n.child("fontRef")), look, element.color);
+    }
+    let theme_face = if title { &look.major } else { &look.minor };
+    let explicit_font = body
+        .descend("rPr")
+        .and_then(|p| p.child("latin"))
+        .or_else(|| body.descend("defRPr").and_then(|p| p.child("latin")));
+    if explicit_font.is_none() && !theme_face.is_empty() {
+        element.font.clone_from(theme_face);
+    }
+}
+
 fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
     let parts = read_zip(bytes)?;
     if let Some(json) = parts
@@ -671,6 +763,23 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
                         bytes: bytes.clone(),
                     };
                 } else if let Some(table) = shape.descend("tbl") {
+                    if let Some(cell) = table.child("tr").and_then(|row| row.child("tc")) {
+                        if let Some(body) = cell.child("txBody") {
+                            apply_text_look(body, &mut element, look, None, 18.0, false);
+                        }
+                        if let Some(props) = cell.child("tcPr") {
+                            element.fill = color(props.child("solidFill"), look, element.fill);
+                            if let Some(line) = props.child("lnL") {
+                                element.stroke_width = if line.child("noFill").is_some() {
+                                    0.0
+                                } else {
+                                    (line.number("w", 12700.0) / 12700.0).clamp(0.0, 300.0)
+                                };
+                                element.stroke =
+                                    color(line.child("solidFill"), look, element.stroke);
+                            }
+                        }
+                    }
                     element.kind = ElementKind::Table {
                         cells: table
                             .children
@@ -691,21 +800,27 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
                         .and_then(|p| parts.get(p))
                     {
                         let chart = parse(chart_xml)?;
-                        let mut values = Vec::new();
-                        let mut labels = Vec::new();
-                        if let Some(val) = chart.descend("val") {
-                            let mut points = Vec::new();
-                            val.all("v", &mut points);
-                            values = points
-                                .iter()
-                                .filter_map(|p| p.text.parse::<f32>().ok())
-                                .collect();
-                        }
-                        if let Some(cat) = chart.descend("cat") {
-                            let mut points = Vec::new();
-                            cat.all("v", &mut points);
-                            labels = points.iter().map(|p| p.text.clone()).collect();
-                        }
+                        let values = chart
+                            .descend("val")
+                            .map(cached_points)
+                            .transpose()?
+                            .unwrap_or_default()
+                            .iter()
+                            .map(|value| {
+                                if value.is_empty() {
+                                    Ok(0.0)
+                                } else {
+                                    value
+                                        .parse::<f32>()
+                                        .map_err(|_| "Некорректное значение диаграммы".to_string())
+                                }
+                            })
+                            .collect::<Result<Vec<_>, String>>()?;
+                        let labels = chart
+                            .descend("cat")
+                            .map(cached_points)
+                            .transpose()?
+                            .unwrap_or_default();
                         element.kind = ElementKind::Chart { values, labels };
                     }
                 } else {
@@ -799,28 +914,7 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
                         Some(_) => 28.0,
                         None => 18.0,
                     };
-                    let props = body.descend("rPr").or_else(|| body.descend("defRPr"));
-                    element.font_size = props
-                        .map_or(default_size, |p| {
-                            p.number("sz", default_size * 100.0) / 100.0
-                        })
-                        .clamp(1.0, 300.0);
-                    if let Some(props) = props {
-                        element.bold = matches!(props.attr("b"), "1" | "true");
-                        element.italic = matches!(props.attr("i"), "1" | "true");
-                    }
-                    let text_fill = props
-                        .and_then(|p| p.child("solidFill"))
-                        .or_else(|| style.and_then(|n| n.child("fontRef")));
-                    element.color = color(text_fill, look, element.color);
-                    let theme_face = if is_title { &look.major } else { &look.minor };
-                    if let Some(face) = props
-                        .and_then(|p| p.child("latin"))
-                        .and_then(|latin| look.font(latin.attr("typeface")))
-                        .or_else(|| (!theme_face.is_empty()).then(|| theme_face.clone()))
-                    {
-                        element.font = face;
-                    }
+                    apply_text_look(body, &mut element, look, style, default_size, is_title);
                     if named_title.is_none()
                         && !element.text.is_empty()
                         && (is_title || (!titled && slide.elements.is_empty()))
@@ -1027,25 +1121,34 @@ fn table_xml(e: &Element, id: usize, cells: &[Vec<String>]) -> String {
     let grid = (0..cols)
         .map(|_| format!("<a:gridCol w=\"{}\"/>", emu(e.w / cols as f32)))
         .collect::<String>();
-    // Each line of a cell is its own paragraph, as PowerPoint stores it.
     let paragraphs = |text: &str| {
-        text.split('\n')
-            .map(|line| {
-                format!(
-                    "<a:p><a:r><a:rPr lang=\"ru-RU\" sz=\"{}\"/><a:t xml:space=\"preserve\">{}</a:t></a:r></a:p>",
-                    (e.font_size * 100.0) as u32,
-                    xml_escape(line.trim_end_matches('\r'))
-                )
-            })
-            .collect::<String>()
+        text.replace("\r\n", "\n").replace('\r', "\n").split('\n')
+            .map(|line| format!(
+                "<a:p><a:r><a:rPr lang=\"ru-RU\" sz=\"{}\" b=\"{}\" i=\"{}\"><a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill><a:latin typeface=\"{}\"/></a:rPr><a:t xml:space=\"preserve\">{}</a:t></a:r></a:p>",
+                (e.font_size * 100.0) as u32, u8::from(e.bold), u8::from(e.italic), hex(e.color), xml_escape(&e.font), xml_escape(line)
+            )).collect::<String>()
     };
+    let line = if e.stroke_width <= 0.0 {
+        "<a:noFill/>".to_string()
+    } else {
+        format!(
+            "<a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill>",
+            hex(e.stroke)
+        )
+    };
+    let borders = ["lnL", "lnR", "lnT", "lnB"]
+        .iter()
+        .map(|edge| format!("<a:{edge} w=\"{}\">{line}</a:{edge}>", emu(e.stroke_width)))
+        .collect::<String>();
     let rows = cells
         .iter()
-        .map(|row| {
+        .enumerate()
+        .map(|(row_index, row)| {
+            let fill = hex(if row_index == 0 { e.fill } else { [245, 247, 250] });
             let values = (0..cols)
                 .map(|col| {
                     format!(
-                        "<a:tc><a:txBody><a:bodyPr/><a:lstStyle/>{}</a:txBody><a:tcPr/></a:tc>",
+                        "<a:tc><a:txBody><a:bodyPr/><a:lstStyle/>{}</a:txBody><a:tcPr>{borders}<a:solidFill><a:srgbClr val=\"{fill}\"/></a:solidFill></a:tcPr></a:tc>",
                         paragraphs(row.get(col).map(String::as_str).unwrap_or(""))
                     )
                 })
@@ -1068,7 +1171,12 @@ fn chart_xml(values: &[f32], labels: &[String], fill: [u8; 3]) -> String {
         .map(|(i, _)| {
             format!(
                 "<c:pt idx=\"{i}\"><c:v>{}</c:v></c:pt>",
-                xml_escape(labels.get(i).map(String::as_str).unwrap_or(""))
+                xml_escape(
+                    &labels
+                        .get(i)
+                        .cloned()
+                        .unwrap_or_else(|| (i + 1).to_string())
+                )
             )
         })
         .collect::<String>();
@@ -1311,6 +1419,99 @@ fn write_pptx(deck: &Deck) -> Result<Vec<u8>, String> {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fallback_shapes_and_partial_run_properties_import_without_losing_text_style()
+    -> Result<(), String> {
+        let slide = format!(
+            r#"<p:sld {NS} xmlns:mc="urn:mc"><p:cSld><p:spTree><mc:AlternateContent><mc:Choice Requires="unsupported"/><mc:Fallback><p:sp><p:nvSpPr><p:cNvPr id="2" name="Text"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr/><p:txBody><a:p><a:pPr><a:defRPr sz="3200" i="1"><a:solidFill><a:srgbClr val="123456"/></a:solidFill><a:latin typeface="Arial"/></a:defRPr></a:pPr><a:r><a:rPr b="1"/><a:t>Fallback</a:t></a:r></a:p></p:txBody></p:sp></mc:Fallback></mc:AlternateContent></p:spTree></p:cSld></p:sld>"#
+        );
+        let deck = external_deck(&slide)?;
+        let e = deck
+            .slides
+            .first()
+            .and_then(|s| s.elements.first())
+            .ok_or("fallback")?;
+        assert_eq!(e.text, "Fallback");
+        assert_eq!(e.font_size, 32.0);
+        assert!(e.bold && e.italic);
+        assert_eq!(e.font, "Arial");
+        assert_eq!(e.color, [0x12, 0x34, 0x56]);
+        Ok(())
+    }
+    fn without_native(deck: &Deck) -> Result<Deck, String> {
+        let parts = read_zip(&write(deck, "pptx")?)?
+            .into_iter()
+            .filter(|(path, _)| !path.starts_with("customXml/"))
+            .collect();
+        read(&write_zip(parts)?, "pptx")
+    }
+    #[test]
+    fn external_table_roundtrip_preserves_the_shared_supported_style() -> Result<(), String> {
+        let mut deck = Deck::empty();
+        let slide = deck.add_slide("blank");
+        let id = deck.add_element(
+            slide,
+            ElementKind::Table {
+                cells: vec![vec!["A".into(), "B".into()]],
+            },
+        )?;
+        let e = deck
+            .slide_mut(slide)
+            .and_then(|s| s.element_mut(id))
+            .ok_or("table")?;
+        e.font_size = 24.0;
+        e.bold = true;
+        e.italic = true;
+        e.color = [11, 22, 33];
+        e.fill = [44, 55, 66];
+        e.stroke = [77, 88, 99];
+        e.stroke_width = 2.0;
+        e.font = "Arial".into();
+        let again = without_native(&deck)?;
+        let e = &again.slides[0].elements[0];
+        assert_eq!(e.font_size, 24.0);
+        assert!(e.bold && e.italic);
+        assert_eq!(e.color, [11, 22, 33]);
+        assert_eq!(e.fill, [44, 55, 66]);
+        assert_eq!(e.stroke, [77, 88, 99]);
+        assert_eq!(e.stroke_width, 2.0);
+        assert_eq!(e.font, "Arial");
+        Ok(())
+    }
+    #[test]
+    fn chart_sparse_caches_keep_point_positions_and_missing_labels_get_numbers()
+    -> Result<(), String> {
+        let mut deck = Deck::empty();
+        let slide = deck.add_slide("blank");
+        deck.add_element(
+            slide,
+            ElementKind::Chart {
+                values: vec![10.0, 0.0, 30.0],
+                labels: vec![],
+            },
+        )?;
+        let again = without_native(&deck)?;
+        assert!(
+            matches!(&again.slides[0].elements[0].kind, ElementKind::Chart { labels, .. } if labels == &["1", "2", "3"])
+        );
+        let mut parts = read_zip(&write(&deck, "pptx")?)?;
+        let chart_path = parts
+            .keys()
+            .find(|path| path.starts_with("ppt/charts/") && path.ends_with(".xml"))
+            .cloned()
+            .ok_or("chart")?;
+        let xml = String::from_utf8(parts[&chart_path].clone())
+            .map_err(|e| e.to_string())?
+            .replace("<c:pt idx=\"1\"><c:v>0</c:v></c:pt>", "");
+        parts.insert(chart_path, xml.into_bytes());
+        parts.retain(|path, _| !path.starts_with("customXml/"));
+        let again = read(&write_zip(parts.into_iter().collect())?, "pptx")?;
+        assert!(
+            matches!(&again.slides[0].elements[0].kind, ElementKind::Chart { values, .. } if values == &[10.0, 0.0, 30.0])
+        );
+        Ok(())
+    }
+
     use super::*;
     #[test]
     fn text_and_html_export_preserve_tables_and_charts() -> Result<(), String> {

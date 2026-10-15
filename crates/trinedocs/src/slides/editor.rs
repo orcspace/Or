@@ -1288,11 +1288,17 @@ fn paste_selection(deck: &mut Deck, state: &mut State) -> bool {
         return false;
     }
     let mut groups = std::collections::HashMap::new();
+    let originals = state
+        .clipboard
+        .iter()
+        .map(|e| (e.id, e.x, e.y, e.w, e.h))
+        .collect::<Vec<_>>();
+    let offset = bounded_delta(&originals, Vec2::splat(20.0));
     state.selected.clear();
     for mut element in state.clipboard.iter().cloned() {
         element.id = deck.allocate_id();
-        element.x += 20.0;
-        element.y += 20.0;
+        element.x += offset.x;
+        element.y += offset.y;
         element.group = element
             .group
             .map(|group| *groups.entry(group).or_insert_with(|| deck.allocate_id()));
@@ -1416,9 +1422,21 @@ fn properties(ui: &mut egui::Ui, e: &mut Element) -> bool {
     });
     ui.horizontal(|ui| {
         ui.label("X");
-        changed |= ui.add(egui::DragValue::new(&mut e.x).speed(1.0)).changed();
+        changed |= ui
+            .add(
+                egui::DragValue::new(&mut e.x)
+                    .range(-1_000_000.0..=1_000_000.0)
+                    .speed(1.0),
+            )
+            .changed();
         ui.label("Y");
-        changed |= ui.add(egui::DragValue::new(&mut e.y).speed(1.0)).changed();
+        changed |= ui
+            .add(
+                egui::DragValue::new(&mut e.y)
+                    .range(-1_000_000.0..=1_000_000.0)
+                    .speed(1.0),
+            )
+            .changed();
     });
     ui.horizontal(|ui| {
         ui.label("Ш");
@@ -1833,15 +1851,23 @@ fn select_object(slide: &Slide, state: &mut State, id: u64, additive: bool, clic
     state.selected.sort_unstable();
     state.selected.dedup();
 }
+fn bounded_delta(original: &[(u64, f32, f32, f32, f32)], mut delta: Vec2) -> Vec2 {
+    for (_, x, y, _, _) in original {
+        delta.x = delta.x.clamp(-1_000_000.0 - x, 1_000_000.0 - x);
+        delta.y = delta.y.clamp(-1_000_000.0 - y, 1_000_000.0 - y);
+    }
+    delta
+}
 fn snapped_drag_delta(original: &[(u64, f32, f32, f32, f32)], delta: Vec2, grid: bool) -> Vec2 {
-    if grid && let Some((_, x, y, _, _)) = original.first() {
+    let delta = if grid && let Some((_, x, y, _, _)) = original.first() {
         Vec2::new(
             ((x + delta.x) / 24.0).round() * 24.0 - x,
             ((y + delta.y) / 24.0).round() * 24.0 - y,
         )
     } else {
         delta
-    }
+    };
+    bounded_delta(original, delta)
 }
 fn canvas(
     ui: &mut egui::Ui,
@@ -2087,6 +2113,13 @@ fn canvas(
             changed = true;
         }
         if delta != Vec2::ZERO {
+            let original = slide
+                .elements
+                .iter()
+                .filter(|e| state.selected.contains(&e.id))
+                .map(|e| (e.id, e.x, e.y, e.w, e.h))
+                .collect::<Vec<_>>();
+            let delta = bounded_delta(&original, delta);
             for e in &mut slide.elements {
                 if state.selected.contains(&e.id) {
                     e.x += delta.x;
@@ -2131,6 +2164,9 @@ fn resize_geometry(
         let factor = (10000.0 / new_width).min(10000.0 / new_height).min(1.0);
         new_width *= factor;
         new_height *= factor;
+        let minimum = (0.001 / new_width).max(0.001 / new_height).max(1.0);
+        new_width = (new_width * minimum).max(0.001);
+        new_height = (new_height * minimum).max(0.001);
     }
     let left = if hx == 0.0 {
         x + width - new_width
@@ -2146,7 +2182,12 @@ fn resize_geometry(
     } else {
         y
     };
-    (left, top, new_width, new_height)
+    (
+        left.clamp(-1_000_000.0, 1_000_000.0),
+        top.clamp(-1_000_000.0, 1_000_000.0),
+        new_width,
+        new_height,
+    )
 }
 fn align(slide: &mut Slide, ids: &[u64], axis: &str, width: f32, height: f32) {
     let mut selected = slide
@@ -2484,6 +2525,45 @@ fn paint_element(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn proportional_resize_keeps_extreme_aspect_ratios_above_the_model_minimum() {
+        let (_, _, w, h) = resize_geometry(
+            (0.0, 0.0, 1.0, 10_000.0),
+            (0.5, 1.0),
+            Vec2::new(0.0, -9996.0),
+            true,
+        );
+        assert!((0.001..=10000.0).contains(&w));
+        assert!((0.001..=10000.0).contains(&h));
+        assert!((w / h - 0.0001).abs() < 0.000001);
+    }
+
+    #[test]
+    fn moving_and_copying_at_the_geometry_limit_remains_saveable() -> Result<(), String> {
+        let original = [
+            (1, 999_999.0, -999_999.0, 10.0, 10.0),
+            (2, 999_990.0, -999_990.0, 10.0, 10.0),
+        ];
+        let delta = snapped_drag_delta(&original, Vec2::new(1000.0, -1000.0), false);
+        assert_eq!(delta, Vec2::new(1.0, -1.0));
+        let mut deck = Deck::empty();
+        let slide = deck.add_slide("blank");
+        let id = deck.add_element(slide, ElementKind::Rect)?;
+        let e = deck
+            .slide_mut(slide)
+            .and_then(|s| s.element_mut(id))
+            .ok_or("element")?;
+        e.x = 1_000_000.0;
+        e.y = 1_000_000.0;
+        let mut state = State {
+            slide_id: slide,
+            selected: vec![id],
+            ..State::default()
+        };
+        assert!(duplicate_selection(&mut deck, &mut state));
+        deck.validate()
+    }
+
     #[test]
     fn table_navigation_focuses_the_destination_cell() -> Result<(), String> {
         let ctx = egui::Context::default();

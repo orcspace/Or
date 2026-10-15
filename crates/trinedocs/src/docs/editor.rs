@@ -1370,6 +1370,7 @@ fn delete_empty_pages(doc: &mut Doc, state: &mut EditorState) {
 }
 fn layout_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id: egui::Id) {
     use crate::chrome::group;
+    let previous_page = doc.page.clone();
     group(ui, "Параметры страницы", 250.0, |ui| {
         ui.horizontal(|ui| {
             ui.menu_button("Поля", |ui| {
@@ -1474,6 +1475,9 @@ fn layout_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_
             });
         }
     });
+    if doc.page != previous_page {
+        doc.page.fit_margins();
+    }
 }
 fn view_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id: egui::Id) {
     use crate::chrome::{group, tool};
@@ -1962,9 +1966,7 @@ fn find_bar(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id
         {
             let index = state.match_index % matches.len();
             if let Some((a, b)) = matches.get(index) {
-                state.anchor = *a;
-                state.cursor = *b;
-                state.scroll_to_cursor = true;
+                select_match(doc, state, *a, *b);
             }
             state.match_index = index + 1;
         }
@@ -1992,6 +1994,10 @@ fn find_bar(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id
         }
     });
 }
+fn select_match(doc: &Doc, state: &mut EditorState, start: Position, end: Position) {
+    state.move_to(doc, end, false);
+    state.anchor = start;
+}
 fn replace_current_match(doc: &mut Doc, state: &mut EditorState) -> bool {
     if !state.selected()
         || !doc
@@ -2004,6 +2010,9 @@ fn replace_current_match(doc: &mut Doc, state: &mut EditorState) -> bool {
     match doc.replace_range(start, end, &state.replacement, None) {
         Ok(position) => {
             state.move_to(doc, position, false);
+            state.match_index = doc
+                .find(&state.search, state.case_sensitive)
+                .partition_point(|(start, _)| *start < position);
             true
         }
         Err(_) => false,
@@ -2563,6 +2572,15 @@ fn selected_runs(p: &Paragraph, start: usize, end: usize) -> Vec<Run> {
     }
     runs
 }
+fn word_class(ch: char) -> u8 {
+    if ch.is_whitespace() {
+        0
+    } else if ch.is_alphanumeric() || ch == '_' {
+        1
+    } else {
+        2
+    }
+}
 fn previous(doc: &Doc, pos: Position, word: bool) -> Position {
     if pos.offset == 0 {
         let paragraph = pos.paragraph.saturating_sub(1);
@@ -2581,14 +2599,11 @@ fn previous(doc: &Doc, pos: Position, word: bool) -> Position {
     let mut offset = pos.offset - 1;
     if word && let Some(p) = doc.paragraphs.get(pos.paragraph) {
         let chars: Vec<char> = p.text().chars().collect();
-        while offset > 0 && chars.get(offset).is_some_and(|c| c.is_whitespace()) {
+        while offset > 0 && chars.get(offset).is_some_and(|c| word_class(*c) == 0) {
             offset -= 1;
         }
-        while offset > 0
-            && chars
-                .get(offset - 1)
-                .is_some_and(|c| c.is_alphanumeric() || *c == '_')
-        {
+        let class = chars.get(offset).copied().map(word_class);
+        while offset > 0 && chars.get(offset - 1).copied().map(word_class) == class {
             offset -= 1;
         }
     }
@@ -2615,15 +2630,14 @@ fn next(doc: &Doc, pos: Position, word: bool) -> Position {
     let mut offset = pos.offset + 1;
     if word && let Some(p) = doc.paragraphs.get(pos.paragraph) {
         let chars: Vec<char> = p.text().chars().collect();
-        while offset < len
-            && chars
-                .get(offset)
-                .is_some_and(|c| c.is_alphanumeric() || *c == '_')
-        {
+        let class = chars.get(pos.offset).copied().map(word_class);
+        while offset < len && chars.get(offset).copied().map(word_class) == class {
             offset += 1;
         }
-        while offset < len && chars.get(offset).is_some_and(|c| c.is_whitespace()) {
-            offset += 1;
+        if class != Some(0) {
+            while offset < len && chars.get(offset).is_some_and(|c| word_class(*c) == 0) {
+                offset += 1;
+            }
         }
     }
     Position {
@@ -2880,6 +2894,62 @@ fn today() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn find_selection_uses_the_matched_text_format_for_typing() {
+        let mut doc = Doc::from_text("match");
+        doc.paragraphs[0].runs[0].format.size = 24.0;
+        doc.paragraphs[0].runs[0].format.bold = true;
+        doc.paragraphs[0].runs.push(Run {
+            text: " tail".into(),
+            format: TextFormat::default(),
+        });
+        let mut state = EditorState::default();
+        select_match(
+            &doc,
+            &mut state,
+            Position::default(),
+            Position {
+                paragraph: 0,
+                offset: 5,
+            },
+        );
+        assert_eq!(state.typing.size, 24.0);
+        assert!(state.insert(&mut doc, "replacement"));
+        assert!(doc.paragraphs[0].runs[0].format.bold);
+        assert_eq!(doc.paragraphs[0].runs[0].format.size, 24.0);
+    }
+
+    #[test]
+    fn word_navigation_from_whitespace_does_not_skip_the_next_word() {
+        let doc = Doc::from_text("one  two... three");
+        let p = |offset| Position {
+            paragraph: 0,
+            offset,
+        };
+        assert_eq!(next(&doc, p(3), true), p(5));
+        assert_eq!(next(&doc, p(0), true), p(5));
+        assert_eq!(next(&doc, p(8), true), p(12));
+        assert_eq!(previous(&doc, p(12), true), p(8));
+        assert_eq!(previous(&doc, p(8), true), p(5));
+    }
+    #[test]
+    fn replace_then_find_continues_at_the_next_surviving_match() {
+        let mut doc = Doc::from_text("a a a");
+        let mut state = EditorState {
+            search: "a".into(),
+            replacement: "long".into(),
+            match_index: 1,
+            cursor: Position {
+                paragraph: 0,
+                offset: 1,
+            },
+            ..EditorState::default()
+        };
+        assert!(replace_current_match(&mut doc, &mut state));
+        let matches = doc.find(&state.search, false);
+        assert_eq!(matches[state.match_index].0.offset, 5);
+    }
+
     #[test]
     fn wrapped_boundary_navigation_uses_visible_row_and_remembers_x() {
         let mut doc = Doc::from_text(&"word ".repeat(50));

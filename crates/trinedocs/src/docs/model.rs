@@ -185,6 +185,8 @@ impl Paragraph {
             "Heading1" => (22.0, true),
             "Heading2" => (17.0, true),
             "Heading3" => (14.0, true),
+            "Heading4" => (12.0, true),
+            "Heading5" | "Heading6" => (11.0, true),
             "Quote" => (11.0, false),
             _ => (11.0, false),
         };
@@ -227,6 +229,22 @@ impl Default for PageSetup {
             header: String::new(),
             footer: String::new(),
             page_numbers: true,
+        }
+    }
+}
+impl PageSetup {
+    pub fn fit_margins(&mut self) {
+        let horizontal = self.margin_left + self.margin_right;
+        let vertical = self.margin_top + self.margin_bottom;
+        let width = (self.width - 24.0).max(0.0);
+        let height = (self.height - 30.0).max(0.0);
+        if horizontal > width {
+            self.margin_left *= width / horizontal;
+            self.margin_right = (width - self.margin_left).max(0.0);
+        }
+        if vertical > height {
+            self.margin_top *= height / vertical;
+            self.margin_bottom = (height - self.margin_top).max(0.0);
         }
     }
 }
@@ -2060,7 +2078,7 @@ fn wrap_lines(
             }
             width += w;
             end += 1;
-            if ch.is_whitespace() {
+            if ch.is_whitespace() && !matches!(*ch, '\u{00a0}' | '\u{202f}') {
                 break_at = Some(end);
             }
         }
@@ -2510,6 +2528,43 @@ fn table_row(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn page_margin_changes_fit_a_smaller_paper_without_invalidating_it() -> Result<(), String> {
+        let mut doc = Doc::from_text("A5");
+        doc.page.width = 419.53;
+        doc.page.height = 595.28;
+        doc.page.margin_left = 200.0;
+        doc.page.margin_right = 200.0;
+        doc.page.fit_margins();
+        doc.validate()?;
+        assert!((doc.page.margin_left - doc.page.margin_right).abs() < 0.001);
+        assert!(doc.page.width - doc.page.margin_left - doc.page.margin_right >= 23.99);
+        Ok(())
+    }
+    #[test]
+    fn wrapping_prefers_a_normal_space_over_a_nonbreaking_space() {
+        let p = Paragraph::default();
+        let text = "X A\u{00a0}B";
+        let chars = text
+            .chars()
+            .map(|ch| (ch, TextFormat::default()))
+            .collect::<Vec<_>>();
+        let width = chars
+            .iter()
+            .take(4)
+            .map(|(ch, f)| char_width(*ch, f))
+            .sum::<f32>()
+            + 0.01;
+        let lines = wrap_lines(&p, &chars, width, 0.0, 1.0);
+        assert_eq!(
+            lines
+                .first()
+                .map(|line| text.chars().take(line.end).collect::<String>()),
+            Some("X ".into())
+        );
+        assert_eq!(lines.len(), 2);
+    }
+
     #[test]
     fn failed_table_commands_leave_ragged_content_and_ids_unchanged() -> Result<(), String> {
         let mut doc = Doc::from_text("table");

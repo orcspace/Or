@@ -207,6 +207,9 @@ fn hint(name: &str) -> Option<&'static str> {
         "sheets_read_objects" => {
             "Read sheet structure by sheet_id: column widths, row heights, hidden rows/columns, merges, frozen panes, filter, conditional rules, tab colour, charts and named ranges."
         }
+        "sheets_set_format" => {
+            "Patch cell formatting over range on sheet_id. Only supplied format fields change; omitted number formats, fills, borders and fonts are preserved."
+        }
         "sheets_find" => {
             "Find cells on sheet_id whose input or shown value contains query (case_sensitive optional). Returns row, col, input and display."
         }
@@ -944,31 +947,15 @@ fn dispatch_inner(
                     .get("format")
                     .and_then(Value::as_object)
                     .ok_or("Требуется format")?;
-                let mut formats = Vec::new();
-                for p in &d.paragraphs {
-                    for r in &p.runs {
-                        let mut value =
-                            serde_json::to_value(&r.format).map_err(|e| e.to_string())?;
-                        if let Some(map) = value.as_object_mut() {
-                            map.extend(patch.clone());
-                        }
-                        formats.push(
-                            serde_json::from_value::<crate::docs::model::TextFormat>(value)
-                                .map_err(|e| e.to_string())?,
-                        );
-                    }
-                }
-                let _ = formats;
-                d.format_range(start, end, |f| {
-                    if let Ok(mut v) = serde_json::to_value(&*f) {
-                        if let Some(map) = v.as_object_mut() {
-                            map.extend(patch.clone());
-                        }
-                        if let Ok(new) = serde_json::from_value(v) {
-                            *f = new;
-                        }
-                    }
+                patched(&crate::docs::model::TextFormat::default(), patch, &[])?;
+                let mut invalid = None;
+                d.format_range(start, end, |format| match patched(&*format, patch, &[]) {
+                    Ok(new) => *format = new,
+                    Err(error) => invalid = Some(error),
                 });
+                if let Some(error) = invalid {
+                    return Err(error);
+                }
             } else {
                 let delta = crate::docs::model::TextEditDelta::capture(d, start, end)?;
                 let after = d.replace_range(
@@ -1106,6 +1093,18 @@ fn dispatch_inner(
                 *table = patched(&*table, patch, &["id", "after_paragraph_id", "rows"])?;
             }
             if let Some(style) = a.get("cell").and_then(Value::as_object) {
+                if let Some(key) = style
+                    .keys()
+                    .find(|key| !matches!(key.as_str(), "fill" | "align" | "format"))
+                {
+                    return Err(format!("invalid_args: неизвестное поле cell.{key}"));
+                }
+                if let Some(format) = style.get("format") {
+                    let format = format
+                        .as_object()
+                        .ok_or("invalid_args: cell.format должен быть объектом")?;
+                    patched(&crate::docs::model::TextFormat::default(), format, &[])?;
+                }
                 let r0 = n(a, "r0", 0)?;
                 let c0 = n(a, "c0", 0)?;
                 let r1 = n(a, "r1", r0)?;
@@ -1204,7 +1203,29 @@ fn dispatch_inner(
             )?;
         }
         (Document::Sheets(b), "sheets_set_format") => {
-            b.set_format(id(a, "sheet_id")?, range(a)?, parse(a, "format")?)?;
+            let sheet = id(a, "sheet_id")?;
+            let range = range(a)?;
+            range.validate()?;
+            let patch = object(a, "format")?;
+            patched(&crate::sheets::model::CellFormat::default(), patch, &[])?.validate()?;
+            if b.sheet_by_id(sheet).is_none() {
+                return Err("Лист не найден".into());
+            }
+            for row in range.r0..=range.r1 {
+                for col in range.c0..=range.c1 {
+                    let old = b
+                        .sheet_by_id(sheet)
+                        .and_then(|sheet| sheet.cell(row, col))
+                        .map(|cell| cell.fmt.clone())
+                        .unwrap_or_default();
+                    let format = patched(&old, patch, &[])?;
+                    b.set_format(
+                        sheet,
+                        crate::sheets::model::Range::new(row, col, row, col),
+                        format,
+                    )?;
+                }
+            }
         }
         (Document::Sheets(b), "sheets_add_sheet") => {
             changed_ids.push(b.add_sheet(s(a, "name")?)?);
@@ -3083,6 +3104,55 @@ mod review_50_tests {
         );
         assert_eq!(tabs[0].document, Document::Slides(deck.clone()));
         assert_eq!(tabs[0].version, 0);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod batch02_format_tests {
+    use super::*;
+    #[test]
+    fn format_patches_preserve_other_cell_properties() -> Result<(), String> {
+        let mut book = crate::sheets::model::Book::default();
+        let sheet = book.active_id();
+        let range = crate::sheets::model::Range::new(0, 0, 0, 0);
+        let format = crate::sheets::model::CellFormat {
+            italic: true,
+            fill: Some([20, 30, 40]),
+            number: "0.00%".into(),
+            ..Default::default()
+        };
+        book.set_format(sheet, range, format.clone())?;
+        let mut tabs = vec![Tab::new(1, Document::Sheets(book), "Book".into(), None)];
+        dispatch(
+            &mut tabs,
+            &mut 2,
+            "sheets_set_format",
+            &json!({"document_id":1,"sheet_id":sheet,"format":{"bold":true}}),
+            "test",
+        )?;
+        let Document::Sheets(book) = &tabs[0].document else {
+            return Err("book".into());
+        };
+        let actual = &book
+            .sheet_by_id(sheet)
+            .and_then(|sheet| sheet.cell(0, 0))
+            .ok_or("cell")?
+            .fmt;
+        assert!(actual.bold && actual.italic);
+        assert_eq!(actual.fill, format.fill);
+        assert_eq!(actual.number, format.number);
+        Ok(())
+    }
+    #[test]
+    fn docs_format_rejects_unknown_fields_without_undo_or_mutation() -> Result<(), String> {
+        let doc = crate::docs::model::Doc::from_text("Text");
+        let paragraph = doc.paragraphs[0].id;
+        let mut tabs = vec![Tab::new(1, Document::Docs(doc), "Doc".into(), None)];
+        let original = tabs[0].document.clone();
+        assert!(dispatch(&mut tabs, &mut 2, "docs_format", &json!({"document_id":1,"start_paragraph_id":paragraph,"end_offset":4,"format":{"boldd":true}}), "test").is_err());
+        assert_eq!(tabs[0].document, original);
+        assert!(tabs[0].undo.is_empty());
         Ok(())
     }
 }

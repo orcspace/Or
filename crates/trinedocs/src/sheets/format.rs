@@ -520,7 +520,8 @@ fn date_display(serial: f64, code: &str) -> String {
                     Some('m') => 1440.0,
                     _ => 86400.0,
                 };
-                let total = (serial * factor + 1e-7).floor();
+                let rounded_seconds = serial.floor() * 86400.0 + f64::from(seconds);
+                let total = (rounded_seconds / (86400.0 / factor)).floor();
                 out.push_str(&format!("{total:0width$.0}", width = lower.len()));
                 previous = lower.chars().next().unwrap_or(' ');
                 i += rest.chars().count() + 2;
@@ -634,6 +635,18 @@ fn date_display(serial: f64, code: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn review2_elapsed_units_share_the_clock_rounding_carry() {
+        let value = Value::Number((25.0 * 3600.0 + 3599.9) / 86400.0);
+        for (code, expected) in [
+            ("[h]:mm:ss", "26:00:00"),
+            ("[m]:ss", "1560:00"),
+            ("[s]", "93600"),
+        ] {
+            assert_eq!(display(&value, code, false), expected, "{code}");
+        }
+    }
+
     #[test]
     fn quoted_and_escaped_format_literals_do_not_become_placeholders() {
         for (format, expected) in [

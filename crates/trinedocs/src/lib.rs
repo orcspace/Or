@@ -6,6 +6,7 @@ pub mod docs;
 pub mod file_io;
 pub mod fonts;
 pub mod i18n;
+pub mod inspector;
 pub mod mcp;
 pub mod native;
 pub mod ops;
