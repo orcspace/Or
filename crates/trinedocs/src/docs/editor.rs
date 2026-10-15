@@ -137,6 +137,12 @@ impl EditorState {
     }
 }
 
+pub fn request_focus(ctx: &egui::Context, tab_id: u64, paragraph_id: u64) {
+    ctx.data_mut(|data| {
+        data.insert_temp(egui::Id::new("docs-focus-request"), (tab_id, paragraph_id))
+    });
+    ctx.request_repaint();
+}
 pub fn show(ui: &mut egui::Ui, doc: &mut Doc) -> bool {
     show_with_edits(ui, doc, None)
 }
@@ -266,6 +272,28 @@ pub fn show_with_edits(ui: &mut egui::Ui, doc: &mut Doc, edits: Option<&[TextEdi
     }
     state.cursor = doc.clamp_position(state.cursor);
     state.anchor = doc.clamp_position(state.anchor);
+    if let Some((tab, paragraph_id)) = ui
+        .ctx()
+        .data(|data| data.get_temp::<(u64, u64)>(egui::Id::new("docs-focus-request")))
+        && ui.ctx().data(|data| data.get_temp::<u64>(active_tab_id())) == Some(tab)
+    {
+        ui.ctx()
+            .data_mut(|data| data.remove::<(u64, u64)>(egui::Id::new("docs-focus-request")));
+        if let Some(paragraph) = doc.paragraphs.iter().position(|p| p.id == paragraph_id) {
+            state.table_cell = None;
+            state.table_page = None;
+            state.move_to(
+                doc,
+                Position {
+                    paragraph,
+                    offset: 0,
+                },
+                false,
+            );
+            state.cursor.offset = doc.paragraphs[paragraph].len();
+            ui.memory_mut(|memory| memory.request_focus(canvas_id));
+        }
+    }
     if !doc.losses.is_empty() {
         egui::CollapsingHeader::new(format!("Ограничения импорта: {}", doc.losses.len())).show(
             ui,
@@ -1776,6 +1804,12 @@ fn outline_menu(ui: &mut egui::Ui, doc: &Doc, state: &mut EditorState) {
         }
     });
 }
+fn fitted_image_size(width: u32, height: u32) -> (f32, f32) {
+    let width = width.max(1) as f32;
+    let height = height.max(1) as f32;
+    let scale = (450.0 / width).min(2000.0 / height).min(1.0);
+    (width * scale, height * scale)
+}
 fn start_image_load(ui: &egui::Ui, doc: &Doc, state: &mut EditorState) {
     let Some(anchor) = doc.paragraphs.get(state.cursor.paragraph).map(|p| p.id) else {
         return;
@@ -1798,8 +1832,7 @@ fn start_image_load(ui: &egui::Ui, doc: &Doc, state: &mut EditorState) {
                     return Err("Изображение превышает 32 МБ".into());
                 }
                 let image = crate::util::decode_image(&bytes)?;
-                let width = (image.width() as f32).min(450.0);
-                let height = width * image.height() as f32 / image.width().max(1) as f32;
+                let (width, height) = fitted_image_size(image.width(), image.height());
                 Ok(Some(ImageAsset {
                     bytes,
                     width,
@@ -1826,8 +1859,7 @@ fn paste_image(doc: &mut Doc, state: &mut EditorState, png: &[u8]) {
     };
     match crate::util::decode_image(png) {
         Ok(image) => {
-            let width = (image.width() as f32).min(450.0);
-            let height = width * image.height() as f32 / image.width().max(1) as f32;
+            let (width, height) = fitted_image_size(image.width(), image.height());
             let id = doc.alloc_id();
             doc.images.push(AnchoredImage {
                 id,
@@ -2143,6 +2175,22 @@ fn cell_editor(
                 });
             }
         }
+        for (key, align) in [
+            (Key::L, Align::Left),
+            (Key::E, Align::Center),
+            (Key::R, Align::Right),
+            (Key::J, Align::Justify),
+        ] {
+            if ui.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, key)) {
+                selected_paragraphs(doc, state, |p| p.align = align);
+            }
+        }
+        for (key, grow) in [(Key::OpenBracket, false), (Key::CloseBracket, true)] {
+            if ui.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, key)) {
+                let size = crate::chrome::step_size(state.typing.size, grow).clamp(4.0, 144.0);
+                state.apply_format(doc, |format| format.size = size);
+            }
+        }
         if escape {
             state.table_cell = None;
             ui.memory_mut(|m| m.request_focus(canvas_id));
@@ -2402,6 +2450,23 @@ fn handle_event(
                     Key::U => {
                         let on = state.typing.underline;
                         state.apply_format(doc, |f| f.underline = !on);
+                        return;
+                    }
+                    Key::L | Key::E | Key::R | Key::J => {
+                        let align = match key {
+                            Key::L => Align::Left,
+                            Key::E => Align::Center,
+                            Key::R => Align::Right,
+                            _ => Align::Justify,
+                        };
+                        selected_paragraphs(doc, state, |p| p.align = align);
+                        return;
+                    }
+                    Key::OpenBracket | Key::CloseBracket => {
+                        let size =
+                            crate::chrome::step_size(state.typing.size, key == Key::CloseBracket)
+                                .clamp(4.0, 144.0);
+                        state.apply_format(doc, |format| format.size = size);
                         return;
                     }
                     Key::Z | Key::Y | Key::S | Key::W | Key::K | Key::O | Key::N => return,
@@ -2894,6 +2959,68 @@ fn today() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tall_image_fit_preserves_ratio_and_passes_document_geometry_validation() -> Result<(), String>
+    {
+        let (w, h) = fitted_image_size(1, 32768);
+        assert!(w > 0.0 && h <= 2000.0);
+        assert!((w / h - 1.0 / 32768.0).abs() < 0.000001);
+        let mut doc = Doc::from_text("image");
+        let id = doc.alloc_id();
+        let asset = image::DynamicImage::new_rgb8(1, 32768);
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        asset
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .map_err(|e| e.to_string())?;
+        doc.images.push(AnchoredImage {
+            id,
+            after_paragraph_id: doc.paragraphs[0].id,
+            bytes: bytes.into_inner(),
+            width: w,
+            height: h,
+            alt: String::new(),
+        });
+        doc.validate()
+    }
+    #[test]
+    fn canvas_alignment_and_size_shortcuts_apply_to_the_selection() -> Result<(), String> {
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx)?;
+        let mut doc = Doc::from_text("selected");
+        let layout = doc.layout();
+        let mut state = EditorState {
+            cursor: Position {
+                paragraph: 0,
+                offset: 8,
+            },
+            ..EditorState::default()
+        };
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let canvas_id = ui.id().with("shortcut-test");
+            ui.memory_mut(|memory| memory.request_focus(canvas_id));
+            for key in [Key::E, Key::CloseBracket] {
+                handle_event(
+                    ui,
+                    &mut doc,
+                    &layout,
+                    &mut state,
+                    canvas_id,
+                    Event::Key {
+                        key,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::CTRL,
+                    },
+                );
+            }
+        });
+        output.textures_delta.clear();
+        assert_eq!(doc.paragraphs[0].align, Align::Center);
+        assert!(doc.paragraphs[0].runs[0].format.size > 11.0);
+        Ok(())
+    }
+
     #[test]
     fn find_selection_uses_the_matched_text_format_for_typing() {
         let mut doc = Doc::from_text("match");

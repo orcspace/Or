@@ -556,6 +556,28 @@ fn border_color(node: Option<&Node>) -> Option<[u8; 3]> {
         Some(edge.attr("color").and_then(color).unwrap_or([0, 0, 0]))
     })
 }
+fn visible_drawings<'a>(node: &'a Node, out: &mut Vec<&'a Node>) {
+    for child in &node.children {
+        match child.name.as_str() {
+            "del" | "moveFrom" => {}
+            "AlternateContent" => {
+                let branch = child
+                    .children
+                    .iter()
+                    .find(|branch| {
+                        branch.name == "Choice" && branch.descendant("drawing").is_some()
+                    })
+                    .or_else(|| child.child("Fallback"));
+                if let Some(branch) = branch {
+                    visible_drawings(branch, out);
+                }
+            }
+            "drawing" => out.push(child),
+            _ => visible_drawings(child, out),
+        }
+    }
+}
+
 fn collect_runs<'a>(
     node: &'a Node,
     rels: &BTreeMap<String, String>,
@@ -707,7 +729,7 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
             "p" => {
                 let p = paragraph(node, &mut doc, &styles, &defaults, &[], &nums, &rels);
                 let mut drawings = Vec::new();
-                node.descendants("drawing", &mut drawings);
+                visible_drawings(node, &mut drawings);
                 // Our spacer between adjacent tables is not part of the document.
                 if p.style == TABLE_GAP && p.is_empty() && drawings.is_empty() {
                     continue;
@@ -812,7 +834,9 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
                         }
                         let cell_id = doc.alloc_id();
                         let mut paragraphs = Vec::new();
-                        for p in tc.children.iter().filter(|n| n.name == "p") {
+                        let mut blocks = Vec::new();
+                        body_blocks(&tc.children, &mut blocks, 0);
+                        for p in blocks.into_iter().filter(|n| n.name == "p") {
                             paragraphs.push(paragraph(
                                 p, &mut doc, &styles, &defaults, &chain, &nums, &rels,
                             ));
@@ -999,22 +1023,29 @@ fn read_section(
             && let Some(bytes) = parts.get(&target)
         {
             let n = xml(bytes)?;
-            let mut depth = 0usize;
+            let mut fields = Vec::new();
             let mut text = String::new();
+            let mut has_page = false;
+            fn page_field(instruction: &str) -> bool {
+                instruction
+                    .split_whitespace()
+                    .next()
+                    .is_some_and(|code| code.eq_ignore_ascii_case("PAGE"))
+            }
             fn visible_header(
                 n: &Node,
-                depth: &mut usize,
+                fields: &mut Vec<(String, bool)>,
                 gap: &mut &'static str,
                 out: &mut String,
+                has_page: &mut bool,
             ) {
-                if matches!(
-                    n.name.as_str(),
-                    "fldSimple" | "del" | "moveFrom" | "pPr" | "rPr"
-                ) {
+                if matches!(n.name.as_str(), "del" | "moveFrom" | "pPr" | "rPr") {
                     return;
                 }
-                // Paragraphs and tabs keep words apart on the single header line; the gap is
-                // written only before following text, so author spaces survive a round trip.
+                if n.name == "fldSimple" && n.attr("instr").is_some_and(page_field) {
+                    *has_page = true;
+                    return;
+                }
                 if (n.name == "p" || n.name == "tab") && !out.is_empty() && !out.ends_with(' ') {
                     *gap = if n.name == "tab" || *gap == "    " {
                         "    "
@@ -1024,11 +1055,27 @@ fn read_section(
                 }
                 if n.name == "fldChar" {
                     match n.attr("fldCharType") {
-                        Some("begin") => *depth += 1,
-                        Some("end") => *depth = depth.saturating_sub(1),
+                        Some("begin") => fields.push((String::new(), false)),
+                        Some("separate") => {
+                            if let Some((instruction, result)) = fields.last_mut() {
+                                *result = true;
+                                *has_page |= page_field(instruction);
+                            }
+                        }
+                        Some("end") => {
+                            fields.pop();
+                        }
                         _ => {}
                     }
-                } else if n.name == "t" && *depth == 0 {
+                } else if n.name == "instrText" {
+                    if let Some((instruction, false)) = fields.last_mut() {
+                        instruction.push_str(&n.text_content());
+                    }
+                } else if n.name == "t"
+                    && fields
+                        .iter()
+                        .all(|(instruction, result)| *result && !page_field(instruction))
+                {
                     let text = n.text_content();
                     if !text.is_empty() {
                         out.push_str(gap);
@@ -1037,23 +1084,17 @@ fn read_section(
                     }
                 } else {
                     for child in &n.children {
-                        visible_header(child, depth, gap, out);
+                        visible_header(child, fields, gap, out, has_page);
                     }
                 }
             }
-            visible_header(&n, &mut depth, &mut "", &mut text);
+            visible_header(&n, &mut fields, &mut "", &mut text, &mut has_page);
             if header {
                 doc.page.header = text;
             } else {
                 doc.page.footer = text;
             }
-            if n.descendant("instrText")
-                .is_some_and(|n| n.text_content().contains("PAGE"))
-                || n.descendant("fldSimple")
-                    .is_some_and(|n| n.attr("instr").is_some_and(|s| s.contains("PAGE")))
-            {
-                doc.page.page_numbers = true;
-            }
+            doc.page.page_numbers |= has_page;
         }
     }
     if node
@@ -1473,69 +1514,235 @@ fn write_docx(doc: &Doc, ext: &str) -> Result<Vec<u8>, String> {
     parts.extend(media);
     write_zip(parts)
 }
-fn inline_md(text: &str) -> Vec<Run> {
-    let mut runs = Vec::new();
-    let mut remaining = text;
-    while !remaining.is_empty() {
-        let markers = [
-            ("**", true, false, true),
-            ("__", true, false, true),
-            ("~~", false, false, true),
-            ("*", false, true, false),
-            ("_", false, true, false),
-        ];
-        let found = markers
-            .iter()
-            .filter_map(|m| remaining.find(m.0).map(|pos| (pos, *m)))
-            .min_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.0.len().cmp(&a.1.0.len())));
-        if let Some((pos, (marker, bold, italic, _))) = found {
-            let prefix = remaining.get(..pos).unwrap_or_default();
-            if !prefix.is_empty() {
-                runs.push(Run {
-                    text: prefix.into(),
-                    format: TextFormat::default(),
-                });
+fn md_spend(budget: &mut usize, amount: usize) -> bool {
+    if let Some(remaining) = budget.checked_sub(amount) {
+        *budget = remaining;
+        true
+    } else {
+        false
+    }
+}
+fn md_unescaped(text: &str, needle: &str, budget: &mut usize) -> Result<Option<usize>, ()> {
+    let bytes = text.as_bytes();
+    let mut escaped = false;
+    for (index, ch) in bytes.iter().copied().enumerate() {
+        if !md_spend(budget, 1) {
+            return Err(());
+        }
+        if ch == b'\\' {
+            escaped = !escaped;
+            continue;
+        }
+        if !escaped && bytes[index..].starts_with(needle.as_bytes()) {
+            if !md_spend(budget, needle.len().saturating_sub(1)) {
+                return Err(());
             }
-            let rest = remaining.get(pos + marker.len()..).unwrap_or_default();
-            if let Some(end) = rest.find(marker) {
-                runs.push(Run {
-                    text: rest.get(..end).unwrap_or_default().into(),
-                    format: TextFormat {
-                        bold,
-                        italic,
-                        strike: marker == "~~",
-                        ..TextFormat::default()
-                    },
-                });
-                remaining = rest.get(end + marker.len()..).unwrap_or_default();
-            } else {
-                runs.push(Run {
-                    text: remaining.get(pos..).unwrap_or_default().into(),
-                    format: TextFormat::default(),
-                });
+            return Ok(Some(index));
+        }
+        escaped = false;
+    }
+    Ok(None)
+}
+fn inline_md(text: &str, inherited: &TextFormat) -> Vec<Run> {
+    fn parse(
+        text: &str,
+        inherited: &TextFormat,
+        depth: usize,
+        budget: &mut usize,
+        out: &mut Vec<Run>,
+    ) {
+        if depth >= 16 {
+            out.push(Run {
+                text: text.into(),
+                format: inherited.clone(),
+            });
+            return;
+        }
+        let mut plain = String::new();
+        let mut offset = 0;
+        'inline: while offset < text.len() {
+            let rest = &text[offset..];
+            if !md_spend(budget, 1) {
+                plain.push_str(rest);
                 break;
             }
-        } else {
-            runs.push(Run {
-                text: remaining.into(),
-                format: TextFormat::default(),
+            let Some(ch) = rest.chars().next() else { break };
+            if ch == '\\'
+                && let Some(next) = rest.chars().nth(1).filter(char::is_ascii_punctuation)
+            {
+                plain.push(next);
+                offset += 1 + next.len_utf8();
+                continue;
+            }
+            if ch == '&'
+                && let Some(end) = rest.bytes().take(33).position(|ch| ch == b';')
+                && let Ok(decoded) = quick_xml::escape::unescape(&rest[..=end])
+                && decoded.as_ref() != &rest[..=end]
+            {
+                plain.push_str(&decoded);
+                offset += end + 1;
+                continue;
+            }
+            if ch == '[' {
+                let close = match md_unescaped(rest, "](", budget) {
+                    Ok(close) => close,
+                    Err(()) => {
+                        plain.push_str(rest);
+                        break;
+                    }
+                };
+                if let Some(close) = close {
+                    let url_start = close + 2;
+                    let mut nesting = 0;
+                    let mut escaped = false;
+                    let mut end = None;
+                    for (index, ch) in rest[url_start..].char_indices() {
+                        if !md_spend(budget, ch.len_utf8()) {
+                            plain.push_str(rest);
+                            break 'inline;
+                        }
+                        if escaped {
+                            escaped = false;
+                            continue;
+                        }
+                        match ch {
+                            '\\' => escaped = true,
+                            '(' => nesting += 1,
+                            ')' if nesting == 0 => {
+                                end = Some(url_start + index);
+                                break;
+                            }
+                            ')' => nesting -= 1,
+                            _ => {}
+                        }
+                    }
+                    if let Some(end) = end {
+                        if !plain.is_empty() {
+                            out.push(Run {
+                                text: std::mem::take(&mut plain),
+                                format: inherited.clone(),
+                            });
+                        }
+                        let mut format = inherited.clone();
+                        let mut url = String::new();
+                        let mut chars = rest[url_start..end].chars();
+                        while let Some(ch) = chars.next() {
+                            url.push(if ch == '\\' {
+                                chars.next().unwrap_or('\\')
+                            } else {
+                                ch
+                            });
+                        }
+                        format.link = Some(url);
+                        parse(&rest[1..close], &format, depth + 1, budget, out);
+                        offset += end + 1;
+                        continue;
+                    }
+                }
+            }
+            let mut matched = false;
+            for marker in ["***", "___", "**", "__", "~~", "*", "_"] {
+                if !rest.starts_with(marker) {
+                    continue;
+                }
+                if marker.starts_with('_')
+                    && text[..offset]
+                        .chars()
+                        .next_back()
+                        .is_some_and(char::is_alphanumeric)
+                    && rest[marker.len()..]
+                        .chars()
+                        .next()
+                        .is_some_and(char::is_alphanumeric)
+                {
+                    continue;
+                }
+                let end = match md_unescaped(&rest[marker.len()..], marker, budget) {
+                    Ok(Some(end)) if end > 0 => end,
+                    Ok(_) => continue,
+                    Err(()) => {
+                        plain.push_str(rest);
+                        break 'inline;
+                    }
+                };
+                if !plain.is_empty() {
+                    out.push(Run {
+                        text: std::mem::take(&mut plain),
+                        format: inherited.clone(),
+                    });
+                }
+                let mut format = inherited.clone();
+                format.bold |= matches!(marker, "**" | "__" | "***" | "___");
+                format.italic |= matches!(marker, "*" | "_" | "***" | "___");
+                format.strike |= marker == "~~";
+                parse(
+                    &rest[marker.len()..marker.len() + end],
+                    &format,
+                    depth + 1,
+                    budget,
+                    out,
+                );
+                offset += marker.len() * 2 + end;
+                matched = true;
+                break;
+            }
+            if !matched {
+                plain.push(ch);
+                offset += ch.len_utf8();
+            }
+        }
+        if !plain.is_empty() {
+            out.push(Run {
+                text: plain,
+                format: inherited.clone(),
             });
-            break;
         }
     }
+    let mut runs = Vec::new();
+    let mut budget = text.len().saturating_mul(16).clamp(4096, 16 * 1024 * 1024);
+    parse(text, inherited, 0, &mut budget, &mut runs);
     if runs.is_empty() {
-        runs.push(Run::default());
+        runs.push(Run {
+            text: String::new(),
+            format: inherited.clone(),
+        });
     }
     runs
+}
+fn escape_markdown(text: &str) -> String {
+    let mut out = String::new();
+    let trailing_spaces = text.trim_end_matches(' ').len();
+    for (index, ch) in text.char_indices() {
+        if ch == ' ' && index >= trailing_spaces {
+            out.push_str("&#32;");
+            continue;
+        }
+        if ch.is_ascii_punctuation() {
+            out.push('\\');
+        }
+        if ch == '\u{000b}' {
+            out.push_str("  \n");
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 fn read_markdown(text: &str) -> Doc {
     let mut doc = Doc::default();
     doc.paragraphs.clear();
-    for line in text
-        .replace("\r\n", "\n")
-        .replace('\r', "\n")
-        .split_terminator('\n')
-    {
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let mut physical = normalized.split_terminator('\n').peekable();
+    while let Some(line) = physical.next() {
+        let mut logical = line.to_string();
+        while logical.ends_with("  ") && physical.peek().is_some() {
+            logical.truncate(logical.len() - 2);
+            logical.push('\u{000b}');
+            if let Some(next) = physical.next() {
+                logical.push_str(next);
+            }
+        }
+        let line = logical.as_str();
         let id = doc.alloc_id();
         let mut p = Paragraph {
             id,
@@ -1560,11 +1767,7 @@ fn read_markdown(text: &str) -> Doc {
             p.set_style("Quote");
             text = rest;
         }
-        p.runs = inline_md(text);
-        if p.style != "Normal" {
-            let style = p.style.clone();
-            p.set_style(&style);
-        }
+        p.runs = inline_md(text, &p.format_at(0));
         doc.paragraphs.push(p);
     }
     doc
@@ -1590,22 +1793,29 @@ fn write_markdown(doc: &Doc) -> String {
             List::None => {}
         }
         for r in &p.runs {
-            let marker = if r.format.bold {
-                "**"
-            } else if r.format.italic {
-                "*"
-            } else if r.format.strike {
-                "~~"
-            } else {
-                ""
+            let emphasis = match (r.format.bold, r.format.italic) {
+                (true, true) => "***",
+                (true, false) => "**",
+                (false, true) => "*",
+                _ => "",
             };
-            out.push_str(marker);
-            if let Some(link) = &r.format.link {
-                out.push_str(&format!("[{}]({})", r.text, link));
-            } else {
-                out.push_str(&r.text.replace('\u{000b}', "  \n"));
+            if r.format.strike {
+                out.push_str("~~");
             }
-            out.push_str(marker);
+            out.push_str(emphasis);
+            if let Some(link) = &r.format.link {
+                let target = link
+                    .replace('\\', "\\\\")
+                    .replace('(', "\\(")
+                    .replace(')', "\\)");
+                out.push_str(&format!("[{}]({target})", escape_markdown(&r.text)));
+            } else {
+                out.push_str(&escape_markdown(&r.text));
+            }
+            out.push_str(emphasis);
+            if r.format.strike {
+                out.push_str("~~");
+            }
         }
         out.push('\n');
         for table in doc.tables.iter().filter(|t| t.after_paragraph_id == p.id) {
@@ -1804,6 +2014,31 @@ fn fallback_html_text(text: &str) -> String {
     }
     plain
 }
+fn html_hidden(node: &Node) -> bool {
+    node.attrs.contains_key("hidden")
+        || node.attr("style").is_some_and(|css| {
+            css.split(';')
+                .filter_map(|part| part.split_once(':'))
+                .any(|(key, value)| {
+                    key.trim().eq_ignore_ascii_case("display")
+                        && value
+                            .split('!')
+                            .next()
+                            .is_some_and(|v| v.trim().eq_ignore_ascii_case("none"))
+                })
+        })
+}
+fn normalize_html_names(node: &mut Node) {
+    node.name.make_ascii_lowercase();
+    node.attrs = std::mem::take(&mut node.attrs)
+        .into_iter()
+        .map(|(key, value)| (key.to_ascii_lowercase(), value))
+        .collect();
+    for child in &mut node.children {
+        normalize_html_names(child);
+    }
+}
+
 fn read_html(text: &str) -> Result<Doc, String> {
     // HTML is imported as data only; scripts, CSS imports and network images are never executed.
     let mut clean = text
@@ -1815,7 +2050,7 @@ fn read_html(text: &str) -> Result<Doc, String> {
     {
         clean.replace_range(start..=start + end, "");
     }
-    let node = xml(clean.as_bytes()).or_else(|_| {
+    let mut node = xml(clean.as_bytes()).or_else(|_| {
         let plain = fallback_html_text(text);
         let plain = quick_xml::escape::unescape(&plain)
             .map_err(|e| e.to_string())?
@@ -1829,7 +2064,7 @@ fn read_html(text: &str) -> Result<Doc, String> {
     let mut doc = Doc::default();
     doc.paragraphs.clear();
     fn walk(node: &Node, doc: &mut Doc, inherited_css: &str, list: Option<List>) {
-        if matches!(node.name.as_str(), "script" | "style" | "head") {
+        if html_hidden(node) || matches!(node.name.as_str(), "script" | "style" | "head") {
             return;
         }
         let css = format!("{inherited_css};{}", node.attr("style").unwrap_or_default());
@@ -1850,7 +2085,7 @@ fn read_html(text: &str) -> Result<Doc, String> {
                 ..Paragraph::default()
             };
             fn runs(n: &Node, f: &TextFormat, out: &mut Vec<Run>) {
-                if matches!(n.name.as_str(), "script" | "style" | "ul" | "ol") {
+                if html_hidden(n) || matches!(n.name.as_str(), "script" | "style" | "ul" | "ol") {
                     return;
                 }
                 let mut fmt = f.clone();
@@ -2018,6 +2253,7 @@ fn read_html(text: &str) -> Result<Doc, String> {
             flush(&mut inline, doc, &css);
         }
     }
+    normalize_html_names(&mut node);
     walk(&node, &mut doc, "", None);
     doc.losses.push(
         "HTML: сложные CSS-макеты и сетевые изображения не импортируются; таблицы преобразуются в абзацы.".into(),
@@ -2027,6 +2263,192 @@ fn read_html(text: &str) -> Result<Doc, String> {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn many_short_valid_markdown_spans_and_links_keep_all_formatting() {
+        let bold = inline_md(&"**x** ".repeat(1000), &TextFormat::default());
+        assert_eq!(
+            bold.iter().map(|run| run.text.as_str()).collect::<String>(),
+            "x ".repeat(1000)
+        );
+        assert_eq!(
+            bold.iter()
+                .filter(|run| run.format.bold && run.text == "x")
+                .count(),
+            1000
+        );
+        assert!(
+            bold.iter()
+                .filter(|run| !run.text.trim().is_empty())
+                .all(|run| run.format.bold)
+        );
+
+        let links = inline_md(
+            &"[x](https://example.com) ".repeat(1000),
+            &TextFormat::default(),
+        );
+        assert_eq!(
+            links
+                .iter()
+                .map(|run| run.text.as_str())
+                .collect::<String>(),
+            "x ".repeat(1000)
+        );
+        assert_eq!(links.iter().filter(|run| run.text == "x").count(), 1000);
+        assert!(
+            links
+                .iter()
+                .filter(|run| !run.text.trim().is_empty())
+                .all(|run| { run.format.link.as_deref() == Some("https://example.com") })
+        );
+    }
+
+    #[test]
+    fn malformed_markdown_links_have_a_shared_work_budget_and_keep_literal_text() {
+        for text in [
+            "[".repeat(100_000),
+            format!("{}]({}", "[".repeat(100_000), "x".repeat(100_000)),
+            "&".repeat(100_000),
+        ] {
+            let format = TextFormat {
+                italic: true,
+                ..TextFormat::default()
+            };
+            let runs = inline_md(&text, &format);
+            assert_eq!(
+                runs.iter().map(|run| run.text.as_str()).collect::<String>(),
+                text
+            );
+            assert!(runs.iter().all(|run| run.format.italic));
+        }
+    }
+
+    #[test]
+    fn markdown_literal_trailing_spaces_do_not_become_a_paragraph_join() -> Result<(), String> {
+        let doc = Doc::from_text("trailing  \nnext & literal &#32;");
+        let again = read(&write(&doc, "md")?, "md")?;
+        assert_eq!(again.plain_text(), doc.plain_text());
+        assert_eq!(again.paragraphs.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn markdown_literal_syntax_and_combined_formats_survive_own_export() -> Result<(), String> {
+        let literal = r"# []()*_! a_b_c ~ \ path";
+        let mut doc = Doc::from_text(literal);
+        doc.paragraphs[0].runs[0].format.bold = true;
+        doc.paragraphs[0].runs[0].format.italic = true;
+        doc.paragraphs[0].runs[0].format.strike = true;
+        let again = read(&write(&doc, "md")?, "md")?;
+        assert_eq!(again.plain_text(), literal);
+        assert!(
+            again.paragraphs[0]
+                .runs
+                .iter()
+                .all(|run| { run.format.bold && run.format.italic && run.format.strike })
+        );
+        let plain = read(&write(&Doc::from_text(literal), "md")?, "md")?;
+        assert_eq!(plain.plain_text(), literal);
+        assert!(
+            plain.paragraphs[0]
+                .runs
+                .iter()
+                .all(|run| { !run.format.bold && !run.format.italic && !run.format.strike })
+        );
+        Ok(())
+    }
+    #[test]
+    fn markdown_links_and_hard_breaks_survive_own_export() -> Result<(), String> {
+        let mut doc = Doc::from_text("before\u{000b}after [label]");
+        let target = "https://example.com/a_(b)";
+        doc.paragraphs[0].runs[0].format.link = Some(target.into());
+        let again = read(&write(&doc, "md")?, "md")?;
+        assert_eq!(again.paragraphs.len(), 1);
+        assert_eq!(again.plain_text(), doc.plain_text());
+        assert!(
+            again.paragraphs[0]
+                .runs
+                .iter()
+                .all(|r| r.format.link.as_deref() == Some(target))
+        );
+        Ok(())
+    }
+    #[test]
+    fn markdown_heading_inherits_the_style_without_overwriting_inline_formats() -> Result<(), String>
+    {
+        let doc = read(b"# heading *italic* ~~strike~~", "md")?;
+        assert_eq!(doc.paragraphs[0].style, "Heading1");
+        assert!(doc.paragraphs[0].runs.iter().all(|run| run.format.bold));
+        assert!(
+            doc.paragraphs[0]
+                .runs
+                .iter()
+                .any(|run| run.text == "italic" && run.format.italic)
+        );
+        assert!(
+            doc.paragraphs[0]
+                .runs
+                .iter()
+                .any(|run| run.text == "strike" && run.format.strike)
+        );
+        Ok(())
+    }
+    #[test]
+    fn docx_table_cell_content_controls_keep_visible_paragraphs() -> Result<(), String> {
+        let document = r#"<w:document xmlns:w="urn:w"><w:body><w:p/><w:tbl><w:tr><w:tc><w:sdt><w:sdtContent><w:p><w:r><w:t>Cell content</w:t></w:r></w:p></w:sdtContent></w:sdt></w:tc></w:tr></w:tbl></w:body></w:document>"#;
+        let bytes = write_zip(vec![(
+            "word/document.xml".into(),
+            document.as_bytes().to_vec(),
+        )])?;
+        let doc = read(&bytes, "docx")?;
+        assert_eq!(
+            doc.tables[0].rows[0][0].paragraphs[0].text(),
+            "Cell content"
+        );
+        Ok(())
+    }
+    #[test]
+    fn docx_drawing_collection_uses_only_the_visible_revision_and_alternate_branch()
+    -> Result<(), String> {
+        let node = xml(br#"<p><del><drawing><blip/></drawing></del><moveFrom><drawing/></moveFrom><ins><drawing id="kept"/></ins><AlternateContent><Choice><drawing id="choice"/></Choice><Fallback><drawing id="fallback"/></Fallback></AlternateContent></p>"#)?;
+        let mut drawings = Vec::new();
+        visible_drawings(&node, &mut drawings);
+        assert_eq!(drawings.len(), 2);
+        assert_eq!(drawings[0].attr("id"), Some("kept"));
+        assert_eq!(drawings[1].attr("id"), Some("choice"));
+        Ok(())
+    }
+    #[test]
+    fn docx_header_keeps_non_page_field_results_and_finds_all_page_fields() -> Result<(), String> {
+        let document = r#"<w:document xmlns:w="urn:w" xmlns:r="urn:r"><w:body><w:p/><w:sectPr><w:headerReference w:type="default" r:id="h"/></w:sectPr></w:body></w:document>"#;
+        let relationships =
+            r#"<Relationships><Relationship Id="h" Target="header1.xml"/></Relationships>"#;
+        let header = r#"<w:hdr xmlns:w="urn:w"><w:p><w:fldSimple w:instr="AUTHOR"><w:r><w:t>Alice</w:t></w:r></w:fldSimple><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>DATE</w:instrText><w:fldChar w:fldCharType="separate"/><w:t>2026</w:t><w:fldChar w:fldCharType="end"/></w:r><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>PAGE \* MERGEFORMAT</w:instrText><w:fldChar w:fldCharType="separate"/><w:t>9</w:t><w:fldChar w:fldCharType="end"/></w:r></w:p></w:hdr>"#;
+        let bytes = write_zip(vec![
+            ("word/document.xml".into(), document.as_bytes().to_vec()),
+            (
+                "word/_rels/document.xml.rels".into(),
+                relationships.as_bytes().to_vec(),
+            ),
+            ("word/header1.xml".into(), header.as_bytes().to_vec()),
+        ])?;
+        let doc = read(&bytes, "docx")?;
+        assert_eq!(doc.page.header, "Alice2026");
+        assert!(doc.page.page_numbers);
+        Ok(())
+    }
+    #[test]
+    fn html_case_and_hidden_nodes_do_not_change_visible_content() -> Result<(), String> {
+        let doc = read(br#"<HTML><BODY><P>before <B>bold</B><SPAN HIDDEN="hidden">secret</SPAN><SPAN STYLE="DISPLAY: none !important">secret</SPAN> after</P><P HIDDEN="hidden">secret</P></BODY></HTML>"#, "html")?;
+        assert_eq!(doc.plain_text(), "before bold after");
+        assert!(
+            doc.paragraphs[0]
+                .runs
+                .iter()
+                .any(|run| run.text == "bold" && run.format.bold)
+        );
+        Ok(())
+    }
+
     #[test]
     fn supported_heading_levels_survive_html_markdown_and_docx() -> Result<(), String> {
         for level in 1..=6 {
@@ -2698,7 +3120,7 @@ mod tests {
     fn html_loose_body_preserves_heading_semantics() -> Result<(), String> {
         let doc = read(b"<html><body><h4>Heading</h4></body></html>", "html")?;
         assert_eq!(doc.plain_text(), "Heading");
-        assert_eq!(doc.paragraphs[0].style, "Heading3");
+        assert_eq!(doc.paragraphs[0].style, "Heading4");
         Ok(())
     }
     #[test]

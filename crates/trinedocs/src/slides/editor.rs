@@ -32,6 +32,7 @@ struct State {
     edit_focus: bool,
     grid: bool,
     zoom: f32,
+    scroll_to_selection: bool,
     error: String,
     image_job: Option<ImageJob>,
     presentation: Presentation,
@@ -66,6 +67,15 @@ fn record_presentation(ctx: &egui::Context, id: egui::Id, active: bool) {
         }
     });
 }
+pub fn request_focus(ctx: &egui::Context, tab_id: u64, slide_id: u64, element_id: Option<u64>) {
+    ctx.data_mut(|data| {
+        data.insert_temp(
+            egui::Id::new("slides-focus-request"),
+            (tab_id, slide_id, element_id),
+        )
+    });
+    ctx.request_repaint();
+}
 pub fn show(ui: &mut egui::Ui, deck: &mut Deck) -> bool {
     let memory_id = ui.id().with("slides_editor");
     let mut state = ui
@@ -86,6 +96,31 @@ pub fn show(ui: &mut egui::Ui, deck: &mut Deck) -> bool {
         state.clipboard = clipboard;
     }
     let mut dropped_slide = None;
+    if let Some((tab, slide, element)) = ui.ctx().data(|data| {
+        data.get_temp::<(u64, u64, Option<u64>)>(egui::Id::new("slides-focus-request"))
+    }) && ui
+        .ctx()
+        .data(|data| data.get_temp::<u64>(crate::docs::editor::active_tab_id()))
+        == Some(tab)
+    {
+        ui.ctx().data_mut(|data| {
+            data.remove::<(u64, u64, Option<u64>)>(egui::Id::new("slides-focus-request"))
+        });
+        if let Some(target) = deck.slide(slide) {
+            state.slide_id = slide;
+            state.selected.clear();
+            if let Some(element) = element.filter(|id| target.element(*id).is_some()) {
+                select_object(target, &mut state, element, false, false);
+                if let Some(index) = state.selected.iter().position(|id| *id == element) {
+                    state.selected.swap(0, index);
+                }
+            }
+            state.edit_text = None;
+            state.edit_cell = None;
+            state.scroll_to_selection = true;
+            state.show_properties = !state.selected.is_empty();
+        }
+    }
     if deck.slide(state.slide_id).is_none() {
         state.slide_id = deck.slides.first().map(|s| s.id).unwrap_or(0);
         state.selected.clear();
@@ -400,7 +435,7 @@ pub fn show(ui: &mut egui::Ui, deck: &mut Deck) -> bool {
             let internal_text = state
                 .clipboard
                 .iter()
-                .map(|e| e.text.as_str())
+                .map(super::io::element_text)
                 .collect::<Vec<_>>()
                 .join("\n");
             if !state.clipboard.is_empty() && text == internal_text {
@@ -472,6 +507,9 @@ fn thumbnail_panel(
                             Vec2::new(150.0, preview_height + 35.0),
                             Sense::click_and_drag(),
                         );
+                        if selected && state.scroll_to_selection {
+                            ui.scroll_to_rect(rect, Some(egui::Align::Center));
+                        }
                         response.dnd_set_drag_payload(SlideDrag(slide.id));
                         if response.dnd_hover_payload::<SlideDrag>().is_some() {
                             ui.painter().line_segment(
@@ -1259,6 +1297,9 @@ fn start_image_job(ctx: &egui::Context, state: &mut State) {
     });
 }
 fn copy_selection(ctx: &egui::Context, deck: &Deck, state: &mut State) {
+    if state.selected.is_empty() {
+        return;
+    }
     if let Some(slide) = deck.slide(state.slide_id) {
         state.clipboard = slide
             .elements
@@ -1277,7 +1318,7 @@ fn copy_selection(ctx: &egui::Context, deck: &Deck, state: &mut State) {
             state
                 .clipboard
                 .iter()
-                .map(|e| e.text.as_str())
+                .map(super::io::element_text)
                 .collect::<Vec<_>>()
                 .join("\n"),
         );
@@ -1312,7 +1353,7 @@ fn paste_selection(deck: &mut Deck, state: &mut State) -> bool {
 fn clipboard_text(elements: &[Element]) -> String {
     elements
         .iter()
-        .map(|element| element.text.as_str())
+        .map(super::io::element_text)
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -1882,6 +1923,21 @@ fn canvas(
         Sense::click_and_drag(),
     );
     state.canvas_rect = Some(rect);
+    if state.scroll_to_selection {
+        let target = state
+            .selected
+            .first()
+            .and_then(|id| slide.element(*id))
+            .map(|element| {
+                Rect::from_min_size(
+                    rect.min + Vec2::new(element.x, element.y) * scale,
+                    Vec2::new(element.w, element.h) * scale,
+                )
+            })
+            .unwrap_or(rect);
+        ui.scroll_to_rect(target, Some(egui::Align::Center));
+        state.scroll_to_selection = false;
+    }
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, rgb(slide.background));
     painter.rect_stroke(rect, 0, ui.visuals().window_stroke, StrokeKind::Inside);
@@ -2190,63 +2246,101 @@ fn resize_geometry(
     )
 }
 fn align(slide: &mut Slide, ids: &[u64], axis: &str, width: f32, height: f32) {
-    let mut selected = slide
+    let mut groups: std::collections::BTreeMap<(bool, u64), Vec<u64>> =
+        std::collections::BTreeMap::new();
+    for element in slide
         .elements
         .iter()
-        .filter(|e| ids.contains(&e.id))
-        .map(|e| (e.id, e.x, e.y, e.w, e.h))
+        .filter(|element| ids.contains(&element.id))
+    {
+        groups
+            .entry(
+                element
+                    .group
+                    .map(|group| (true, group))
+                    .unwrap_or((false, element.id)),
+            )
+            .or_default()
+            .push(element.id);
+    }
+    let mut units = groups
+        .into_values()
+        .filter_map(|ids| {
+            let mut items = ids.iter().filter_map(|id| slide.element(*id));
+            let first = items.next()?;
+            let (mut x, mut y, mut right, mut bottom) =
+                (first.x, first.y, first.x + first.w, first.y + first.h);
+            for e in items {
+                x = x.min(e.x);
+                y = y.min(e.y);
+                right = right.max(e.x + e.w);
+                bottom = bottom.max(e.y + e.h);
+            }
+            Some((ids, x, y, right - x, bottom - y))
+        })
         .collect::<Vec<_>>();
-    if selected.is_empty() {
+    if units.is_empty() {
         return;
     }
-    if axis == "horizontal" || axis == "vertical" {
-        let horizontal = axis == "horizontal";
-        selected.sort_by(|a, b| {
+    let distribute = matches!(axis, "horizontal" | "vertical");
+    if distribute && units.len() < 3 {
+        return;
+    }
+    let horizontal = axis == "horizontal";
+    let mut next = 0.0;
+    let mut gap = 0.0;
+    if distribute {
+        units.sort_by(|a, b| {
             if horizontal {
                 a.1.total_cmp(&b.1)
             } else {
                 a.2.total_cmp(&b.2)
             }
         });
-        let first = selected.first().copied();
-        let last = selected.last().copied();
-        if let (Some(first), Some(last)) = (first, last) {
-            let total = selected
+        if let (Some(first), Some(last)) = (units.first(), units.last()) {
+            let total = units
                 .iter()
-                .map(|s| if horizontal { s.3 } else { s.4 })
+                .map(|unit| if horizontal { unit.3 } else { unit.4 })
                 .sum::<f32>();
-            let start = if horizontal { first.1 } else { first.2 };
+            next = if horizontal { first.1 } else { first.2 };
             let end = if horizontal {
                 last.1 + last.3
             } else {
                 last.2 + last.4
             };
-            let gap = (end - start - total) / (selected.len().saturating_sub(1).max(1)) as f32;
-            let mut pos = start;
-            for (id, _, _, w, h) in selected {
-                if let Some(e) = slide.element_mut(id) {
-                    if horizontal {
-                        e.x = pos;
-                        pos += w + gap;
-                    } else {
-                        e.y = pos;
-                        pos += h + gap;
-                    }
-                }
-            }
+            gap = (end - next - total) / (units.len() - 1) as f32;
         }
-    } else {
-        for id in ids {
-            if let Some(e) = slide.element_mut(*id) {
-                match axis {
-                    "left" => e.x = 0.0,
-                    "center" => e.x = (width - e.w) / 2.0,
-                    "right" => e.x = width - e.w,
-                    "top" => e.y = 0.0,
-                    "middle" => e.y = (height - e.h) / 2.0,
-                    "bottom" => e.y = height - e.h,
-                    _ => {}
-                }
+    }
+    for (members, x, y, w, h) in units {
+        let delta = match axis {
+            "horizontal" => {
+                let delta = Vec2::new(next - x, 0.0);
+                next += w + gap;
+                delta
+            }
+            "vertical" => {
+                let delta = Vec2::new(0.0, next - y);
+                next += h + gap;
+                delta
+            }
+            "left" => Vec2::new(-x, 0.0),
+            "center" => Vec2::new((width - w) / 2.0 - x, 0.0),
+            "right" => Vec2::new(width - w - x, 0.0),
+            "top" => Vec2::new(0.0, -y),
+            "middle" => Vec2::new(0.0, (height - h) / 2.0 - y),
+            "bottom" => Vec2::new(0.0, height - h - y),
+            _ => Vec2::ZERO,
+        };
+        let original = members
+            .iter()
+            .filter_map(|id| slide.element(*id))
+            .map(|e| (e.id, e.x, e.y, e.w, e.h))
+            .collect::<Vec<_>>();
+        let delta = bounded_delta(&original, delta);
+        for id in members {
+            if let Some(e) = slide.element_mut(id) {
+                e.x += delta.x;
+                e.y += delta.y;
             }
         }
     }
@@ -2458,7 +2552,7 @@ fn paint_element(
         }
         ElementKind::Chart { values, labels } => {
             let (min, max) = super::model::chart_bounds(values);
-            let range = (max - min).max(f32::EPSILON);
+            let range = max - min;
             let plot_height = (rect.height() - 30.0 * scale).max(1.0);
             let cw = rect.width() / values.len().max(1) as f32;
             let baseline = rect.top() + plot_height * max / range;
@@ -2525,6 +2619,106 @@ fn paint_element(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn inspection_focus_keeps_the_target_first_and_selects_its_whole_group() -> Result<(), String> {
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx)?;
+        let mut deck = Deck::empty();
+        let slide_id = deck.add_slide("blank");
+        let group = deck.allocate_id();
+        let a = deck.add_element(slide_id, ElementKind::Rect)?;
+        let b = deck.add_element(slide_id, ElementKind::Rect)?;
+        for (id, x) in [(a, 30.0), (b, 70.0)] {
+            let element = deck
+                .slide_mut(slide_id)
+                .and_then(|s| s.element_mut(id))
+                .ok_or("element")?;
+            element.x = x;
+            element.w = 10.0;
+            element.group = Some(group);
+        }
+        let tab = 7_u64;
+        ctx.data_mut(|data| data.insert_temp(crate::docs::editor::active_tab_id(), tab));
+        request_focus(&ctx, tab, slide_id, Some(b));
+        let state = editor_frame(&ctx, &mut deck, Vec::new(), egui::Modifiers::NONE, false)?;
+        assert_eq!(state.selected.first().copied(), Some(b));
+        assert_eq!(state.selected.len(), 2);
+        let slide = deck.slide_mut(slide_id).ok_or("slide")?;
+        align(slide, &state.selected, "left", 960.0, 540.0);
+        assert_eq!(slide.element(a).ok_or("a")?.x, 0.0);
+        assert_eq!(slide.element(b).ok_or("b")?.x, 40.0);
+        deck.validate()
+    }
+
+    #[test]
+    fn empty_copy_preserves_the_previous_internal_selection() {
+        let ctx = egui::Context::default();
+        let deck = Deck::default();
+        let previous = Element {
+            id: 99,
+            text: "previous".into(),
+            ..Element::default()
+        };
+        let mut state = State {
+            slide_id: deck.slides[0].id,
+            clipboard: vec![previous.clone()].into(),
+            ..State::default()
+        };
+        copy_selection(&ctx, &deck, &mut state);
+        assert_eq!(state.clipboard.as_ref(), &vec![previous]);
+    }
+    #[test]
+    fn structured_objects_copy_their_cell_values_and_chart_labels() {
+        let table = Element {
+            text: "Table".into(),
+            kind: ElementKind::Table {
+                cells: vec![vec!["A".into(), "B".into()], vec!["C".into(), "D".into()]],
+            },
+            ..Element::default()
+        };
+        let chart = Element {
+            kind: ElementKind::Chart {
+                values: vec![1.0, 2.0],
+                labels: vec!["Jan".into(), "Feb".into()],
+            },
+            ..Element::default()
+        };
+        assert_eq!(
+            clipboard_text(&[table, chart]),
+            "Table\nA\tB\nC\tD\nJan\t1\nFeb\t2"
+        );
+    }
+    #[test]
+    fn group_alignment_and_distribution_preserve_member_offsets() -> Result<(), String> {
+        let mut deck = Deck::empty();
+        let id = deck.add_slide("blank");
+        let group = deck.allocate_id();
+        let a = deck.add_element(id, ElementKind::Rect)?;
+        let b = deck.add_element(id, ElementKind::Rect)?;
+        let c = deck.add_element(id, ElementKind::Rect)?;
+        let d = deck.add_element(id, ElementKind::Rect)?;
+        let slide = deck.slide_mut(id).ok_or("slide")?;
+        for (element, x) in slide.elements.iter_mut().zip([30.0, 70.0, 200.0, 400.0]) {
+            element.x = x;
+            element.y = 20.0;
+            element.w = 10.0;
+            element.h = 10.0;
+            if element.id == a || element.id == b {
+                element.group = Some(group);
+            }
+        }
+        align(slide, &[a, b], "left", 960.0, 540.0);
+        assert_eq!(slide.element(a).ok_or("a")?.x, 0.0);
+        assert_eq!(slide.element(b).ok_or("b")?.x, 40.0);
+        align(slide, &[a, b, c, d], "horizontal", 960.0, 540.0);
+        assert_eq!(
+            slide.element(b).ok_or("b")?.x - slide.element(a).ok_or("a")?.x,
+            40.0
+        );
+        assert_eq!(slide.element(d).ok_or("d")?.x, 400.0);
+        deck.validate()
+    }
+
     #[test]
     fn proportional_resize_keeps_extreme_aspect_ratios_above_the_model_minimum() {
         let (_, _, w, h) = resize_geometry(
