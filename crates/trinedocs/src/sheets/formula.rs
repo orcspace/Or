@@ -945,7 +945,7 @@ impl<'a> Engine<'a> {
                     "-" => x - y,
                     "*" => x * y,
                     "/" => x / y,
-                    "^" => x.powf(y),
+                    "^" => power(x, y)?,
                     _ => return Err("#VALUE!".into()),
                 };
                 Ok(Grid::scalar(Value::Number(finite(n)?)))
@@ -979,12 +979,42 @@ impl<'a> Engine<'a> {
             let r = range.r0 + (i / cols) as u32;
             let c = range.c0 + (i % cols) as u32;
             let nested = source.cell(r, c).is_some_and(|cell| {
-                let input = cell.input.to_uppercase();
-                input.contains("SUBTOTAL(") || input.contains("ПРОМЕЖУТОЧНЫЕ.ИТОГИ(")
+                cell.input.starts_with('=')
+                    && parse(&cell.input).is_ok_and(|expr| contains_subtotal(&expr))
             });
             if nested || (hidden && source.hidden_rows.contains(&r)) {
                 *value = Value::Empty;
             }
+        }
+    }
+    fn reference(&self, expr: &Expr, depth: usize) -> CalcResult<Option<(Option<String>, Range)>> {
+        if depth >= 32 {
+            return Err("#REF!".into());
+        }
+        match expr {
+            Expr::Reference(target, range) => {
+                if target.as_ref().is_some_and(|name| {
+                    !self
+                        .book
+                        .sheets
+                        .iter()
+                        .any(|sheet| sheet.name.to_lowercase() == name.to_lowercase())
+                }) {
+                    return Err("#REF!".into());
+                }
+                Ok(Some((target.clone(), *range)))
+            }
+            Expr::Name(name) => {
+                let input = self
+                    .book
+                    .names
+                    .iter()
+                    .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                    .map(|(_, input)| input)
+                    .ok_or("#NAME?")?;
+                self.reference(&parse(input)?, depth + 1)
+            }
+            _ => Ok(None),
         }
     }
     fn call(
@@ -1080,7 +1110,7 @@ impl<'a> Engine<'a> {
             if args.len() != 1 {
                 return Err("#VALUE!".into());
             }
-            if let Expr::Reference(_, range) = &args[0] {
+            if let Some((_, range)) = self.reference(&args[0], 0)? {
                 return Ok(Grid::scalar(Value::Number(f64::from(if name == "ROW" {
                     range.r0 + 1
                 } else {
@@ -1121,13 +1151,13 @@ impl<'a> Engine<'a> {
             let mut value = self.eval(expr, sheet, row, col);
             if name == "SUBTOTAL"
                 && index > 0
-                && let (Ok(grid), Expr::Reference(target, range)) = (&mut value, expr)
+                && let (Ok(grid), Some((target, range))) = (&mut value, self.reference(expr, 0)?)
             {
                 let hidden = evaluated
                     .first()
                     .and_then(|code| code.number().ok())
                     .is_some_and(|code| code >= 100.0);
-                self.skip_subtotal_cells(grid, target.as_deref(), range, sheet, hidden);
+                self.skip_subtotal_cells(grid, target.as_deref(), &range, sheet, hidden);
             }
             evaluated.push(if name.starts_with("IS") || name == "TYPE" {
                 value.unwrap_or_else(|e| Grid::scalar(Value::Error(e)))
@@ -1403,8 +1433,13 @@ impl<'a> Engine<'a> {
                         boolean((n(0)?.trunc().abs() % 2.0 == 0.0) == (name == "ISEVEN"))
                     }
                     "ISFORMULA" => {
-                        if let Some(Expr::Reference(target, r)) = args.first() {
-                            let si = match target {
+                        if let Some((target, r)) = args
+                            .first()
+                            .map(|expr| self.reference(expr, 0))
+                            .transpose()?
+                            .flatten()
+                        {
+                            let si = match &target {
                                 Some(name) => self
                                     .book
                                     .sheets
@@ -1538,7 +1573,7 @@ impl<'a> Engine<'a> {
                 let x = n(0)?;
                 let y = default_n(1, if name == "LOG" { 10.0 } else { 1.0 })?;
                 match name {
-                    "POWER" => num(x.powf(y)),
+                    "POWER" => num(power(x, y)?),
                     "LOG" => num(x.log(y)),
                     "ATAN2" => {
                         if x == 0.0 && y == 0.0 {
@@ -2065,22 +2100,30 @@ impl<'a> Engine<'a> {
                         v,
                         &needle,
                         (name == "XMATCH" && mode == 2) || (name == "MATCH" && mode == 0),
-                    ) {
-                        return num(i as f64 + 1.0);
+                    ) && ((name != "MATCH" || mode == 0) || lookup_kind(v, &needle))
+                    {
+                        if name != "MATCH" || mode == 0 {
+                            return num(i as f64 + 1.0);
+                        }
+                        best = Some(i);
+                        continue;
                     }
-                    let eligible = if name == "MATCH" {
-                        (mode > 0 && compare(v, &needle).is_le())
-                            || (mode < 0 && compare(v, &needle).is_ge())
-                    } else {
-                        (mode == -1 && compare(v, &needle).is_le())
-                            || (mode == 1 && compare(v, &needle).is_ge())
-                    };
+                    let eligible = lookup_kind(v, &needle)
+                        && if name == "MATCH" {
+                            (mode > 0 && compare(v, &needle).is_le())
+                                || (mode < 0 && compare(v, &needle).is_ge())
+                        } else {
+                            (mode == -1 && compare(v, &needle).is_le())
+                                || (mode == 1 && compare(v, &needle).is_ge())
+                        };
                     if eligible
                         && best.is_none_or(|b: usize| {
                             if (name == "MATCH" && mode > 0) || (name == "XMATCH" && mode == -1) {
                                 compare(v, &vals[b]).is_gt()
+                                    || name == "MATCH" && compare(v, &vals[b]).is_eq()
                             } else {
                                 compare(v, &vals[b]).is_lt()
+                                    || name == "MATCH" && compare(v, &vals[b]).is_eq()
                             }
                         })
                     {
@@ -2110,11 +2153,15 @@ impl<'a> Engine<'a> {
                     } else {
                         table.at(0, i)?
                     };
-                    if lookup_equal(&v, &needle, !approximate) {
+                    if lookup_equal(&v, &needle, !approximate)
+                        && (!approximate || lookup_kind(&v, &needle))
+                    {
                         chosen = Some(i);
-                        break;
+                        if !approximate {
+                            break;
+                        }
                     }
-                    if approximate && compare(&v, &needle).is_le() {
+                    if approximate && lookup_kind(&v, &needle) && compare(&v, &needle).is_le() {
                         chosen = Some(i);
                     }
                 }
@@ -2156,8 +2203,9 @@ impl<'a> Engine<'a> {
                     if lookup_equal(v, &needle, mode == 2) {
                         return Ok(Grid::scalar(a[2].values[i].clone()));
                     }
-                    let eligible = (mode == -1 && compare(v, &needle).is_le())
-                        || (mode == 1 && compare(v, &needle).is_ge());
+                    let eligible = lookup_kind(v, &needle)
+                        && ((mode == -1 && compare(v, &needle).is_le())
+                            || (mode == 1 && compare(v, &needle).is_ge()));
                     if eligible
                         && best.is_none_or(|b: usize| {
                             if mode == -1 {
@@ -2303,22 +2351,31 @@ impl<'a> Engine<'a> {
             }
             "TIMEVALUE" => {
                 arity(1, 1)?;
-                let s = text(0)?;
-                let parts: Vec<_> = s.split(':').map(|p| p.parse::<u32>()).collect();
-                if !(2..=3).contains(&parts.len()) {
+                let input = text(0)?.trim().to_ascii_uppercase();
+                let (clock, afternoon) = if let Some(clock) = input.strip_suffix("AM") {
+                    (clock.trim(), Some(false))
+                } else if let Some(clock) = input.strip_suffix("PM") {
+                    (clock.trim(), Some(true))
+                } else {
+                    (input.as_str(), None)
+                };
+                let vals = clock
+                    .split(':')
+                    .map(|part| part.trim().parse::<u32>().map_err(|_| "#VALUE!"))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if !(if afternoon.is_some() { 1 } else { 2 }..=3).contains(&vals.len()) {
                     return Err("#VALUE!".into());
                 }
-                let vals = parts
-                    .into_iter()
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|_| "#VALUE!")?;
-                if vals[0] > 23 || vals[1] > 59 || vals.get(2).is_some_and(|n| *n > 59) {
+                let mut hour = vals[0];
+                let minute = vals.get(1).copied().unwrap_or(0);
+                let second = vals.get(2).copied().unwrap_or(0);
+                if hour > if afternoon.is_some() { 12 } else { 23 } || minute > 59 || second > 59 {
                     return Err("#VALUE!".into());
                 }
-                num(
-                    f64::from(vals[0] * 3600 + vals[1] * 60 + vals.get(2).copied().unwrap_or(0))
-                        / 86400.0,
-                )
+                if let Some(afternoon) = afternoon {
+                    hour = hour % 12 + if afternoon { 12 } else { 0 };
+                }
+                num(f64::from(hour * 3600 + minute * 60 + second) / 86400.0)
             }
             "DATEDIF" => {
                 arity(3, 3)?;
@@ -3025,6 +3082,31 @@ impl<'a> Engine<'a> {
         }
     }
 }
+fn contains_subtotal(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call(name, args) => name == "SUBTOTAL" || args.iter().any(contains_subtotal),
+        Expr::Unary(_, expr) => contains_subtotal(expr),
+        Expr::Binary(_, left, right) => contains_subtotal(left) || contains_subtotal(right),
+        _ => false,
+    }
+}
+fn lookup_kind(value: &Value, needle: &Value) -> bool {
+    matches!(
+        (value, needle),
+        (Value::Number(_), Value::Number(_) | Value::Empty)
+            | (Value::Text(_), Value::Text(_))
+            | (Value::Bool(_), Value::Bool(_))
+    )
+}
+fn power(base: f64, exponent: f64) -> CalcResult<f64> {
+    if base == 0.0 && exponent == 0.0 {
+        return Err("#NUM!".into());
+    }
+    if base == 0.0 && exponent < 0.0 {
+        return Err("#DIV/0!".into());
+    }
+    finite(base.powf(exponent))
+}
 fn formula_result(value: Value) -> Value {
     if value == Value::Empty {
         Value::Number(0.0)
@@ -3168,7 +3250,11 @@ fn wildcard(pattern: &[char], text: &[char]) -> bool {
     pi == pattern.len()
 }
 fn criterion(value: &Value, criteria: &Value) -> bool {
-    let raw = criteria.display();
+    let raw = if *criteria == Value::Empty {
+        "0".into()
+    } else {
+        criteria.display()
+    };
     let (op, rest) = ["<>", ">=", "<=", "=", ">", "<"]
         .iter()
         .find_map(|op| raw.strip_prefix(op).map(|rest| (*op, rest)))

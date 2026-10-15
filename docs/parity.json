@@ -4230,7 +4230,7 @@
     "priority": "P1",
     "phase": 8,
     "requirement": "REQ-11-005",
-    "mcp": "UI: уровни/пустые заголовки и alt изображений; GAP: docs_inspect_structure MCP",
+    "mcp": "UI: уровни/пустые заголовки и alt изображений; GAP: docs_inspect_structure MCP UI: переход из замечания по stable ID; для картинки Docs — к абзацу-якорю, скрытые/устаревшие цели недоступны. Runtime navigation не проверялась.",
     "import": "planned",
     "export": "n/a",
     "status": "partial_unverified"
@@ -4254,7 +4254,7 @@
     "priority": "P1",
     "phase": 8,
     "requirement": "REQ-11-011",
-    "mcp": "UI: обычный текст/границы объектов; GAP: таблицы/диаграммы/повороты/фон и slides_inspect_readability MCP",
+    "mcp": "UI: обычный текст/границы объектов; GAP: таблицы/диаграммы/повороты/фон и slides_inspect_readability MCP UI: переход из замечания по stable ID; для картинки Docs — к абзацу-якорю, скрытые/устаревшие цели недоступны. Runtime navigation не проверялась.",
     "import": "planned",
     "export": "n/a",
     "status": "partial_unverified"
@@ -4278,7 +4278,7 @@
     "priority": "P1",
     "phase": 8,
     "requirement": "REQ-11-008",
-    "mcp": "UI read-only inspector; GAP: отдельная bounded MCP-сводка ошибок",
+    "mcp": "UI read-only inspector; GAP: отдельная bounded MCP-сводка ошибок UI: переход из замечания по stable ID; для картинки Docs — к абзацу-якорю, скрытые/устаревшие цели недоступны. Runtime navigation не проверялась.",
     "import": "n/a",
     "export": "n/a",
     "status": "implemented_unverified"

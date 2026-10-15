@@ -561,7 +561,9 @@ impl Book {
         }
         for s in &mut self.sheets {
             for cell in s.cells.values_mut() {
-                cell.input = super::formula::invalidate_sheet(&cell.input, &removed.name);
+                if cell.input.starts_with('=') {
+                    cell.input = super::formula::invalidate_sheet(&cell.input, &removed.name);
+                }
             }
         }
         for value in self.names.values_mut() {
@@ -648,6 +650,18 @@ impl Book {
             })
         {
             return Err("Недопустимый или слишком большой диапазон".into());
+        }
+        let source = self.sheet_by_id(sheet).ok_or("Лист не найден")?;
+        if source.merges.iter().any(|merge| {
+            values.iter().enumerate().any(|(r, line)| {
+                line.iter().enumerate().any(|(c, _)| {
+                    let target = (row + r as u32, col + c as u32);
+                    merge.contains(target.0, target.1)
+                        && (count > 1 || target != (merge.r0, merge.c0))
+                })
+            })
+        }) {
+            return Err("Вставка затрагивает объединённые ячейки: сначала разъедините их".into());
         }
         for (r, line) in values.iter().enumerate() {
             for (c, input) in line.iter().enumerate() {
@@ -884,7 +898,12 @@ impl Book {
             return Err("Сортировка объединённых ячеек не поддерживается".into());
         }
         let start = range.r0 + u32::from(header);
-        let mut rows: Vec<_> = (start..=range.r1)
+        let positions: Vec<_> = (start..=range.r1)
+            .filter(|row| !s.hidden_rows.contains(row))
+            .collect();
+        let mut rows: Vec<_> = positions
+            .iter()
+            .copied()
             .map(|r| {
                 (
                     r,
@@ -936,8 +955,7 @@ impl Book {
             std::cmp::Ordering::Equal
         });
         let s = self.sheet_by_id_mut(sheet).ok_or("Лист не найден")?;
-        for (i, (old, line)) in rows.into_iter().enumerate() {
-            let r = start + i as u32;
+        for (r, (old, line)) in positions.into_iter().zip(rows) {
             for (j, cell) in line.into_iter().enumerate() {
                 let key = address(r, range.c0 + j as u32);
                 s.cells.remove(&key);

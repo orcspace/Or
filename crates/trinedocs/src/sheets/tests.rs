@@ -1387,3 +1387,237 @@ fn review2_print_count_matches_hidden_cells_and_draws_both_decorations() -> Resu
     assert_eq!(book.print_page_count(), book.pages().len());
     Ok(())
 }
+
+#[test]
+fn review3_deleting_sheet_keeps_reference_looking_plain_text() -> Result<(), String> {
+    let mut book = Book::default();
+    let id = book.active_id();
+    let other = book.add_sheet("Other")?;
+    book.set_cell(id, 0, 0, "Other!A1")?;
+    book.set_cell(id, 1, 0, "'Other!A1")?;
+    book.set_cell(id, 2, 0, "=Other!A1")?;
+    book.delete_sheet(other)?;
+    assert_eq!(
+        book.active_sheet()
+            .and_then(|sheet| sheet.cell(0, 0))
+            .map(|cell| cell.input.as_str()),
+        Some("Other!A1")
+    );
+    assert_eq!(
+        formula::evaluate(&book, id, "=A1"),
+        Value::Text("Other!A1".into())
+    );
+    assert_eq!(
+        formula::evaluate(&book, id, "=A2"),
+        Value::Text("Other!A1".into())
+    );
+    assert_eq!(
+        formula::evaluate(&book, id, "=A3"),
+        Value::Error("#REF!".into())
+    );
+    Ok(())
+}
+#[test]
+fn review3_subtotals_use_expression_structure_and_named_reference_identity() -> Result<(), String> {
+    let mut book = Book::default();
+    let id = book.active_id();
+    book.set_range(
+        id,
+        0,
+        0,
+        &[
+            vec!["SUBTOTAL(".into()],
+            vec!["=SUBTOTAL(9,B1:B2)".into()],
+            vec!["7".into()],
+        ],
+    )?;
+    book.set_range(id, 0, 1, &[vec!["2".into()], vec!["3".into()]])?;
+    book.names.insert("Data".into(), "=A1:A3".into());
+    book.names.insert("Alias".into(), "=Data".into());
+    assert_eq!(
+        formula::evaluate(&book, id, "=SUBTOTAL(3,A1:A3)"),
+        Value::Number(2.0)
+    );
+    assert_eq!(
+        formula::evaluate(&book, id, "=SUBTOTAL(9,Alias)"),
+        Value::Number(7.0)
+    );
+    book.active_sheet_mut()
+        .ok_or("sheet")?
+        .hidden_rows
+        .insert(2);
+    assert_eq!(
+        formula::evaluate(&book, id, "=SUBTOTAL(109,Data)"),
+        Value::Number(0.0)
+    );
+    book.names.insert("Cell".into(), "=A2".into());
+    assert_eq!(
+        formula::evaluate(&book, id, "=ISFORMULA(Cell)"),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        formula::evaluate(&book, id, "=ROW(Cell)"),
+        Value::Number(2.0)
+    );
+    assert_eq!(
+        formula::evaluate(&book, id, "=COLUMN(Cell)"),
+        Value::Number(1.0)
+    );
+    assert_eq!(
+        formula::evaluate(&book, id, "=ROW('Missing'!A1)"),
+        Value::Error("#REF!".into())
+    );
+    Ok(())
+}
+#[test]
+fn review3_empty_criteria_reference_means_zero_and_power_domains_match_office() -> Result<(), String>
+{
+    let mut book = Book::default();
+    let id = book.active_id();
+    book.set_range(
+        id,
+        0,
+        0,
+        &[vec!["0".into()], vec!["0".into()], vec!["".into()]],
+    )?;
+    assert_eq!(
+        formula::evaluate(&book, id, "=COUNTIF(A1:A3,Z1)"),
+        Value::Number(2.0)
+    );
+    assert_eq!(
+        formula::evaluate(&book, id, "=COUNTIF(A1:A3,\"\")"),
+        Value::Number(1.0)
+    );
+    for (input, expected) in [
+        ("=POWER(0,0)", Value::Error("#NUM!".into())),
+        ("=0^0", Value::Error("#NUM!".into())),
+        ("=POWER(0,-1)", Value::Error("#DIV/0!".into())),
+        ("=0^-1", Value::Error("#DIV/0!".into())),
+        ("=POWER(0,1)", Value::Number(0.0)),
+    ] {
+        assert_eq!(formula::evaluate(&book, id, input), expected, "{input}");
+    }
+    Ok(())
+}
+#[test]
+fn review3_approximate_lookup_uses_last_tie_and_compatible_types() -> Result<(), String> {
+    let mut book = Book::default();
+    let id = book.active_id();
+    book.set_range(
+        id,
+        0,
+        0,
+        &[
+            vec!["1".into(), "10".into()],
+            vec!["2".into(), "20".into()],
+            vec!["2".into(), "30".into()],
+        ],
+    )?;
+    for (input, expected) in [
+        ("=MATCH(2,A1:A3,1)", Value::Number(3.0)),
+        ("=MATCH(2,A1:A3,0)", Value::Number(2.0)),
+        ("=XMATCH(2,A1:A3)", Value::Number(2.0)),
+        ("=VLOOKUP(2,A1:B3,2,TRUE)", Value::Number(30.0)),
+        ("=VLOOKUP(2,A1:B3,2,FALSE)", Value::Number(20.0)),
+        ("=MATCH(\"cat\",A1:A3,1)", Value::Error("#N/A".into())),
+        (
+            "=VLOOKUP(\"cat\",A1:B3,2,TRUE)",
+            Value::Error("#N/A".into()),
+        ),
+        (
+            "=XLOOKUP(\"cat\",A1:A3,B1:B3,, -1)",
+            Value::Error("#N/A".into()),
+        ),
+    ] {
+        assert_eq!(formula::evaluate(&book, id, input), expected, "{input}");
+    }
+    Ok(())
+}
+#[test]
+fn review3_sort_does_not_move_hidden_rows() -> Result<(), String> {
+    let mut book = Book::default();
+    let id = book.active_id();
+    book.set_range(
+        id,
+        0,
+        0,
+        &[vec!["3".into()], vec!["1".into()], vec!["2".into()]],
+    )?;
+    book.active_sheet_mut()
+        .ok_or("sheet")?
+        .hidden_rows
+        .insert(1);
+    let hidden_id = book
+        .active_sheet()
+        .and_then(|sheet| sheet.cell(1, 0))
+        .ok_or("hidden")?
+        .id;
+    book.sort(id, Range::new(0, 0, 2, 0), &[(0, false)], false)?;
+    assert_eq!(
+        book.read_range(id, 0, 0, 2, 0)?,
+        vec![vec!["2"], vec!["1"], vec!["3"]]
+    );
+    assert_eq!(
+        book.active_sheet()
+            .and_then(|sheet| sheet.cell(1, 0))
+            .ok_or("hidden")?
+            .id,
+        hidden_id
+    );
+    Ok(())
+}
+
+#[test]
+fn review3_timevalue_accepts_twelve_hour_time_without_changing_twenty_four_hour_rules() {
+    let book = Book::default();
+    let id = book.active_id();
+    for (input, expected) in [
+        ("=TIMEVALUE(\"6:45 PM\")", 18.75 / 24.0),
+        ("=TIMEVALUE(\"12:00 AM\")", 0.0),
+        ("=TIMEVALUE(\"12:00 PM\")", 0.5),
+        ("=TIMEVALUE(\" 6 pm \")", 0.75),
+        ("=TIMEVALUE(\"18:45\")", 18.75 / 24.0),
+    ] {
+        assert_eq!(
+            formula::evaluate(&book, id, input),
+            Value::Number(expected),
+            "{input}"
+        );
+    }
+    for input in [
+        "=TIMEVALUE(\"13:15 PM\")",
+        "=TIMEVALUE(\"12:60 AM\")",
+        "=TIMEVALUE(\"24:00\")",
+        "=TIMEVALUE(\"word\")",
+    ] {
+        assert_eq!(
+            formula::evaluate(&book, id, input),
+            Value::Error("#VALUE!".into()),
+            "{input}"
+        );
+    }
+}
+#[test]
+fn review3_range_paste_rejects_merged_cells_before_modifying_any_destination() -> Result<(), String>
+{
+    let mut book = Book::default();
+    let id = book.active_id();
+    book.set_cell(id, 0, 0, "original")?;
+    book.merge(id, Range::new(0, 0, 0, 1))?;
+    let before = book.clone();
+    assert!(
+        book.set_range(id, 0, 0, &[vec!["new".into(), "hidden".into()]])
+            .is_err()
+    );
+    assert_eq!(book, before);
+    assert!(book.set_range(id, 0, 1, &[vec!["hidden".into()]]).is_err());
+    assert_eq!(book, before);
+    book.set_range(id, 0, 0, &[vec!["visible".into()]])?;
+    assert_eq!(book.read_range(id, 0, 0, 0, 0)?, vec![vec!["visible"]]);
+    assert!(
+        book.active_sheet()
+            .and_then(|sheet| sheet.cell(0, 1))
+            .is_none()
+    );
+    Ok(())
+}

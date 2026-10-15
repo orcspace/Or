@@ -918,7 +918,7 @@ impl Deck {
                 }
                 ElementKind::Chart { values, labels } => {
                     let (min, max) = chart_bounds(values);
-                    let range = (max - min).max(f32::EPSILON);
+                    let range = max - min;
                     let plot_height = (element.h - 30.0).max(1.0);
                     let baseline = element.y + plot_height * max / range;
                     let cw = element.w / values.len().max(1) as f32;
@@ -1153,6 +1153,35 @@ pub fn text_lines(element: &Element) -> Vec<String> {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tiny_chart_values_use_the_same_full_scale_as_ordinary_values() -> Result<(), String> {
+        let mut deck = Deck::empty();
+        let slide = deck.add_slide("blank");
+        let chart = deck.add_element(
+            slide,
+            ElementKind::Chart {
+                values: vec![1.0e-10, -1.0e-10],
+                labels: vec!["positive".into(), "negative".into()],
+            },
+        )?;
+        let element = deck
+            .slide_mut(slide)
+            .and_then(|s| s.element_mut(chart))
+            .ok_or("chart")?;
+        element.h = 230.0;
+        let page = deck.page(deck.slide(slide).ok_or("slide")?);
+        let bars = page
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                crate::render::Primitive::Rect { h, .. } => Some(*h),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(bars.iter().filter(|h| (**h - 100.0).abs() < 0.001).count() >= 2);
+        deck.validate()
+    }
+
     #[test]
     fn layouts_create_their_required_text_boxes_even_from_blank() -> Result<(), String> {
         let mut deck = Deck::empty();

@@ -24,6 +24,7 @@ struct State {
     rename_sheet_id: Option<u64>,
     selected_image: Option<u64>,
     image_job: Option<ImageJob>,
+    image_target: Option<(u64, u32, u32)>,
     #[cfg(test)]
     formula_rect: Option<Rect>,
     #[cfg(test)]
@@ -64,8 +65,15 @@ fn commit(book: &mut Book, state: &mut State) -> bool {
     if !state.editing {
         return false;
     }
+    let input = entry_text(
+        book,
+        state.last.0,
+        state.last.1,
+        state.last.2,
+        &state.buffer,
+    );
     let value = book
-        .set_cell(state.last.0, state.last.1, state.last.2, &state.buffer)
+        .set_cell(state.last.0, state.last.1, state.last.2, &input)
         .map(|_| ());
     let changed = result(state, value);
     if changed {
@@ -448,7 +456,7 @@ fn toolbar(
                     .on_hover_text("Вставить рисунок из файла поверх ячеек · или Ctrl+V")
                     .clicked()
                 {
-                    start_image_job(ui.ctx(), state);
+                    start_image_job(ui.ctx(), state, book);
                 }
             });
             crate::chrome::group(ui, "Лист", 244.0, |ui| {
@@ -597,19 +605,9 @@ fn toolbar(
                         ui.separator();
                         if command_action(ui.button("Автоподбор ширины"), book, state, &mut changed)
                         {
+                            let locale_ru = book.locale_ru;
                             if let Some(sheet) = book.active_sheet_mut() {
-                                let width = sheet
-                                    .cells
-                                    .iter()
-                                    .filter(|(address, _)| {
-                                        super::model::parse_address(address)
-                                            .is_some_and(|(_, c)| c == col)
-                                    })
-                                    .map(|(_, cell)| {
-                                        cell.value.display().chars().count() as f32 * 7.5 + 18.0
-                                    })
-                                    .fold(96.0, f32::max)
-                                    .min(600.0);
+                                let width = autofit_width(ui, sheet, col, locale_ru);
                                 sheet.widths.insert(col, width);
                                 changed = true;
                             }
@@ -712,6 +710,46 @@ pub fn show(ui: &mut egui::Ui, book: &mut Book) -> bool {
 pub fn show_for_tab(ui: &mut egui::Ui, book: &mut Book, tab_id: u64) -> bool {
     show_impl(ui, book, egui::Id::new(("sheets-editor", tab_id)))
 }
+pub fn request_focus(ctx: &egui::Context, tab_id: u64, sheet_id: u64, row: u32, col: u32) {
+    let id = egui::Id::new(("sheets-editor", tab_id)).with("focus-request");
+    ctx.data_mut(|data| data.insert_temp(id, (sheet_id, row, col)));
+    ctx.request_repaint();
+}
+fn apply_focus_request(book: &mut Book, state: &mut State, request: (u64, u32, u32)) -> bool {
+    if state.editing {
+        return false;
+    }
+    let (sheet_id, row, col) = request;
+    let Some(index) = book.sheets.iter().position(|sheet| {
+        sheet.id == sheet_id
+            && !sheet.hidden
+            && !sheet.hidden_rows.contains(&row)
+            && !sheet.hidden_cols.contains(&col)
+            && !sheet
+                .merges
+                .iter()
+                .any(|range| range.contains(row, col) && (range.r0, range.c0) != (row, col))
+            && sheet.cell(row, col).is_some()
+    }) else {
+        return false;
+    };
+    book.active = index;
+    book.selection = Selection {
+        row,
+        col,
+        anchor_row: row,
+        anchor_col: col,
+    };
+    state.last = (sheet_id, row, col);
+    state.buffer = book.sheets[index]
+        .cell(row, col)
+        .map(|cell| cell.input.clone())
+        .unwrap_or_default();
+    state.selected_image = None;
+    state.scroll_to_selection = true;
+    state.error.clear();
+    true
+}
 pub fn commit_pending(ctx: &egui::Context, tab_id: u64, book: &mut Book) -> Result<bool, String> {
     let id = egui::Id::new(("sheets-editor", tab_id));
     let Some(mut state) = ctx.data_mut(|data| data.get_temp::<State>(id)) else {
@@ -735,6 +773,15 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
         .data_mut(|d| d.get_temp::<State>(state_id))
         .unwrap_or_default();
     let mut changed = false;
+    if let Some(request) = ui
+        .ctx()
+        .data_mut(|data| data.remove_temp::<(u64, u32, u32)>(state_id.with("focus-request")))
+        && apply_focus_request(book, &mut state, request)
+    {
+        if ui.is_enabled() {
+            ui.memory_mut(|memory| memory.request_focus(state_id.with("canvas")));
+        }
+    }
     let formula_id = state_id.with("formula");
     let canvas_id = state_id.with("canvas");
     #[cfg(test)]
@@ -881,7 +928,7 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
             } else {
                 changed |= commit(book, &mut state);
                 if !state.editing {
-                    advance(&mut book.selection, key, modifiers.shift);
+                    advance(book, key, modifiers.shift);
                     state.scroll_to_selection = true;
                 }
             }
@@ -977,22 +1024,31 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
             }
         });
     }
-    let loaded = state.image_job.as_ref().and_then(|job| match job.lock() {
-        Ok(receiver) => match receiver.try_recv() {
-            Ok(result) => Some(result),
-            Err(std::sync::mpsc::TryRecvError::Empty) => None,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                Some(Err("Загрузка изображения прервана".into()))
-            }
-        },
-        Err(_) => Some(Err("Ошибка загрузки изображения".into())),
-    });
+    let loaded = ui
+        .is_enabled()
+        .then_some(())
+        .and_then(|_| state.image_job.as_ref())
+        .and_then(|job| match job.lock() {
+            Ok(receiver) => match receiver.try_recv() {
+                Ok(result) => Some(result),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Some(Err("Загрузка изображения прервана".into()))
+                }
+            },
+            Err(_) => Some(Err("Ошибка загрузки изображения".into())),
+        });
     if state.image_job.is_some() {
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(50));
     }
     let pasted = if ui.is_enabled() {
         crate::clipboard::take_image(ui.ctx()).map(|png| png.to_vec())
+    } else {
+        None
+    };
+    let image_target = if loaded.is_some() {
+        state.image_target.take()
     } else {
         None
     };
@@ -1010,10 +1066,11 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
         None => pasted,
     };
     if let Some(bytes) = picture {
-        let (sheet, row, col) = (book.active_id(), book.selection.row, book.selection.col);
+        let (sheet, row, col) =
+            image_target.unwrap_or((book.active_id(), book.selection.row, book.selection.col));
         match book.add_image(sheet, row, col, bytes) {
             Ok(image) => {
-                state.selected_image = Some(image);
+                state.selected_image = (book.active_id() == sheet).then_some(image);
                 changed = true;
             }
             Err(error) => state.error = error,
@@ -1073,8 +1130,7 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                 .max(book.selection.anchor_col)
                 .saturating_add(20))
             .clamp(26, MAX_COLS);
-            let width = axis_pos(cols, 96.0, &sheet.widths, &sheet.hidden_cols) + 48.0;
-            let height = axis_pos(rows, 26.0, &sheet.row_heights, &sheet.hidden_rows) + 28.0;
+            let (width, height) = grid_size(sheet, rows, cols);
             let (_, rect) = ui.allocate_space(Vec2::new(width, height));
             let response = ui.interact(rect, canvas_id, Sense::click_and_drag());
             if ui.is_enabled()
@@ -1141,140 +1197,129 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                 "grid-b1".into(),
                 cell_rect(sheet, origin, viewport, 0, 1, frozen_r, frozen_c),
             );
-            for r in (r0..r1).chain(0..frozen_r) {
-                if sheet.hidden_rows.contains(&r) {
+            let cells = visible_cells(
+                sheet,
+                origin,
+                viewport,
+                r0..r1,
+                c0..c1,
+                (frozen_r, frozen_c),
+                ui.clip_rect(),
+            );
+            for (r, c) in cells {
+                if sheet
+                    .merges
+                    .iter()
+                    .any(|merge| merge.contains(r, c) && (merge.r0, merge.c0) != (r, c))
+                {
                     continue;
                 }
-                for c in (c0..c1).chain(0..frozen_c) {
-                    if sheet.hidden_cols.contains(&c) {
-                        continue;
-                    }
-                    let cell_rect = cell_rect(sheet, origin, viewport, r, c, frozen_r, frozen_c);
-                    if !ui.clip_rect().intersects(cell_rect) {
-                        continue;
-                    }
-                    if let Some(merge) = sheet.merges.iter().find(|m| m.contains(r, c))
-                        && (merge.r0, merge.c0) != (r, c)
-                    {
-                        continue;
-                    }
-                    let mut cell_rect = cell_rect;
-                    if let Some(merge) = sheet.merges.iter().find(|m| m.r0 == r && m.c0 == c) {
-                        cell_rect.max.x = cell_rect.min.x
-                            + axis_pos(merge.c1 + 1, 96.0, &sheet.widths, &sheet.hidden_cols)
-                            - axis_pos(merge.c0, 96.0, &sheet.widths, &sheet.hidden_cols);
-                        cell_rect.max.y = cell_rect.min.y
-                            + axis_pos(merge.r1 + 1, 26.0, &sheet.row_heights, &sheet.hidden_rows)
-                            - axis_pos(merge.r0, 26.0, &sheet.row_heights, &sheet.hidden_rows);
-                    }
-                    let cell = sheet.cell(r, c);
-                    let fmt = cell.map(|c| c.fmt.clone()).unwrap_or_default();
-                    let conditional = sheet
-                        .conditional
-                        .iter()
-                        .find(|rule| {
-                            rule.range.contains(r, c)
-                                && cell.and_then(|c| c.value.number().ok()).is_some_and(|n| {
-                                    match rule.operator.as_str() {
-                                        ">" => n > rule.threshold,
-                                        "<" => n < rule.threshold,
-                                        "=" => n == rule.threshold,
-                                        ">=" => n >= rule.threshold,
-                                        "<=" => n <= rule.threshold,
-                                        _ => false,
-                                    }
+                let cell_rect = cell_area(sheet, origin, viewport, r, c, frozen_r, frozen_c);
+                if !ui.clip_rect().intersects(cell_rect) {
+                    continue;
+                }
+                let cell = sheet.cell(r, c);
+                let fmt = cell.map(|c| c.fmt.clone()).unwrap_or_default();
+                let conditional = sheet
+                    .conditional
+                    .iter()
+                    .find(|rule| {
+                        rule.range.contains(r, c)
+                            && cell
+                                .and_then(|c| c.value.number().ok())
+                                .is_some_and(|n| match rule.operator.as_str() {
+                                    ">" => n > rule.threshold,
+                                    "<" => n < rule.threshold,
+                                    "=" => n == rule.threshold,
+                                    ">=" => n >= rule.threshold,
+                                    "<=" => n <= rule.threshold,
+                                    _ => false,
                                 })
-                        })
-                        .map(|rule| rule.fill);
-                    if r < frozen_r || c < frozen_c {
-                        painter.rect_filled(cell_rect, 0.0, bg);
-                    }
-                    if let Some(fill) = conditional.or(fmt.fill) {
-                        painter.rect_filled(cell_rect, 0.0, color(fill));
-                    }
-                    if selection.contains(r, c) {
-                        painter.rect_filled(
-                            cell_rect,
-                            0.0,
-                            crate::chrome::accent(ui).gamma_multiply(0.12),
-                        );
-                    }
+                    })
+                    .map(|rule| rule.fill);
+                if r < frozen_r || c < frozen_c {
+                    painter.rect_filled(cell_rect, 0.0, bg);
+                }
+                if let Some(fill) = conditional.or(fmt.fill) {
+                    painter.rect_filled(cell_rect, 0.0, color(fill));
+                }
+                if selection.contains(r, c) {
+                    painter.rect_filled(
+                        cell_rect,
+                        0.0,
+                        crate::chrome::accent(ui).gamma_multiply(0.12),
+                    );
+                }
+                painter.rect_stroke(
+                    cell_rect,
+                    0.0,
+                    Stroke::new(
+                        if fmt.border { 1.0 } else { 0.5 },
+                        if fmt.border {
+                            ui.visuals().text_color()
+                        } else {
+                            grid
+                        },
+                    ),
+                    StrokeKind::Inside,
+                );
+                let text = sheet.display(r, c, book.locale_ru);
+                let right = fmt.align == Align::Right
+                    || (fmt.align == Align::General
+                        && cell.is_some_and(|c| matches!(c.value, Value::Number(_))));
+                let family = crate::fonts::egui_family(ui.ctx(), &fmt.font, fmt.bold, fmt.italic);
+                let font = FontId::new(fmt.size * 1.333, family);
+                let align = if fmt.align == Align::Center {
+                    Align2::CENTER_CENTER
+                } else if right {
+                    Align2::RIGHT_CENTER
+                } else {
+                    Align2::LEFT_CENTER
+                };
+                let point = if fmt.align == Align::Center {
+                    cell_rect.center()
+                } else if right {
+                    Pos2::new(cell_rect.right() - 5.0, cell_rect.center().y)
+                } else {
+                    Pos2::new(cell_rect.left() + 5.0, cell_rect.center().y)
+                };
+                let clipped = painter.with_clip_rect(cell_rect.shrink(2.0));
+                let text_color = if ui.visuals().dark_mode && fmt.color == [28, 32, 38] {
+                    ui.visuals().text_color()
+                } else {
+                    color(fmt.color)
+                };
+                if fmt.wrap {
+                    let galley =
+                        clipped.layout(text, font, text_color, (cell_rect.width() - 10.0).max(1.0));
+                    let x = if fmt.align == Align::Center {
+                        cell_rect.center().x - galley.size().x / 2.0
+                    } else if right {
+                        cell_rect.right() - 5.0 - galley.size().x
+                    } else {
+                        cell_rect.left() + 5.0
+                    };
+                    clipped.galley(Pos2::new(x, cell_rect.top() + 3.0), galley, text_color);
+                } else {
+                    clipped.text(point, align, text, font, text_color);
+                }
+                if fmt.underline || fmt.strike {
+                    let y = cell_rect.center().y + if fmt.strike { 0.0 } else { 7.0 };
+                    clipped.line_segment(
+                        [
+                            Pos2::new(cell_rect.left() + 5.0, y),
+                            Pos2::new(cell_rect.right() - 5.0, y),
+                        ],
+                        Stroke::new(1.0, color(fmt.color)),
+                    );
+                }
+                if (r, c) == (row, col) {
                     painter.rect_stroke(
                         cell_rect,
                         0.0,
-                        Stroke::new(
-                            if fmt.border { 1.0 } else { 0.5 },
-                            if fmt.border {
-                                ui.visuals().text_color()
-                            } else {
-                                grid
-                            },
-                        ),
+                        Stroke::new(2.0, crate::chrome::accent(ui)),
                         StrokeKind::Inside,
                     );
-                    let text = sheet.display(r, c, book.locale_ru);
-                    let right = fmt.align == Align::Right
-                        || (fmt.align == Align::General
-                            && cell.is_some_and(|c| matches!(c.value, Value::Number(_))));
-                    let family =
-                        crate::fonts::egui_family(ui.ctx(), &fmt.font, fmt.bold, fmt.italic);
-                    let font = FontId::new(fmt.size * 1.333, family);
-                    let align = if fmt.align == Align::Center {
-                        Align2::CENTER_CENTER
-                    } else if right {
-                        Align2::RIGHT_CENTER
-                    } else {
-                        Align2::LEFT_CENTER
-                    };
-                    let point = if fmt.align == Align::Center {
-                        cell_rect.center()
-                    } else if right {
-                        Pos2::new(cell_rect.right() - 5.0, cell_rect.center().y)
-                    } else {
-                        Pos2::new(cell_rect.left() + 5.0, cell_rect.center().y)
-                    };
-                    let clipped = painter.with_clip_rect(cell_rect.shrink(2.0));
-                    let text_color = if ui.visuals().dark_mode && fmt.color == [28, 32, 38] {
-                        ui.visuals().text_color()
-                    } else {
-                        color(fmt.color)
-                    };
-                    if fmt.wrap {
-                        let galley = clipped.layout(
-                            text,
-                            font,
-                            text_color,
-                            (cell_rect.width() - 10.0).max(1.0),
-                        );
-                        let x = if fmt.align == Align::Center {
-                            cell_rect.center().x - galley.size().x / 2.0
-                        } else if right {
-                            cell_rect.right() - 5.0 - galley.size().x
-                        } else {
-                            cell_rect.left() + 5.0
-                        };
-                        clipped.galley(Pos2::new(x, cell_rect.top() + 3.0), galley, text_color);
-                    } else {
-                        clipped.text(point, align, text, font, text_color);
-                    }
-                    if fmt.underline || fmt.strike {
-                        let y = cell_rect.center().y + if fmt.strike { 0.0 } else { 7.0 };
-                        clipped.line_segment(
-                            [
-                                Pos2::new(cell_rect.left() + 5.0, y),
-                                Pos2::new(cell_rect.right() - 5.0, y),
-                            ],
-                            Stroke::new(1.0, color(fmt.color)),
-                        );
-                    }
-                    if (r, c) == (row, col) {
-                        painter.rect_stroke(
-                            cell_rect,
-                            0.0,
-                            Stroke::new(2.0, crate::chrome::accent(ui)),
-                            StrokeKind::Inside,
-                        );
-                    }
                 }
             }
             if response.clicked() {
@@ -1354,12 +1399,13 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                 return;
             };
             let header_y = origin.y + viewport.min.y;
-            let headers: Vec<_> = (c0..c1)
+            let headers: Vec<_> = visible_axis(c0..c1, frozen_c)
+                .into_iter()
                 .filter(|c| !sheet.hidden_cols.contains(c))
                 .map(|c| {
                     (
                         c,
-                        origin.x + 48.0 + axis_pos(c, 96.0, &sheet.widths, &sheet.hidden_cols),
+                        cell_rect(sheet, origin, viewport, 0, c, frozen_r, frozen_c).left(),
                         sheet.widths.get(&c).copied().unwrap_or(96.0),
                     )
                 })
@@ -1400,11 +1446,11 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
             let Some(sheet) = book.active_sheet() else {
                 return;
             };
-            for r in r0..r1 {
+            for r in visible_axis(r0..r1, frozen_r) {
                 if sheet.hidden_rows.contains(&r) {
                     continue;
                 }
-                let y = origin.y + 28.0 + axis_pos(r, 26.0, &sheet.row_heights, &sheet.hidden_rows);
+                let y = cell_rect(sheet, origin, viewport, r, 0, frozen_r, frozen_c).top();
                 let h = sheet.row_heights.get(&r).copied().unwrap_or(26.0);
                 let header = Rect::from_min_size(
                     Pos2::new(origin.x + viewport.min.x, y),
@@ -1526,15 +1572,9 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                         }
                         egui::Event::Paste(text) => match super::io::parse_csv(&text, '\t') {
                             Ok(rows) => {
-                                changed |= result(
-                                    &mut state,
-                                    book.set_range(
-                                        id,
-                                        book.selection.row,
-                                        book.selection.col,
-                                        &rows,
-                                    ),
-                                )
+                                let (row, col) = (book.selection.row, book.selection.col);
+                                changed |=
+                                    result(&mut state, paste_values(book, id, row, col, &rows))
                             }
                             Err(e) => state.error = e,
                         },
@@ -1560,7 +1600,7 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                                 } else if key == Key::Enter || key == Key::Tab {
                                     changed |= commit(book, &mut state);
                                     if !state.editing {
-                                        advance(&mut book.selection, key, modifiers.shift);
+                                        advance(book, key, modifiers.shift);
                                         state.scroll_to_selection = true;
                                     }
                                 }
@@ -1622,7 +1662,7 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                                 continue;
                             }
                             if key == Key::Enter || key == Key::Tab {
-                                advance(&mut book.selection, key, modifiers.shift);
+                                advance(book, key, modifiers.shift);
                                 state.scroll_to_selection = true;
                                 continue;
                             }
@@ -1688,10 +1728,38 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                             } else {
                                 None
                             };
+                            let step = if !modifiers.ctrl {
+                                let delta = match key {
+                                    Key::ArrowUp => Some((-1, 0)),
+                                    Key::ArrowDown => Some((1, 0)),
+                                    Key::ArrowLeft => Some((0, -1)),
+                                    Key::ArrowRight => Some((0, 1)),
+                                    _ => None,
+                                };
+                                delta.and_then(|(dr, dc)| {
+                                    book.active_sheet().map(|sheet| {
+                                        step_cell(
+                                            sheet,
+                                            book.selection.row,
+                                            book.selection.col,
+                                            dr,
+                                            dc,
+                                        )
+                                    })
+                                })
+                            } else {
+                                None
+                            };
                             let selection = &mut book.selection;
                             match key {
                                 _ if jump.is_some() => {
                                     if let Some((r, c)) = jump {
+                                        selection.row = r;
+                                        selection.col = c;
+                                    }
+                                }
+                                _ if step.is_some() => {
+                                    if let Some((r, c)) = step {
                                         selection.row = r;
                                         selection.col = c;
                                     }
@@ -1863,16 +1931,104 @@ fn freeze_selection(book: &mut Book, state: &mut State, row: u32, col: u32) -> b
         false
     }
 }
-fn advance(selection: &mut Selection, key: Key, backwards: bool) {
-    match (key, backwards) {
-        (Key::Enter, true) => selection.row = selection.row.saturating_sub(1),
-        (Key::Enter, false) => selection.row = selection.row.saturating_add(1).min(MAX_ROWS - 1),
-        (Key::Tab, true) => selection.col = selection.col.saturating_sub(1),
-        (Key::Tab, false) => selection.col = selection.col.saturating_add(1).min(MAX_COLS - 1),
-        _ => (),
+fn entry_text(book: &Book, sheet: u64, row: u32, col: u32, input: &str) -> String {
+    if !input.is_empty()
+        && !input.starts_with('\'')
+        && book
+            .sheet_by_id(sheet)
+            .and_then(|sheet| sheet.cell(row, col))
+            .is_some_and(|cell| cell.fmt.number == "@")
+    {
+        format!("'{input}")
+    } else {
+        input.into()
     }
-    selection.anchor_row = selection.row;
-    selection.anchor_col = selection.col;
+}
+fn paste_values(
+    book: &mut Book,
+    sheet: u64,
+    row: u32,
+    col: u32,
+    rows: &[Vec<String>],
+) -> Result<(), String> {
+    let values: Vec<Vec<String>> = rows
+        .iter()
+        .enumerate()
+        .map(|(r, line)| {
+            line.iter()
+                .enumerate()
+                .map(|(c, input)| {
+                    entry_text(
+                        book,
+                        sheet,
+                        row.saturating_add(r as u32),
+                        col.saturating_add(c as u32),
+                        input,
+                    )
+                })
+                .collect()
+        })
+        .collect();
+    book.set_range(sheet, row, col, &values)
+}
+fn visible_index(mut index: u32, count: u32, direction: i8, hidden: &BTreeSet<u32>) -> Option<u32> {
+    while hidden.contains(&index) {
+        index = if direction < 0 {
+            index.checked_sub(1)?
+        } else {
+            index.checked_add(1).filter(|value| *value < count)?
+        };
+    }
+    Some(index)
+}
+fn step_cell(sheet: &Sheet, row: u32, col: u32, dr: i8, dc: i8) -> (u32, u32) {
+    let merge = sheet.merges.iter().find(|range| range.contains(row, col));
+    let base_row = merge.map_or(row, |range| if dr > 0 { range.r1 } else { range.r0 });
+    let base_col = merge.map_or(col, |range| if dc > 0 { range.c1 } else { range.c0 });
+    let r = if dr < 0 {
+        base_row.saturating_sub(1)
+    } else if dr > 0 {
+        base_row.saturating_add(1).min(MAX_ROWS - 1)
+    } else {
+        row
+    };
+    let c = if dc < 0 {
+        base_col.saturating_sub(1)
+    } else if dc > 0 {
+        base_col.saturating_add(1).min(MAX_COLS - 1)
+    } else {
+        col
+    };
+    let Some(r) = visible_index(r, MAX_ROWS, dr, &sheet.hidden_rows) else {
+        return (row, col);
+    };
+    let Some(c) = visible_index(c, MAX_COLS, dc, &sheet.hidden_cols) else {
+        return (row, col);
+    };
+    sheet
+        .merges
+        .iter()
+        .find(|range| range.contains(r, c))
+        .map_or((r, c), |range| (range.r0, range.c0))
+}
+fn advance(book: &mut Book, key: Key, backwards: bool) {
+    let direction = if backwards { -1 } else { 1 };
+    let delta = if key == Key::Enter {
+        (direction, 0)
+    } else {
+        (0, direction)
+    };
+    let current = (book.selection.row, book.selection.col);
+    let (row, col) = book
+        .active_sheet()
+        .map(|sheet| step_cell(sheet, current.0, current.1, delta.0, delta.1))
+        .unwrap_or(current);
+    book.selection = Selection {
+        row,
+        col,
+        anchor_row: row,
+        anchor_col: col,
+    };
 }
 fn add_sheet(book: &mut Book, state: &mut State) -> bool {
     let committed = commit(book, state);
@@ -1960,20 +2116,73 @@ fn chart_kind_name(kind: ChartKind) -> &'static str {
 }
 
 fn clear(book: &mut Book, state: &mut State) -> bool {
-    let range = book.selection.range();
-    if let Err(e) = range.validate() {
-        state.error = e;
-        return false;
+    result(
+        state,
+        book.clear_range(book.active_id(), book.selection.range(), true, false),
+    )
+}
+fn autofit_width(ui: &egui::Ui, sheet: &Sheet, col: u32, locale_ru: bool) -> f32 {
+    sheet
+        .cells
+        .iter()
+        .filter_map(|(address, cell)| {
+            let (row, cell_col) = super::model::parse_address(address)?;
+            (cell_col == col && !sheet.merges.iter().any(|merge| merge.contains(row, col)))
+                .then_some((row, cell))
+        })
+        .map(|(row, cell)| {
+            let font = FontId::new(
+                cell.fmt.size * 1.333,
+                crate::fonts::egui_family(ui.ctx(), &cell.fmt.font, cell.fmt.bold, cell.fmt.italic),
+            );
+            ui.painter()
+                .layout_no_wrap(
+                    sheet.display(row, col, locale_ru),
+                    font,
+                    color(cell.fmt.color),
+                )
+                .size()
+                .x
+                + 10.0
+        })
+        .fold(24.0, f32::max)
+        .min(1800.0)
+}
+fn grid_size(sheet: &Sheet, rows: u32, cols: u32) -> (f32, f32) {
+    let row_end = sheet
+        .merges
+        .iter()
+        .map(|merge| merge.r1.saturating_add(1))
+        .max()
+        .unwrap_or(0);
+    let col_end = sheet
+        .merges
+        .iter()
+        .map(|merge| merge.c1.saturating_add(1))
+        .max()
+        .unwrap_or(0);
+    let mut width = axis_pos(cols.max(col_end), 96.0, &sheet.widths, &sheet.hidden_cols) + 48.0;
+    let mut height = axis_pos(
+        rows.max(row_end),
+        26.0,
+        &sheet.row_heights,
+        &sheet.hidden_rows,
+    ) + 28.0;
+    for image in &sheet.images {
+        width = width.max(
+            48.0 + axis_pos(image.col, 96.0, &sheet.widths, &sheet.hidden_cols)
+                + image.x_offset
+                + image.width
+                + 16.0,
+        );
+        height = height.max(
+            28.0 + axis_pos(image.row, 26.0, &sheet.row_heights, &sheet.hidden_rows)
+                + image.y_offset
+                + image.height
+                + 16.0,
+        );
     }
-    let id = book.active_id();
-    let mut changed = false;
-    for r in range.r0..=range.r1 {
-        for c in range.c0..=range.c1 {
-            changed |= result(state, book.set_input(id, r, c, "").map(|_| ()));
-        }
-    }
-    book.recalculate();
-    changed
+    (width, height)
 }
 /// Moves/resizes a picture; `local` is its top-left corner relative to the grid origin.
 fn place_image(sheet: &mut Sheet, image: u64, local: Vec2, size: Vec2) {
@@ -2037,7 +2246,8 @@ fn paint_image(
         }
     }
 }
-fn start_image_job(ctx: &egui::Context, state: &mut State) {
+fn start_image_job(ctx: &egui::Context, state: &mut State, book: &Book) {
+    state.image_target = Some((book.active_id(), book.selection.row, book.selection.col));
     let (sender, receiver) = std::sync::mpsc::channel();
     let ctx = ctx.clone();
     state.image_job = Some(std::sync::Arc::new(std::sync::Mutex::new(receiver)));
@@ -2119,6 +2329,70 @@ fn cell_rect(
             sheet.row_heights.get(&row).copied().unwrap_or(26.0),
         ),
     )
+}
+fn visible_axis(range: std::ops::Range<u32>, frozen: u32) -> Vec<u32> {
+    range
+        .filter(|index| *index >= frozen)
+        .chain(0..frozen)
+        .collect()
+}
+fn cell_area(
+    sheet: &Sheet,
+    origin: Pos2,
+    viewport: Rect,
+    row: u32,
+    col: u32,
+    frozen_rows: u32,
+    frozen_cols: u32,
+) -> Rect {
+    let mut rect = cell_rect(sheet, origin, viewport, row, col, frozen_rows, frozen_cols);
+    if let Some(merge) = sheet
+        .merges
+        .iter()
+        .find(|merge| merge.r0 == row && merge.c0 == col)
+    {
+        rect.max.x = rect.min.x + axis_pos(merge.c1 + 1, 96.0, &sheet.widths, &sheet.hidden_cols)
+            - axis_pos(merge.c0, 96.0, &sheet.widths, &sheet.hidden_cols);
+        rect.max.y = rect.min.y
+            + axis_pos(merge.r1 + 1, 26.0, &sheet.row_heights, &sheet.hidden_rows)
+            - axis_pos(merge.r0, 26.0, &sheet.row_heights, &sheet.hidden_rows);
+    }
+    rect
+}
+fn visible_cells(
+    sheet: &Sheet,
+    origin: Pos2,
+    viewport: Rect,
+    rows: std::ops::Range<u32>,
+    cols: std::ops::Range<u32>,
+    frozen: (u32, u32),
+    clip: Rect,
+) -> Vec<(u32, u32)> {
+    let mut cells = BTreeSet::new();
+    for row in visible_axis(rows, frozen.0) {
+        if sheet.hidden_rows.contains(&row) {
+            continue;
+        }
+        for col in visible_axis(cols.clone(), frozen.1) {
+            if !sheet.hidden_cols.contains(&col) {
+                cells.insert((row, col));
+            }
+        }
+    }
+    for merge in &sheet.merges {
+        if !sheet.hidden_rows.contains(&merge.r0)
+            && !sheet.hidden_cols.contains(&merge.c0)
+            && cell_area(
+                sheet, origin, viewport, merge.r0, merge.c0, frozen.0, frozen.1,
+            )
+            .intersects(clip)
+        {
+            cells.insert((merge.r0, merge.c0));
+        }
+    }
+    let mut cells: Vec<_> = cells.into_iter().collect();
+    cells.sort_by_key(|&(row, col)| (row < frozen.0, col < frozen.1, row, col));
+    cells
 }
 fn paint_chart(ui: &egui::Ui, sheet: &Sheet, chart: &super::model::Chart, rect: Rect) {
     let painter = ui.painter().with_clip_rect(rect);
@@ -2800,6 +3074,272 @@ mod tests {
                 .and_then(|sheet| sheet.cell(0, 1))
                 .is_none()
         );
+        Ok(())
+    }
+    #[test]
+    fn review3_keyboard_skips_hidden_axes_and_crosses_entire_merge() {
+        let mut sheet = Sheet::default();
+        sheet.hidden_rows.insert(1);
+        sheet.hidden_cols.insert(1);
+        sheet.merges.push(Range::new(3, 2, 5, 4));
+        assert_eq!(step_cell(&sheet, 0, 0, 1, 0), (2, 0));
+        assert_eq!(step_cell(&sheet, 0, 0, 0, 1), (0, 2));
+        assert_eq!(step_cell(&sheet, 3, 2, 1, 0), (6, 2));
+        assert_eq!(step_cell(&sheet, 3, 2, 0, 1), (3, 5));
+        assert_eq!(step_cell(&sheet, 3, 5, 0, -1), (3, 2));
+        assert_eq!(step_cell(&sheet, 6, 2, -1, 0), (3, 2));
+        sheet.hidden_rows.insert(MAX_ROWS - 1);
+        assert_eq!(step_cell(&sheet, MAX_ROWS - 2, 0, 1, 0), (MAX_ROWS - 2, 0));
+    }
+    #[test]
+    fn review3_frozen_cells_are_unique_and_headers_keep_viewport_coordinates() {
+        let sheet = Sheet::default();
+        let origin = Pos2::new(10.0, 20.0);
+        let viewport = Rect::from_min_max(Pos2::new(400.0, 260.0), Pos2::new(800.0, 520.0));
+        let columns = visible_axis(0..5, 2);
+        assert_eq!(columns, vec![2, 3, 4, 0, 1]);
+        let cells = visible_cells(
+            &sheet,
+            origin,
+            viewport,
+            0..4,
+            0..5,
+            (2, 2),
+            Rect::EVERYTHING,
+        );
+        assert_eq!(cells.iter().filter(|&&(r, c)| (r, c) == (0, 0)).count(), 1);
+        assert_eq!(cells.last().copied(), Some((1, 1)));
+        let frozen = cell_rect(&sheet, origin, viewport, 0, 0, 2, 2);
+        assert_eq!(frozen.min, Pos2::new(458.0, 308.0));
+        let moving = cell_rect(&sheet, origin, viewport, 2, 2, 2, 2);
+        assert_eq!(moving.min, Pos2::new(250.0, 100.0));
+    }
+    #[test]
+    fn review3_merge_anchor_remains_visible_when_its_original_cell_is_offscreen() {
+        let mut sheet = Sheet::default();
+        sheet.merges.push(Range::new(0, 0, 14, 3));
+        let viewport = Rect::from_min_max(Pos2::new(0.0, 260.0), Pos2::new(400.0, 520.0));
+        let cells = visible_cells(&sheet, Pos2::ZERO, viewport, 10..20, 0..4, (0, 0), viewport);
+        assert!(cells.contains(&(0, 0)));
+        assert_eq!(
+            cell_area(&sheet, Pos2::ZERO, viewport, 0, 0, 0, 0).max.y,
+            418.0
+        );
+    }
+    #[test]
+    fn review3_text_formatted_cells_keep_typed_and_pasted_input_literal() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        let fmt = CellFormat {
+            number: "@".into(),
+            ..Default::default()
+        };
+        book.set_format(id, Range::new(0, 0, 1, 0), fmt)?;
+        let mut state = State {
+            editing: true,
+            last: (id, 0, 0),
+            buffer: "001".into(),
+            ..Default::default()
+        };
+        assert!(commit(&mut book, &mut state));
+        assert_eq!(
+            book.active_sheet()
+                .and_then(|sheet| sheet.cell(0, 0))
+                .map(|cell| &cell.value),
+            Some(&Value::Text("001".into()))
+        );
+        paste_values(&mut book, id, 1, 0, &[vec!["=1+1".into(), "002".into()]])?;
+        assert_eq!(
+            book.active_sheet()
+                .and_then(|sheet| sheet.cell(1, 0))
+                .map(|cell| &cell.value),
+            Some(&Value::Text("=1+1".into()))
+        );
+        assert_eq!(
+            book.active_sheet()
+                .and_then(|sheet| sheet.cell(1, 1))
+                .map(|cell| &cell.value),
+            Some(&Value::Number(2.0))
+        );
+        assert_eq!(entry_text(&book, id, 0, 0, ""), "");
+        Ok(())
+    }
+    #[test]
+    fn review3_delete_keeps_sparse_storage_and_existing_formats() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.set_cell(id, 0, 0, "value")?;
+        book.set_format(
+            id,
+            Range::new(1, 1, 1, 1),
+            CellFormat {
+                bold: true,
+                ..Default::default()
+            },
+        )?;
+        let format_id = book
+            .active_sheet()
+            .and_then(|sheet| sheet.cell(1, 1))
+            .ok_or("cell")?
+            .id;
+        book.selection = Selection {
+            row: 99,
+            col: 99,
+            anchor_row: 0,
+            anchor_col: 0,
+        };
+        assert!(clear(&mut book, &mut State::default()));
+        let sheet = book.active_sheet().ok_or("sheet")?;
+        assert_eq!(sheet.cells.len(), 1);
+        assert_eq!(
+            sheet
+                .cell(1, 1)
+                .map(|cell| (cell.id, cell.fmt.bold, cell.input.as_str())),
+            Some((format_id, true, ""))
+        );
+        assert!(sheet.cell(0, 0).is_none());
+        assert!(sheet.cell(99, 99).is_none());
+        Ok(())
+    }
+    #[test]
+    fn review3_grid_bounds_include_merge_extent_and_floating_image_edges() {
+        let mut sheet = Sheet::default();
+        sheet.merges.push(Range::new(0, 0, 1499, 49));
+        let (width, height) = grid_size(&sheet, 1000, 26);
+        assert!(width >= 48.0 + 50.0 * 96.0);
+        assert!(height >= 28.0 + 1500.0 * 26.0);
+        sheet.merges.clear();
+        sheet.images.push(super::super::model::SheetImage {
+            id: 2,
+            row: 2000,
+            col: 80,
+            x_offset: 400.0,
+            y_offset: 200.0,
+            width: 8000.0,
+            height: 8000.0,
+            bytes: vec![1],
+            alt: String::new(),
+        });
+        let (width, height) = grid_size(&sheet, 1000, 26);
+        assert!(width > 48.0 + 80.0 * 96.0 + 400.0 + 8000.0);
+        assert!(height > 28.0 + 2000.0 * 26.0 + 200.0 + 8000.0);
+    }
+    #[test]
+    fn review3_autofit_measures_number_format_and_font_and_can_shrink() -> Result<(), String> {
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx)?;
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.set_cell(id, 0, 0, "1")?;
+        let mut widths = Vec::new();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            if let Some(sheet) = book.active_sheet_mut() {
+                widths.push(autofit_width(ui, sheet, 0, false));
+                if let Some(cell) = sheet.cell_mut(0, 0) {
+                    cell.fmt.number = "0.000000000000".into();
+                }
+                widths.push(autofit_width(ui, sheet, 0, false));
+                if let Some(cell) = sheet.cell_mut(0, 0) {
+                    cell.fmt.size = 36.0;
+                }
+                widths.push(autofit_width(ui, sheet, 0, false));
+            }
+        });
+        output.textures_delta.clear();
+        assert_eq!(widths.len(), 3);
+        assert!(widths[0] < 96.0);
+        assert!(widths[1] > widths[0] * 2.0);
+        assert!(widths[2] > widths[1] * 2.0);
+        Ok(())
+    }
+    #[test]
+    fn review3_async_image_retains_sheet_and_cell_while_active_sheet_changes() -> Result<(), String>
+    {
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx)?;
+        let mut book = Book::default();
+        let first = book.active_id();
+        let other = book.add_sheet("Other")?;
+        book.active = 1;
+        book.selection = Selection {
+            row: 9,
+            col: 9,
+            anchor_row: 9,
+            anchor_col: 9,
+        };
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(2, 2)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .map_err(|error| error.to_string())?;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        sender
+            .send(Ok(Some(png.into_inner())))
+            .map_err(|error| error.to_string())?;
+        let state_id = egui::Id::new(("sheets-editor", 73u64));
+        ctx.data_mut(|data| {
+            data.insert_temp(
+                state_id,
+                State {
+                    last: (other, 9, 9),
+                    image_job: Some(std::sync::Arc::new(std::sync::Mutex::new(receiver))),
+                    image_target: Some((first, 3, 4)),
+                    ..Default::default()
+                },
+            )
+        });
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            show_for_tab(ui, &mut book, 73);
+        });
+        output.textures_delta.clear();
+        let image = book
+            .sheet_by_id(first)
+            .and_then(|sheet| sheet.images.first())
+            .ok_or("image")?;
+        assert_eq!((image.row, image.col), (3, 4));
+        assert!(book.sheet_by_id(other).ok_or("other")?.images.is_empty());
+        assert_eq!(book.active_id(), other);
+        assert!(
+            ctx.data_mut(|data| data.get_temp::<State>(state_id))
+                .ok_or("state")?
+                .selected_image
+                .is_none()
+        );
+        Ok(())
+    }
+    #[test]
+    fn review3_inspection_navigation_is_consumed_readonly_and_rejects_hidden_or_missing_cells()
+    -> Result<(), String> {
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx)?;
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.set_cell(id, 2, 3, "error")?;
+        request_focus(&ctx, 74, id, 2, 3);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.disable();
+            show_for_tab(ui, &mut book, 74);
+        });
+        output.textures_delta.clear();
+        assert_eq!((book.selection.row, book.selection.col), (2, 3));
+        let request_id = egui::Id::new(("sheets-editor", 74u64)).with("focus-request");
+        assert!(
+            ctx.data_mut(|data| data.get_temp::<(u64, u32, u32)>(request_id))
+                .is_none()
+        );
+        let mut state = State::default();
+        let before = book.clone();
+        assert!(!apply_focus_request(&mut book, &mut state, (id, 9, 9)));
+        assert_eq!(book, before);
+        book.active_sheet_mut()
+            .ok_or("sheet")?
+            .merges
+            .push(Range::new(2, 2, 2, 3));
+        assert!(!apply_focus_request(&mut book, &mut state, (id, 2, 3)));
+        book.active_sheet_mut()
+            .ok_or("sheet")?
+            .hidden_rows
+            .insert(2);
+        assert!(!apply_focus_request(&mut book, &mut state, (id, 2, 3)));
         Ok(())
     }
 }

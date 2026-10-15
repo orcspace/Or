@@ -150,6 +150,7 @@ pub struct App {
     recovery: crate::recovery::Recovery,
     locks: BTreeMap<u64, FileLock>,
     stamps: BTreeMap<u64, Option<SystemTime>>,
+    observed_stamps: BTreeMap<u64, Option<SystemTime>>,
     recoveries: Vec<crate::recovery::Snapshot>,
     mcp: Option<crate::mcp::Handle>,
     bridge: Option<std::sync::mpsc::Receiver<crate::mcp::BridgeRequest>>,
@@ -235,6 +236,7 @@ impl App {
             recovery: crate::recovery::Recovery::start(),
             locks: BTreeMap::new(),
             stamps: BTreeMap::new(),
+            observed_stamps: BTreeMap::new(),
             recoveries: if std::env::args().any(|a| a == "--ui-smoke-test") {
                 Vec::new()
             } else {
@@ -350,6 +352,75 @@ impl App {
             }
             Err(error) => self.error = error,
         }
+    }
+    fn restore_snapshot(&mut self, snapshot: &crate::recovery::Snapshot) -> Result<(), String> {
+        if self.pending.is_some() {
+            return Err("Сначала завершите подтверждение".into());
+        }
+        if let Some(id) = self.active {
+            self.flush_pending(id)?;
+        }
+        let (id, following) = fresh_tab_id(&self.tabs, self.next_id)?;
+        let tab = Tab::new(id, snapshot.document.clone(), snapshot.title.clone(), None);
+        if !self.recovery.restore(
+            snapshot.id,
+            crate::recovery::Snapshot {
+                id,
+                title: tab.title.clone(),
+                path: None,
+                version: tab.version,
+                document: tab.document.clone(),
+            },
+        ) {
+            return Err(
+                "Не удалось поставить восстановление в очередь; исходный снимок сохранён.".into(),
+            );
+        }
+        self.next_id = following;
+        self.snapshot_versions.insert(id, tab.version);
+        self.tabs.push(tab);
+        self.active = Some(id);
+        crate::slides::editor::stop_presentation(&self.editor_ctx);
+        self.recoveries.retain(|s| s.id != snapshot.id);
+        Ok(())
+    }
+    fn navigate_inspection(
+        &mut self,
+        ctx: &egui::Context,
+        id: u64,
+        version: u64,
+        target: crate::inspector::Target,
+    ) -> Result<(), String> {
+        if self.pending.is_some() || self.palette {
+            return Err("Сначала завершите текущее действие".into());
+        }
+        if let Some(active) = self.active {
+            self.flush_pending(active)?;
+        }
+        let tab = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == id)
+            .ok_or("Документ проверки закрыт")?;
+        if tab.version != version || !target.available(&tab.document) {
+            return Err("Замечание устарело или объект скрыт. Повторите проверку.".into());
+        }
+        self.active = Some(id);
+        crate::slides::editor::stop_presentation(ctx);
+        match target {
+            crate::inspector::Target::Paragraph(paragraph) => {
+                crate::docs::editor::request_focus(ctx, id, paragraph)
+            }
+            crate::inspector::Target::Cell { sheet, row, col } => {
+                crate::sheets::editor::request_focus(ctx, id, sheet, row, col)
+            }
+            crate::inspector::Target::Element { slide, element } => {
+                crate::slides::editor::request_focus(ctx, id, slide, Some(element))
+            }
+        }
+        self.show_inspector = false;
+        ctx.request_repaint();
+        Ok(())
     }
     fn tr<'a>(&self, s: &'a str) -> &'a str {
         crate::i18n::tr(s, &self.settings.language)
@@ -636,6 +707,7 @@ impl App {
         }
         self.locks.remove(&id);
         self.stamps.remove(&id);
+        self.observed_stamps.remove(&id);
         self.snapshot_versions.remove(&id);
         self.saving.remove(&id);
         self.reloading.remove(&id);
@@ -856,9 +928,11 @@ impl App {
                             self.recovery.clear(id);
                         }
                     }
-                    self.settings.remember(path);
-                    if let Err(error) = self.worker.save_settings(self.settings.clone()) {
-                        self.error = error;
+                    if !export {
+                        self.settings.remember(path);
+                        if let Err(error) = self.worker.save_settings(self.settings.clone()) {
+                            self.error = error;
+                        }
                     }
                     self.status = if copy {
                         "Копия сохранена"
@@ -921,6 +995,7 @@ impl App {
                 }
                 Event::Watched(stamps) => {
                     for (id, new) in stamps {
+                        self.observed_stamps.insert(id, new);
                         if !self.reloading.contains_key(&id)
                             && self.stamps.get(&id).is_some_and(|old| *old != new)
                         {
@@ -996,6 +1071,10 @@ impl App {
                 let _ = r
                     .reply
                     .send(Err("busy: подтвердите действие в интерфейсе".into()));
+                continue;
+            }
+            if let Err(error) = crate::mcp::tools::validate_args(&r.tool, &r.args) {
+                let _ = r.reply.send(Err(error));
                 continue;
             }
             if r.args
@@ -1473,6 +1552,7 @@ impl App {
         if self.show_inspector {
             let mut open = true;
             let mut refresh = false;
+            let mut navigate = None;
             egui::Window::new("Проверка документа")
                 .open(&mut open)
                 .default_width(520.0)
@@ -1501,7 +1581,25 @@ impl App {
                             .max_height(420.0)
                             .show(ui, |ui| {
                                 for finding in &result.report.findings {
-                                    ui.label(egui::RichText::new(&finding.location).strong());
+                                    if ui
+                                        .add_enabled(
+                                            unchanged
+                                                && self.pending.is_none()
+                                                && self
+                                                    .tabs
+                                                    .iter()
+                                                    .find(|tab| tab.id == result.id)
+                                                    .is_some_and(|tab| {
+                                                        finding.target.available(&tab.document)
+                                                    }),
+                                            egui::Button::new(&finding.location)
+                                                .frame_when_inactive(false),
+                                        )
+                                        .clicked()
+                                    {
+                                        navigate =
+                                            Some((result.id, result.version, finding.target));
+                                    }
                                     ui.label(&finding.message);
                                     ui.add_space(8.0);
                                 }
@@ -1523,6 +1621,11 @@ impl App {
                         .clicked();
                 });
             self.show_inspector = open;
+            if let Some((id, version, target)) = navigate {
+                if let Err(error) = self.navigate_inspection(ctx, id, version, target) {
+                    self.error = error;
+                }
+            }
             if refresh {
                 self.inspect_current();
             }
@@ -1566,30 +1669,9 @@ impl App {
                         ui.horizontal(|ui| {
                             ui.label(&s.title);
                             if ui.button("Восстановить").clicked() {
-                                let (id, following) = match fresh_tab_id(&self.tabs, self.next_id) {
-                                    Ok(ids) => ids,
-                                    Err(e) => {
-                                        self.error = e;
-                                        return;
-                                    }
-                                };
-                                let mut t = Tab::new(id, s.document.clone(), s.title.clone(), None);
-                                t.saved_version = u64::MAX;
-                                if !self.recovery.restore(s.id, crate::recovery::Snapshot {
-                                    id,
-                                    title: t.title.clone(),
-                                    path: None,
-                                    version: t.version,
-                                    document: t.document.clone(),
-                                }) {
-                                    self.error = "Не удалось поставить восстановление в очередь; исходный снимок сохранён.".into();
-                                    return;
+                                if let Err(error) = self.restore_snapshot(&s) {
+                                    self.error = error;
                                 }
-                                self.next_id = following;
-                                self.snapshot_versions.insert(id, t.version);
-                                self.tabs.push(t);
-                                self.active = Some(id);
-                                self.recoveries.retain(|r| r.id != s.id);
                             }
                         });
                     }
@@ -1605,7 +1687,7 @@ impl App {
             egui::Window::new("Файл изменён на диске").collapsible(false).show(ctx,|ui|{
             ui.label("Перезагрузка заменит текущие правки. Для их сохранения используйте «Сохранить копию».");ui.horizontal(|ui|{
                 if ui.button("Перезагрузить").clicked() { self.reload(id); }
-                if ui.button("Оставить правки").clicked(){self.stamps.insert(id, self.tabs.iter().find(|t|t.id==id).and_then(|t|t.path.as_ref()).and_then(|p|crate::file_io::stamp(p)));self.disk_changed=None;}
+                if ui.button("Оставить правки").clicked(){if let Some(observed) = self.observed_stamps.get(&id).copied() { self.stamps.insert(id, observed); self.disk_changed=None; } else { self.status="Дождитесь повторной проверки файла".into(); }}
             });
         });
         }
@@ -3104,6 +3186,7 @@ mod shell_input_tests {
             )),
             locks: BTreeMap::new(),
             stamps: BTreeMap::new(),
+            observed_stamps: BTreeMap::new(),
             recoveries: Vec::new(),
             mcp,
             bridge,
@@ -3753,6 +3836,119 @@ mod shell_input_tests {
         if root.exists() {
             std::fs::remove_dir_all(root).map_err(|error| error.to_string())?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_mcp_args_do_not_commit_a_pending_user_cell() -> Result<(), String> {
+        let mut app = fixture()?;
+        app.active = Some(11);
+        frame(&mut app, vec![]);
+        let canvas = egui::Id::new(("sheets-editor", 11_u64)).with("canvas");
+        app.editor_ctx.memory_mut(|m| m.request_focus(canvas));
+        frame(&mut app, vec![egui::Event::Text("draft".into())]);
+        let before = app.tabs[1].document.clone();
+        let version = app.tabs[1].version;
+        let mut reply = mcp_request(
+            &mut app,
+            "sheets_write_range",
+            json!({"document_id":11,"values":[["x"]],"col":"wrong"}),
+        )?;
+        let ctx = app.editor_ctx.clone();
+        app.mcp_requests(&ctx);
+        assert!(reply.try_recv().map_err(|e| e.to_string())?.is_err());
+        assert_eq!(app.tabs[1].document, before);
+        assert_eq!(app.tabs[1].version, version);
+        app.flush_pending(11)?;
+        let Document::Sheets(book) = &app.tabs[1].document else {
+            return Err("book".into());
+        };
+        assert_eq!(
+            book.active_sheet()
+                .and_then(|s| s.cell(0, 0))
+                .map(|c| c.input.as_str()),
+            Some("draft")
+        );
+        Ok(())
+    }
+    #[test]
+    fn restoring_another_document_commits_the_current_cell_draft() -> Result<(), String> {
+        let mut app = fixture()?;
+        app.active = Some(11);
+        frame(&mut app, vec![]);
+        let canvas = egui::Id::new(("sheets-editor", 11_u64)).with("canvas");
+        app.editor_ctx.memory_mut(|m| m.request_focus(canvas));
+        frame(&mut app, vec![egui::Event::Text("draft".into())]);
+        let snapshot = crate::recovery::Snapshot {
+            id: 100,
+            title: "Recovery".into(),
+            path: None,
+            version: 0,
+            document: Document::create("docs")?,
+        };
+        app.restore_snapshot(&snapshot)?;
+        let Document::Sheets(book) = &app.tabs[1].document else {
+            return Err("book".into());
+        };
+        assert_eq!(
+            book.active_sheet()
+                .and_then(|s| s.cell(0, 0))
+                .map(|c| c.input.as_str()),
+            Some("draft")
+        );
+        assert_ne!(app.active, Some(11));
+        assert!(app.current().is_some_and(Tab::dirty));
+        Ok(())
+    }
+    #[test]
+    fn exports_do_not_add_unopenable_paths_to_recent_documents() -> Result<(), String> {
+        let mut app = fixture()?;
+        let recent = app.settings.recent.clone();
+        worker_event(
+            &mut app,
+            Event::Saved {
+                id: 10,
+                version: 0,
+                path: "C:/report.pdf".into(),
+                copy: false,
+                export: true,
+                stamp: None,
+                lock: None,
+            },
+        )?;
+        app.events();
+        assert_eq!(app.settings.recent, recent);
+        assert!(app.tabs[0].path.is_none());
+        Ok(())
+    }
+    #[test]
+    fn inspector_rejects_stale_targets_and_preserves_history() -> Result<(), String> {
+        let mut app = fixture()?;
+        let Document::Docs(doc) = &app.tabs[0].document else {
+            return Err("doc".into());
+        };
+        let target = crate::inspector::Target::Paragraph(doc.paragraphs[0].id);
+        let before = app.tabs[0].document.clone();
+        let version = app.tabs[0].version;
+        let ctx = app.editor_ctx.clone();
+        assert!(
+            app.navigate_inspection(&ctx, 10, version + 1, target)
+                .is_err()
+        );
+        assert!(
+            app.navigate_inspection(
+                &ctx,
+                10,
+                version,
+                crate::inspector::Target::Paragraph(u64::MAX)
+            )
+            .is_err()
+        );
+        app.navigate_inspection(&ctx, 10, version, target)?;
+        assert_eq!(app.tabs[0].document, before);
+        assert_eq!(app.tabs[0].version, version);
+        assert!(app.tabs[0].undo.is_empty());
+        assert_eq!(app.active, Some(10));
         Ok(())
     }
 }

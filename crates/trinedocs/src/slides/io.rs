@@ -66,7 +66,7 @@ pub fn write(deck: &Deck, ext: &str) -> Result<Vec<u8>, String> {
         _ => Err(format!("Экспорт .{ext} ещё не поддерживается")),
     }
 }
-fn element_text(element: &Element) -> String {
+pub(crate) fn element_text(element: &Element) -> String {
     let content = match &element.kind {
         ElementKind::Table { cells } => cells
             .iter()

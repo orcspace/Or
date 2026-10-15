@@ -55,6 +55,12 @@ pub fn write_zip(parts: Vec<(String, Vec<u8>)>) -> Result<Vec<u8>, String> {
         if !safe_name(name) || !names.insert(name) {
             return Err("Недопустимое имя/дубликат ZIP".into());
         }
+        if (name.ends_with(".xml") || name.ends_with(".rels"))
+            && let Ok(xml) = std::str::from_utf8(data)
+            && let Some(character) = xml.chars().find(|ch| !matches!(*ch, '\u{9}' | '\u{a}' | '\u{d}' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}'))
+        {
+            return Err(format!("Недопустимый символ U+{:04X} в XML-части {name}; файл не изменён", character as u32));
+        }
         total = total.saturating_add(data.len() as u64);
         if data.len() > MAX_FILE || total > MAX_INFLATED {
             return Err("Превышен лимит архива при сохранении".into());
@@ -125,6 +131,38 @@ mod tests {
             let bytes = zip.finish().map_err(|e| e.to_string())?.into_inner();
             assert!(read_zip(&bytes).is_err(), "{name}");
         }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod xml_character_tests {
+    #[test]
+    fn rejects_illegal_xml_scalars_without_modifying_binary_assets() -> Result<(), String> {
+        let mut deck = crate::slides::model::Deck::default();
+        deck.slides[0].notes = "Text with \u{1} control".into();
+        assert!(crate::native::export(&crate::native::Document::Slides(deck), "pptx").is_err());
+
+        for character in ['\u{0}', '\u{1}', '\u{b}', '\u{fffe}', '\u{ffff}'] {
+            assert!(
+                super::write_zip(vec![(
+                    "ppt/slides/slide1.xml".into(),
+                    format!("<t>{character}</t>").into_bytes()
+                )])
+                .is_err()
+            );
+        }
+        let bytes = super::write_zip(vec![
+            (
+                "ppt/slides/slide1.xml".into(),
+                "<t>\t\n\r Кириллица 😀</t>".as_bytes().to_vec(),
+            ),
+            ("assets/image.bin".into(), vec![0, 1, 11, 255]),
+        ])?;
+        assert_eq!(
+            super::read_zip(&bytes)?.get("assets/image.bin"),
+            Some(&vec![0, 1, 11, 255])
+        );
         Ok(())
     }
 }

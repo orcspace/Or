@@ -581,13 +581,36 @@ pub fn dispatch(
     Ok(result)
 }
 
-fn dispatch_inner(
-    tabs: &mut Vec<Tab>,
-    next_id: &mut u64,
-    name: &str,
-    a: &Value,
-    client: &str,
-) -> Result<Value, String> {
+fn slide_metadata(slide: &crate::slides::model::Slide) -> Value {
+    let elements: Vec<Value> = slide
+        .elements
+        .iter()
+        .map(|element| {
+            let kind = match &element.kind {
+                crate::slides::model::ElementKind::Image { bytes } => {
+                    json!({"image": {"bytes_len": bytes.len()}})
+                }
+                kind => json!(kind),
+            };
+            json!({
+                "id": element.id, "kind": kind,
+                "x": element.x, "y": element.y, "w": element.w, "h": element.h,
+                "rotation": element.rotation, "fill": element.fill, "stroke": element.stroke,
+                "stroke_width": element.stroke_width, "text": element.text,
+                "font_size": element.font_size, "color": element.color, "bold": element.bold,
+                "italic": element.italic, "font": element.font, "group": element.group,
+                "animation": element.animation,
+            })
+        })
+        .collect();
+    json!({
+        "id": slide.id, "title": slide.title, "elements": elements,
+        "background": slide.background, "notes": slide.notes, "hidden": slide.hidden,
+        "layout": slide.layout, "section": slide.section, "transition": slide.transition,
+    })
+}
+
+pub fn validate_args(name: &str, a: &Value) -> Result<(), String> {
     if !a.is_object() {
         return Err("Аргументы должны быть объектом".into());
     }
@@ -634,6 +657,17 @@ fn dispatch_inner(
     {
         return Err("Название слишком длинное".into());
     }
+    Ok(())
+}
+
+fn dispatch_inner(
+    tabs: &mut Vec<Tab>,
+    next_id: &mut u64,
+    name: &str,
+    a: &Value,
+    client: &str,
+) -> Result<Value, String> {
+    validate_args(name, a)?;
     if name == "app_status" || name == "list_documents" {
         return Ok(
             json!({"documents":tabs.iter().map(|t|json!({"id":t.id,"title":t.title,"kind":t.document.kind(),"version":t.version,"dirty":t.dirty(),"read_only":t.read_only,"save_locked":t.save_locked})).collect::<Vec<_>>(),"version":env!("CARGO_PKG_VERSION")}),
@@ -766,7 +800,7 @@ fn dispatch_inner(
                 json!({"kind":"sheets","sheet_id":sh.id,"cells":sh.cells.iter().skip(start).take(count).collect::<Vec<_>>(),"total":sh.cells.len()})
             }
             Document::Slides(d) => {
-                json!({"kind":"slides","slides":d.slides.iter().skip(start).take(count).collect::<Vec<_>>(),"total":d.slides.len()})
+                json!({"kind":"slides","slides":d.slides.iter().skip(start).take(count).map(slide_metadata).collect::<Vec<_>>(),"total":d.slides.len()})
             }
         };
         let result = json!({"document_id":t.id,"version":t.version,"content":content,"offset":start,"page_size":count});
@@ -1309,6 +1343,7 @@ fn dispatch_inner(
             for (sheet, r, c, input) in edits {
                 changed_ids.push(b.set_input(sheet, r, c, &input)?);
             }
+            b.recalculate();
         }
         (Document::Sheets(b), "sheets_merge") => {
             b.merge(id(a, "sheet_id")?, range(a)?)?;
@@ -1419,8 +1454,17 @@ fn dispatch_inner(
         }
         (Document::Slides(d), "slides_update_slide") => {
             let sid = id(a, "slide_id")?;
-            let slide = d.slide_mut(sid).ok_or("Слайд не найден")?;
-            *slide = patched(&*slide, object(a, "slide")?, &["id", "elements"])?;
+            let patch = object(a, "slide")?;
+            let slide = d.slide(sid).ok_or("Слайд не найден")?;
+            let updated = patched(slide, patch, &["id", "elements"])?;
+            if patch.contains_key("layout") {
+                d.set_layout(sid, &updated.layout)?;
+            }
+            let elements = d.slide(sid).ok_or("Слайд не найден")?.elements.clone();
+            *d.slide_mut(sid).ok_or("Слайд не найден")? = crate::slides::model::Slide {
+                elements,
+                ..updated
+            };
             changed_ids.push(sid);
         }
         (Document::Slides(d), "slides_write_table") => {
@@ -1633,7 +1677,7 @@ fn dispatch_inner(
                 .notes = s(a, "notes")?.into();
         }
         (Document::Slides(d), "slides_set_theme") => {
-            d.theme = parse(a, "theme")?;
+            d.apply_theme(parse(a, "theme")?);
         }
         (Document::Slides(d), "slides_set_transition") => {
             d.slide_mut(id(a, "slide_id")?)
@@ -1676,6 +1720,7 @@ fn dispatch_inner(
     if a.get("mode").and_then(Value::as_str) == Some("dry_run") {
         return Ok(json!({"applied":false,"version":t.version,"changed_ids":changed_ids}));
     }
+    let before_version = t.version;
     t.apply_with_docs_edits(
         Op::Replace {
             document: doc,
@@ -1688,7 +1733,7 @@ fn dispatch_inner(
         exact_docs_edits.then_some(docs_edits),
     )?;
     Ok(
-        json!({"applied":true,"version":t.version,"undo_group_id":t.version,"changed_ids":changed_ids}),
+        json!({"applied":t.version != before_version,"version":t.version,"undo_group_id":(t.version != before_version).then_some(t.version),"changed_ids":if t.version != before_version { changed_ids } else { Vec::new() }}),
     )
 }
 #[cfg(test)]
@@ -3154,5 +3199,116 @@ mod batch02_format_tests {
         assert_eq!(tabs[0].document, original);
         assert!(tabs[0].undo.is_empty());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod batch03_tests {
+    use super::*;
+    #[test]
+    fn replacement_recalculates_inputs_and_all_dependents() -> Result<(), String> {
+        let mut book = crate::sheets::model::Book::default();
+        let sheet = book.active_id();
+        book.set_range(
+            sheet,
+            0,
+            0,
+            &[vec!["10".into(), "=A1*2".into(), "=B1+1".into()]],
+        )?;
+        let mut tabs = vec![Tab::new(1, Document::Sheets(book), "Book".into(), None)];
+        let mut next = 2;
+        dispatch(
+            &mut tabs,
+            &mut next,
+            "sheets_replace_all",
+            &json!({"document_id":1,"sheet_id":sheet,"query":"10","replacement":"20"}),
+            "test",
+        )?;
+        let Document::Sheets(book) = &tabs[0].document else {
+            return Err("book".into());
+        };
+        assert_eq!(
+            book.read_range(sheet, 0, 0, 0, 2)?,
+            vec![vec!["20", "40", "41"]]
+        );
+        assert_eq!(tabs[0].undo.len(), 1);
+        Ok(())
+    }
+    #[test]
+    fn theme_and_layout_mcp_commands_update_existing_content() -> Result<(), String> {
+        let deck = crate::slides::model::Deck::default();
+        let slide = deck.slides[0].id;
+        let mut tabs = vec![Tab::new(1, Document::Slides(deck), "Deck".into(), None)];
+        let mut next = 2;
+        dispatch(
+            &mut tabs,
+            &mut next,
+            "slides_set_theme",
+            &json!({"document_id":1,"theme":{"background":[12,34,56],"foreground":[230,230,230],"font":"Arial"}}),
+            "test",
+        )?;
+        dispatch(
+            &mut tabs,
+            &mut next,
+            "slides_update_slide",
+            &json!({"document_id":1,"slide_id":slide,"slide":{"layout":"two_content","notes":"keep"}}),
+            "test",
+        )?;
+        let Document::Slides(deck) = &tabs[0].document else {
+            return Err("deck".into());
+        };
+        let slide = deck.slide(slide).ok_or("slide")?;
+        assert_eq!(slide.background, [12, 34, 56]);
+        assert_eq!(slide.notes, "keep");
+        assert_eq!(
+            slide
+                .elements
+                .iter()
+                .filter(|e| matches!(e.kind, crate::slides::model::ElementKind::Text))
+                .count(),
+            3
+        );
+        assert!(slide.elements.iter().all(|e| e.color == [230, 230, 230]));
+        Ok(())
+    }
+    #[test]
+    fn no_op_does_not_reuse_an_earlier_undo_group() -> Result<(), String> {
+        let deck = crate::slides::model::Deck::default();
+        let slide = deck.slides[0].id;
+        let mut tabs = vec![Tab::new(1, Document::Slides(deck), "Deck".into(), None)];
+        let mut next = 2;
+        let args = json!({"document_id":1,"slide_id":slide,"notes":"Changed"});
+        assert_eq!(
+            dispatch(&mut tabs, &mut next, "slides_set_notes", &args, "test")?["applied"],
+            true
+        );
+        let result = dispatch(&mut tabs, &mut next, "slides_set_notes", &args, "test")?;
+        assert_eq!(result["applied"], false);
+        assert!(result["undo_group_id"].is_null());
+        assert_eq!(result["changed_ids"], json!([]));
+        assert_eq!(tabs[0].version, 1);
+        assert_eq!(tabs[0].undo.len(), 1);
+        Ok(())
+    }
+    #[test]
+    fn image_metadata_keeps_ids_and_text_without_serializing_binary() {
+        let mut slide = crate::slides::model::Slide::default();
+        slide.elements.push(crate::slides::model::Element {
+            id: 7,
+            kind: crate::slides::model::ElementKind::Image {
+                bytes: vec![255; 2_000_000],
+            },
+            text: "Caption".into(),
+            ..Default::default()
+        });
+        let value = slide_metadata(&slide);
+        assert_eq!(
+            value["elements"][0]["kind"]["image"]["bytes_len"],
+            2_000_000
+        );
+        assert!(value["elements"][0]["kind"]["image"].get("bytes").is_none());
+        assert_eq!(value["elements"][0]["id"], 7);
+        assert_eq!(value["elements"][0]["text"], "Caption");
+        assert!(value.to_string().len() < 4096);
     }
 }

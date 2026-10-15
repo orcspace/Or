@@ -936,10 +936,11 @@ impl Doc {
         self.next_id = next;
         self.page.width = self.page.width.clamp(144.0, 2880.0);
         self.page.height = self.page.height.clamp(144.0, 2880.0);
-        self.page.margin_left = self.page.margin_left.clamp(0.0, self.page.width * 0.4);
-        self.page.margin_right = self.page.margin_right.clamp(0.0, self.page.width * 0.4);
-        self.page.margin_top = self.page.margin_top.clamp(0.0, self.page.height * 0.4);
-        self.page.margin_bottom = self.page.margin_bottom.clamp(0.0, self.page.height * 0.4);
+        self.page.margin_left = self.page.margin_left.clamp(0.0, self.page.width - 24.0);
+        self.page.margin_right = self.page.margin_right.clamp(0.0, self.page.width - 24.0);
+        self.page.margin_top = self.page.margin_top.clamp(0.0, self.page.height - 30.0);
+        self.page.margin_bottom = self.page.margin_bottom.clamp(0.0, self.page.height - 30.0);
+        self.page.fit_margins();
     }
     pub fn from_text(text: &str) -> Self {
         let mut doc = Self::default();
@@ -1379,6 +1380,8 @@ impl Doc {
                     .get(at.saturating_sub(1))
                     .map(|row| row.iter().map(|c| c.span.max(1)).collect())
                     .unwrap_or_else(|| vec![1; columns]);
+                let following = table.rows.get(at).cloned();
+                let mut grid = 0;
                 let row = spans
                     .iter()
                     .enumerate()
@@ -1386,6 +1389,22 @@ impl Doc {
                         let mut cell =
                             empty_cell(&mut next, fills.get(i).copied().unwrap_or([255; 3]));
                         cell.span = *span;
+                        if at > 0
+                            && let Some(following) = &following
+                        {
+                            let mut start = 0;
+                            cell.merged = following
+                                .iter()
+                                .find_map(|below| {
+                                    let matches = start == grid;
+                                    start += below.span();
+                                    matches.then_some(
+                                        below.merged && below.span() == usize::from(*span),
+                                    )
+                                })
+                                .unwrap_or(false);
+                        }
+                        grid += usize::from(*span);
                         cell
                     })
                     .collect();
@@ -1663,9 +1682,7 @@ impl Doc {
                 next_page(&mut layout, setup, &mut y);
             }
             let marker = list_marker(p, &mut list_numbers);
-            let indent = p.indent.max(0.0)
-                + f32::from(p.list_level) * 18.0
-                + if p.list != List::None { 18.0 } else { 0.0 };
+            let indent = p.indent + list_indent(p);
             let base_x = setup.margin_left + indent;
             let available = (setup.width - setup.margin_right - base_x).max(12.0);
             let chars: Vec<(char, TextFormat)> = p
@@ -2200,6 +2217,13 @@ fn line_breaks(heights: &[f32], start: f32, top: f32, bottom: f32, widow: bool) 
     }
     breaks
 }
+fn list_indent(p: &Paragraph) -> f32 {
+    if p.list == List::None {
+        0.0
+    } else {
+        (f32::from(p.list_level) + 1.0) * 18.0
+    }
+}
 fn list_marker(p: &Paragraph, numbers: &mut [usize; 9]) -> String {
     let level = usize::from(p.list_level).min(8);
     match p.list {
@@ -2223,9 +2247,7 @@ fn table_lines(cell: &Cell, width: f32, margin: [f32; 4]) -> Vec<Row> {
     let mut list_numbers = [0_usize; 9];
     for (paragraph, p) in cell.paragraphs.iter().enumerate() {
         let marker = list_marker(p, &mut list_numbers);
-        let indent = p.indent.max(0.0)
-            + f32::from(p.list_level) * 18.0
-            + if p.list != List::None { 18.0 } else { 0.0 };
+        let indent = p.indent + list_indent(p);
         let available = (width - margin[1] - margin[3] - indent).max(1.0);
         let chars: Vec<(char, TextFormat)> = p
             .runs
@@ -2528,6 +2550,49 @@ fn table_row(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn normalizing_keeps_valid_asymmetric_page_margins() -> Result<(), String> {
+        let mut doc = Doc::from_text("Narrow body");
+        doc.page.margin_left = 450.0;
+        doc.page.margin_right = 50.0;
+        doc.page.margin_top = 500.0;
+        doc.page.margin_bottom = 50.0;
+        let expected = doc.page.clone();
+        doc.normalize();
+        assert_eq!(doc.page, expected);
+        doc.validate()
+    }
+    #[test]
+    fn negative_indent_and_disabled_list_level_match_page_and_cell_layout() {
+        let mut doc = Doc::from_text("outdent");
+        doc.paragraphs[0].indent = -24.0;
+        doc.paragraphs[0].list_level = 3;
+        let layout = doc.layout();
+        assert!((layout.rows[0].x - (doc.page.margin_left - 24.0)).abs() < 0.01);
+        let cell = Cell::new(10, vec![doc.paragraphs[0].clone()], [255; 3]);
+        let rows = table_lines(&cell, 200.0, [5.0; 4]);
+        assert!((rows[0].x - (5.0 - 24.0)).abs() < 0.01);
+        doc.paragraphs[0].indent = 0.0;
+        doc.paragraphs[0].list_level = 3;
+        assert!((doc.layout().rows[0].x - doc.page.margin_left).abs() < 0.01);
+        let cell = Cell::new(10, vec![doc.paragraphs[0].clone()], [255; 3]);
+        assert!((table_lines(&cell, 200.0, [5.0; 4])[0].x - 5.0).abs() < 0.01);
+    }
+    #[test]
+    fn inserted_row_preserves_the_vertical_merge_chain() -> Result<(), String> {
+        let mut doc = Doc::from_text("table");
+        let id = doc.add_table(doc.paragraphs[0].id, 3, 2)?;
+        doc.tables[0].rows[1][0].merged = true;
+        doc.tables[0].rows[2][0].merged = true;
+        doc.edit_table(id, TableEdit::InsertRow(1))?;
+        let rows = &doc.tables[0].rows;
+        assert_eq!(rows.len(), 4);
+        assert!(!rows[0][0].merged);
+        assert!(rows.iter().skip(1).all(|row| row[0].merged));
+        assert!(rows.iter().all(|row| !row[1].merged));
+        doc.validate()
+    }
+
     #[test]
     fn page_margin_changes_fit_a_smaller_paper_without_invalidating_it() -> Result<(), String> {
         let mut doc = Doc::from_text("A5");
