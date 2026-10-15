@@ -1,7 +1,10 @@
 use crate::native::Document;
 use std::{
     path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver, SyncSender},
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, Receiver, SyncSender},
+    },
     thread::JoinHandle,
     time::SystemTime,
 };
@@ -86,6 +89,7 @@ pub struct ReloadTarget {
     pub path: PathBuf,
 }
 pub enum Job {
+    SaveSettings,
     PreviewRegistration(crate::mcp::register::Client),
     ApplyRegistration(crate::mcp::register::Preview),
     PickOpen,
@@ -121,6 +125,7 @@ pub enum Job {
         expected: Option<SystemTime>,
         print: bool,
         owns_lock: bool,
+        source_path: Option<PathBuf>,
     },
     Watch(Vec<(u64, PathBuf)>),
     Stop,
@@ -182,6 +187,7 @@ pub struct Worker {
     pub tx: SyncSender<Job>,
     pub rx: Receiver<Event>,
     thread: Option<JoinHandle<()>>,
+    pending_settings: Arc<Mutex<Option<crate::settings::Settings>>>,
 }
 pub fn stamp(p: &Path) -> Option<SystemTime> {
     std::fs::metadata(p).ok().and_then(|m| m.modified().ok())
@@ -210,6 +216,19 @@ fn export_unchanged(
         return Err("Файл изменился во время экспорта: сохраните копию или перезагрузите".into());
     }
     Ok(bytes)
+}
+fn ensure_copy_target(source: Option<&Path>, target: &Path) -> Result<(), String> {
+    if let Some(source) = source {
+        let same = source == target
+            || std::fs::canonicalize(source)
+                .ok()
+                .zip(std::fs::canonicalize(target).ok())
+                .is_some_and(|(source, target)| source == target);
+        if same {
+            return Err("Для копии выберите другой файл; исходный файл сохранён.".into());
+        }
+    }
+    Ok(())
 }
 fn open_event(path: PathBuf, reload: Option<ReloadTarget>) -> Event {
     let path = std::fs::canonicalize(&path).unwrap_or(path);
@@ -242,12 +261,41 @@ fn open_event(path: PathBuf, reload: Option<ReloadTarget>) -> Event {
 }
 impl Worker {
     pub fn start(ctx: egui::Context) -> Self {
+        Self::start_inner(ctx, true)
+    }
+    #[cfg(test)]
+    pub(crate) fn start_for_test(ctx: egui::Context) -> Self {
+        Self::start_inner(ctx, false)
+    }
+    fn start_inner(ctx: egui::Context, persist_settings: bool) -> Self {
         let (tx, jobs) = mpsc::sync_channel(16);
         let (events, rx) = mpsc::channel();
+        let pending_settings = Arc::new(Mutex::new(None::<crate::settings::Settings>));
+        let worker_settings = pending_settings.clone();
         let thread = std::thread::spawn(move || {
             while let Ok(job) = jobs.recv() {
+                let settings = worker_settings
+                    .lock()
+                    .ok()
+                    .and_then(|mut pending| pending.take());
+                if let Some(settings) = settings
+                    && persist_settings
+                    && let Err(message) = settings.save()
+                {
+                    if events
+                        .send(Event::Error {
+                            message: format!("Не удалось сохранить настройки: {message}"),
+                            id: None,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                    ctx.request_repaint();
+                }
                 let result = match job {
                     Job::Stop => break,
+                    Job::SaveSettings => None,
                     Job::PreviewRegistration(client) => {
                         let result =
                             std::env::current_exe()
@@ -369,8 +417,12 @@ impl Worker {
                         expected,
                         print,
                         owns_lock,
+                        source_path,
                     } => {
                         let result = (|| -> Result<Event, String> {
+                            if copy {
+                                ensure_copy_target(source_path.as_deref(), &path)?;
+                            }
                             let lock = if owns_lock {
                                 None
                             } else {
@@ -426,6 +478,17 @@ impl Worker {
             tx,
             rx,
             thread: Some(thread),
+            pending_settings,
+        }
+    }
+    pub fn save_settings(&self, settings: crate::settings::Settings) -> Result<(), String> {
+        *self
+            .pending_settings
+            .lock()
+            .map_err(|_| "Очередь настроек недоступна")? = Some(settings);
+        match self.tx.try_send(Job::SaveSettings) {
+            Ok(()) | Err(mpsc::TrySendError::Full(_)) => Ok(()),
+            Err(mpsc::TrySendError::Disconnected(_)) => Err("Файловый поток остановлен".into()),
         }
     }
     pub fn send(&self, job: Job) -> Result<(), String> {
@@ -459,6 +522,23 @@ mod lock_tests {
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         Ok(dir)
     }
+    #[test]
+    fn copy_cannot_replace_a_canonical_alias_of_its_source() -> Result<(), String> {
+        let root = directory()?;
+        std::fs::create_dir_all(root.join("nested")).map_err(|error| error.to_string())?;
+        let source = root.join("original.docx");
+        std::fs::write(&source, b"source").map_err(|error| error.to_string())?;
+        let alias = root.join("nested").join("..").join("original.docx");
+        assert!(ensure_copy_target(Some(&source), &alias).is_err());
+        assert!(ensure_copy_target(Some(&source), &root.join("copy.docx")).is_ok());
+        assert_eq!(
+            std::fs::read(&source).map_err(|error| error.to_string())?,
+            b"source"
+        );
+        std::fs::remove_dir_all(root).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
     #[test]
     fn save_as_detects_target_creation_or_modification_during_export() -> Result<(), String> {
         let dir = directory()?;

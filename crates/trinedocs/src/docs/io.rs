@@ -337,12 +337,11 @@ fn apply_ppr(p: &mut Paragraph, node: &Node, num_formats: &BTreeMap<String, List
     }
     if let Some(n) = node.child("numPr") {
         p.list_level = number(n.child("ilvl").and_then(Node::value), 0.0).clamp(0.0, 8.0) as u8;
-        p.list = n
-            .child("numId")
-            .and_then(Node::value)
-            .and_then(|id| num_formats.get(id))
-            .copied()
-            .unwrap_or(List::Bullet);
+        p.list = match n.child("numId").and_then(Node::value) {
+            Some("0") => List::None,
+            Some(id) => num_formats.get(id).copied().unwrap_or(List::Bullet),
+            None => p.list,
+        };
     }
     if let Some(n) = node.child("spacing") {
         p.spacing_before = number(n.attr("before"), p.spacing_before * 20.0) / 20.0;
@@ -1619,21 +1618,71 @@ fn write_markdown(doc: &Doc) -> String {
     }
     out
 }
+fn css_points(value: &str, fallback: f32) -> f32 {
+    let value = value.trim();
+    let factor = if value.ends_with("px") { 0.75 } else { 1.0 };
+    number(
+        Some(value.trim_end_matches("pt").trim_end_matches("px")),
+        fallback / factor,
+    ) * factor
+}
+fn safe_html_link(value: &str) -> bool {
+    let scheme = value.split_once(':').map(|(scheme, _)| {
+        scheme
+            .chars()
+            .filter(|c| !c.is_ascii_whitespace() && !c.is_control())
+            .collect::<String>()
+            .to_ascii_lowercase()
+    });
+    scheme.is_none_or(|scheme| {
+        matches!(
+            scheme.as_str(),
+            "http" | "https" | "mailto" | "tel" | "ftp" | "file"
+        )
+    })
+}
 fn write_html(doc: &Doc) -> String {
     let mut out = format!(
         "<!DOCTYPE html><html lang=\"ru\"><head><meta charset=\"utf-8\"/><title>{}</title></head><body>",
         esc(&doc.title)
     );
+    let mut list = List::None;
+    let mut numbered = false;
+    let mut ordinal = 0;
     for p in &doc.paragraphs {
-        let tag = match p.style.as_str() {
-            "Heading1" => "h1",
-            "Heading2" => "h2",
-            "Heading3" => "h3",
-            "Quote" => "blockquote",
+        ordinal = if p.list == List::Number {
+            if numbered { ordinal + 1 } else { 1 }
+        } else {
+            0
+        };
+        numbered = p.list == List::Number;
+        if list != p.list {
+            if list != List::None {
+                out.push_str(if list == List::Number {
+                    "</ol>"
+                } else {
+                    "</ul>"
+                });
+            }
+            list = p.list;
+            if list != List::None {
+                if list == List::Number {
+                    out.push_str(&format!("<ol start=\"{ordinal}\">"));
+                } else {
+                    out.push_str("<ul>");
+                }
+            }
+        }
+        let tag = match (p.list, p.style.as_str()) {
+            (List::Number | List::Bullet, _) => "li",
+            (_, "Heading1") => "h1",
+            (_, "Heading2") => "h2",
+            (_, "Heading3") => "h3",
+            (_, "Quote") => "blockquote",
             _ => "p",
         };
         out.push_str(&format!(
-            "<{tag} style=\"text-align:{};margin-left:{}pt;line-height:{}\">",
+            "<{tag} style=\"white-space:pre-wrap;text-align:{};margin-left:{}pt;line-height:{}\">",
             match p.align {
                 Align::Left => "left",
                 Align::Center => "center",
@@ -1643,33 +1692,41 @@ fn write_html(doc: &Doc) -> String {
             p.indent,
             p.line_spacing
         ));
-        if p.list != List::None {
-            out.push_str(if p.list == List::Bullet {
-                "• "
-            } else {
-                "1. "
-            });
-        }
         for r in &p.runs {
             let f = &r.format;
             out.push_str(&format!("<span style=\"font-family:{};font-size:{}pt;color:#{};font-weight:{};font-style:{};text-decoration:{}{};{}\">",esc(&f.font),f.size,hex(f.color),if f.bold{"bold"}else{"normal"},if f.italic{"italic"}else{"normal"},if f.underline{"underline "}else{""},if f.strike{"line-through"}else{""},f.highlight.map(|c|format!("background-color:#{}",hex(c))).unwrap_or_default()));
-            if let Some(link) = &f.link {
+            let link = f.link.as_deref().filter(|link| safe_html_link(link));
+            if let Some(link) = link {
                 out.push_str(&format!("<a href=\"{}\">", esc(link)));
             }
-            out.push_str(&esc(&r.text).replace(['\u{000b}', '\n'], "<br>"));
-            if f.link.is_some() {
+            if f.script != 0 {
+                out.push_str(if f.script > 0 { "<sup>" } else { "<sub>" });
+            }
+            out.push_str(&esc(&r.text).replace(['\u{000b}', '\n'], "<br/>"));
+            if f.script != 0 {
+                out.push_str(if f.script > 0 { "</sup>" } else { "</sub>" });
+            }
+            if link.is_some() {
                 out.push_str("</a>");
             }
             out.push_str("</span>");
         }
         out.push_str(&format!("</{tag}>"));
         for table in doc.tables.iter().filter(|t| t.after_paragraph_id == p.id) {
+            if list != List::None {
+                out.push_str(if list == List::Number {
+                    "</ol>"
+                } else {
+                    "</ul>"
+                });
+                list = List::None;
+            }
             out.push_str("<table style=\"border-collapse:collapse\">");
             for row in &table.rows {
                 out.push_str("<tr>");
                 for cell in row {
                     out.push_str(&format!(
-                        "<td style=\"border:1px solid #{};background:#{}\">{}</td>",
+                        "<td style=\"white-space:pre-wrap;border:1px solid #{};background:#{}\">{}</td>",
                         hex(table.border_color),
                         hex(cell.fill),
                         esc(&cell
@@ -1685,8 +1742,49 @@ fn write_html(doc: &Doc) -> String {
             out.push_str("</table>");
         }
     }
+    if list != List::None {
+        out.push_str(if list == List::Number {
+            "</ol>"
+        } else {
+            "</ul>"
+        });
+    }
     out.push_str("</body></html>");
     out
+}
+fn fallback_html_text(text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let mut plain = String::new();
+    let mut offset = 0;
+    let mut hidden: Option<&str> = None;
+    while offset < text.len() {
+        let rest = &text[offset..];
+        if rest.starts_with('<') {
+            let Some(end) = rest.find('>') else { break };
+            let tag = lower[offset + 1..offset + end].trim();
+            let closing = tag.starts_with('/');
+            let name = tag
+                .trim_start_matches('/')
+                .split(|c: char| c.is_ascii_whitespace() || c == '/')
+                .next()
+                .unwrap_or("");
+            if closing && hidden == Some(name) {
+                hidden = None;
+            } else if !closing && hidden.is_none() && matches!(name, "script" | "style" | "head") {
+                hidden = Some(name);
+            } else if hidden.is_none() && matches!(name, "br" | "p" | "div" | "li" | "tr") {
+                plain.push('\n');
+            }
+            offset += end + 1;
+        } else {
+            let end = rest.find('<').unwrap_or(rest.len());
+            if hidden.is_none() {
+                plain.push_str(&rest[..end]);
+            }
+            offset += end;
+        }
+    }
+    plain
 }
 fn read_html(text: &str) -> Result<Doc, String> {
     // HTML is imported as data only; scripts, CSS imports and network images are never executed.
@@ -1700,18 +1798,7 @@ fn read_html(text: &str) -> Result<Doc, String> {
         clean.replace_range(start..=start + end, "");
     }
     let node = xml(clean.as_bytes()).or_else(|_| {
-        let mut plain = String::new();
-        let mut inside = false;
-        for ch in text.chars() {
-            if ch == '<' {
-                inside = true;
-            } else if ch == '>' {
-                inside = false;
-                plain.push(' ');
-            } else if !inside {
-                plain.push(ch);
-            }
-        }
+        let plain = fallback_html_text(text);
         let plain = quick_xml::escape::unescape(&plain)
             .map_err(|e| e.to_string())?
             .into_owned();
@@ -1723,11 +1810,16 @@ fn read_html(text: &str) -> Result<Doc, String> {
     })?;
     let mut doc = Doc::default();
     doc.paragraphs.clear();
-    fn walk(node: &Node, doc: &mut Doc, inherited_css: &str) {
+    fn walk(node: &Node, doc: &mut Doc, inherited_css: &str, list: Option<List>) {
         if matches!(node.name.as_str(), "script" | "style" | "head") {
             return;
         }
         let css = format!("{inherited_css};{}", node.attr("style").unwrap_or_default());
+        let list = match node.name.as_str() {
+            "ol" => Some(List::Number),
+            "ul" => Some(List::Bullet),
+            _ => list,
+        };
         let block = matches!(
             node.name.as_str(),
             "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "blockquote" | "li"
@@ -1740,7 +1832,7 @@ fn read_html(text: &str) -> Result<Doc, String> {
                 ..Paragraph::default()
             };
             fn runs(n: &Node, f: &TextFormat, out: &mut Vec<Run>) {
-                if matches!(n.name.as_str(), "script" | "style") {
+                if matches!(n.name.as_str(), "script" | "style" | "ul" | "ol") {
                     return;
                 }
                 let mut fmt = f.clone();
@@ -1758,17 +1850,7 @@ fn read_html(text: &str) -> Result<Doc, String> {
                     for declaration in css.split(';') {
                         if let Some((key, value)) = declaration.split_once(':') {
                             match key.trim() {
-                                "font-size" => {
-                                    fmt.size = number(
-                                        Some(
-                                            value
-                                                .trim()
-                                                .trim_end_matches("pt")
-                                                .trim_end_matches("px"),
-                                        ),
-                                        11.0,
-                                    )
-                                }
+                                "font-size" => fmt.size = css_points(value, 11.0),
                                 "font-family" => {
                                     fmt.font =
                                         value.trim().trim_matches('\'').trim_matches('"').into()
@@ -1819,11 +1901,37 @@ fn read_html(text: &str) -> Result<Doc, String> {
                 "h2" => p.style = "Heading2".into(),
                 "h3" | "h4" | "h5" | "h6" => p.style = "Heading3".into(),
                 "blockquote" => p.style = "Quote".into(),
-                "li" => p.list = List::Bullet,
+                "li" => p.list = list.unwrap_or(List::Bullet),
                 _ => {}
+            }
+            for declaration in css.split(';') {
+                if let Some((key, value)) = declaration.split_once(':') {
+                    match key.trim() {
+                        "text-align" => {
+                            p.align = match value.trim() {
+                                "center" => Align::Center,
+                                "right" => Align::Right,
+                                "justify" => Align::Justify,
+                                _ => Align::Left,
+                            }
+                        }
+                        "margin-left" => p.indent = css_points(value, 0.0),
+                        "line-height" => {
+                            p.line_spacing = number(Some(value.trim()), 1.28).clamp(0.5, 5.0)
+                        }
+                        _ => {}
+                    }
+                }
             }
             p.normalize();
             doc.paragraphs.push(p);
+            for child in node
+                .children
+                .iter()
+                .filter(|n| matches!(n.name.as_str(), "ol" | "ul"))
+            {
+                walk(child, doc, &css, list);
+            }
         } else {
             fn boundary(node: &Node) -> bool {
                 matches!(
@@ -1866,14 +1974,14 @@ fn read_html(text: &str) -> Result<Doc, String> {
                 if !paragraph.text_content().trim().is_empty()
                     || paragraph.children.iter().any(|n| n.name == "br")
                 {
-                    walk(&paragraph, doc, "");
+                    walk(&paragraph, doc, "", None);
                 }
             }
             let mut inline = Vec::new();
             for child in &node.children {
                 if boundary(child) {
                     flush(&mut inline, doc, &css);
-                    walk(child, doc, &css);
+                    walk(child, doc, &css, list);
                 } else {
                     inline.push(child.clone());
                 }
@@ -1881,7 +1989,7 @@ fn read_html(text: &str) -> Result<Doc, String> {
             flush(&mut inline, doc, &css);
         }
     }
-    walk(&node, &mut doc, "");
+    walk(&node, &mut doc, "", None);
     doc.losses.push(
         "HTML: сложные CSS-макеты и сетевые изображения не импортируются; таблицы преобразуются в абзацы.".into(),
     );
@@ -1890,6 +1998,73 @@ fn read_html(text: &str) -> Result<Doc, String> {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn html_lists_paragraph_geometry_and_scripts_round_trip() -> Result<(), String> {
+        let mut doc = Doc::from_text("one\ntwo");
+        for p in &mut doc.paragraphs {
+            p.list = List::Number;
+            p.align = Align::Right;
+            p.indent = 24.0;
+            p.line_spacing = 1.5;
+            p.runs[0].format.script = 1;
+        }
+        let html = write_html(&doc);
+        assert!(html.contains("<ol start=\"1\">"));
+        assert!(html.contains("<sup>"));
+        let loaded = read_html(&html)?;
+        assert_eq!(loaded.plain_text(), "one\ntwo");
+        assert!(loaded.paragraphs.iter().all(|p| p.list == List::Number
+            && p.align == Align::Right
+            && p.indent == 24.0
+            && p.line_spacing == 1.5
+            && p.runs[0].format.script == 1));
+        Ok(())
+    }
+    #[test]
+    fn html_tables_close_list_containers_and_resume_numbering() -> Result<(), String> {
+        let mut doc = Doc::from_text("first\nsecond");
+        for p in &mut doc.paragraphs {
+            p.list = List::Number;
+        }
+        doc.add_table(doc.paragraphs[0].id, 1, 1)?;
+        let html = write_html(&doc);
+        assert!(html.contains("</li></ol><table"));
+        assert!(html.contains("</table><ol start=\"2\">"));
+        Ok(())
+    }
+    #[test]
+    fn html_pixel_sizes_and_inert_links_are_preserved_safely() -> Result<(), String> {
+        let doc = read_html(
+            "<html><body><p><span style=\"font-size:16px\">text</span></p></body></html>",
+        )?;
+        assert_eq!(doc.paragraphs[0].runs[0].format.size, 12.0);
+        let mut doc = Doc::from_text("click");
+        doc.paragraphs[0].runs[0].format.link = Some("java\tscript:alert(1)".into());
+        assert!(!write_html(&doc).contains("<a "));
+        assert!(safe_html_link("https://example.com/a"));
+        Ok(())
+    }
+    #[test]
+    fn malformed_html_fallback_keeps_hidden_content_out() -> Result<(), String> {
+        let doc = read_html(
+            "<html><head><style>secret CSS</style></head><body><p>Visible<img src='x'></p><script>secret JS</script></body></html>",
+        )?;
+        assert!(doc.plain_text().contains("Visible"));
+        assert!(!doc.plain_text().contains("secret"));
+        Ok(())
+    }
+    #[test]
+    fn docx_zero_numbering_cancels_inherited_lists() -> Result<(), String> {
+        let mut p = Paragraph {
+            list: List::Number,
+            ..Paragraph::default()
+        };
+        let props = xml(b"<w:pPr xmlns:w=\"x\"><w:numPr><w:numId w:val=\"0\"/></w:numPr></w:pPr>")?;
+        apply_ppr(&mut p, &props, &BTreeMap::new());
+        assert_eq!(p.list, List::None);
+        Ok(())
+    }
+
     use super::*;
     #[test]
     fn docx_tables_keep_merges_widths_and_borders() -> Result<(), String> {

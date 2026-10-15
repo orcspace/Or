@@ -2,7 +2,7 @@
 
 Первичный feature inventory по заданию и первым проверенным пробелам. Полная сверка всех вкладок Office ещё не завершена. Внутри каждого PAR-пункта варианты поведения проверяются отдельно. Ни одна функция не объявлена готовой. P2 не удаляется из конечного объёма; поздние фазы ждут решения владельца ADR-0005.
 
-Всего функций/вариантов: **350**.
+Всего функций/вариантов: **356**.
 
 | PAR ID | Режим | Функция | P | Фаза | REQ | MCP / пробел | Import | Export | Статус |
 |---|---|---|---|---|---|---|---|---|---|
@@ -356,3 +356,9 @@
 | PAR-TRI-030 | TrineDocs | 20. Clipboard read/write formats each OS, Word/Excel/PowerPoint/browser, drag-and-drop. | P1 | 8 | REQ-A03-034 | GAP: точная ops/tool-схема ещё не определена | planned | planned | planned |
 | PAR-DOC-104 | Docs | Alt text visual objects (FACT-017) | P1 | 8 | REQ-11-005 | GAP: add explicit tool/ops schema | planned | planned | planned |
 | PAR-DOC-105 | Docs | Synchronous side-by-side scrolling (FACT-017) | P1 | 8 | REQ-11-005 | GAP: add explicit tool/ops schema | planned | planned | planned |
+| PAR-TRI-031 | TrineDocs | Фильтр недавних и закреплённых файлов по Docs/Sheets/Slides, очистка поиска | P0 | 1 | REQ-06-004 | UI view-only; MCP list_documents остаётся отдельно | n/a | n/a | implemented_unverified |
+| PAR-TRI-032 | TrineDocs | Палитра команд: выбор стрелками вверх/вниз, запуск выбранной команды по Enter | P0 | 1 | REQ-05-012 | UI view-only; команды используют существующие ops | n/a | n/a | implemented_unverified |
+| PAR-TRI-033 | Docs | Проверка структуры документа: пропущенные уровни заголовков, пустые заголовки и alt text | P1 | 8 | REQ-11-005 | GAP: read-only docs_inspect_structure с привязкой к stable IDs | planned | n/a | planned |
+| PAR-TRI-034 | Sheets | Паспорт формулы: зависимости, типы входов и пошаговое объяснение результата без изменения ячейки | P1 | 8 | REQ-11-008 | GAP: read-only sheets_explain_formula, bounded graph/result | planned | n/a | planned |
+| PAR-TRI-035 | Slides | Проверка читаемости слайдов: переполнение текста, контраст и слишком мелкий шрифт | P1 | 8 | REQ-11-011 | GAP: read-only slides_inspect_readability с ID проблемных объектов | planned | n/a | planned |
+| PAR-TRI-036 | TrineDocs | Карточка AI-пакета: затронутые объекты, краткий diff и конфликты до применения | P1 | 8 | REQ-03-022 | GAP: preview ops batch без мутаций и повторная проверка base_version при commit | n/a | n/a | planned |
