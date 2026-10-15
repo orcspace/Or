@@ -4306,5 +4306,17 @@
     "import": "planned",
     "export": "planned",
     "status": "planned"
+  },
+  {
+    "id": "PAR-TRI-040",
+    "mode": "TrineDocs",
+    "feature": "Параллельная подготовка AI-правок нескольких открытых Docs/Sheets/Slides с общим preflight commit",
+    "priority": "P1",
+    "phase": 8,
+    "requirement": "REQ-M06-072",
+    "mcp": "workspace_documents/apply/job_status/cancel; 4 документа/32 операции; GAP: полный apply_ops, дисковые side effects, persistent jobs и runtime-приёмка",
+    "import": "not applicable",
+    "export": "not applicable",
+    "status": "partial"
   }
 ]

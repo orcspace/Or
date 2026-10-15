@@ -344,7 +344,11 @@ fn apply_ppr(p: &mut Paragraph, node: &Node, num_formats: &BTreeMap<String, List
                 p.list_level = 0;
                 List::None
             }
-            Some(id) => num_formats.get(id).copied().unwrap_or(List::Bullet),
+            Some(id) => num_formats
+                .get(&format!("{id}:{}", p.list_level))
+                .or_else(|| num_formats.get(id))
+                .copied()
+                .unwrap_or(List::Bullet),
             None => p.list,
         };
     }
@@ -681,28 +685,61 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
         let node = xml(bytes)?;
         let mut abstracts = BTreeMap::new();
         for n in &node.children {
-            if n.name == "abstractNum" {
-                let kind = if n.descendant("numFmt").and_then(Node::value) == Some("bullet") {
-                    List::Bullet
-                } else {
-                    List::Number
-                };
-                if let Some(id) = n.attr("abstractNumId") {
-                    abstracts.insert(id.to_string(), kind);
-                }
+            if n.name == "abstractNum"
+                && let Some(id) = n.attr("abstractNumId")
+            {
+                let levels = n
+                    .children
+                    .iter()
+                    .filter(|level| level.name == "lvl")
+                    .filter_map(|level| {
+                        let index = level.attr("ilvl")?.parse::<u8>().ok()?;
+                        let kind = if level.child("numFmt").and_then(Node::value) == Some("bullet")
+                        {
+                            List::Bullet
+                        } else {
+                            List::Number
+                        };
+                        Some((index, kind))
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                abstracts.insert(id.to_string(), levels);
             }
         }
         for n in &node.children {
             if n.name == "num"
                 && let Some(id) = n.attr("numId")
             {
-                let kind = n
+                let mut levels = n
                     .child("abstractNumId")
                     .and_then(Node::value)
                     .and_then(|id| abstracts.get(id))
-                    .copied()
-                    .unwrap_or(List::Bullet);
-                nums.insert(id.to_string(), kind);
+                    .cloned()
+                    .unwrap_or_default();
+                for override_node in n.children.iter().filter(|n| n.name == "lvlOverride") {
+                    if let Some(level) = override_node.child("lvl")
+                        && let Some(index) = override_node
+                            .attr("ilvl")
+                            .and_then(|v| v.parse::<u8>().ok())
+                        && let Some(format) = level.child("numFmt").and_then(Node::value)
+                    {
+                        levels.insert(
+                            index,
+                            if format == "bullet" {
+                                List::Bullet
+                            } else {
+                                List::Number
+                            },
+                        );
+                    }
+                }
+                nums.insert(
+                    id.to_string(),
+                    levels.get(&0).copied().unwrap_or(List::Bullet),
+                );
+                for (level, kind) in levels {
+                    nums.insert(format!("{id}:{level}"), kind);
+                }
             }
         }
     }
@@ -1146,7 +1183,7 @@ fn r_xml(run: &Run) -> String {
     let properties = rpr_xml(&run.format);
     let mut text = String::new();
     let mut current = String::new();
-    for ch in run.text.chars() {
+    for ch in run.text.replace("\r\n", "\n").replace('\r', "\n").chars() {
         if ch == '\t' || ch == '\u{000b}' || ch == '\n' || ch == '\u{000c}' {
             if !current.is_empty() {
                 text.push_str(&format!(
@@ -1162,7 +1199,7 @@ fn r_xml(run: &Run) -> String {
             } else {
                 "<w:br/>"
             });
-        } else if ch >= ' ' {
+        } else {
             current.push(ch);
         }
     }
@@ -1260,7 +1297,7 @@ fn table_xml(table: &Table, usable_width: f32, links: &mut Vec<(String, String)>
                 .get(i)
                 .copied()
                 .unwrap_or(usable_width / columns as f32)
-                .max(12.0);
+                .max(1.0);
             (pt * 20.0).round() as u32
         })
         .collect();
@@ -1775,13 +1812,8 @@ fn read_markdown(text: &str) -> Doc {
 fn write_markdown(doc: &Doc) -> String {
     let mut out = String::new();
     for p in &doc.paragraphs {
-        if p.style.starts_with("Heading") {
-            let level = p
-                .style
-                .trim_start_matches("Heading")
-                .parse::<usize>()
-                .unwrap_or(1)
-                .clamp(1, 6);
+        if let Some(level) = heading_level(&p.style) {
+            let level = usize::from(level);
             out.push_str(&"#".repeat(level));
             out.push(' ');
         } else if p.style == "Quote" {
@@ -1906,6 +1938,9 @@ fn write_html(doc: &Doc) -> String {
             (_, "Heading1") => "h1",
             (_, "Heading2") => "h2",
             (_, "Heading3") => "h3",
+            (_, "Heading4") => "h4",
+            (_, "Heading5") => "h5",
+            (_, "Heading6") => "h6",
             (_, "Quote") => "blockquote",
             _ => "p",
         };
@@ -2263,6 +2298,18 @@ fn read_html(text: &str) -> Result<Doc, String> {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn review4_docx_normalizes_crlf_once_and_refuses_xml_controls() -> Result<(), String> {
+        let mut mixed = Doc::from_text("a");
+        mixed.paragraphs[0].runs[0].text = "a\r\nb\rc".into();
+        let again = read(&write(&mixed, "docx")?, "docx")?;
+        assert_eq!(again.paragraphs[0].text(), "a\u{000b}b\u{000b}c");
+        mixed.paragraphs[0].runs[0].text = "a\u{001b}b".into();
+        assert!(write(&mixed, "docx").is_err());
+        assert_eq!(mixed.paragraphs[0].text(), "a\u{001b}b");
+        Ok(())
+    }
+
     #[test]
     fn many_short_valid_markdown_spans_and_links_keep_all_formatting() {
         let bold = inline_md(&"**x** ".repeat(1000), &TextFormat::default());

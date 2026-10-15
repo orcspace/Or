@@ -166,6 +166,7 @@ pub struct App {
     show_inspector: bool,
     inspection: Option<crate::inspector::Task>,
     inspection_result: Option<crate::inspector::Inspection>,
+    workspace_jobs: Vec<crate::mcp::workspace::Task>,
     show_ai: bool,
     /// 0 = chat, 1 = AI change review.
     ai_tab: usize,
@@ -256,6 +257,7 @@ impl App {
             show_inspector: false,
             inspection: None,
             inspection_result: None,
+            workspace_jobs: Vec::new(),
             show_ai: std::env::args().any(|a| a == "--ui-smoke-compact"),
             ai_tab: 0,
             chat,
@@ -1042,6 +1044,268 @@ impl App {
         ctx.data_mut(|d| d.insert_temp(crate::docs::editor::ai_caret_id(), caret));
         ctx.request_repaint();
     }
+    fn start_workspace(
+        &mut self,
+        args: &Value,
+        client: &str,
+        ctx: &egui::Context,
+    ) -> Result<Value, String> {
+        use crate::mcp::workspace::{MAX_JOBS, Snapshot, Task};
+        let plan = crate::mcp::workspace::parse(args)?;
+        if self
+            .workspace_jobs
+            .iter()
+            .filter(|job| job.running())
+            .count()
+            >= MAX_JOBS
+        {
+            return Err("busy: уже готовятся 4 пакета документов".into());
+        }
+        for (&id, (version, _)) in &plan.groups {
+            let tab = self
+                .tabs
+                .iter()
+                .find(|tab| tab.id == id)
+                .ok_or("not_found: документ пакета не открыт")?;
+            if tab.read_only {
+                return Err(format!("read_only: документ {id}"));
+            }
+            if tab.version != *version {
+                return Err(format!("conflict: документ {id} изменился"));
+            }
+            if self.reloading.contains_key(&id)
+                || self
+                    .workspace_jobs
+                    .iter()
+                    .any(|job| job.running() && job.targets.iter().any(|target| target.0 == id))
+            {
+                return Err(format!("busy: документ {id} уже обрабатывается"));
+            }
+        }
+        if !plan.dry_run {
+            for id in plan.groups.keys() {
+                self.flush_pending(*id)?;
+            }
+        }
+        let mut snapshots = Vec::new();
+        for (&id, (version, _)) in &plan.groups {
+            let tab = self
+                .tabs
+                .iter()
+                .find(|tab| tab.id == id)
+                .ok_or("not_found: документ закрыт")?;
+            if tab.version != *version {
+                return Err(format!(
+                    "conflict: документ {id} изменился при завершении ввода"
+                ));
+            }
+            snapshots.push(Snapshot {
+                id,
+                title: tab.title.clone(),
+                version: tab.version,
+                document: tab.document.clone(),
+            });
+        }
+        let task = Task::start(plan, snapshots, client.to_owned(), ctx.clone())?;
+        let result = task.status();
+        while self.workspace_jobs.len() >= 64 {
+            if let Some(index) = self.workspace_jobs.iter().position(|job| !job.running()) {
+                self.workspace_jobs.remove(index);
+            } else {
+                break;
+            }
+        }
+        self.workspace_jobs.push(task);
+        ctx.request_repaint();
+        Ok(result)
+    }
+    fn workspace_request(
+        &mut self,
+        tool: &str,
+        args: &Value,
+        client: &str,
+        ctx: &egui::Context,
+    ) -> Result<Value, String> {
+        crate::mcp::tools::validate_args(tool, args)?;
+        match tool {
+            "workspace_documents" => {
+                if args.as_object().is_none_or(|map| {
+                    map.keys()
+                        .any(|key| !matches!(key.as_str(), "index" | "count"))
+                }) {
+                    return Err("invalid_args: workspace_documents принимает index/count".into());
+                }
+                let start = args.get("index").and_then(Value::as_u64).unwrap_or(0);
+                let start = usize::try_from(start).map_err(|_| "invalid_args: index")?;
+                let count = args.get("count").and_then(Value::as_u64).unwrap_or(50);
+                if !(1..=50).contains(&count) {
+                    return Err("invalid_args: count от 1 до 50".into());
+                }
+                let count = count as usize;
+                Ok(json!({
+                    "documents":self.tabs.iter().skip(start).take(count).map(|tab| json!({
+                        "document_id":tab.id,"title":tab.title,"kind":tab.document.kind(),"version":tab.version,
+                        "read_only":tab.read_only,"dirty":tab.dirty(),
+                        "busy":self.reloading.contains_key(&tab.id) || self.workspace_jobs.iter().any(|job|job.running() && job.targets.iter().any(|target|target.0==tab.id)),
+                    })).collect::<Vec<_>>(),
+                    "offset":start,"total":self.tabs.len(),"active_document_id":self.active,
+                }))
+            }
+            "workspace_apply" => self.start_workspace(args, client, ctx),
+            "workspace_job_status" | "workspace_cancel" => {
+                if args
+                    .as_object()
+                    .is_none_or(|map| map.keys().any(|key| key != "job_id"))
+                {
+                    return Err("invalid_args: требуется только job_id".into());
+                }
+                let id = args
+                    .get("job_id")
+                    .and_then(Value::as_str)
+                    .filter(|id| {
+                        id.len() == 36
+                            && id.starts_with("job-")
+                            && id.as_bytes()[4..]
+                                .iter()
+                                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+                    })
+                    .ok_or("invalid_args: требуется job_id")?;
+                let task = self
+                    .workspace_jobs
+                    .iter_mut()
+                    .find(|task| {
+                        task.id == id
+                            && (task.client == client
+                                || (self.chat.owns(&task.client) && self.chat.owns(client)))
+                    })
+                    .ok_or("not_found: собственное задание не найдено")?;
+                if tool == "workspace_cancel" {
+                    task.cancel();
+                }
+                Ok(task.status())
+            }
+            _ => Err("unsupported_feature: workspace tool".into()),
+        }
+    }
+    fn finish_workspace(&mut self, ctx: &egui::Context) {
+        for task in &mut self.workspace_jobs {
+            if task.running()
+                && (!self.settings.mcp
+                    || (!self.allowed.contains(&task.client) && !self.chat.owns(&task.client))
+                    || task.started.elapsed() > crate::mcp::workspace::TIMEOUT)
+            {
+                task.cancel();
+            }
+        }
+        if self.pending.is_some() || self.palette || self.allow_exit {
+            return;
+        }
+        let ready: Vec<_> = self
+            .workspace_jobs
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(index, task)| task.poll().map(|result| (index, result)))
+            .collect();
+        for (index, result) in ready {
+            let client = self.workspace_jobs[index].client.clone();
+            let dry_run = self.workspace_jobs[index].dry_run;
+            let result = (|| -> Result<Value, String> {
+                if self.workspace_jobs[index].cancelled() {
+                    return Err("cancelled: пакет отменён или доступ отозван".into());
+                }
+                if self.workspace_jobs[index].started.elapsed() > crate::mcp::workspace::TIMEOUT {
+                    return Err("timeout: пакет устарел".into());
+                }
+                let updates = result?;
+                if !dry_run {
+                    for update in &updates {
+                        self.flush_pending(update.id)?;
+                    }
+                }
+                crate::ops::apply_workspace(
+                    &mut self.tabs,
+                    updates,
+                    Author::Agent {
+                        name: client.clone(),
+                    },
+                    dry_run,
+                )
+            })();
+            match result {
+                Ok(result) => {
+                    let applied = result.get("applied").and_then(Value::as_bool) == Some(true);
+                    if applied {
+                        let changed = result["documents"]
+                            .as_array()
+                            .map(|items| {
+                                items
+                                    .iter()
+                                    .filter(|item| item["applied"] == true)
+                                    .filter_map(|item| item["document_id"].as_u64())
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
+                        let target = self
+                            .active
+                            .filter(|id| changed.contains(id))
+                            .or_else(|| changed.first().copied());
+                        if let Some(target) = target {
+                            self.last_agent = Some((target, client.clone(), Instant::now()));
+                            if let Some(arguments) = self.workspace_jobs[index].cues.get(&target) {
+                                self.mark_ai_caret(ctx, target, arguments);
+                            }
+                        }
+                        self.status = format!("ИИ: пакет применён · документов {}", changed.len());
+                    }
+                    self.workspace_jobs[index].complete(result);
+                }
+                Err(error) => {
+                    self.status = format!("ИИ: пакет не применён · {error}");
+                    self.workspace_jobs[index].fail(error);
+                }
+            }
+        }
+    }
+    fn workspace_strip(&mut self, ui: &mut egui::Ui) {
+        if !self.workspace_jobs.iter().any(|task| task.running()) {
+            return;
+        }
+        egui::Panel::top("workspace-jobs")
+            .frame(
+                egui::Frame::new()
+                    .fill(ui.visuals().panel_fill)
+                    .inner_margin(egui::Margin::symmetric(12, 6)),
+            )
+            .show(ui, |ui| {
+                for task in self.workspace_jobs.iter_mut().filter(|task| task.running()) {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spinner();
+                        ui.label(format!(
+                            "ИИ · {} документа · {}",
+                            task.targets.len(),
+                            if task.cancelled() {
+                                "Отмена…"
+                            } else {
+                                "Подготовка правок"
+                            }
+                        ));
+                        let titles = task
+                            .targets
+                            .iter()
+                            .map(|target| target.2.chars().take(40).collect::<String>())
+                            .collect::<Vec<_>>()
+                            .join(" · ");
+                        ui.weak(titles);
+                        if ui
+                            .add_enabled(!task.cancelled(), egui::Button::new("Отменить"))
+                            .clicked()
+                        {
+                            task.cancel();
+                        }
+                    });
+                }
+            });
+    }
     fn mcp_requests(&mut self, ctx: &egui::Context) {
         // Agents often send bursts of small edits; drain them in one frame.
         let started = Instant::now();
@@ -1067,7 +1331,10 @@ impl App {
                 ));
                 continue;
             }
-            if !crate::mcp::tools::read_only(&r.tool) && self.pending.is_some() {
+            if !crate::mcp::tools::read_only(&r.tool)
+                && r.tool != "workspace_cancel"
+                && self.pending.is_some()
+            {
                 let _ = r
                     .reply
                     .send(Err("busy: подтвердите действие в интерфейсе".into()));
@@ -1091,6 +1358,17 @@ impl App {
                 let _ = r
                     .reply
                     .send(Err("unsupported_feature: неизвестный инструмент MCP".into()));
+                continue;
+            }
+            if matches!(
+                r.tool.as_str(),
+                "workspace_documents"
+                    | "workspace_apply"
+                    | "workspace_job_status"
+                    | "workspace_cancel"
+            ) {
+                let result = self.workspace_request(&r.tool, &r.args, &r.client, ctx);
+                let _ = r.reply.send(result);
                 continue;
             }
             let dry_run = r.args.get("mode").and_then(Value::as_str) == Some("dry_run");
@@ -2370,6 +2648,38 @@ impl eframe::App for App {
                     };
                     crate::chrome::tabs(ui, &mut self.ai_tab, &["Чат", &changes]);
                     ui.add_space(6.0);
+                    egui::CollapsingHeader::new("Задачи ИИ").show(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("workspace-history")
+                            .max_height(140.0)
+                            .show(ui, |ui| {
+                                for task in self.workspace_jobs.iter().rev().take(12) {
+                                    let status = task.status();
+                                    let label = match task.state() {
+                                        "preparing" => "Подготовка",
+                                        "completed" => "Применено",
+                                        "preview" => "Предпросмотр",
+                                        "cancelled" => "Отменено",
+                                        _ => "Не применено",
+                                    };
+                                    ui.label(format!(
+                                        "{label} · документов {}",
+                                        task.targets.len()
+                                    ));
+                                    ui.weak(
+                                        task.targets
+                                            .iter()
+                                            .map(|target| target.2.as_str())
+                                            .collect::<Vec<_>>()
+                                            .join(" · "),
+                                    );
+                                    if let Some(error) = status["error"].as_str() {
+                                        ui.weak(error);
+                                    }
+                                    ui.separator();
+                                }
+                            });
+                    });
                     if self.ai_tab == 0 {
                         if self.chat.show(ui, document, self.settings.mcp) {
                             (self.settings.chat_models, self.settings.chat_efforts) =
@@ -2426,6 +2736,7 @@ impl eframe::App for App {
                     }
                 });
         }
+        self.workspace_strip(ui);
         crate::clipboard::set_target(&ctx, if ui.is_enabled() { self.active } else { None });
         egui::CentralPanel::default()
             .frame(
@@ -2595,6 +2906,7 @@ impl eframe::App for App {
         }
         self.finish_mcp_closes();
         self.events();
+        self.finish_workspace(&ctx);
         for (id, action) in std::mem::take(&mut self.deferred) {
             if action == "activate_external" {
                 external_activation = Some(id);
@@ -2614,7 +2926,8 @@ impl eframe::App for App {
                 self.active = Some(id);
             }
         }
-        let close_busy = self.opening
+        let close_busy = self.workspace_jobs.iter().any(|task| task.running())
+            || self.opening
             || self.pending.is_some()
             || !self.picking.is_empty()
             || !self.saving.is_empty()
@@ -3202,6 +3515,7 @@ mod shell_input_tests {
             show_inspector: false,
             inspection: None,
             inspection_result: None,
+            workspace_jobs: Vec::new(),
             show_ai: false,
             ai_tab: 0,
             chat: crate::chat::Chat::new(),
@@ -3330,6 +3644,109 @@ mod shell_input_tests {
         let (sender, receiver) = std::sync::mpsc::channel();
         app.worker.rx = receiver;
         sender.send(event).map_err(|error| error.to_string())
+    }
+    fn ready_workspace(app: &mut App) -> Result<(), String> {
+        let updates = app
+            .tabs
+            .iter()
+            .map(|tab| {
+                let mut document = tab.document.clone();
+                match &mut document {
+                    Document::Docs(doc) => {
+                        doc.insert_text(doc.paragraphs[0].id, 0, "AI ")?;
+                    }
+                    Document::Sheets(book) => {
+                        book.set_cell(book.active_id(), 0, 0, "AI")?;
+                    }
+                    Document::Slides(deck) => {
+                        deck.slides[0].notes = "AI".into();
+                    }
+                }
+                Ok(crate::ops::WorkspaceUpdate {
+                    id: tab.id,
+                    base_version: tab.version,
+                    document,
+                    changed_ids: Vec::new(),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        app.settings.mcp = true;
+        app.allowed.insert("test-agent".into());
+        app.workspace_jobs
+            .push(crate::mcp::workspace::Task::ready_for_test(
+                "test-agent",
+                updates,
+            ));
+        Ok(())
+    }
+    #[test]
+    fn prepared_workspace_conflicts_with_same_frame_input_without_changing_other_documents()
+    -> Result<(), String> {
+        let mut app = fixture()?;
+        focus_page(&mut app)?;
+        ready_workspace(&mut app)?;
+        let sheets = app.tabs[1].document.clone();
+        frame_with_logic(&mut app, vec![egui::Event::Text("USER".into())]);
+        assert!(text(&app).contains("USER"));
+        assert!(!text(&app).contains("AI "));
+        assert_eq!(app.tabs[1].document, sheets);
+        assert_eq!(app.workspace_jobs[0].state(), "failed");
+        assert_eq!(app.active, Some(10));
+        Ok(())
+    }
+    #[test]
+    fn prepared_workspace_cancel_and_revoked_access_leave_both_models_unchanged()
+    -> Result<(), String> {
+        for revoke in [false, true] {
+            let mut app = fixture()?;
+            ready_workspace(&mut app)?;
+            let before: Vec<_> = app.tabs.iter().map(|tab| tab.document.clone()).collect();
+            if revoke {
+                app.allowed.clear();
+            } else {
+                app.workspace_jobs[0].cancel();
+            }
+            app.finish_workspace(&app.editor_ctx.clone());
+            assert_eq!(app.workspace_jobs[0].state(), "cancelled");
+            assert_eq!(
+                app.tabs
+                    .iter()
+                    .map(|tab| tab.document.clone())
+                    .collect::<Vec<_>>(),
+                before
+            );
+            assert!(app.tabs.iter().all(|tab| tab.undo.is_empty()));
+        }
+        Ok(())
+    }
+    #[test]
+    fn prepared_workspace_commits_without_switching_tabs_and_checks_owner() -> Result<(), String> {
+        let mut app = fixture()?;
+        ready_workspace(&mut app)?;
+        let ctx = app.editor_ctx.clone();
+        let id = app.workspace_jobs[0].id.clone();
+        assert!(
+            app.workspace_request("workspace_job_status", &json!({"job_id":id}), "other", &ctx)
+                .is_err()
+        );
+        app.finish_workspace(&ctx);
+        assert_eq!(app.active, Some(10));
+        assert_eq!(app.workspace_jobs[0].state(), "completed");
+        assert!(
+            app.tabs
+                .iter()
+                .all(|tab| tab.version == 1 && tab.undo.len() == 1 && tab.ai.len() == 1)
+        );
+        assert!(
+            app.workspace_request(
+                "workspace_documents",
+                &json!({"count":0}),
+                "test-agent",
+                &ctx
+            )
+            .is_err()
+        );
+        Ok(())
     }
     #[test]
     fn mcp_dry_run_and_unknown_tools_preserve_pending_sheet_input() -> Result<(), String> {

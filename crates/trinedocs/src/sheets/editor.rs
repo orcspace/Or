@@ -1303,8 +1303,11 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                 } else {
                     clipped.text(point, align, text, font, text_color);
                 }
-                if fmt.underline || fmt.strike {
-                    let y = cell_rect.center().y + if fmt.strike { 0.0 } else { 7.0 };
+                for offset in [fmt.underline.then_some(7.0), fmt.strike.then_some(0.0)]
+                    .into_iter()
+                    .flatten()
+                {
+                    let y = cell_rect.center().y + offset;
                     clipped.line_segment(
                         [
                             Pos2::new(cell_rect.left() + 5.0, y),
@@ -2394,6 +2397,32 @@ fn visible_cells(
     cells.sort_by_key(|&(row, col)| (row < frozen.0, col < frozen.1, row, col));
     cells
 }
+fn chart_bounds(values: impl Iterator<Item = f64>, zero: bool) -> (f64, f64) {
+    let mut low = if zero { 0.0 } else { f64::INFINITY };
+    let mut high = if zero { 0.0 } else { f64::NEG_INFINITY };
+    for value in values.filter(|value| value.is_finite()) {
+        low = low.min(value);
+        high = high.max(value);
+    }
+    if !low.is_finite() || !high.is_finite() {
+        (0.0, 1.0)
+    } else {
+        (low, high)
+    }
+}
+fn chart_fraction(value: f64, low: f64, high: f64) -> f32 {
+    if low == high {
+        return 0.5;
+    }
+    let span = high - low;
+    let result = if span.is_finite() {
+        (value - low) / span
+    } else {
+        (value / 2.0 - low / 2.0) / (high / 2.0 - low / 2.0)
+    };
+    result as f32
+}
+
 fn paint_chart(ui: &egui::Ui, sheet: &Sheet, chart: &super::model::Chart, rect: Rect) {
     let painter = ui.painter().with_clip_rect(rect);
     painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
@@ -2425,14 +2454,8 @@ fn paint_chart(ui: &egui::Ui, sheet: &Sheet, chart: &super::model::Chart, rect: 
         return;
     }
     let plot = rect.shrink2(Vec2::new(30.0, 18.0));
-    let lo = series.iter().flatten().copied().fold(0.0, f64::min);
-    let hi = series
-        .iter()
-        .flatten()
-        .copied()
-        .fold(0.0, f64::max)
-        .max(lo + 1.0);
-    let y = |v: f64| plot.bottom() - ((v - lo) / (hi - lo)) as f32 * plot.height();
+    let (lo, hi) = chart_bounds(series.iter().flatten().copied(), true);
+    let y = |v: f64| plot.bottom() - chart_fraction(v, lo, hi) * plot.height();
     if matches!(chart.kind, ChartKind::Pie | ChartKind::Doughnut) {
         let total = first.iter().map(|v| v.max(0.0)).sum::<f64>();
         if total <= 0.0 {
@@ -2488,8 +2511,8 @@ fn paint_chart(ui: &egui::Ui, sheet: &Sheet, chart: &super::model::Chart, rect: 
                 ChartKind::Bar => {
                     let h = plot.height() / values.len() as f32 / series.len() as f32;
                     let yy = plot.top() + i as f32 * h * series.len() as f32 + si as f32 * h;
-                    let zero = plot.left() + ((-lo) / (hi - lo)) as f32 * plot.width();
-                    let xx = plot.left() + ((*v - lo) / (hi - lo)) as f32 * plot.width();
+                    let zero = plot.left() + chart_fraction(0.0, lo, hi) * plot.width();
+                    let xx = plot.left() + chart_fraction(*v, lo, hi) * plot.width();
                     painter.rect_filled(
                         Rect::from_two_pos(Pos2::new(zero, yy), Pos2::new(xx, yy + h - 1.0)),
                         0.0,
@@ -2501,16 +2524,15 @@ fn paint_chart(ui: &egui::Ui, sheet: &Sheet, chart: &super::model::Chart, rect: 
                         .cell(start + i as u32, r.c0)
                         .and_then(|c| c.value.number().ok())
                         .unwrap_or(i as f64);
-                    let xmin = (start..=r.r1.min(start + 199))
-                        .filter_map(|rr| sheet.cell(rr, r.c0).and_then(|c| c.value.number().ok()))
-                        .fold(f64::INFINITY, f64::min);
-                    let xmax = (start..=r.r1.min(start + 199))
-                        .filter_map(|rr| sheet.cell(rr, r.c0).and_then(|c| c.value.number().ok()))
-                        .fold(f64::NEG_INFINITY, f64::max);
-                    let width = (xmax - xmin).max(1.0);
+                    let (xmin, xmax) = chart_bounds(
+                        (start..=r.r1.min(start + 199)).filter_map(|rr| {
+                            sheet.cell(rr, r.c0).and_then(|c| c.value.number().ok())
+                        }),
+                        false,
+                    );
                     painter.circle_filled(
                         Pos2::new(
-                            plot.left() + ((xv - xmin) / width) as f32 * plot.width(),
+                            plot.left() + chart_fraction(xv, xmin, xmax) * plot.width(),
                             point.y,
                         ),
                         3.0,
@@ -2542,6 +2564,73 @@ fn paint_chart(ui: &egui::Ui, sheet: &Sheet, chart: &super::model::Chart, rect: 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn review4_chart_coordinates_use_the_data_scale_without_a_unit_floor() {
+        let (low, high) = chart_bounds([-1E-200, 1E-200].into_iter(), true);
+        assert_eq!(chart_fraction(-1E-200, low, high), 0.0);
+        assert_eq!(chart_fraction(1E-200, low, high), 1.0);
+        assert_eq!(chart_fraction(0.0, low, high), 0.5);
+        assert_eq!(chart_fraction(0.0, -1E308, 1E308), 0.5);
+        assert_eq!(chart_fraction(1E308, -1E308, 1E308), 1.0);
+        let (low, high) = chart_bounds([0.01, 0.02].into_iter(), false);
+        assert_eq!(chart_fraction(0.02, low, high), 1.0);
+        assert_eq!(chart_fraction(5.0, 5.0, 5.0), 0.5);
+    }
+    #[test]
+    fn review4_canvas_renders_underline_and_strike_as_two_distinct_lines() -> Result<(), String> {
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx)?;
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.set_cell(id, 0, 0, "both")?;
+        book.set_format(
+            id,
+            Range::new(0, 0, 0, 0),
+            CellFormat {
+                underline: true,
+                strike: true,
+                ..Default::default()
+            },
+        )?;
+        let mut target = None;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1250.0, 820.0))),
+                ..Default::default()
+            },
+            |ui| {
+                show(ui, &mut book);
+                target = ui
+                    .ctx()
+                    .data_mut(|data| data.get_temp::<State>(ui.id().with("sheets-editor")))
+                    .and_then(|state| state.test_controls.get("grid-b1").copied())
+                    .map(|rect| rect.translate(Vec2::new(-96.0, 0.0)));
+            },
+        );
+        let rect = target.ok_or("grid geometry")?;
+        let mut lines = output
+            .shapes
+            .iter()
+            .filter_map(|shape| {
+                if let egui::Shape::LineSegment { points, stroke } = &shape.shape {
+                    (stroke.width == 1.0
+                        && stroke.color == color([28, 32, 38])
+                        && rect.contains(points[0])
+                        && rect.contains(points[1])
+                        && (points[0].y - points[1].y).abs() < 0.01)
+                        .then_some(points[0].y)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        lines.sort_by(f32::total_cmp);
+        output.textures_delta.clear();
+        assert_eq!(lines.len(), 2);
+        assert!((lines[1] - lines[0] - 7.0).abs() < 0.01);
+        Ok(())
+    }
+
     use super::*;
     #[test]
     fn same_frame_text_and_paste_preserve_the_pending_draft() -> Result<(), String> {

@@ -114,6 +114,10 @@ impl EditorState {
         self.preedit.clear();
     }
     fn insert(&mut self, doc: &mut Doc, text: &str) -> bool {
+        if self.table_cell.is_some() {
+            self.message = Some("Эта команда недоступна внутри ячейки таблицы".into());
+            return false;
+        }
         let (a, b) = self.range();
         match doc.replace_range(a, b, text, Some(self.typing.clone())) {
             Ok(pos) => {
@@ -133,8 +137,129 @@ impl EditorState {
         } else if self.selected() {
             let (a, b) = self.range();
             doc.format_range(a, b, apply);
+        } else if let Some(p) = doc
+            .paragraphs
+            .get_mut(self.cursor.paragraph)
+            .filter(|p| p.is_empty())
+        {
+            for run in &mut p.runs {
+                apply(&mut run.format);
+            }
         }
     }
+}
+
+pub(crate) fn reconcile_text_edit(ctx: &egui::Context, id: egui::Id, text: &str) {
+    let previous =
+        ctx.data(|data| data.get_temp::<std::sync::Arc<str>>(id.with("model-text-baseline")));
+    if let Some(previous) = previous.filter(|previous| previous.as_ref() != text)
+        && let Some(mut state) = egui::text_edit::TextEditState::load(ctx, id)
+    {
+        if let Some(mut range) = state.cursor.char_range() {
+            range.primary.index = rebase_text_offset(&previous, text, range.primary.index.0).into();
+            range.secondary.index =
+                rebase_text_offset(&previous, text, range.secondary.index.0).into();
+            range.h_pos = None;
+            state.cursor.set_char_range(Some(range));
+        }
+        state.clear_undoer();
+        state.store(ctx, id);
+    }
+}
+pub(crate) fn remember_text_edit(ctx: &egui::Context, id: egui::Id, text: &str) {
+    ctx.data_mut(|data| {
+        let key = id.with("model-text-baseline");
+        if data
+            .get_temp::<std::sync::Arc<str>>(key)
+            .is_none_or(|previous| previous.as_ref() != text)
+        {
+            data.insert_temp(key, std::sync::Arc::<str>::from(text));
+        }
+    });
+}
+fn rebase_text_offset(old: &str, new: &str, offset: usize) -> usize {
+    let old: Vec<_> = old.chars().collect();
+    let new: Vec<_> = new.chars().collect();
+    let offset = offset.min(old.len());
+    let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+    let suffix = old
+        .iter()
+        .rev()
+        .zip(new.iter().rev())
+        .take(old.len().min(new.len()).saturating_sub(prefix))
+        .take_while(|(a, b)| a == b)
+        .count();
+    if offset <= prefix {
+        offset
+    } else if offset >= old.len().saturating_sub(suffix) {
+        new.len().saturating_sub(old.len().saturating_sub(offset))
+    } else {
+        prefix
+    }
+}
+fn cell_ref(doc: &Doc, cursor: TableCursor) -> Option<&Cell> {
+    doc.tables
+        .iter()
+        .find(|table| table.id == cursor.table)?
+        .rows
+        .get(cursor.row)?
+        .get(cursor.column)
+}
+fn canonical_cell(doc: &Doc, mut cursor: TableCursor) -> Option<TableCursor> {
+    let table = doc.tables.iter().find(|table| table.id == cursor.table)?;
+    let start = *table.grid_starts(cursor.row).get(cursor.column)?;
+    let span = cell_ref(doc, cursor)?.span();
+    while cell_ref(doc, cursor)?.merged {
+        cursor.row = cursor.row.checked_sub(1)?;
+        cursor.column = table
+            .grid_starts(cursor.row)
+            .iter()
+            .position(|grid| *grid == start)?;
+        if cell_ref(doc, cursor)?.span() != span {
+            return None;
+        }
+    }
+    Some(cursor)
+}
+fn rebase_active_cell(old: &Doc, new: &Doc, cursor: TableCursor) -> Option<TableCursor> {
+    let id = cell_ref(old, cursor)?.id;
+    for table in &new.tables {
+        for (row, cells) in table.rows.iter().enumerate() {
+            if let Some(column) = cells.iter().position(|cell| cell.id == id) {
+                return canonical_cell(
+                    new,
+                    TableCursor {
+                        table: table.id,
+                        row,
+                        column,
+                    },
+                );
+            }
+        }
+    }
+    None
+}
+fn current_paragraph<'a>(doc: &'a Doc, state: &EditorState) -> Option<&'a Paragraph> {
+    if let Some(cursor) = state.table_cell {
+        cell_ref(doc, cursor)?.paragraphs.first()
+    } else {
+        doc.paragraphs.get(state.cursor.paragraph)
+    }
+}
+fn insert_ribbon_text(
+    ui: &egui::Ui,
+    doc: &mut Doc,
+    state: &mut EditorState,
+    text: &str,
+    canvas_id: egui::Id,
+) {
+    if state.table_cell.is_some() {
+        ui.ctx()
+            .input_mut(|input| input.events.push(Event::Text(text.into())));
+    } else {
+        state.insert(doc, text);
+    }
+    refocus(ui, state, canvas_id);
 }
 
 pub fn request_focus(ctx: &egui::Context, tab_id: u64, paragraph_id: u64) {
@@ -247,13 +372,21 @@ pub fn show_with_edits(ui: &mut egui::Ui, doc: &mut Doc, edits: Option<&[TextEdi
         .data_mut(|d| d.get_temp::<EditorState>(state_id))
         .unwrap_or_default();
     let before = doc.clone();
-    if ui.is_enabled() {
-        poll_image(doc, &mut state);
-    }
-    if ui.is_enabled()
-        && let Some(png) = crate::clipboard::take_image(ui.ctx())
+    let follow_typing = state.previous.as_deref().is_some_and(|previous| {
+        current_paragraph(previous, &state).is_some_and(|p| {
+            p.format_at(if state.table_cell.is_some() {
+                0
+            } else {
+                state.cursor.offset
+            }) == state.typing
+        })
+    });
+    if let Some(previous) = state.previous.as_deref()
+        && previous != doc
+        && let Some(cursor) = state.table_cell
     {
-        paste_image(doc, &mut state, &png);
+        state.table_cell = rebase_active_cell(previous, doc, cursor);
+        state.table_page = None;
     }
     if let Some(edits) = edits {
         for edit in edits {
@@ -272,6 +405,21 @@ pub fn show_with_edits(ui: &mut egui::Ui, doc: &mut Doc, edits: Option<&[TextEdi
     }
     state.cursor = doc.clamp_position(state.cursor);
     state.anchor = doc.clamp_position(state.anchor);
+    if follow_typing && let Some(paragraph) = current_paragraph(doc, &state) {
+        state.typing = paragraph.format_at(if state.table_cell.is_some() {
+            0
+        } else {
+            state.cursor.offset
+        });
+    }
+    if ui.is_enabled() {
+        poll_image(doc, &mut state);
+    }
+    if ui.is_enabled()
+        && let Some(png) = crate::clipboard::take_image(ui.ctx())
+    {
+        paste_image(doc, &mut state, &png);
+    }
     if let Some((tab, paragraph_id)) = ui
         .ctx()
         .data(|data| data.get_temp::<(u64, u64)>(egui::Id::new("docs-focus-request")))
@@ -409,7 +557,7 @@ pub fn show_with_edits(ui: &mut egui::Ui, doc: &mut Doc, edits: Option<&[TextEdi
                 state.preferred_x = None;
                 let cell = response
                     .interact_pointer_pos()
-                    .and_then(|p| cell_at(&layout, p, page_origin, scale, page_height, gap));
+                    .and_then(|p| cell_at(doc, &layout, p, page_origin, scale, page_height, gap));
                 if let Some((cell, page)) = cell {
                     state.table_cell = Some(cell);
                     state.table_page = Some(page);
@@ -794,11 +942,14 @@ fn table_command(doc: &mut Doc, state: &mut EditorState, command: TableCommand) 
                 .and_then(|t| t.rows.get(row))
                 .map(Vec::len)
                 .unwrap_or(1);
-            state.table_cell = Some(TableCursor {
-                row,
-                column: target.column.min(columns.saturating_sub(1)),
-                ..cursor
-            });
+            state.table_cell = canonical_cell(
+                doc,
+                TableCursor {
+                    row,
+                    column: target.column.min(columns.saturating_sub(1)),
+                    ..cursor
+                },
+            );
         }
         Ok(false) => leave_table(doc, state, anchor),
         Err(error) => state.message = Some(error),
@@ -813,38 +964,36 @@ fn step_cell(doc: &mut Doc, state: &mut EditorState, forward: bool) {
         state.table_cell = None;
         return;
     };
-    // Rows may hold different numbers of cells (merged cells), so walk real cells.
-    let rows = table.rows.len();
-    let row_len = |row: usize| table.rows.get(row).map(Vec::len).unwrap_or_default();
-    if forward {
-        if cursor.column + 1 < row_len(cursor.row) {
-            state.table_cell = Some(TableCursor {
-                column: cursor.column + 1,
-                ..cursor
-            });
-        } else if cursor.row + 1 < rows {
-            state.table_cell = Some(TableCursor {
-                row: cursor.row + 1,
-                column: 0,
-                ..cursor
-            });
+    let visible = table
+        .rows
+        .iter()
+        .enumerate()
+        .flat_map(|(row, cells)| {
+            cells
+                .iter()
+                .enumerate()
+                .filter(|(_, cell)| !cell.merged)
+                .map(move |(column, _)| TableCursor {
+                    row,
+                    column,
+                    ..cursor
+                })
+        })
+        .collect::<Vec<_>>();
+    if let Some(index) = visible.iter().position(|candidate| *candidate == cursor) {
+        let target = if forward {
+            visible.get(index + 1)
         } else {
+            index.checked_sub(1).and_then(|index| visible.get(index))
+        };
+        if let Some(target) = target {
+            state.table_cell = Some(*target);
+        } else if forward {
             table_command(doc, state, TableCommand::RowBelow);
-            if let Some(c) = &mut state.table_cell {
-                c.column = 0;
+            if let Some(cursor) = &mut state.table_cell {
+                cursor.column = 0;
             }
         }
-    } else if cursor.column > 0 {
-        state.table_cell = Some(TableCursor {
-            column: cursor.column - 1,
-            ..cursor
-        });
-    } else if cursor.row > 0 {
-        state.table_cell = Some(TableCursor {
-            row: cursor.row - 1,
-            column: row_len(cursor.row - 1).saturating_sub(1),
-            ..cursor
-        });
     }
     state.table_page = None;
     state.focus_cell = true;
@@ -855,6 +1004,11 @@ fn table_grid_picker(
     state: &mut EditorState,
     canvas_id: egui::Id,
 ) {
+    if state.table_cell.is_some() {
+        ui.weak("Вложенные таблицы пока не поддерживаются");
+        return;
+    }
+
     const COLUMNS: usize = 10;
     const ROWS: usize = 8;
     const STEP: f32 = 19.0;
@@ -1151,9 +1305,7 @@ fn home_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id
         });
     });
     group(ui, "Абзац", 168.0, |ui| {
-        let (list, current) = doc
-            .paragraphs
-            .get(state.cursor.paragraph)
+        let (list, current) = current_paragraph(doc, state)
             .map(|p| (p.list, p.align))
             .unwrap_or_default();
         ui.horizontal(|ui| {
@@ -1161,7 +1313,7 @@ fn home_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id
                 ("•≡", "Маркеры", List::Bullet),
                 ("1≡", "Нумерация", List::Number),
             ] {
-                if tool(ui, glyph, tip, list == kind && state.table_cell.is_none()).clicked() {
+                if tool(ui, glyph, tip, list == kind).clicked() {
                     selected_paragraphs(doc, state, |p| {
                         p.list = if p.list == kind { List::None } else { kind }
                     });
@@ -1327,8 +1479,7 @@ fn insert_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_
                             .add(egui::Button::new(ch).min_size(egui::vec2(26.0, 26.0)))
                             .clicked()
                         {
-                            state.insert(doc, ch);
-                            ui.memory_mut(|m| m.request_focus(canvas_id));
+                            insert_ribbon_text(ui, doc, state, ch, canvas_id);
                             ui.close();
                         }
                     }
@@ -1336,17 +1487,20 @@ fn insert_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_
             });
             if tool(ui, "📅  Дата", "Вставить текущую дату", false).clicked()
             {
-                state.insert(doc, &today());
-                ui.memory_mut(|m| m.request_focus(canvas_id));
+                insert_ribbon_text(ui, doc, state, &today(), canvas_id);
             }
         });
-        if tool(
-            ui,
-            "⤓  Разрыв страницы",
-            "Начать новую страницу · Ctrl+Enter",
-            false,
-        )
-        .clicked()
+        if ui
+            .add_enabled_ui(state.table_cell.is_none(), |ui| {
+                tool(
+                    ui,
+                    "⤓  Разрыв страницы",
+                    "Начать новую страницу · Ctrl+Enter",
+                    false,
+                )
+            })
+            .inner
+            .clicked()
         {
             if state.insert(doc, "\n")
                 && let Some(p) = doc.paragraphs.get_mut(state.cursor.paragraph)
@@ -1374,7 +1528,12 @@ fn delete_empty_pages(doc: &mut Doc, state: &mut EditorState) {
     let current = layout
         .rows
         .iter()
-        .find(|r| r.paragraph == state.cursor.paragraph)
+        .rev()
+        .find(|r| {
+            r.paragraph == state.cursor.paragraph
+                && state.cursor.offset >= r.start
+                && state.cursor.offset <= r.end
+        })
         .map(|r| r.page);
     let mut removed = current.is_some_and(|page| doc.delete_empty_page(page)) as usize;
     if removed == 0 {
@@ -1462,7 +1621,10 @@ fn layout_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_
             });
         });
         if ui
-            .add(egui::Button::new("Разрывы страниц").frame_when_inactive(false))
+            .add_enabled(
+                state.table_cell.is_none(),
+                egui::Button::new("Разрывы страниц").frame_when_inactive(false),
+            )
             .on_hover_text("Вставить разрыв страницы перед текущим абзацем")
             .clicked()
             && let Some(p) = doc.paragraphs.get_mut(state.cursor.paragraph)
@@ -1472,36 +1634,7 @@ fn layout_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_
         }
     });
     group(ui, "Абзац", 300.0, |ui| {
-        if let Some(p) = doc.paragraphs.get_mut(state.cursor.paragraph) {
-            ui.horizontal(|ui| {
-                ui.label("Отступ слева");
-                ui.add(
-                    egui::DragValue::new(&mut p.indent)
-                        .range(0.0..=250.0)
-                        .suffix(" pt"),
-                );
-                ui.label("Первая строка");
-                ui.add(
-                    egui::DragValue::new(&mut p.first_indent)
-                        .range(-100.0..=100.0)
-                        .suffix(" pt"),
-                );
-            });
-            ui.horizontal(|ui| {
-                ui.label("Интервал до");
-                ui.add(
-                    egui::DragValue::new(&mut p.spacing_before)
-                        .range(0.0..=100.0)
-                        .suffix(" pt"),
-                );
-                ui.label("после");
-                ui.add(
-                    egui::DragValue::new(&mut p.spacing_after)
-                        .range(0.0..=100.0)
-                        .suffix(" pt"),
-                );
-            });
-        }
+        paragraph_controls(ui, doc, state, true);
     });
     if doc.page != previous_page {
         doc.page.fit_margins();
@@ -1714,13 +1847,21 @@ fn selected_paragraphs(doc: &mut Doc, state: &EditorState, apply: impl Fn(&mut P
 }
 fn apply_style(doc: &mut Doc, state: &mut EditorState, style: &str) {
     selected_paragraphs(doc, state, |p| p.set_style(style));
-    state.typing = doc
-        .paragraphs
-        .get(state.cursor.paragraph)
-        .map(|p| p.format_at(state.cursor.offset))
+    state.typing = current_paragraph(doc, state)
+        .map(|p| {
+            p.format_at(if state.table_cell.is_some() {
+                0
+            } else {
+                state.cursor.offset
+            })
+        })
         .unwrap_or_default();
 }
 fn insert_table(doc: &mut Doc, state: &mut EditorState) {
+    if state.table_cell.is_some() {
+        state.message = Some("Вложенные таблицы пока не поддерживаются".into());
+        return;
+    }
     if let Some(id) = doc.paragraphs.get(state.cursor.paragraph).map(|p| p.id) {
         match doc.add_table(id, state.table_rows, state.table_columns) {
             Ok(table) => {
@@ -1736,11 +1877,66 @@ fn insert_table(doc: &mut Doc, state: &mut EditorState) {
         }
     }
 }
+fn paragraph_controls(ui: &mut egui::Ui, doc: &mut Doc, state: &EditorState, indent: bool) {
+    let Some(p) = current_paragraph(doc, state).cloned() else {
+        return;
+    };
+    if indent {
+        ui.horizontal(|ui| {
+            for (label, old, first) in [
+                ("Отступ слева", p.indent, false),
+                ("Первая строка", p.first_indent, true),
+            ] {
+                let mut value = old;
+                ui.label(label);
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut value)
+                            .range(-250.0..=250.0)
+                            .suffix(" pt"),
+                    )
+                    .changed()
+                {
+                    selected_paragraphs(doc, state, |p| {
+                        if first {
+                            p.first_indent = value
+                        } else {
+                            p.indent = value
+                        }
+                    });
+                }
+            }
+        });
+    }
+    ui.horizontal(|ui| {
+        for (label, old, after) in [
+            ("До", p.spacing_before, false),
+            ("После", p.spacing_after, true),
+        ] {
+            let mut value = old;
+            ui.label(label);
+            if ui
+                .add(
+                    egui::DragValue::new(&mut value)
+                        .range(0.0..=1000.0)
+                        .suffix(" pt"),
+                )
+                .changed()
+            {
+                selected_paragraphs(doc, state, |p| {
+                    if after {
+                        p.spacing_after = value
+                    } else {
+                        p.spacing_before = value
+                    }
+                });
+            }
+        }
+    });
+}
 fn paragraph_spacing(ui: &mut egui::Ui, doc: &mut Doc, state: &EditorState) {
     ui.weak("Междустрочный интервал");
-    let current = doc
-        .paragraphs
-        .get(state.cursor.paragraph)
+    let current = current_paragraph(doc, state)
         .map(|p| p.line_spacing)
         .unwrap_or(1.0);
     for value in [1.0_f32, 1.15, 1.5, 2.0, 2.5, 3.0] {
@@ -1756,22 +1952,16 @@ fn paragraph_spacing(ui: &mut egui::Ui, doc: &mut Doc, state: &EditorState) {
         }
     }
     ui.separator();
-    if let Some(p) = doc.paragraphs.get_mut(state.cursor.paragraph) {
-        ui.horizontal(|ui| {
-            ui.label("До");
-            ui.add(
-                egui::DragValue::new(&mut p.spacing_before)
-                    .range(0.0..=100.0)
-                    .suffix(" pt"),
-            );
-            ui.label("После");
-            ui.add(
-                egui::DragValue::new(&mut p.spacing_after)
-                    .range(0.0..=100.0)
-                    .suffix(" pt"),
-            );
-        });
-        ui.checkbox(&mut p.page_break_before, "С новой страницы");
+    paragraph_controls(ui, doc, state, false);
+    let mut page_break = current_paragraph(doc, state).is_some_and(|p| p.page_break_before);
+    if ui
+        .add_enabled(
+            state.table_cell.is_none(),
+            egui::Checkbox::new(&mut page_break, "С новой страницы"),
+        )
+        .changed()
+    {
+        selected_paragraphs(doc, state, |p| p.page_break_before = page_break);
     }
 }
 fn page_headers(ui: &mut egui::Ui, doc: &mut Doc) {
@@ -1811,6 +2001,10 @@ fn fitted_image_size(width: u32, height: u32) -> (f32, f32) {
     (width * scale, height * scale)
 }
 fn start_image_load(ui: &egui::Ui, doc: &Doc, state: &mut EditorState) {
+    if state.table_cell.is_some() {
+        state.message = Some("Вставка изображения в ячейку пока не поддерживается".into());
+        return;
+    }
     let Some(anchor) = doc.paragraphs.get(state.cursor.paragraph).map(|p| p.id) else {
         return;
     };
@@ -1854,6 +2048,10 @@ fn start_image_load(ui: &egui::Ui, doc: &Doc, state: &mut EditorState) {
 }
 /// Inserts a picture from the clipboard after the paragraph with the caret, like Word.
 fn paste_image(doc: &mut Doc, state: &mut EditorState, png: &[u8]) {
+    if state.table_cell.is_some() {
+        state.message = Some("Вставка изображения в ячейку пока не поддерживается".into());
+        return;
+    }
     let Some(anchor) = doc.paragraphs.get(state.cursor.paragraph).map(|p| p.id) else {
         return;
     };
@@ -2109,6 +2307,7 @@ fn cell_box_rect(
     )
 }
 fn cell_at(
+    doc: &Doc,
     layout: &Layout,
     pointer: Pos2,
     page_origin: Pos2,
@@ -2120,15 +2319,16 @@ fn cell_at(
         .cells
         .iter()
         .find(|c| cell_box_rect(c, page_origin, scale, page_height, gap).contains(pointer))
-        .map(|c| {
-            (
+        .and_then(|c| {
+            canonical_cell(
+                doc,
                 TableCursor {
                     table: c.table,
                     row: c.row,
                     column: c.column,
                 },
-                c.page,
             )
+            .map(|cursor| (cursor, c.page))
         })
 }
 /// Makes the ribbon show the format of the active cell.
@@ -2225,6 +2425,7 @@ fn cell_editor(
         .unwrap_or_default();
     let align = cell.paragraphs.first().map(|p| p.align).unwrap_or_default();
     let mut text = cell_text(cell);
+    reconcile_text_edit(ui.ctx(), id, &text);
     ui.painter()
         .rect_filled(rect.shrink(1.0), 0.0, rgb(cell.fill));
     let family = if format.font.is_empty() {
@@ -2268,6 +2469,7 @@ fn cell_editor(
         Stroke::new(2.0, crate::chrome::accent(ui)),
         egui::StrokeKind::Inside,
     );
+    remember_text_edit(ui.ctx(), id, &text);
     if response.changed() {
         let mut next = doc.next_id;
         if let Some(cell) = active_cell(doc, Some(cursor)) {
@@ -2600,7 +2802,8 @@ fn insert_break(doc: &mut Doc, state: &mut EditorState, soft: bool, page: bool) 
         && !page
         && !state.selected()
         && paragraph.is_some_and(|p| {
-            state.cursor.offset == p.len() && (p.style.starts_with("Heading") || p.style == "Title")
+            state.cursor.offset == p.len()
+                && (heading_level(&p.style).is_some() || p.style == "Title")
         });
     if state.insert(doc, if soft { "\u{000b}" } else { "\n" })
         && let Some(p) = doc.paragraphs.get_mut(state.cursor.paragraph)
@@ -2959,6 +3162,24 @@ fn today() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn review4_text_baseline_reuses_storage_and_rebases_external_unicode_edit() -> Result<(), String>
+    {
+        let ctx = egui::Context::default();
+        let id = egui::Id::new("external-text-baseline");
+        remember_text_edit(&ctx, id, "a🌍bc");
+        let first = ctx
+            .data(|d| d.get_temp::<std::sync::Arc<str>>(id.with("model-text-baseline")))
+            .ok_or("baseline")?;
+        remember_text_edit(&ctx, id, "a🌍bc");
+        let second = ctx
+            .data(|d| d.get_temp::<std::sync::Arc<str>>(id.with("model-text-baseline")))
+            .ok_or("baseline")?;
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+        assert_eq!(rebase_text_offset("a🌍bc", "prefix a🌍bc", 3), 10);
+        Ok(())
+    }
+
     #[test]
     fn tall_image_fit_preserves_ratio_and_passes_document_geometry_validation() -> Result<(), String>
     {

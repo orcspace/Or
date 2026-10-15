@@ -341,6 +341,16 @@ impl Default for Book {
     }
 }
 impl Book {
+    fn atomic_edit<R>(
+        &mut self,
+        edit: impl FnOnce(&mut Self) -> Result<R, String>,
+    ) -> Result<R, String> {
+        let mut candidate = self.clone();
+        let result = edit(&mut candidate)?;
+        candidate.validate()?;
+        *self = candidate;
+        Ok(result)
+    }
     pub fn validate(&self) -> Result<(), String> {
         if self.sheets.is_empty()
             || self.sheets.len() > 1024
@@ -520,6 +530,9 @@ impl Book {
         Ok(())
     }
     pub fn rename_sheet(&mut self, id: u64, name: &str) -> Result<(), String> {
+        self.atomic_edit(|book| book.rename_sheet_inner(id, name))
+    }
+    fn rename_sheet_inner(&mut self, id: u64, name: &str) -> Result<(), String> {
         self.validate_name(name, Some(id))?;
         let old = self.sheet_by_id(id).ok_or("Лист не найден")?.name.clone();
         for s in &mut self.sheets {
@@ -583,16 +596,12 @@ impl Book {
             .ok_or("Лист не найден")?;
         let active = self.active_id();
         let s = self.sheets.remove(pos);
-        let hidden = s.hidden;
         self.sheets.insert(index, s);
-        self.active = if hidden {
-            self.sheets
-                .iter()
-                .position(|sheet| sheet.id == active)
-                .unwrap_or(index)
-        } else {
-            index
-        };
+        self.active = self
+            .sheets
+            .iter()
+            .position(|sheet| sheet.id == active)
+            .unwrap_or(index);
         Ok(())
     }
     pub fn set_cell(&mut self, sheet: u64, row: u32, col: u32, input: &str) -> Result<u64, String> {
@@ -856,6 +865,9 @@ impl Book {
         super::formula::recalculate(self);
     }
     pub fn fill(&mut self, sheet: u64, source: Range, target: Range) -> Result<(), String> {
+        self.atomic_edit(|book| book.fill_inner(sheet, source, target))
+    }
+    fn fill_inner(&mut self, sheet: u64, source: Range, target: Range) -> Result<(), String> {
         source.validate()?;
         target.validate()?;
         let s = self.sheet_by_id(sheet).ok_or("Лист не найден")?;
@@ -880,6 +892,15 @@ impl Book {
         Ok(())
     }
     pub fn sort(
+        &mut self,
+        sheet: u64,
+        range: Range,
+        keys: &[(u32, bool)],
+        header: bool,
+    ) -> Result<(), String> {
+        self.atomic_edit(|book| book.sort_inner(sheet, range, keys, header))
+    }
+    fn sort_inner(
         &mut self,
         sheet: u64,
         range: Range,
@@ -970,6 +991,16 @@ impl Book {
         Ok(())
     }
     pub fn edit_dimension(
+        &mut self,
+        sheet: u64,
+        index: u32,
+        count: u32,
+        rows: bool,
+        delete: bool,
+    ) -> Result<(), String> {
+        self.atomic_edit(|book| book.edit_dimension_inner(sheet, index, count, rows, delete))
+    }
+    fn edit_dimension_inner(
         &mut self,
         sheet: u64,
         index: u32,

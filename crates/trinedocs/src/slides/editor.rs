@@ -366,6 +366,11 @@ pub fn show(ui: &mut egui::Ui, deck: &mut Deck) -> bool {
                 .show(ui.ctx(), |ui| {
                     ui.add_enabled_ui(enabled, |ui| {
                         if let Some(slide) = deck.slide_mut(state.slide_id) {
+                            crate::docs::editor::reconcile_text_edit(
+                                ui.ctx(),
+                                memory_id.with("notes"),
+                                &slide.notes,
+                            );
                             changed |= ui
                                 .add(
                                     egui::TextEdit::multiline(&mut slide.notes)
@@ -374,6 +379,11 @@ pub fn show(ui: &mut egui::Ui, deck: &mut Deck) -> bool {
                                         .desired_width(f32::INFINITY),
                                 )
                                 .changed();
+                            crate::docs::editor::remember_text_edit(
+                                ui.ctx(),
+                                memory_id.with("notes"),
+                                &slide.notes,
+                            );
                         }
                     });
                 });
@@ -383,6 +393,7 @@ pub fn show(ui: &mut egui::Ui, deck: &mut Deck) -> bool {
         && let Some(slide) = deck.slide_mut(state.slide_id)
     {
         ui.label(egui::RichText::new("Заметки докладчика").color(crate::chrome::muted(ui)));
+        crate::docs::editor::reconcile_text_edit(ui.ctx(), memory_id.with("notes"), &slide.notes);
         changed |= ui
             .add_sized(
                 Vec2::new(ui.available_width(), 70.0),
@@ -391,6 +402,7 @@ pub fn show(ui: &mut egui::Ui, deck: &mut Deck) -> bool {
                     .desired_rows(3),
             )
             .changed();
+        crate::docs::editor::remember_text_edit(ui.ctx(), memory_id.with("notes"), &slide.notes);
     }
     if ui.is_enabled()
         && !ui.ctx().text_edit_focused()
@@ -1533,13 +1545,17 @@ fn properties(ui: &mut egui::Ui, e: &mut Element) -> bool {
         changed |= ui.color_edit_button_srgb(&mut e.color).changed();
     });
     ui.label(egui::RichText::new("Текст объекта").color(crate::chrome::muted(ui)));
+    let property_text_id = ui.id().with(("property-text", e.id));
+    crate::docs::editor::reconcile_text_edit(ui.ctx(), property_text_id, &e.text);
     changed |= ui
         .add(
             egui::TextEdit::multiline(&mut e.text)
+                .id(property_text_id)
                 .desired_rows(3)
                 .desired_width(f32::INFINITY),
         )
         .changed();
+    crate::docs::editor::remember_text_edit(ui.ctx(), property_text_id, &e.text);
     match &mut e.kind {
         ElementKind::Table { cells } => {
             ui.label("Ячейки таблицы");
@@ -1793,6 +1809,7 @@ fn inline_editor(
             return changed;
         };
         let size = font_size.min(ch / scale * 0.7) * scale;
+        crate::docs::editor::reconcile_text_edit(ui.ctx(), editor_id.with((r, c)), value);
         let response = ui.put(
             Rect::from_min_size(
                 cell.min + Vec2::splat(5.0 * scale),
@@ -1806,6 +1823,7 @@ fn inline_editor(
                 .text_color(color)
                 .desired_width(f32::INFINITY),
         );
+        crate::docs::editor::remember_text_edit(ui.ctx(), editor_id.with((r, c)), value);
         let (tab, shift, enter, up, down) = ui.input(|i| {
             (
                 i.key_pressed(egui::Key::Tab),
@@ -1843,6 +1861,7 @@ fn inline_editor(
         }
         response
     } else {
+        crate::docs::editor::reconcile_text_edit(ui.ctx(), editor_id, &e.text);
         let response = ui.put(
             object.shrink(5.0 * scale),
             egui::TextEdit::multiline(&mut e.text)
@@ -1853,6 +1872,7 @@ fn inline_editor(
                 .text_color(color)
                 .desired_width(f32::INFINITY),
         );
+        crate::docs::editor::remember_text_edit(ui.ctx(), editor_id, &e.text);
         if response.lost_focus() && !focus_requested {
             state.edit_text = None;
         }

@@ -121,6 +121,7 @@ fn element_html(element: &Element) -> String {
 struct Node {
     name: String,
     attrs: BTreeMap<String, String>,
+    namespaces: BTreeMap<String, String>,
     text: String,
     children: Vec<Node>,
 }
@@ -196,14 +197,39 @@ fn parse(bytes: &[u8]) -> Result<Node, String> {
                     name: local(e.name().as_ref()).into(),
                     ..Node::default()
                 };
-                for attr in e.attributes() {
-                    let attr = attr.map_err(|e| e.to_string())?;
-                    let key = attr.key.as_ref().to_string();
-                    let value = quick_xml::escape::unescape(attr.value.as_ref())
-                        .map_err(|e| e.to_string())?
-                        .into_owned();
+                let attributes = e
+                    .attributes()
+                    .map(|attr| {
+                        let attr = attr.map_err(|e| e.to_string())?;
+                        let key = attr.key.as_ref().to_string();
+                        let value = attr
+                            .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                            .map_err(|e| e.to_string())?
+                            .into_owned();
+                        Ok((key, value))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                for (key, value) in &attributes {
+                    if let Some(prefix) = key.strip_prefix("xmlns:") {
+                        node.namespaces.insert(prefix.into(), value.clone());
+                    }
+                }
+                for (key, value) in &attributes {
                     node.attrs.insert(key.clone(), value.clone());
-                    node.attrs.entry(local(&key).into()).or_insert(value);
+                    node.attrs
+                        .entry(local(key).into())
+                        .or_insert_with(|| value.clone());
+                }
+                for (key, value) in attributes {
+                    if let Some((prefix, name)) = key.split_once(':')
+                        && node.namespaces.get(prefix).or_else(|| {
+                            stack.iter().rev().find_map(|parent| parent.namespaces.get(prefix))
+                        }).is_some_and(|uri| matches!(uri.as_str(),
+                            "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+                            | "http://purl.oclc.org/ooxml/officeDocument/relationships"))
+                    {
+                        node.attrs.insert(format!("r:{name}"), value);
+                    }
                 }
                 if empty {
                     if let Some(parent) = stack.last_mut() {
@@ -248,10 +274,16 @@ fn parse(bytes: &[u8]) -> Result<Node, String> {
     if stack.len() != 1 {
         return Err("XML не закрыт".into());
     }
-    stack
-        .pop()
-        .and_then(|n| n.children.into_iter().next())
-        .ok_or_else(|| "Пустой XML".into())
+    let root = stack.pop().ok_or("Пустой XML")?;
+    if !root.text.trim().is_empty() {
+        return Err("XML содержит текст вне корневого элемента".into());
+    }
+    let mut children = root.children.into_iter();
+    let node = children.next().ok_or("Пустой XML")?;
+    if children.next().is_some() {
+        return Err("XML должен содержать ровно один корневой элемент".into());
+    }
+    Ok(node)
 }
 fn relationships(bytes: Option<&Vec<u8>>, base: &str) -> Result<BTreeMap<String, String>, String> {
     let mut rels = BTreeMap::new();
@@ -684,8 +716,8 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
                         element.y = (map[1] * offset.number("y", 0.0) + map[3]) / 12700.0;
                     }
                     if let Some(size) = transform.child("ext") {
-                        element.w = (map[0] * size.number("cx", 1270000.0) / 12700.0).max(1.0);
-                        element.h = (map[1] * size.number("cy", 1270000.0) / 12700.0).max(1.0);
+                        element.w = (map[0] * size.number("cx", 1270000.0) / 12700.0).max(0.001);
+                        element.h = (map[1] * size.number("cy", 1270000.0) / 12700.0).max(0.001);
                     }
                     element.rotation = transform.number("rot", 0.0) / 60000.0;
                     flip = (
@@ -1062,7 +1094,8 @@ fn xfrm(e: &Element, prefix: &str) -> String {
     )
 }
 fn text_body(e: &Element) -> String {
-    let paragraphs = e.text.split('\n').map(|line| format!("<a:p><a:r><a:rPr lang=\"ru-RU\" sz=\"{}\" b=\"{}\" i=\"{}\"><a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill><a:latin typeface=\"{}\"/></a:rPr><a:t xml:space=\"preserve\">{}</a:t></a:r><a:endParaRPr lang=\"ru-RU\"/></a:p>", (e.font_size * 100.0) as u32, u8::from(e.bold), u8::from(e.italic), hex(e.color), xml_escape(&e.font), xml_escape(line))).collect::<String>();
+    let normalized = e.text.replace("\r\n", "\n").replace('\r', "\n");
+    let paragraphs = normalized.split('\n').map(|line| format!("<a:p><a:r><a:rPr lang=\"ru-RU\" sz=\"{}\" b=\"{}\" i=\"{}\"><a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill><a:latin typeface=\"{}\"/></a:rPr><a:t xml:space=\"preserve\">{}</a:t></a:r><a:endParaRPr lang=\"ru-RU\"/></a:p>", (e.font_size * 100.0) as u32, u8::from(e.bold), u8::from(e.italic), hex(e.color), xml_escape(&e.font), xml_escape(line))).collect::<String>();
     // Only text boxes grow with their text; shapes keep the frame the user drew.
     let fit = if matches!(e.kind, ElementKind::Text) {
         "<a:spAutoFit/>"

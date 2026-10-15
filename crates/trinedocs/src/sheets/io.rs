@@ -3,8 +3,8 @@ use super::model::{
 };
 use calamine::{Data, Reader as _, open_workbook_auto_from_rs};
 use quick_xml::{
-    Reader,
-    events::{BytesStart, Event},
+    Reader, Writer,
+    events::{BytesStart, BytesText, Event},
 };
 use rust_xlsxwriter::{
     Chart, ChartType, Color, Format, FormatAlign, FormatBorder, FormatUnderline, Formula, Image,
@@ -1135,7 +1135,6 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
         if let Some(s) = book.sheet_by_id_mut(id) {
             s.hidden = hidden;
         }
-        read_sheet_images(book, id, &path, parts);
         let Some(bytes) = parts.get(&path) else {
             continue;
         };
@@ -1178,7 +1177,8 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
                             .and_then(|v| v.parse::<f32>().ok())
                             .filter(|w| w.is_finite() && *w > 0.0)
                         {
-                            s.widths.insert(c, (w * 7.0 + 5.0).clamp(12.0, 1800.0));
+                            let pixels = if w < 1.0 { w * 12.0 } else { w * 7.0 + 5.0 };
+                            s.widths.insert(c, pixels.clamp(1.0, 1800.0));
                         }
                         if xml_bool(a.get("hidden"), false) {
                             s.hidden_cols.insert(c);
@@ -1199,8 +1199,7 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
                         .and_then(|v| v.parse::<f32>().ok())
                         .filter(|h| h.is_finite() && *h > 0.0)
                     {
-                        s.row_heights
-                            .insert(r, (h * 96.0 / 72.0).clamp(12.0, 600.0));
+                        s.row_heights.insert(r, (h * 96.0 / 72.0).clamp(1.0, 600.0));
                     }
                     if xml_bool(a.get("hidden"), false) {
                         s.hidden_rows.insert(r);
@@ -1229,6 +1228,7 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
             }
             Ok(())
         })?;
+        read_sheet_images(book, id, &path, parts);
     }
     if book.active_sheet().is_some_and(|sheet| sheet.hidden) {
         book.active = book
@@ -1391,16 +1391,20 @@ fn read_sheet_images(
             else {
                 continue;
             };
-            if let Ok(image_id) = book.add_image(id, anchor.row, anchor.col, bytes.clone())
+            let Some(sheet) = book.sheet_by_id(id) else {
+                continue;
+            };
+            let (row, col, x_offset, y_offset, width, height) = picture_geometry(sheet, &anchor);
+            if let Ok(image_id) = book.add_image(id, row, col, bytes.clone())
                 && let Some(image) = book
                     .sheet_by_id_mut(id)
                     .and_then(|s| s.images.iter_mut().find(|i| i.id == image_id))
             {
-                image.x_offset = (anchor.col_off as f32 / 9525.0).clamp(0.0, 4000.0);
-                image.y_offset = (anchor.row_off as f32 / 9525.0).clamp(0.0, 4000.0);
-                if anchor.cx > 0 && anchor.cy > 0 {
-                    image.width = (anchor.cx as f32 / 9525.0).clamp(1.0, 8000.0);
-                    image.height = (anchor.cy as f32 / 9525.0).clamp(1.0, 8000.0);
+                image.x_offset = x_offset;
+                image.y_offset = y_offset;
+                if width > 0.0 && height > 0.0 {
+                    image.width = width.clamp(1.0, 8000.0);
+                    image.height = height.clamp(1.0, 8000.0);
                 }
                 image.alt = anchor.alt;
             }
@@ -1408,11 +1412,17 @@ fn read_sheet_images(
     }
 }
 #[derive(Default)]
-struct PictureAnchor {
+struct PicturePoint {
     row: u32,
     col: u32,
     row_off: u64,
     col_off: u64,
+}
+#[derive(Default)]
+struct PictureAnchor {
+    from: PicturePoint,
+    to: Option<PicturePoint>,
+    absolute: Option<(u64, u64)>,
     cx: u64,
     cy: u64,
     embed: String,
@@ -1422,29 +1432,50 @@ fn drawing_pictures(text: &str) -> Result<Vec<PictureAnchor>, String> {
     let mut reader = Reader::from_str(text);
     let mut pictures = Vec::new();
     let mut current: Option<PictureAnchor> = None;
-    let mut in_from = false;
+    let mut point = None;
     loop {
-        match reader.read_event().map_err(|e| e.to_string())? {
+        match reader.read_event().map_err(|error| error.to_string())? {
             Event::Start(e) => {
                 let tag = local(&e);
                 match tag.as_str() {
                     "oneCellAnchor" | "twoCellAnchor" | "absoluteAnchor" => {
                         current = Some(PictureAnchor::default());
+                        point = None;
                     }
-                    "from" => in_from = true,
-                    "row" | "col" | "rowOff" | "colOff" if in_from => {
+                    "from" => point = Some(false),
+                    "to" => {
+                        point = Some(true);
+                        if let Some(anchor) = current.as_mut() {
+                            anchor.to = Some(PicturePoint::default());
+                        }
+                    }
+                    "row" | "col" | "rowOff" | "colOff" if point.is_some() => {
                         let value = reader
                             .read_text(e.name())
-                            .map_err(|e| e.to_string())?
+                            .map_err(|error| error.to_string())?
                             .trim()
                             .parse::<u64>()
-                            .unwrap_or(0);
+                            .map_err(|_| "Неверная координата рисунка")?;
                         if let Some(anchor) = current.as_mut() {
+                            let position = if point == Some(true) {
+                                anchor
+                                    .to
+                                    .as_mut()
+                                    .ok_or("Нет конечной координаты рисунка")?
+                            } else {
+                                &mut anchor.from
+                            };
                             match tag.as_str() {
-                                "row" => anchor.row = u32::try_from(value).unwrap_or(0),
-                                "col" => anchor.col = u32::try_from(value).unwrap_or(0),
-                                "rowOff" => anchor.row_off = value,
-                                _ => anchor.col_off = value,
+                                "row" => {
+                                    position.row = u32::try_from(value)
+                                        .map_err(|_| "Строка рисунка вне листа")?
+                                }
+                                "col" => {
+                                    position.col = u32::try_from(value)
+                                        .map_err(|_| "Столбец рисунка вне листа")?
+                                }
+                                "rowOff" => position.row_off = value,
+                                _ => position.col_off = value,
                             }
                         }
                     }
@@ -1453,7 +1484,7 @@ fn drawing_pictures(text: &str) -> Result<Vec<PictureAnchor>, String> {
             }
             Event::Empty(e) => picture_attrs(&e, &reader, &local(&e), current.as_mut())?,
             Event::End(e) => match e.local_name().as_ref() {
-                "from" => in_from = false,
+                "from" | "to" => point = None,
                 "oneCellAnchor" | "twoCellAnchor" | "absoluteAnchor" => {
                     if let Some(anchor) = current.take()
                         && !anchor.embed.is_empty()
@@ -1476,28 +1507,141 @@ fn picture_attrs(
     tag: &str,
     anchor: Option<&mut PictureAnchor>,
 ) -> Result<(), String> {
-    let Some(anchor) = anchor else {
-        return Ok(());
-    };
+    let Some(anchor) = anchor else { return Ok(()) };
+    let values = attrs(e, reader)?;
     match tag {
         "ext" if anchor.cx == 0 => {
-            let a = attrs(e, reader)?;
-            anchor.cx = a.get("cx").and_then(|v| v.parse().ok()).unwrap_or(0);
-            anchor.cy = a.get("cy").and_then(|v| v.parse().ok()).unwrap_or(0);
+            anchor.cx = values
+                .get("cx")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            anchor.cy = values
+                .get("cy")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+        }
+        "pos" => {
+            if let (Some(x), Some(y)) = (
+                values.get("x").and_then(|value| value.parse().ok()),
+                values.get("y").and_then(|value| value.parse().ok()),
+            ) {
+                anchor.absolute = Some((x, y));
+            }
         }
         "blip" => {
-            if let Some(embed) = attrs(e, reader)?.get("r:embed") {
+            if let Some(embed) = values.get("r:embed") {
                 anchor.embed = embed.clone();
             }
         }
         "cNvPr" => {
-            if let Some(descr) = attrs(e, reader)?.get("descr") {
-                anchor.alt = descr.clone();
+            if let Some(description) = values.get("descr") {
+                anchor.alt = description.clone();
             }
         }
         _ => {}
     }
     Ok(())
+}
+fn drawing_axis_position(
+    index: u32,
+    base: f32,
+    sizes: &BTreeMap<u32, f32>,
+    hidden: &std::collections::BTreeSet<u32>,
+) -> f32 {
+    (index as f32 * base
+        + sizes
+            .range(..index)
+            .filter(|(position, _)| !hidden.contains(position))
+            .map(|(_, size)| *size - base)
+            .sum::<f32>()
+        - hidden.range(..index).count() as f32 * base)
+        .max(0.0)
+}
+fn drawing_axis_index(
+    pixel: f32,
+    count: u32,
+    base: f32,
+    sizes: &BTreeMap<u32, f32>,
+    hidden: &std::collections::BTreeSet<u32>,
+) -> u32 {
+    let (mut low, mut high) = (0, count);
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if drawing_axis_position(middle + 1, base, sizes, hidden) <= pixel {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    low.min(count - 1)
+}
+fn picture_geometry(
+    sheet: &super::model::Sheet,
+    anchor: &PictureAnchor,
+) -> (u32, u32, f32, f32, f32, f32) {
+    let x = drawing_axis_position(anchor.from.col, 96.0, &sheet.widths, &sheet.hidden_cols)
+        + anchor.from.col_off as f32 / 9525.0;
+    let y = drawing_axis_position(
+        anchor.from.row,
+        26.0,
+        &sheet.row_heights,
+        &sheet.hidden_rows,
+    ) + anchor.from.row_off as f32 / 9525.0;
+    let (x, y) = anchor
+        .absolute
+        .map_or((x, y), |(x, y)| (x as f32 / 9525.0, y as f32 / 9525.0));
+    let (row, col, x_offset, y_offset) = if anchor.absolute.is_some() {
+        let row = drawing_axis_index(
+            y,
+            super::model::MAX_ROWS,
+            26.0,
+            &sheet.row_heights,
+            &sheet.hidden_rows,
+        );
+        let col = drawing_axis_index(
+            x,
+            super::model::MAX_COLS,
+            96.0,
+            &sheet.widths,
+            &sheet.hidden_cols,
+        );
+        (
+            row,
+            col,
+            x - drawing_axis_position(col, 96.0, &sheet.widths, &sheet.hidden_cols),
+            y - drawing_axis_position(row, 26.0, &sheet.row_heights, &sheet.hidden_rows),
+        )
+    } else {
+        (
+            anchor.from.row,
+            anchor.from.col,
+            anchor.from.col_off as f32 / 9525.0,
+            anchor.from.row_off as f32 / 9525.0,
+        )
+    };
+    let (width, height) = anchor
+        .to
+        .as_ref()
+        .map(|end| {
+            (
+                drawing_axis_position(end.col, 96.0, &sheet.widths, &sheet.hidden_cols)
+                    + end.col_off as f32 / 9525.0
+                    - x,
+                drawing_axis_position(end.row, 26.0, &sheet.row_heights, &sheet.hidden_rows)
+                    + end.row_off as f32 / 9525.0
+                    - y,
+            )
+        })
+        .filter(|(width, height)| *width > 0.0 && *height > 0.0)
+        .unwrap_or((anchor.cx as f32 / 9525.0, anchor.cy as f32 / 9525.0));
+    (
+        row,
+        col,
+        x_offset.clamp(0.0, 4000.0),
+        y_offset.clamp(0.0, 4000.0),
+        width,
+        height,
+    )
 }
 fn xlsx_format(fmt: &CellFormat) -> Format {
     let mut f = Format::new()
@@ -1560,11 +1704,11 @@ fn write_xlsx(book: &Book) -> Result<Vec<u8>, String> {
         ws.set_freeze_panes(sheet.frozen_rows, sheet.frozen_cols as u16)
             .map_err(|e| e.to_string())?;
         for (col, width) in &sheet.widths {
-            ws.set_column_width_pixels(*col as u16, width.clamp(12.0, 1800.0) as u32)
+            ws.set_column_width_pixels(*col as u16, width.round().clamp(1.0, 1800.0) as u32)
                 .map_err(|e| e.to_string())?;
         }
         for (row, height) in &sheet.row_heights {
-            ws.set_row_height_pixels(*row, height.clamp(12.0, 600.0) as u32)
+            ws.set_row_height(*row, f64::from(height.clamp(1.0, 600.0)) * 72.0 / 96.0)
                 .map_err(|e| e.to_string())?;
         }
         for row in &sheet.hidden_rows {
@@ -1695,10 +1839,201 @@ fn write_xlsx(book: &Book) -> Result<Vec<u8>, String> {
             .map_err(|e| e.to_string())?;
         }
     }
-    workbook.save_to_buffer().map_err(|e| e.to_string())
+    let bytes = workbook
+        .save_to_buffer()
+        .map_err(|error| error.to_string())?;
+    patch_formula_string_results(bytes, book)
 }
+fn ambiguous_formula_string(cell: &super::model::Cell) -> Option<&str> {
+    if !cell.input.starts_with('=') {
+        return None;
+    }
+    let Value::Text(text) = &cell.value else {
+        return None;
+    };
+    (text.parse::<f64>().is_ok()
+        || matches!(
+            text.as_str(),
+            "TRUE"
+                | "FALSE"
+                | "#DIV/0!"
+                | "#N/A"
+                | "#NAME?"
+                | "#NULL!"
+                | "#NUM!"
+                | "#REF!"
+                | "#VALUE!"
+                | "#GETTING_DATA"
+        ))
+    .then_some(text.as_str())
+}
+fn typed_formula_strings(xml: &[u8], sheet: &super::model::Sheet) -> Result<Vec<u8>, String> {
+    let mut reader = Reader::from_reader(xml);
+    let mut writer = Writer::new(Vec::with_capacity(xml.len()));
+    let mut result: Option<&str> = None;
+    loop {
+        let event = reader.read_event().map_err(|error| error.to_string())?;
+        match event {
+            Event::Start(e) if e.local_name().as_ref() == b"c" => {
+                let values = attrs(&e, &reader)?;
+                result = values
+                    .get("r")
+                    .and_then(|address| sheet.cells.get(address))
+                    .and_then(ambiguous_formula_string);
+                if result.is_some() {
+                    let mut element = e.into_owned();
+                    element.clear_attributes();
+                    for (key, value) in values.iter().filter(|(key, _)| key.as_str() != "t") {
+                        element.push_attribute((key.as_str(), value.as_str()));
+                    }
+                    element.push_attribute(("t", "str"));
+                    writer
+                        .write_event(Event::Start(element))
+                        .map_err(|error| error.to_string())?;
+                } else {
+                    writer
+                        .write_event(Event::Start(e))
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+            Event::Start(e) if e.local_name().as_ref() == b"v" && result.is_some() => {
+                writer
+                    .write_event(Event::Start(e.borrow()))
+                    .map_err(|error| error.to_string())?;
+                writer
+                    .write_event(Event::Text(BytesText::new(result.unwrap_or(""))))
+                    .map_err(|error| error.to_string())?;
+                reader
+                    .read_to_end(e.name())
+                    .map_err(|error| error.to_string())?;
+                writer
+                    .write_event(Event::End(e.to_end()))
+                    .map_err(|error| error.to_string())?;
+            }
+            Event::End(e) if e.local_name().as_ref() == b"c" => {
+                result = None;
+                writer
+                    .write_event(Event::End(e))
+                    .map_err(|error| error.to_string())?;
+            }
+            Event::Eof => break,
+            event => writer
+                .write_event(event)
+                .map_err(|error| error.to_string())?,
+        }
+    }
+    Ok(writer.into_inner())
+}
+fn patch_formula_string_results(bytes: Vec<u8>, book: &Book) -> Result<Vec<u8>, String> {
+    if !book.sheets.iter().any(|sheet| {
+        sheet
+            .cells
+            .values()
+            .any(|cell| ambiguous_formula_string(cell).is_some())
+    }) {
+        return Ok(bytes);
+    }
+    let mut parts = crate::package::read_zip(&bytes)?;
+    for (index, sheet) in book.sheets.iter().enumerate() {
+        if !sheet
+            .cells
+            .values()
+            .any(|cell| ambiguous_formula_string(cell).is_some())
+        {
+            continue;
+        }
+        let path = format!("xl/worksheets/sheet{}.xml", index + 1);
+        let xml = parts
+            .get(&path)
+            .ok_or("Нет XML-части экспортируемого листа")?;
+        let updated = typed_formula_strings(xml, sheet)?;
+        parts.insert(path, updated);
+    }
+    crate::package::write_zip(parts.into_iter().collect())
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn review4_xlsx_formula_cache_keeps_numeric_boolean_and_error_looking_text_typed()
+    -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.set_range(
+            id,
+            0,
+            0,
+            &[vec![
+                "=\"001\"".into(),
+                "=\"TRUE\"".into(),
+                "=\"#N/A\"".into(),
+                "=123".into(),
+                "=TRUE".into(),
+                "=\"NaN\"".into(),
+                "=NA()".into(),
+            ]],
+        )?;
+        let bytes = write(&book, "xlsx")?;
+        let mut imported =
+            open_workbook_auto_from_rs(Cursor::new(bytes)).map_err(|error| error.to_string())?;
+        let range = imported
+            .worksheet_range("Лист1")
+            .map_err(|error| error.to_string())?;
+        for (col, expected) in [
+            (0, Data::String("001".into())),
+            (1, Data::String("TRUE".into())),
+            (2, Data::String("#N/A".into())),
+            (3, Data::Float(123.0)),
+            (4, Data::Bool(true)),
+            (5, Data::String("NaN".into())),
+        ] {
+            assert_eq!(range.get_value((0, col)), Some(&expected));
+        }
+        assert!(matches!(range.get_value((0, 6)), Some(Data::Error(_))));
+        Ok(())
+    }
+    #[test]
+    fn review4_xlsx_keeps_small_dimensions_and_fractional_row_height() -> Result<(), String> {
+        let mut book = Book::default();
+        let sheet = book.active_sheet_mut().ok_or("sheet")?;
+        sheet.widths.insert(0, 6.0);
+        sheet.row_heights.insert(0, 1.5);
+        let bytes = write(&book, "xlsx")?;
+        let again = read(&bytes, "xlsx")?;
+        let sheet = again.active_sheet().ok_or("sheet")?;
+        assert!((sheet.widths.get(&0).copied().unwrap_or(0.0) - 6.0).abs() < 0.1);
+        assert!((sheet.row_heights.get(&0).copied().unwrap_or(0.0) - 1.5).abs() < 0.01);
+        Ok(())
+    }
+    #[test]
+    fn review4_drawing_anchors_use_absolute_position_and_both_cell_markers() -> Result<(), String> {
+        let mut sheet = super::super::model::Sheet::default();
+        sheet.widths.insert(0, 180.0);
+        sheet.row_heights.insert(0, 42.0);
+        let xml = format!(
+            r#"<wsDr xmlns:r="urn:r"><absoluteAnchor><pos x="{}" y="{}"/><ext cx="{}" cy="{}"/><pic><blip r:embed="p"/></pic></absoluteAnchor><twoCellAnchor><from><col>0</col><colOff>{}</colOff><row>0</row><rowOff>{}</rowOff></from><to><col>2</col><colOff>{}</colOff><row>2</row><rowOff>{}</rowOff></to><pic><ext cx="9525" cy="9525"/><blip r:embed="p"/></pic></twoCellAnchor></wsDr>"#,
+            190 * 9525,
+            47 * 9525,
+            40 * 9525,
+            30 * 9525,
+            10 * 9525,
+            5 * 9525,
+            20 * 9525,
+            6 * 9525
+        );
+        let anchors = drawing_pictures(&xml)?;
+        assert_eq!(anchors.len(), 2);
+        assert_eq!(
+            picture_geometry(&sheet, &anchors[0]),
+            (1, 1, 10.0, 5.0, 40.0, 30.0)
+        );
+        assert_eq!(
+            picture_geometry(&sheet, &anchors[1]),
+            (0, 0, 10.0, 5.0, 286.0, 69.0)
+        );
+        Ok(())
+    }
+
     use super::super::model::Range;
     use super::*;
 
