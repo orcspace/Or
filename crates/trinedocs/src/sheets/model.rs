@@ -697,6 +697,9 @@ impl Book {
     pub fn merge(&mut self, sheet: u64, range: Range) -> Result<(), String> {
         range.validate()?;
         let s = self.sheet_by_id_mut(sheet).ok_or("Лист не найден")?;
+        if range.r0 == range.r1 && range.c0 == range.c1 {
+            return Ok(());
+        }
         if s.merges
             .iter()
             .any(|m| m.r0 <= range.r1 && range.r0 <= m.r1 && m.c0 <= range.c1 && range.c0 <= m.c1)
@@ -901,13 +904,30 @@ impl Book {
                     b.1.get((c - range.c0) as usize)
                         .and_then(Option::as_ref)
                         .map(|x| &x.value);
+                let av = av.unwrap_or(&Value::Empty);
+                let bv = bv.unwrap_or(&Value::Empty);
+                let a_blank = matches!(av, Value::Empty);
+                let b_blank = matches!(bv, Value::Empty);
+                if a_blank != b_blank {
+                    // Empty cells stay after data in either sort direction.
+                    return a_blank.cmp(&b_blank);
+                }
+                let kind = |value: &Value| match value {
+                    Value::Number(_) => 0,
+                    Value::Text(_) => 1,
+                    Value::Bool(_) => 2,
+                    Value::Error(_) => 3,
+                    Value::Empty => 4,
+                };
                 let order = match (av, bv) {
-                    (Some(Value::Number(a)), Some(Value::Number(b))) => a.total_cmp(b),
-                    _ => av
-                        .map(Value::display)
-                        .unwrap_or_default()
-                        .to_lowercase()
-                        .cmp(&bv.map(Value::display).unwrap_or_default().to_lowercase()),
+                    (Value::Number(a), Value::Number(b)) => {
+                        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                    }
+                    (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
+                    (Value::Text(a), Value::Text(b)) | (Value::Error(a), Value::Error(b)) => {
+                        a.to_lowercase().cmp(&b.to_lowercase())
+                    }
+                    _ => kind(av).cmp(&kind(bv)),
                 };
                 if !order.is_eq() {
                     return if *desc { order.reverse() } else { order };
@@ -1041,7 +1061,8 @@ impl Book {
                 .filter_map(shift_index)
                 .collect();
         }
-        s.merges.retain_mut(adjust);
+        s.merges
+            .retain_mut(|range| adjust(range) && (range.r0 != range.r1 || range.c0 != range.c1));
         s.charts.retain_mut(|chart| {
             if !adjust(&mut chart.range) {
                 return false;
@@ -1190,13 +1211,18 @@ impl Book {
     pub fn print_page_count(&self) -> usize {
         let mut keys = BTreeSet::new();
         for sheet in self.sheets.iter().filter(|s| !s.hidden) {
-            if sheet.cells.is_empty() {
-                keys.insert((sheet.id, 0, 0));
-            }
+            let mut visible = false;
             for key in sheet.cells.keys() {
-                if let Some((r, c)) = parse_address(key) {
+                if let Some((r, c)) = parse_address(key)
+                    && !sheet.hidden_rows.contains(&r)
+                    && !sheet.hidden_cols.contains(&c)
+                {
+                    visible = true;
                     keys.insert((sheet.id, r / 38, c / 8));
                 }
+            }
+            if !visible {
+                keys.insert((sheet.id, 0, 0));
             }
         }
         keys.len()
@@ -1258,8 +1284,14 @@ impl Book {
                         italic: cell.fmt.italic,
                         font: cell.fmt.font.clone(),
                     });
-                    if cell.fmt.underline || cell.fmt.strike {
-                        let yy = y + if cell.fmt.strike { 8.0 } else { 15.0 };
+                    for offset in [
+                        cell.fmt.underline.then_some(15.0),
+                        cell.fmt.strike.then_some(8.0),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        let yy = y + offset;
                         items.push(Primitive::Line {
                             x1: x + 3.0,
                             y1: yy,

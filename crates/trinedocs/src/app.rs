@@ -35,6 +35,7 @@ fn palette_commands(has_document: bool, query: &str) -> Vec<(&'static str, &'sta
         ("slides", "Создать презентацию"),
         ("open", "Открыть файл · Ctrl+O"),
         ("settings", "Настройки"),
+        ("inspect", "Проверить документ"),
         ("save", "Сохранить · Ctrl+S"),
         ("saveas", "Сохранить как…"),
         ("copy", "Сохранить копию…"),
@@ -161,6 +162,9 @@ pub struct App {
     status: String,
     error: String,
     show_settings: bool,
+    show_inspector: bool,
+    inspection: Option<crate::inspector::Task>,
+    inspection_result: Option<crate::inspector::Inspection>,
     show_ai: bool,
     /// 0 = chat, 1 = AI change review.
     ai_tab: usize,
@@ -247,6 +251,9 @@ impl App {
             status: "Готово".into(),
             error: font_error,
             show_settings: false,
+            show_inspector: false,
+            inspection: None,
+            inspection_result: None,
             show_ai: std::env::args().any(|a| a == "--ui-smoke-compact"),
             ai_tab: 0,
             chat,
@@ -314,6 +321,35 @@ impl App {
         self.palette = true;
         self.palette_focus = true;
         self.palette_selected = 0;
+    }
+    fn inspect_current(&mut self) {
+        if self.inspection.is_some() || self.pending.is_some() {
+            return;
+        }
+        let Some(id) = self.active else {
+            return;
+        };
+        if let Err(error) = self.flush_pending(id) {
+            self.error = error;
+            return;
+        }
+        let Some(tab) = self.current() else {
+            return;
+        };
+        match crate::inspector::Task::start(
+            tab.id,
+            tab.version,
+            tab.title.clone(),
+            tab.document.clone(),
+            self.editor_ctx.clone(),
+        ) {
+            Ok(task) => {
+                self.inspection = Some(task);
+                self.inspection_result = None;
+                self.show_inspector = true;
+            }
+            Err(error) => self.error = error,
+        }
     }
     fn tr<'a>(&self, s: &'a str) -> &'a str {
         crate::i18n::tr(s, &self.settings.language)
@@ -1163,6 +1199,17 @@ impl App {
     }
     fn tick(&mut self, ctx: &egui::Context) {
         self.chat.poll();
+        if let Some(result) = self
+            .inspection
+            .as_ref()
+            .and_then(crate::inspector::Task::poll)
+        {
+            self.inspection = None;
+            match result {
+                Ok(result) => self.inspection_result = Some(result),
+                Err(error) => self.error = error,
+            }
+        }
         let previous_active = self.active;
         self.mcp_saves.retain(|_, reply| !reply.is_closed());
         if self.exit_after_save && self.close_after_save.is_none() && self.pending.is_none() {
@@ -1423,6 +1470,63 @@ impl App {
         });
     }
     fn dialogs(&mut self, ctx: &egui::Context) {
+        if self.show_inspector {
+            let mut open = true;
+            let mut refresh = false;
+            egui::Window::new("Проверка документа")
+                .open(&mut open)
+                .default_width(520.0)
+                .show(ctx, |ui| {
+                    if self.inspection.is_some() {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Проверяем документ…");
+                        });
+                    }
+                    if let Some(result) = &self.inspection_result {
+                        ui.label(egui::RichText::new(&result.title).strong());
+                        ui.weak(result.report.scope);
+                        let unchanged = self
+                            .tabs
+                            .iter()
+                            .any(|tab| tab.id == result.id && tab.version == result.version);
+                        if !unchanged {
+                            ui.label("Документ изменён или закрыт после проверки.");
+                        }
+                        ui.separator();
+                        if result.report.findings.is_empty() {
+                            ui.label("По поддерживаемым проверкам замечаний нет.");
+                        }
+                        egui::ScrollArea::vertical()
+                            .max_height(420.0)
+                            .show(ui, |ui| {
+                                for finding in &result.report.findings {
+                                    ui.label(egui::RichText::new(&finding.location).strong());
+                                    ui.label(&finding.message);
+                                    ui.add_space(8.0);
+                                }
+                            });
+                        if result.report.omitted > 0 {
+                            ui.weak(format!(
+                                "Ещё замечаний: {}. Показаны первые 200.",
+                                result.report.omitted
+                            ));
+                        }
+                    }
+                    refresh = ui
+                        .add_enabled(
+                            self.active.is_some()
+                                && self.inspection.is_none()
+                                && self.pending.is_none(),
+                            egui::Button::new("Проверить текущий документ"),
+                        )
+                        .clicked();
+                });
+            self.show_inspector = open;
+            if refresh {
+                self.inspect_current();
+            }
+        }
         if !self.error.is_empty() {
             let error = self.error.clone();
             egui::Window::new("Сообщение")
@@ -1752,6 +1856,7 @@ if ui.button("Отмена").clicked(){action=3}});}}
                             "docs" | "sheets" | "slides" => self.create(key),
                             "open" => self.send(Job::PickOpen),
                             "settings" => self.show_settings = true,
+                            "inspect" => self.inspect_current(),
                             "close" => {
                                 if let Some(id) = self.active {
                                     self.close(id);
@@ -1779,8 +1884,16 @@ if ui.button("Отмена").clicked(){action=3}});}}
 }
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
-        crate::clipboard::observe(ctx);
         self.tick(ctx);
+        crate::clipboard::set_target(
+            ctx,
+            if self.pending.is_none() && !self.palette {
+                self.active
+            } else {
+                None
+            },
+        );
+        crate::clipboard::observe(ctx);
     }
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
@@ -1938,6 +2051,16 @@ impl eframe::App for App {
                         ui.menu_button("···", |ui| {
                             if ui.button(self.tr("Settings")).clicked() {
                                 self.show_settings = true;
+                                ui.close();
+                            }
+                            if ui
+                                .add_enabled(
+                                    self.current().is_some() && self.inspection.is_none(),
+                                    egui::Button::new("Проверить документ"),
+                                )
+                                .clicked()
+                            {
+                                command = Some("inspect");
                                 ui.close();
                             }
                             if ui.button("Поиск команд · Ctrl+K").clicked() {
@@ -2221,6 +2344,7 @@ impl eframe::App for App {
                     }
                 });
         }
+        crate::clipboard::set_target(&ctx, if ui.is_enabled() { self.active } else { None });
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
@@ -2327,6 +2451,7 @@ impl eframe::App for App {
                 user_activation |= self.active != before;
             }
             Some("open") => self.send(Job::PickOpen),
+            Some("inspect") => self.inspect_current(),
             Some(action @ ("undo" | "redo")) => {
                 if let Some(id) = self.active
                     && let Err(e) = self.flush_pending(id)
@@ -2991,6 +3116,9 @@ mod shell_input_tests {
             status: "Готово".into(),
             error: font_error,
             show_settings: false,
+            show_inspector: false,
+            inspection: None,
+            inspection_result: None,
             show_ai: false,
             ai_tab: 0,
             chat: crate::chat::Chat::new(),

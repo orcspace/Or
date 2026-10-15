@@ -4230,10 +4230,10 @@
     "priority": "P1",
     "phase": 8,
     "requirement": "REQ-11-005",
-    "mcp": "GAP: read-only docs_inspect_structure с привязкой к stable IDs",
+    "mcp": "UI: уровни/пустые заголовки и alt изображений; GAP: docs_inspect_structure MCP",
     "import": "planned",
     "export": "n/a",
-    "status": "planned"
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-TRI-034",
@@ -4254,10 +4254,10 @@
     "priority": "P1",
     "phase": 8,
     "requirement": "REQ-11-011",
-    "mcp": "GAP: read-only slides_inspect_readability с ID проблемных объектов",
+    "mcp": "UI: обычный текст/границы объектов; GAP: таблицы/диаграммы/повороты/фон и slides_inspect_readability MCP",
     "import": "planned",
     "export": "n/a",
-    "status": "planned"
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-TRI-036",
@@ -4269,6 +4269,42 @@
     "mcp": "GAP: preview ops batch без мутаций и повторная проверка base_version при commit",
     "import": "n/a",
     "export": "n/a",
+    "status": "planned"
+  },
+  {
+    "id": "PAR-TRI-037",
+    "mode": "Sheets",
+    "feature": "Список ошибок ячеек и формул на всех листах с адресами и ограниченной выдачей",
+    "priority": "P1",
+    "phase": 8,
+    "requirement": "REQ-11-008",
+    "mcp": "UI read-only inspector; GAP: отдельная bounded MCP-сводка ошибок",
+    "import": "n/a",
+    "export": "n/a",
+    "status": "implemented_unverified"
+  },
+  {
+    "id": "PAR-TRI-038",
+    "mode": "Docs",
+    "feature": "Карта фактического оформления: отличия прямого форматирования от стилей и переход к примерам",
+    "priority": "P1",
+    "phase": 8,
+    "requirement": "REQ-11-005",
+    "mcp": "GAP: read-only style audit со stable paragraph/run anchors",
+    "import": "planned",
+    "export": "n/a",
+    "status": "planned"
+  },
+  {
+    "id": "PAR-TRI-039",
+    "mode": "Slides",
+    "feature": "Автоматическая повестка презентации из разделов и заголовков с явным предпросмотром",
+    "priority": "P1",
+    "phase": 8,
+    "requirement": "REQ-11-011",
+    "mcp": "GAP: preview agenda + обычные slides ops после выбора",
+    "import": "planned",
+    "export": "planned",
     "status": "planned"
   }
 ]

@@ -2,7 +2,7 @@
 
 Первичный feature inventory по заданию и первым проверенным пробелам. Полная сверка всех вкладок Office ещё не завершена. Внутри каждого PAR-пункта варианты поведения проверяются отдельно. Ни одна функция не объявлена готовой. P2 не удаляется из конечного объёма; поздние фазы ждут решения владельца ADR-0005.
 
-Всего функций/вариантов: **356**.
+Всего функций/вариантов: **359**.
 
 | PAR ID | Режим | Функция | P | Фаза | REQ | MCP / пробел | Import | Export | Статус |
 |---|---|---|---|---|---|---|---|---|---|
@@ -358,7 +358,10 @@
 | PAR-DOC-105 | Docs | Synchronous side-by-side scrolling (FACT-017) | P1 | 8 | REQ-11-005 | GAP: add explicit tool/ops schema | planned | planned | planned |
 | PAR-TRI-031 | TrineDocs | Фильтр недавних и закреплённых файлов по Docs/Sheets/Slides, очистка поиска | P0 | 1 | REQ-06-004 | UI view-only; MCP list_documents остаётся отдельно | n/a | n/a | implemented_unverified |
 | PAR-TRI-032 | TrineDocs | Палитра команд: выбор стрелками вверх/вниз, запуск выбранной команды по Enter | P0 | 1 | REQ-05-012 | UI view-only; команды используют существующие ops | n/a | n/a | implemented_unverified |
-| PAR-TRI-033 | Docs | Проверка структуры документа: пропущенные уровни заголовков, пустые заголовки и alt text | P1 | 8 | REQ-11-005 | GAP: read-only docs_inspect_structure с привязкой к stable IDs | planned | n/a | planned |
+| PAR-TRI-033 | Docs | Проверка структуры документа: пропущенные уровни заголовков, пустые заголовки и alt text | P1 | 8 | REQ-11-005 | UI: уровни/пустые заголовки и alt изображений; GAP: docs_inspect_structure MCP | planned | n/a | partial_unverified |
 | PAR-TRI-034 | Sheets | Паспорт формулы: зависимости, типы входов и пошаговое объяснение результата без изменения ячейки | P1 | 8 | REQ-11-008 | GAP: read-only sheets_explain_formula, bounded graph/result | planned | n/a | planned |
-| PAR-TRI-035 | Slides | Проверка читаемости слайдов: переполнение текста, контраст и слишком мелкий шрифт | P1 | 8 | REQ-11-011 | GAP: read-only slides_inspect_readability с ID проблемных объектов | planned | n/a | planned |
+| PAR-TRI-035 | Slides | Проверка читаемости слайдов: переполнение текста, контраст и слишком мелкий шрифт | P1 | 8 | REQ-11-011 | UI: обычный текст/границы объектов; GAP: таблицы/диаграммы/повороты/фон и slides_inspect_readability MCP | planned | n/a | partial_unverified |
 | PAR-TRI-036 | TrineDocs | Карточка AI-пакета: затронутые объекты, краткий diff и конфликты до применения | P1 | 8 | REQ-03-022 | GAP: preview ops batch без мутаций и повторная проверка base_version при commit | n/a | n/a | planned |
+| PAR-TRI-037 | Sheets | Список ошибок ячеек и формул на всех листах с адресами и ограниченной выдачей | P1 | 8 | REQ-11-008 | UI read-only inspector; GAP: отдельная bounded MCP-сводка ошибок | n/a | n/a | implemented_unverified |
+| PAR-TRI-038 | Docs | Карта фактического оформления: отличия прямого форматирования от стилей и переход к примерам | P1 | 8 | REQ-11-005 | GAP: read-only style audit со stable paragraph/run anchors | planned | n/a | planned |
+| PAR-TRI-039 | Slides | Автоматическая повестка презентации из разделов и заголовков с явным предпросмотром | P1 | 8 | REQ-11-011 | GAP: preview agenda + обычные slides ops после выбора | planned | planned | planned |

@@ -35,6 +35,8 @@ impl Presentation {
                 .map(|(i, _)| i)
             {
                 self.index = index;
+            } else if let Some(index) = deck.slides.iter().rposition(|slide| !slide.hidden) {
+                self.index = index;
             } else {
                 return;
             }
@@ -453,6 +455,20 @@ pub fn show(ui: &mut egui::Ui, deck: &Deck, state: &mut Presentation) {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn starting_on_a_trailing_hidden_slide_uses_the_last_visible_slide() -> Result<(), String> {
+        let mut deck = Deck::empty();
+        let visible = deck.add_slide("blank");
+        let hidden = deck.add_slide("blank");
+        deck.slide_mut(hidden).ok_or("slide")?.hidden = true;
+        let ctx = egui::Context::default();
+        let mut state = Presentation::default();
+        state.start(&ctx, &deck, 1);
+        assert!(state.active);
+        assert_eq!(state.slide_id, Some(visible));
+        Ok(())
+    }
+
     use super::*;
     #[test]
     fn live_hide_reorder_and_delete_keep_presentation_identity_safe() -> Result<(), String> {

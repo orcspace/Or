@@ -933,8 +933,8 @@ fn builtin(id: u32) -> String {
         15 => "d-mmm-yy",
         16 => "d-mmm",
         17 => "mmm-yy",
-        18 => "h:mm",
-        19 => "h:mm:ss",
+        18 => "h:mm AM/PM",
+        19 => "h:mm:ss AM/PM",
         20 => "h:mm",
         21 => "h:mm:ss",
         22 => "dd.mm.yyyy h:mm",
@@ -1578,7 +1578,11 @@ fn write_xlsx(book: &Book) -> Result<Vec<u8>, String> {
             ws.autofilter(range.r0, range.c0 as u16, range.r1, range.c1 as u16)
                 .map_err(|e| e.to_string())?;
         }
-        for range in &sheet.merges {
+        for range in sheet
+            .merges
+            .iter()
+            .filter(|range| range.r0 != range.r1 || range.c0 != range.c1)
+        {
             let text = sheet
                 .cell(range.r0, range.c0)
                 .map(|c| c.value.display())
@@ -1697,6 +1701,41 @@ fn write_xlsx(book: &Book) -> Result<Vec<u8>, String> {
 mod tests {
     use super::super::model::Range;
     use super::*;
+
+    #[test]
+    fn review2_builtin_twelve_hour_formats_keep_the_period() {
+        for (id, expected) in [(18, "1:30 PM"), (19, "1:30:00 PM")] {
+            assert_eq!(
+                super::super::format::display(&Value::Number(13.5 / 24.0), &builtin(id), false),
+                expected
+            );
+        }
+        assert_eq!(
+            super::super::format::display(&Value::Number(13.5 / 24.0), &builtin(20), false),
+            "13:30"
+        );
+    }
+    #[test]
+    fn review2_degenerate_merged_ranges_do_not_break_xlsx_save() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.set_cell(id, 0, 0, "kept")?;
+        book.merge(id, Range::new(0, 0, 0, 0))?;
+        assert!(book.active_sheet().ok_or("sheet")?.merges.is_empty());
+        book.merge(id, Range::new(0, 0, 1, 0))?;
+        book.edit_dimension(id, 1, 1, true, true)?;
+        assert!(book.active_sheet().ok_or("sheet")?.merges.is_empty());
+        let bytes = write(&book, "xlsx")?;
+        let reopened = read(&bytes, "xlsx")?;
+        assert_eq!(
+            reopened
+                .active_sheet()
+                .and_then(|sheet| sheet.cell(0, 0))
+                .map(|cell| cell.value.clone()),
+            Some(Value::Text("kept".into()))
+        );
+        Ok(())
+    }
 
     #[test]
     fn review_xlsx_rotation_and_boolean_values() -> Result<(), String> {

@@ -336,9 +336,14 @@ fn apply_ppr(p: &mut Paragraph, node: &Node, num_formats: &BTreeMap<String, List
         };
     }
     if let Some(n) = node.child("numPr") {
-        p.list_level = number(n.child("ilvl").and_then(Node::value), 0.0).clamp(0.0, 8.0) as u8;
+        if let Some(level) = n.child("ilvl").and_then(Node::value) {
+            p.list_level = number(Some(level), f32::from(p.list_level)).clamp(0.0, 8.0) as u8;
+        }
         p.list = match n.child("numId").and_then(Node::value) {
-            Some("0") => List::None,
+            Some("0") => {
+                p.list_level = 0;
+                List::None
+            }
             Some(id) => num_formats.get(id).copied().unwrap_or(List::Bullet),
             None => p.list,
         };
@@ -437,6 +442,9 @@ fn canonical_style(styles: &BTreeMap<String, Node>, id: &str) -> String {
         "heading 1" => "Heading1".into(),
         "heading 2" => "Heading2".into(),
         "heading 3" => "Heading3".into(),
+        "heading 4" => "Heading4".into(),
+        "heading 5" => "Heading5".into(),
+        "heading 6" => "Heading6".into(),
         "quote" => "Quote".into(),
         _ => id.into(),
     }
@@ -486,13 +494,14 @@ fn paragraph(
         let mut fmt = format.clone();
         fmt.link = link;
         if let Some(n) = run.child("rPr") {
-            if let Some(s) = n
-                .child("rStyle")
-                .and_then(Node::value)
-                .and_then(|id| styles.get(id))
-                .and_then(|s| s.child("rPr"))
-            {
-                apply_rpr(&mut fmt, s);
+            if let Some(id) = n.child("rStyle").and_then(Node::value) {
+                let mut character_styles = Vec::new();
+                style_chain(styles, id, &mut character_styles, 0);
+                for style in character_styles {
+                    if let Some(rpr) = style.child("rPr") {
+                        apply_rpr(&mut fmt, rpr);
+                    }
+                }
             }
             apply_rpr(&mut fmt, n);
         }
@@ -501,6 +510,8 @@ fn paragraph(
             match n.name.as_str() {
                 "t" => text.push_str(&n.text_content()),
                 "tab" => text.push('\t'),
+                "noBreakHyphen" => text.push('\u{2011}'),
+                "softHyphen" => text.push('\u{00ad}'),
                 "br" | "cr" => {
                     if n.attr("type") == Some("page") {
                         text.push('\u{000c}');
@@ -1404,6 +1415,9 @@ fn write_docx(doc: &Doc, ext: &str) -> Result<Vec<u8>, String> {
         ("Heading1", "heading 1", 44, true),
         ("Heading2", "heading 2", 34, true),
         ("Heading3", "heading 3", 28, true),
+        ("Heading4", "heading 4", 24, true),
+        ("Heading5", "heading 5", 22, true),
+        ("Heading6", "heading 6", 22, true),
         ("Quote", "Quote", 22, false),
     ] {
         let default = if id == "Normal" {
@@ -1430,11 +1444,11 @@ fn write_docx(doc: &Doc, ext: &str) -> Result<Vec<u8>, String> {
     }
     numbering.push_str("</w:numbering>");
     let header = format!(
-        "<w:hdr xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:p><w:r><w:t>{}</w:t></w:r></w:p></w:hdr>",
+        "<w:hdr xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:p><w:r><w:t xml:space=\"preserve\">{}</w:t></w:r></w:p></w:hdr>",
         esc(&setup.header)
     );
     let footer = format!(
-        "<w:ftr xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:p><w:r><w:t>{}</w:t></w:r>{}</w:p></w:ftr>",
+        "<w:ftr xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:p><w:r><w:t xml:space=\"preserve\">{}</w:t></w:r>{}</w:p></w:ftr>",
         esc(&setup.footer),
         if setup.page_numbers {
             "<w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r>"
@@ -1517,7 +1531,11 @@ fn inline_md(text: &str) -> Vec<Run> {
 fn read_markdown(text: &str) -> Doc {
     let mut doc = Doc::default();
     doc.paragraphs.clear();
-    for line in text.replace("\r\n", "\n").replace('\r', "\n").split('\n') {
+    for line in text
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .split_terminator('\n')
+    {
         let id = doc.alloc_id();
         let mut p = Paragraph {
             id,
@@ -1526,7 +1544,7 @@ fn read_markdown(text: &str) -> Doc {
         let mut text = line;
         let headings = line.chars().take_while(|c| *c == '#').count();
         if (1..=6).contains(&headings) && line.as_bytes().get(headings) == Some(&b' ') {
-            p.set_style(&format!("Heading{}", headings.min(3)));
+            p.set_style(&format!("Heading{headings}"));
             text = line.get(headings + 1..).unwrap_or_default();
         } else if let Some(rest) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
             p.list = List::Bullet;
@@ -1893,16 +1911,27 @@ fn read_html(text: &str) -> Result<Doc, String> {
                     }
                 }
             }
+            let style = match node.name.as_str() {
+                "h1" => Some("Heading1"),
+                "h2" => Some("Heading2"),
+                "h3" => Some("Heading3"),
+                "h4" => Some("Heading4"),
+                "h5" => Some("Heading5"),
+                "h6" => Some("Heading6"),
+                "blockquote" => Some("Quote"),
+                _ => None,
+            };
+            p.runs.push(Run::default());
+            if let Some(style) = style {
+                p.set_style(style);
+            }
+            let default_format = p.format_at(0);
+            p.runs.clear();
             let mut styled = node.clone();
             styled.attrs.insert("style".into(), css.clone());
-            runs(&styled, &TextFormat::default(), &mut p.runs);
-            match node.name.as_str() {
-                "h1" => p.style = "Heading1".into(),
-                "h2" => p.style = "Heading2".into(),
-                "h3" | "h4" | "h5" | "h6" => p.style = "Heading3".into(),
-                "blockquote" => p.style = "Quote".into(),
-                "li" => p.list = list.unwrap_or(List::Bullet),
-                _ => {}
+            runs(&styled, &default_format, &mut p.runs);
+            if node.name == "li" {
+                p.list = list.unwrap_or(List::Bullet);
             }
             for declaration in css.split(';') {
                 if let Some((key, value)) = declaration.split_once(':') {
@@ -1998,6 +2027,92 @@ fn read_html(text: &str) -> Result<Doc, String> {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn supported_heading_levels_survive_html_markdown_and_docx() -> Result<(), String> {
+        for level in 1..=6 {
+            let html = format!("<h{level}>heading</h{level}>");
+            let doc = read(html.as_bytes(), "html")?;
+            let p = doc.paragraphs.first().ok_or("heading")?;
+            assert_eq!(p.style, format!("Heading{level}"));
+            assert!(p.runs.first().is_some_and(|run| run.format.bold));
+            if level == 1 {
+                assert!(p.runs[0].format.size > 11.0);
+            }
+            for extension in ["docx", "md"] {
+                let again = read(&write(&doc, extension)?, extension)?;
+                assert_eq!(again.paragraphs[0].style, format!("Heading{level}"));
+            }
+        }
+        let doc = read(
+            b"<h1 style=\"font-size:18px;font-weight:normal\">custom</h1>",
+            "html",
+        )?;
+        assert_eq!(doc.paragraphs[0].runs[0].format.size, 13.5);
+        assert!(!doc.paragraphs[0].runs[0].format.bold);
+        Ok(())
+    }
+    #[test]
+    fn docx_character_style_inheritance_preserves_hyphen_characters() -> Result<(), String> {
+        let document = r#"<w:document xmlns:w="urn:w"><w:body><w:p><w:r><w:rPr><w:rStyle w:val="Child"/></w:rPr><w:t>a</w:t><w:noBreakHyphen/><w:t>b</w:t><w:softHyphen/><w:t>c</w:t></w:r></w:p></w:body></w:document>"#;
+        let styles = r#"<w:styles xmlns:w="urn:w"><w:style w:type="character" w:styleId="Base"><w:rPr><w:b/><w:color w:val="112233"/></w:rPr></w:style><w:style w:type="character" w:styleId="Child"><w:basedOn w:val="Base"/><w:rPr><w:i/></w:rPr></w:style></w:styles>"#;
+        let bytes = write_zip(vec![
+            ("word/document.xml".into(), document.as_bytes().to_vec()),
+            ("word/styles.xml".into(), styles.as_bytes().to_vec()),
+        ])?;
+        let doc = read(&bytes, "docx")?;
+        assert_eq!(doc.paragraphs[0].text(), "a\u{2011}b\u{00ad}c");
+        let f = &doc.paragraphs[0].runs[0].format;
+        assert!(f.bold && f.italic);
+        assert_eq!(f.color, [0x11, 0x22, 0x33]);
+        Ok(())
+    }
+    #[test]
+    fn partial_numbering_properties_keep_the_inherited_level() -> Result<(), String> {
+        let mut p = Paragraph {
+            list: List::Number,
+            list_level: 3,
+            ..Paragraph::default()
+        };
+        let node =
+            xml(br#"<w:pPr xmlns:w="urn:w"><w:numPr><w:numId w:val="2"/></w:numPr></w:pPr>"#)?;
+        apply_ppr(&mut p, &node, &BTreeMap::from([("2".into(), List::Number)]));
+        assert_eq!((p.list, p.list_level), (List::Number, 3));
+        let cancel =
+            xml(br#"<w:pPr xmlns:w="urn:w"><w:numPr><w:numId w:val="0"/></w:numPr></w:pPr>"#)?;
+        apply_ppr(&mut p, &cancel, &BTreeMap::new());
+        assert_eq!((p.list, p.list_level), (List::None, 0));
+        Ok(())
+    }
+    #[test]
+    fn repeated_markdown_roundtrips_do_not_accumulate_empty_paragraphs() -> Result<(), String> {
+        let mut doc = Doc::from_text("one\n\ntwo\n");
+        let expected = doc.plain_text();
+        for _ in 0..3 {
+            doc = read(&write(&doc, "md")?, "md")?;
+            assert_eq!(doc.plain_text(), expected);
+        }
+        Ok(())
+    }
+    #[test]
+    fn docx_header_footer_preserve_edge_spaces_for_office_readers() -> Result<(), String> {
+        let mut doc = Doc::from_text("body");
+        doc.page.header = "  header  ".into();
+        doc.page.footer = " footer ".into();
+        let bytes = write(&doc, "docx")?;
+        let parts = read_zip(&bytes)?;
+        for path in ["word/header1.xml", "word/footer1.xml"] {
+            let root = xml(parts.get(path).ok_or("part")?)?;
+            assert_eq!(
+                root.descendant("t").and_then(|node| node.attr("space")),
+                Some("preserve")
+            );
+        }
+        let again = read(&bytes, "docx")?;
+        assert_eq!(again.page.header, doc.page.header);
+        assert_eq!(again.page.footer, doc.page.footer);
+        Ok(())
+    }
+
     #[test]
     fn html_lists_paragraph_geometry_and_scripts_round_trip() -> Result<(), String> {
         let mut doc = Doc::from_text("one\ntwo");

@@ -35,11 +35,17 @@ impl Default for Settings {
 }
 impl Settings {
     pub fn load() -> Self {
-        crate::util::read_limited(&crate::util::app_dir().join("settings.json"), 1024 * 1024)
-            .ok()
-            .filter(|b| b.len() <= 1024 * 1024)
-            .and_then(|b| serde_json::from_slice::<Self>(&b).ok())
-            .map(Self::normalized)
+        Self::load_at(&crate::util::app_dir().join("settings.json"))
+    }
+    fn load_at(path: &std::path::Path) -> Self {
+        [path.to_path_buf(), path.with_extension("json.bak")]
+            .iter()
+            .find_map(|candidate| {
+                crate::util::read_limited(candidate, 1024 * 1024)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<Self>(&bytes).ok())
+                    .map(Self::normalized)
+            })
             .unwrap_or_default()
     }
     fn normalized(mut self) -> Self {
@@ -96,5 +102,29 @@ mod tests {
             .scale,
             1.0
         );
+    }
+    #[test]
+    fn corrupted_primary_settings_fall_back_to_the_backup() -> Result<(), String> {
+        let root = std::env::temp_dir().join(format!(
+            "TrineDocs-settings-backup-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| e.to_string())?
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+        let path = root.join("settings.json");
+        std::fs::write(&path, b"{invalid").map_err(|e| e.to_string())?;
+        std::fs::write(
+            path.with_extension("json.bak"),
+            br#"{"language":"en","recent":["C:/document.docx"]}"#,
+        )
+        .map_err(|e| e.to_string())?;
+        let settings = super::Settings::load_at(&path);
+        assert_eq!(settings.language, "en");
+        assert_eq!(settings.recent.len(), 1);
+        std::fs::remove_dir_all(root).map_err(|e| e.to_string())?;
+        Ok(())
     }
 }

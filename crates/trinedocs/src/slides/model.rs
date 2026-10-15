@@ -220,7 +220,7 @@ impl Deck {
                 id: title_id,
                 x: 60.0,
                 y: 50.0,
-                w: self.width - 120.0,
+                w: (self.width - 120.0).max(1.0),
                 h: 80.0,
                 font_size: 40.0,
                 bold: true,
@@ -234,8 +234,8 @@ impl Deck {
                 id: body_id,
                 x: 60.0,
                 y: 160.0,
-                w: self.width - 120.0,
-                h: self.height - 200.0,
+                w: (self.width - 120.0).max(1.0),
+                h: (self.height - 200.0).max(1.0),
                 text: if layout == "title" {
                     "Подзаголовок".into()
                 } else {
@@ -247,6 +247,7 @@ impl Deck {
             });
         }
         self.slides.push(slide);
+        let _ = self.set_layout(id, layout);
         id
     }
     pub fn add_element(&mut self, slide_id: u64, kind: ElementKind) -> Result<u64, String> {
@@ -324,6 +325,37 @@ impl Deck {
         if !matches!(layout, "title" | "content" | "blank" | "two_content") {
             return Err("Неизвестный макет".into());
         }
+        if self.slide(slide_id).is_none() {
+            return Err("Слайд не найден".into());
+        }
+        let needed = match layout {
+            "blank" => 0,
+            "two_content" => 3,
+            _ => 2,
+        };
+        let count = self
+            .slide(slide_id)
+            .map(|slide| {
+                slide
+                    .elements
+                    .iter()
+                    .filter(|e| matches!(e.kind, ElementKind::Text))
+                    .count()
+            })
+            .unwrap_or(0);
+        for index in count..needed {
+            let id = self.add_element(slide_id, ElementKind::Text)?;
+            if let Some(element) = self.slide_mut(slide_id).and_then(|s| s.element_mut(id)) {
+                element.text = if index == 0 {
+                    "Заголовок"
+                } else if layout == "title" {
+                    "Подзаголовок"
+                } else {
+                    "Текст слайда"
+                }
+                .into();
+            }
+        }
         let width = self.width;
         let height = self.height;
         let Some(slide) = self.slide_mut(slide_id) else {
@@ -399,8 +431,8 @@ impl Deck {
             return Err("Объект не найден".into());
         };
         copy.id = self.allocate_id();
-        copy.x += 20.0;
-        copy.y += 20.0;
+        copy.x = (copy.x + 20.0).clamp(-1_000_000.0, 1_000_000.0);
+        copy.y = (copy.y + 20.0).clamp(-1_000_000.0, 1_000_000.0);
         copy.group = None;
         let id = copy.id;
         if let Some(slide) = self.slide_mut(slide_id) {
@@ -1121,6 +1153,26 @@ pub fn text_lines(element: &Element) -> Vec<String> {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn layouts_create_their_required_text_boxes_even_from_blank() -> Result<(), String> {
+        let mut deck = Deck::empty();
+        let id = deck.add_slide("two_content");
+        let slide = deck.slide(id).ok_or("slide")?;
+        assert_eq!(slide.elements.len(), 3);
+        assert!(slide.elements[1].x < slide.elements[2].x);
+        let id = deck.add_slide("blank");
+        deck.set_layout(id, "content")?;
+        assert_eq!(deck.slide(id).ok_or("slide")?.elements.len(), 2);
+        deck.validate()?;
+        let mut tiny = Deck {
+            width: 80.0,
+            height: 100.0,
+            ..Deck::empty()
+        };
+        tiny.add_slide("title");
+        tiny.validate()
+    }
+
     use super::*;
     #[test]
     fn failed_table_edits_preserve_ragged_data() -> Result<(), String> {
