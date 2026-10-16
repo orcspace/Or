@@ -26,7 +26,10 @@ const INTEGER_ARGS: &[&str] = &[
     "slide_id",
     "element_id",
     "table_id",
+    "seed",
 ];
+/// Finite coordinates and offsets in points or seconds; may be zero or negative.
+const NUMBER_ARGS: &[&str] = &["x", "y", "stagger"];
 const STRING_ARGS: &[&str] = &[
     "kind",
     "path",
@@ -45,6 +48,9 @@ const STRING_ARGS: &[&str] = &[
     "edit",
     "job_id",
     "client_access",
+    "url",
+    "align",
+    "relative_to",
 ];
 const OBJECT_ARGS: &[&str] = &[
     "format",
@@ -72,8 +78,16 @@ const ARRAY_ARGS: &[&str] = &[
     "element_ids",
     "labels",
     "operations",
+    "colors",
 ];
-const BOOLEAN_ARGS: &[&str] = &["contents", "formats", "front", "case_sensitive", "refresh"];
+const BOOLEAN_ARGS: &[&str] = &[
+    "contents",
+    "formats",
+    "front",
+    "case_sensitive",
+    "refresh",
+    "as_background",
+];
 
 pub fn names() -> Vec<&'static str> {
     vec![
@@ -144,8 +158,15 @@ pub fn names() -> Vec<&'static str> {
         "sheets_add_image",
         "sheets_update_image",
         "sheets_delete_image",
+        "slides_design_guide",
         "slides_list",
         "slides_read",
+        "slides_search_images",
+        "slides_add_image_url",
+        "slides_generate_image",
+        "slides_format_text",
+        "slides_animate",
+        "slides_align",
         "slides_add_slide",
         "slides_delete_slide",
         "slides_duplicate_slide",
@@ -196,6 +217,8 @@ pub fn read_only(name: &str) -> bool {
             | "sheets_find"
             | "slides_list"
             | "slides_read"
+            | "slides_design_guide"
+            | "slides_search_images"
     )
 }
 /// Argument guides for tools whose arguments are not obvious from the name.
@@ -224,7 +247,7 @@ fn hint(name: &str) -> Option<&'static str> {
         }
         "slides_add_text" | "slides_add_shape" | "slides_add_image" | "slides_add_table"
         | "slides_add_chart" => {
-            "Create an element on slide_id. Optional width/height in points override its initial size; one image dimension preserves its natural aspect ratio. The full request must fit 1 MiB."
+            "Create an element on slide_id. Optional x/y (top-left, points) and width/height override its initial geometry; one image dimension preserves its natural aspect ratio. slides_add_image with as_background=true fills the whole slide and goes to the back. For web or generated pictures use slides_add_image_url / slides_generate_image. Read slides_design_guide before designing a deck. The full request must fit 1 MiB."
         }
         "docs_find" => {
             "Find text in at most 100 paragraphs from index. Returns the snapshot version and page metadata with stable paragraph IDs and Unicode offsets."
@@ -382,6 +405,152 @@ fn workspace_definition(name: &'static str) -> Option<rmcp::model::Tool> {
         ),
     )
 }
+/// Schemas for the presentation design tools (ADR-0027).
+fn slides_definition(name: &'static str) -> Option<rmcp::model::Tool> {
+    let color = json!({"oneOf":[{"type":"string","pattern":"^#?[0-9a-fA-F]{6}$"},{"type":"array","minItems":3,"maxItems":3,"items":{"type":"integer","minimum":0,"maximum":255}}]});
+    let rgb = json!({"type":"array","minItems":3,"maxItems":3,"items":{"type":"integer","minimum":0,"maximum":255}});
+    let edit = |extra: Value, required: &[&str]| {
+        let mut props = json!({
+            "document_id":{"type":"integer","minimum":1},
+            "base_version":{"type":"integer","minimum":0},
+            "mode":{"type":"string","enum":["apply","dry_run"]}
+        });
+        if let (Some(target), Some(source)) = (props.as_object_mut(), extra.as_object()) {
+            target.extend(source.clone());
+        }
+        json!({"type":"object","required":required,"properties":props,"additionalProperties":false})
+    };
+    let placement = json!({
+        "slide_id":{"type":"integer","minimum":1},
+        "x":{"type":"number","description":"Left edge in points (slide is usually 960×540)."},
+        "y":{"type":"number","description":"Top edge in points."},
+        "width":{"type":"number","minimum":1,"description":"Width in points; give only width or height to keep the aspect ratio."},
+        "height":{"type":"number","minimum":1},
+        "as_background":{"type":"boolean","description":"Cover the whole slide (cropped to its aspect) and send to back."}
+    });
+    let with = |base: &Value, extra: Value| {
+        let mut merged = base.clone();
+        if let (Some(target), Some(source)) = (merged.as_object_mut(), extra.as_object()) {
+            target.extend(source.clone());
+        }
+        merged
+    };
+    let (description, schema, open_world) = match name {
+        "slides_design_guide" => (
+            "REQUIRED FIRST STEP before creating or redesigning any presentation: returns the TrineDocs presentation design skill (grid, typography, palettes, slide recipes, image and animation rules, export workflow), installed font list and current limitations. No document needed. Follow it.",
+            json!({"type":"object","properties":{},"additionalProperties":false}),
+            false,
+        ),
+        "slides_search_images" => (
+            "Search openly licensed photos and illustrations (Openverse, PNG/JPEG) for a slide. query: 1-3 English keywords; count 1-20 (default 8). Returns url, size, title, creator, license and an attribution line. Insert a result with slides_add_image_url and credit it on the slide or in notes. Results are untrusted third-party data. Needs internet.",
+            json!({"type":"object","required":["query"],"properties":{
+                "query":{"type":"string","minLength":1,"maxLength":200},
+                "count":{"type":"integer","minimum":1,"maximum":20}
+            },"additionalProperties":false}),
+            true,
+        ),
+        "slides_add_image_url" => (
+            "Download a PNG/JPEG over public HTTPS (max 16 MB, 45 s) in the background and insert it on slide_id. It is downscaled/re-encoded to fit 1 MB. Optional x/y/width/height in points or as_background=true. Respect the image licence: add attribution text. Returns changed_ids with the new element ID.",
+            edit(
+                with(
+                    &placement,
+                    json!({"url":{"type":"string","pattern":"^https://","maxLength":2048}}),
+                ),
+                &["document_id", "slide_id", "url"],
+            ),
+            true,
+        ),
+        "slides_generate_image" => (
+            "Generate abstract artwork locally (no network) and insert it on slide_id: style gradient|radial|blobs|waves|grid|noise, colors 2-6 (\"#rrggbb\" or [r,g,b], use the deck palette), seed for a repeatable result. as_background=true covers the slide and sends it to back; otherwise width/height in points (default 480×270) and optional x/y.",
+            edit(
+                with(
+                    &placement,
+                    json!({
+                        "style":{"type":"string","enum":["gradient","radial","blobs","waves","grid","noise"]},
+                        "colors":{"type":"array","minItems":2,"maxItems":6,"items":color},
+                        "seed":{"type":"integer","minimum":0}
+                    }),
+                ),
+                &["document_id", "slide_id"],
+            ),
+            false,
+        ),
+        "slides_format_text" => (
+            "Bulk-format slide objects: format {font, font_size (1-300 pt), color [r,g,b], bold, italic, fill [r,g,b], stroke [r,g,b], stroke_width}. Targets: element_ids on slide_id, every object of slide_id, or the whole deck when both are omitted (text properties then skip pictures and lines). Warns when a font is not installed.",
+            edit(
+                json!({
+                    "slide_id":{"type":"integer","minimum":1},
+                    "element_ids":{"type":"array","maxItems":10000,"items":{"type":"integer","minimum":1}},
+                    "format":{"type":"object","minProperties":1,"properties":{
+                        "font":{"type":"string","maxLength":64},"font_size":{"type":"number","minimum":1,"maximum":300},
+                        "color":rgb.clone(),"bold":{"type":"boolean"},"italic":{"type":"boolean"},
+                        "fill":rgb.clone(),"stroke":rgb,"stroke_width":{"type":"number","minimum":0,"maximum":300}
+                    },"additionalProperties":false}
+                }),
+                &["document_id", "format"],
+            ),
+            false,
+        ),
+        "slides_animate" => (
+            "Animate several objects on slide_id at once. animation {effect fade|fly_in|zoom|none, trigger on_click|with_previous|after_previous, delay, duration} is applied to element_ids; the i-th object gets delay + i*stagger seconds. On-click steps play in the slide's layer order. Animations play in TrineDocs shows but are not yet written to PPTX timing (transitions are).",
+            edit(
+                json!({
+                    "slide_id":{"type":"integer","minimum":1},
+                    "element_ids":{"type":"array","minItems":1,"maxItems":200,"items":{"type":"integer","minimum":1}},
+                    "animation":{"type":"object","properties":{
+                        "effect":{"type":"string","enum":["none","fade","fly_in","zoom"]},
+                        "trigger":{"type":"string","enum":["on_click","with_previous","after_previous"]},
+                        "delay":{"type":"number","minimum":0},"duration":{"type":"number","exclusiveMinimum":0,"maximum":3600}
+                    },"additionalProperties":false},
+                    "stagger":{"type":"number","minimum":0,"maximum":60}
+                }),
+                &["document_id", "slide_id", "element_ids", "animation"],
+            ),
+            false,
+        ),
+        "slides_align" => (
+            "Align or distribute element_ids on slide_id. align: left|center|right|top|middle|bottom|distribute_horizontal|distribute_vertical. relative_to: slide (edges), content (60/48/40 pt safe margins) or selection (bounding box of the objects; default for 2+ objects).",
+            edit(
+                json!({
+                    "slide_id":{"type":"integer","minimum":1},
+                    "element_ids":{"type":"array","minItems":1,"maxItems":10000,"items":{"type":"integer","minimum":1}},
+                    "align":{"type":"string","enum":["left","center","right","top","middle","bottom","distribute_horizontal","distribute_vertical"]},
+                    "relative_to":{"type":"string","enum":["slide","content","selection"]}
+                }),
+                &["document_id", "slide_id", "element_ids", "align"],
+            ),
+            false,
+        ),
+        "export" => (
+            "Export an open document in the background to a NEW file in Documents\\TrineDocs\\Экспорт (never overwrites). format_extension: pptx|pdf|png for Slides, docx|pdf|txt|md|html for Docs, xlsx|pdf|csv|tsv|html for Sheets; default is the Office format. Returns the file path and format-loss warnings to report to the user.",
+            json!({"type":"object","required":["document_id"],"properties":{
+                "document_id":{"type":"integer","minimum":1},
+                "format_extension":{"type":"string","enum":["pptx","pdf","png","docx","txt","md","html","xlsx","csv","tsv"]},
+                "mode":{"type":"string","enum":["apply","dry_run"]}
+            },"additionalProperties":false}),
+            false,
+        ),
+        _ => return None,
+    };
+    let mut schema = schema;
+    if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+        properties.insert("client_access".into(),json!({"type":"string","pattern":"^[0-9a-f]{32}$","maxLength":32,"description":"Optional external-client permission handle from request_access; top-level only."}));
+    }
+    Some(
+        rmcp::model::Tool::new(
+            name,
+            description,
+            schema.as_object().cloned().unwrap_or_default(),
+        )
+        .with_annotations(
+            rmcp::model::ToolAnnotations::new()
+                .read_only(read_only(name))
+                .destructive(false)
+                .idempotent(read_only(name))
+                .open_world(open_world),
+        ),
+    )
+}
 fn job_output_schema() -> Value {
     json!({"type":"object","required":["job_id","status","mode","documents","result","error"],"properties":{
         "job_id":{"type":"string"},"status":{"type":"string","enum":["preparing","completed","preview","failed","cancelled"]},
@@ -392,8 +561,9 @@ fn job_output_schema() -> Value {
 
 pub fn definitions() -> Vec<rmcp::model::Tool> {
     names().into_iter().map(|name|{
-        if let Some(tool) = workspace_definition(name) { return tool; }
+        if let Some(tool) = workspace_definition(name).or_else(|| slides_definition(name)) { return tool; }
         let mut props=serde_json::Map::new();
+        for key in NUMBER_ARGS{props.insert((*key).into(),json!({"type":"number"}));}
         for key in INTEGER_ARGS{props.insert((*key).into(),json!({"type":"integer","minimum":0}));}
         for key in STRING_ARGS{props.insert((*key).into(),json!({"type":"string","maxLength":1000000}));}
         for key in OBJECT_ARGS{props.insert((*key).into(),json!({"type":"object"}));}
@@ -810,6 +980,10 @@ pub fn validate_args(name: &str, a: &Value) -> Result<(), String> {
             value
                 .as_f64()
                 .is_some_and(|number| number.is_finite() && number >= 1.0)
+        } else if NUMBER_ARGS.contains(&key.as_str()) {
+            value
+                .as_f64()
+                .is_some_and(|number| number.is_finite() && number.abs() <= 1_000_000.0)
         } else {
             return Err(format!("invalid_args: неизвестный аргумент {key}"));
         };
@@ -846,6 +1020,15 @@ fn dispatch_inner(
     client: &str,
 ) -> Result<Value, String> {
     validate_args(name, a)?;
+    if name == "slides_design_guide" {
+        return Ok(super::media::design_guide());
+    }
+    if super::media::is_background(name) {
+        // Network, pixel and export work runs on app workers (app.rs start_media_job).
+        return Err(
+            "unsupported_feature: инструмент выполняется фоновым заданием приложения".into(),
+        );
+    }
     if name == "app_status" || name == "list_documents" {
         return Ok(
             json!({"documents":tabs.iter().map(|t|json!({"id":t.id,"title":t.title,"kind":t.document.kind(),"version":t.version,"dirty":t.dirty(),"read_only":t.read_only,"save_locked":t.save_locked})).collect::<Vec<_>>(),"version":env!("CARGO_PKG_VERSION")}),
@@ -1148,6 +1331,7 @@ fn dispatch_inner(
     }
     let mut doc = t.document.clone();
     let mut changed_ids = Vec::<u64>::new();
+    let mut notes = Vec::<String>::new();
     let exact_docs_edits = matches!(&doc, Document::Docs(_)) && name != "replace_document_model";
     let mut docs_edits = Vec::new();
     match (&mut doc, name) {
@@ -1871,12 +2055,29 @@ fn dispatch_inner(
                 serde_json::from_value(json!(s(a, "kind")?)).map_err(|e| e.to_string())?
             };
             let sid = id(a, "slide_id")?;
+            let (deck_width, deck_height) = (d.width, d.height);
             let eid = d.add_element(sid, kind)?;
             changed_ids.push(eid);
+            let mut background = false;
             if let Some(e) = d
                 .slide_mut(sid)
                 .and_then(|s| s.elements.iter_mut().find(|e| e.id == eid))
             {
+                if flag(a, "as_background", false) {
+                    if !matches!(e.kind, crate::slides::model::ElementKind::Image { .. }) {
+                        return Err("invalid_args: as_background только для изображений".into());
+                    }
+                    if a.get("x").is_some()
+                        || a.get("y").is_some()
+                        || a.get("width").is_some()
+                        || a.get("height").is_some()
+                    {
+                        return Err(
+                            "invalid_args: as_background нельзя сочетать с x/y/width/height".into(),
+                        );
+                    }
+                    background = true;
+                }
                 if matches!(e.kind, crate::slides::model::ElementKind::Image { .. })
                     && (a.get("width").is_some() || a.get("height").is_some())
                     && let crate::slides::model::ElementKind::Image { bytes } = &e.kind
@@ -1890,11 +2091,255 @@ fn dispatch_inner(
                     &mut e.h,
                     matches!(e.kind, crate::slides::model::ElementKind::Image { .. }),
                 );
+                if let Some(x) = a.get("x").and_then(Value::as_f64) {
+                    e.x = x as f32;
+                }
+                if let Some(y) = a.get("y").and_then(Value::as_f64) {
+                    e.y = y as f32;
+                }
+                if background {
+                    // The picture is already cropped to the slide aspect by the media worker.
+                    (e.x, e.y, e.w, e.h) = (0.0, 0.0, deck_width, deck_height);
+                }
                 e.text = a
                     .get("text")
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .into();
+            }
+            if background {
+                d.set_z_order_many(sid, &[eid], false)?;
+            }
+        }
+        (Document::Slides(d), "slides_format_text") => {
+            let patch = object(a, "format")?;
+            const KEYS: &[&str] = &[
+                "font",
+                "font_size",
+                "color",
+                "bold",
+                "italic",
+                "fill",
+                "stroke",
+                "stroke_width",
+            ];
+            if patch.is_empty() {
+                return Err("invalid_args: format не должен быть пустым".into());
+            }
+            if let Some(key) = patch.keys().find(|key| !KEYS.contains(&key.as_str())) {
+                return Err(format!("invalid_args: неизвестное поле format.{key}"));
+            }
+            if let Some(font) = patch.get("font") {
+                let font = font.as_str().ok_or("invalid_args: font — строка")?;
+                if font.trim().is_empty() || font.len() > 64 {
+                    return Err("invalid_args: font от 1 до 64 байт".into());
+                }
+                if !crate::fonts::is_installed(font) {
+                    notes.push(format!(
+                        "Шрифт «{font}» не установлен в системе; при показе и в PDF будет замена"
+                    ));
+                }
+            }
+            if let Some(size) = patch.get("font_size") {
+                let size = size.as_f64().ok_or("invalid_args: font_size — число")?;
+                if !(1.0..=300.0).contains(&size) {
+                    return Err("invalid_range: font_size от 1 до 300".into());
+                }
+            }
+            if let Some(width) = patch.get("stroke_width")
+                && !width
+                    .as_f64()
+                    .is_some_and(|width| (0.0..=300.0).contains(&width))
+            {
+                return Err("invalid_range: stroke_width от 0 до 300".into());
+            }
+            let explicit = a.get("element_ids").is_some();
+            let ids: Option<std::collections::BTreeSet<u64>> = if explicit {
+                let ids: Vec<u64> = parse(a, "element_ids")?;
+                if ids.is_empty() {
+                    return Err("invalid_args: element_ids пуст".into());
+                }
+                Some(ids.into_iter().collect())
+            } else {
+                None
+            };
+            let slide = a.get("slide_id").and_then(Value::as_u64);
+            if explicit && slide.is_none() {
+                return Err("invalid_args: element_ids требует slide_id".into());
+            }
+            if let Some(sid) = slide
+                && d.slide(sid).is_none()
+            {
+                return Err("not_found: слайд не найден".into());
+            }
+            let text_keys = ["font", "font_size", "color", "bold", "italic"];
+            let mut found = std::collections::BTreeSet::new();
+            for s in d
+                .slides
+                .iter_mut()
+                .filter(|s| slide.is_none_or(|sid| sid == s.id))
+            {
+                for e in s
+                    .elements
+                    .iter_mut()
+                    .filter(|e| ids.as_ref().is_none_or(|ids| ids.contains(&e.id)))
+                {
+                    found.insert(e.id);
+                    let mut local = patch.clone();
+                    // Without explicit IDs, text styling skips pictures and lines.
+                    if !explicit
+                        && matches!(
+                            e.kind,
+                            crate::slides::model::ElementKind::Image { .. }
+                                | crate::slides::model::ElementKind::Line
+                                | crate::slides::model::ElementKind::Arrow
+                        )
+                    {
+                        local.retain(|key, _| !text_keys.contains(&key.as_str()));
+                        if local.is_empty() {
+                            continue;
+                        }
+                    }
+                    let updated = patched(&*e, &local, &["id"])?;
+                    if updated != *e {
+                        *e = updated;
+                        changed_ids.push(e.id);
+                    }
+                }
+            }
+            if let Some(ids) = &ids
+                && ids.len() != found.len()
+            {
+                return Err("not_found: часть объектов не найдена на слайде".into());
+            }
+        }
+        (Document::Slides(d), "slides_animate") => {
+            let sid = id(a, "slide_id")?;
+            let ids: Vec<u64> = parse(a, "element_ids")?;
+            let unique: std::collections::BTreeSet<_> = ids.iter().copied().collect();
+            if ids.is_empty() || unique.len() != ids.len() || ids.len() > 200 {
+                return Err("invalid_args: нужны от 1 до 200 различных element_ids".into());
+            }
+            let base: crate::slides::model::Animation = parse(a, "animation")?;
+            if !base.delay.is_finite()
+                || base.delay < 0.0
+                || !base.duration.is_finite()
+                || base.duration <= 0.0
+            {
+                return Err("invalid_range: delay ≥ 0, duration > 0".into());
+            }
+            let stagger = a.get("stagger").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+            if !(0.0..=60.0).contains(&stagger) {
+                return Err("invalid_range: stagger от 0 до 60 с".into());
+            }
+            let slide = d.slide_mut(sid).ok_or("Слайд не найден")?;
+            for (index, eid) in ids.iter().enumerate() {
+                let e = slide.element_mut(*eid).ok_or("Фигура не найдена")?;
+                e.animation = crate::slides::model::Animation {
+                    delay: base.delay + stagger * index as f32,
+                    ..base.clone()
+                };
+                changed_ids.push(*eid);
+            }
+            if base.trigger == "on_click" && ids.len() > 1 {
+                notes.push(
+                    "Шаги по щелчку воспроизводятся в порядке слоёв слайда; порядок element_ids задаёт только задержку"
+                        .into(),
+                );
+            }
+        }
+        (Document::Slides(d), "slides_align") => {
+            let sid = id(a, "slide_id")?;
+            let ids: Vec<u64> = parse(a, "element_ids")?;
+            let unique: std::collections::BTreeSet<_> = ids.iter().copied().collect();
+            if ids.is_empty() || unique.len() != ids.len() {
+                return Err("invalid_args: нужны различные element_ids".into());
+            }
+            let mode = s(a, "align")?;
+            let distribute = mode.starts_with("distribute_");
+            if distribute && ids.len() < 3 {
+                return Err("invalid_args: для распределения нужно не меньше трёх объектов".into());
+            }
+            let (width, height) = (d.width, d.height);
+            let slide = d.slide_mut(sid).ok_or("Слайд не найден")?;
+            let mut boxes = Vec::with_capacity(ids.len());
+            for eid in &ids {
+                let e = slide.element(*eid).ok_or("Фигура не найдена")?;
+                boxes.push((*eid, e.x, e.y, e.w, e.h));
+            }
+            let relative =
+                a.get("relative_to")
+                    .and_then(Value::as_str)
+                    .unwrap_or(if ids.len() > 1 {
+                        "selection"
+                    } else {
+                        "content"
+                    });
+            let (left, top, right, bottom) = match relative {
+                "slide" => (0.0, 0.0, width, height),
+                "content" => (60.0, 48.0, width - 60.0, height - 40.0),
+                "selection" => boxes.iter().fold(
+                    (f32::MAX, f32::MAX, f32::MIN, f32::MIN),
+                    |(l, t, r, b), (_, x, y, w, h)| {
+                        (l.min(*x), t.min(*y), r.max(x + w), b.max(y + h))
+                    },
+                ),
+                _ => return Err("invalid_args: relative_to slide|content|selection".into()),
+            };
+            let mut placed: Vec<(u64, f32, f32)> = Vec::with_capacity(boxes.len());
+            match mode {
+                "left" | "center" | "right" | "top" | "middle" | "bottom" => {
+                    for (eid, x, y, w, h) in &boxes {
+                        let (nx, ny) = match mode {
+                            "left" => (left, *y),
+                            "center" => ((left + right - w) / 2.0, *y),
+                            "right" => (right - w, *y),
+                            "top" => (*x, top),
+                            "middle" => (*x, (top + bottom - h) / 2.0),
+                            _ => (*x, bottom - h),
+                        };
+                        placed.push((*eid, nx, ny));
+                    }
+                }
+                "distribute_horizontal" | "distribute_vertical" => {
+                    let horizontal = mode == "distribute_horizontal";
+                    let mut order = boxes.clone();
+                    order.sort_by(|p, q| {
+                        let (a, b) = if horizontal { (p.1, q.1) } else { (p.2, q.2) };
+                        a.total_cmp(&b)
+                    });
+                    let total: f32 = order
+                        .iter()
+                        .map(|b| if horizontal { b.3 } else { b.4 })
+                        .sum();
+                    let (start, end) = if horizontal {
+                        (left, right)
+                    } else {
+                        (top, bottom)
+                    };
+                    let gap = (end - start - total) / (order.len() - 1) as f32;
+                    let mut cursor = start;
+                    for (eid, x, y, w, h) in order {
+                        if horizontal {
+                            placed.push((eid, cursor, y));
+                            cursor += w + gap;
+                        } else {
+                            placed.push((eid, x, cursor));
+                            cursor += h + gap;
+                        }
+                    }
+                }
+                _ => return Err("invalid_args: неизвестное значение align".into()),
+            }
+            for (eid, x, y) in placed {
+                let e = slide.element_mut(eid).ok_or("Фигура не найдена")?;
+                if !x.is_finite() || !y.is_finite() {
+                    return Err("invalid_range: недопустимая геометрия".into());
+                }
+                if (e.x, e.y) != (x, y) {
+                    (e.x, e.y) = (x, y);
+                    changed_ids.push(eid);
+                }
             }
         }
         (Document::Slides(d), "slides_update_element") => {
@@ -1963,7 +2408,11 @@ fn dispatch_inner(
         return Err(format!("conflict: текущая версия {}", t.version));
     }
     if a.get("mode").and_then(Value::as_str) == Some("dry_run") {
-        return Ok(json!({"applied":false,"version":t.version,"changed_ids":changed_ids}));
+        let mut result = json!({"applied":false,"version":t.version,"changed_ids":changed_ids});
+        if !notes.is_empty() {
+            result["warnings"] = json!(notes);
+        }
+        return Ok(result);
     }
     let before_version = t.version;
     t.apply_with_docs_edits(
@@ -1977,9 +2426,11 @@ fn dispatch_inner(
         },
         exact_docs_edits.then_some(docs_edits),
     )?;
-    Ok(
-        json!({"applied":t.version != before_version,"version":t.version,"undo_group_id":(t.version != before_version).then_some(t.version),"changed_ids":if t.version != before_version { changed_ids } else { Vec::new() }}),
-    )
+    let mut result = json!({"applied":t.version != before_version,"version":t.version,"undo_group_id":(t.version != before_version).then_some(t.version),"changed_ids":if t.version != before_version { changed_ids } else { Vec::new() }});
+    if !notes.is_empty() {
+        result["warnings"] = json!(notes);
+    }
+    Ok(result)
 }
 #[cfg(test)]
 mod tests {
@@ -3929,6 +4380,122 @@ mod review04_tests {
             (deck.slides[0].elements[1].w, deck.slides[0].elements[1].h),
             (250.0, 140.0)
         );
+        Ok(())
+    }
+    #[test]
+    fn design_guide_needs_no_document_and_background_tools_are_not_inline() -> Result<(), String> {
+        let mut tabs = Vec::new();
+        let guide = dispatch(
+            &mut tabs,
+            &mut 1,
+            "slides_design_guide",
+            &json!({}),
+            "agent",
+        )?;
+        assert!(
+            guide["guide"]
+                .as_str()
+                .is_some_and(|g| g.contains("960×540"))
+        );
+        let error = dispatch(
+            &mut tabs,
+            &mut 1,
+            "slides_search_images",
+            &json!({"query":"mountain"}),
+            "agent",
+        );
+        assert!(error.is_err_and(|e| e.starts_with("unsupported_feature")));
+        for name in [
+            "slides_design_guide",
+            "slides_search_images",
+            "slides_add_image_url",
+            "slides_generate_image",
+            "slides_format_text",
+            "slides_animate",
+            "slides_align",
+            "export",
+        ] {
+            let tool = definitions()
+                .into_iter()
+                .find(|tool| tool.name == name)
+                .ok_or("tool missing")?;
+            assert!(tool.input_schema.get("properties").is_some(), "{name}");
+        }
+        Ok(())
+    }
+    #[test]
+    fn slides_design_tools_format_animate_align_and_place() -> Result<(), String> {
+        let mut deck = crate::slides::model::Deck::default();
+        let sid = deck.slides[0].id;
+        deck.slides[0].elements.clear();
+        let mut tabs = vec![Tab::new(1, Document::Slides(deck), "Deck".into(), None)];
+        let mut ids = Vec::new();
+        for x in [100.0, 300.0, 700.0] {
+            let result = dispatch(
+                &mut tabs,
+                &mut 2,
+                "slides_add_text",
+                &json!({"document_id":1,"slide_id":sid,"text":"Пункт","x":x,"y":200,"width":100,"height":40}),
+                "agent",
+            )?;
+            ids.push(result["changed_ids"][0].as_u64().ok_or("id")?);
+        }
+        let changed = dispatch(
+            &mut tabs,
+            &mut 2,
+            "slides_format_text",
+            &json!({"document_id":1,"format":{"font_size":28,"bold":true,"color":[10,20,30]}}),
+            "agent",
+        )?;
+        assert_eq!(changed["changed_ids"].as_array().map(Vec::len), Some(3));
+        let unknown = dispatch(
+            &mut tabs,
+            &mut 2,
+            "slides_format_text",
+            &json!({"document_id":1,"format":{"underline":true}}),
+            "agent",
+        );
+        assert!(unknown.is_err_and(|e| e.contains("format.underline")));
+        dispatch(
+            &mut tabs,
+            &mut 2,
+            "slides_animate",
+            &json!({"document_id":1,"slide_id":sid,"element_ids":ids,"animation":{"effect":"fade","trigger":"after_previous","delay":0.5,"duration":0.4},"stagger":0.25}),
+            "agent",
+        )?;
+        dispatch(
+            &mut tabs,
+            &mut 2,
+            "slides_align",
+            &json!({"document_id":1,"slide_id":sid,"element_ids":[ids[0]],"align":"left","relative_to":"content"}),
+            "agent",
+        )?;
+        dispatch(
+            &mut tabs,
+            &mut 2,
+            "slides_align",
+            &json!({"document_id":1,"slide_id":sid,"element_ids":ids,"align":"distribute_horizontal","relative_to":"slide"}),
+            "agent",
+        )?;
+        let Document::Slides(deck) = &tabs[0].document else {
+            return Err("deck".into());
+        };
+        let elements = &deck.slides[0].elements;
+        assert!(
+            elements
+                .iter()
+                .all(|e| e.font_size == 28.0 && e.bold && e.color == [10, 20, 30])
+        );
+        let delays: Vec<f32> = elements.iter().map(|e| e.animation.delay).collect();
+        assert_eq!(delays, vec![0.5, 0.75, 1.0]);
+        assert!(
+            elements
+                .iter()
+                .all(|e| e.animation.effect == "fade" && e.y == 200.0)
+        );
+        let xs: Vec<f32> = elements.iter().map(|e| e.x).collect();
+        // 960 pt minus three 100 pt boxes leaves two 330 pt gaps.
+        assert_eq!(xs, vec![0.0, 430.0, 860.0]);
         Ok(())
     }
 }

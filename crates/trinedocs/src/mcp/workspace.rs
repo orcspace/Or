@@ -46,6 +46,8 @@ pub fn batchable(name: &str) -> bool {
                 | "close_document"
                 | "save_document"
                 | "export"
+                | "slides_add_image_url"
+                | "slides_generate_image"
                 | "undo"
                 | "redo"
                 | "set_selection"

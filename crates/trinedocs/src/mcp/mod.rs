@@ -1,5 +1,6 @@
 pub mod access;
 pub mod integration;
+pub mod media;
 pub mod register;
 pub mod server;
 pub mod shim;

@@ -10,6 +10,12 @@ use std::{
     path::PathBuf,
     time::{Instant, SystemTime},
 };
+/// An MCP request whose slow part runs on a worker thread; the UI thread commits its result.
+struct MediaJob {
+    request: crate::mcp::BridgeRequest,
+    result: std::sync::mpsc::Receiver<Result<crate::mcp::media::Output, String>>,
+}
+const MAX_MEDIA_JOBS: usize = 4;
 #[derive(Clone)]
 enum Pending {
     Register(crate::mcp::register::Preview),
@@ -159,6 +165,8 @@ pub struct App {
     client_access: crate::mcp::access::Registry,
     mcp_saves: BTreeMap<u64, tokio::sync::oneshot::Sender<Result<Value, String>>>,
     pending_mcp_closes: Vec<crate::mcp::BridgeRequest>,
+    /// Network, pixel and export work for the Slides design tools (ADR-0027).
+    media_jobs: Vec<MediaJob>,
     pending: Option<Pending>,
     close_after_save: Option<u64>,
     status: String,
@@ -253,6 +261,7 @@ impl App {
             client_access: Default::default(),
             mcp_saves: BTreeMap::new(),
             pending_mcp_closes: Vec::new(),
+            media_jobs: Vec::new(),
             pending: None,
             close_after_save: None,
             status: "Готово".into(),
@@ -1558,6 +1567,10 @@ impl App {
                 let _ = r.reply.send(Ok(json!({"applied":false})));
                 continue;
             }
+            if crate::mcp::media::is_background(&r.tool) {
+                self.start_media_job(r, ctx);
+                continue;
+            }
             if r.tool == "save_document" {
                 if id.is_some_and(|id| self.reloading.contains_key(&id)) {
                     let _ = r
@@ -1600,10 +1613,9 @@ impl App {
                 }
                 continue;
             }
-            if r.tool == "open_document" || r.tool == "export" {
+            if r.tool == "open_document" {
                 let _ = r.reply.send(Err(
-                    "needs_confirmation: открытие пути и экспорт выполняются через меню Файл"
-                        .into(),
+                    "needs_confirmation: открытие пути выполняется через меню Файл".into(),
                 ));
                 continue;
             }
@@ -1656,6 +1668,173 @@ impl App {
                 break;
             }
         }
+    }
+    /// Starts a design-guide, image or export tool on a worker thread (ADR-0027).
+    fn start_media_job(&mut self, r: crate::mcp::BridgeRequest, ctx: &egui::Context) {
+        use crate::mcp::media::Snapshot;
+        if self.media_jobs.len() >= MAX_MEDIA_JOBS {
+            let _ = r.reply.send(Err(
+                "busy: дождитесь завершения загрузки или экспорта".into()
+            ));
+            return;
+        }
+        let tab = r
+            .args
+            .get("document_id")
+            .and_then(Value::as_u64)
+            .and_then(|id| self.tabs.iter().find(|t| t.id == id));
+        let snapshot = match r.tool.as_str() {
+            "export" => match tab {
+                Some(t) => Snapshot::Export {
+                    document: Box::new(t.document.clone()),
+                    title: t.title.clone(),
+                },
+                None => {
+                    let _ = r.reply.send(Err("not_found: требуется document_id".into()));
+                    return;
+                }
+            },
+            "slides_add_image_url" | "slides_generate_image" => {
+                let checked = (|| -> Result<Snapshot, String> {
+                    let t = tab.ok_or("not_found: требуется document_id")?;
+                    let Document::Slides(deck) = &t.document else {
+                        return Err("unsupported_feature: инструмент только для презентаций".into());
+                    };
+                    if t.read_only {
+                        return Err("read_only: документ защищён от правки".into());
+                    }
+                    let slide = r
+                        .args
+                        .get("slide_id")
+                        .and_then(Value::as_u64)
+                        .ok_or("invalid_range: требуется slide_id")?;
+                    deck.slide(slide).ok_or("not_found: слайд не найден")?;
+                    if r.tool == "slides_add_image_url" {
+                        let url = r
+                            .args
+                            .get("url")
+                            .and_then(Value::as_str)
+                            .ok_or("invalid_args: требуется url")?;
+                        crate::mcp::media::check_url(url)?;
+                    }
+                    Ok(Snapshot::Slide {
+                        width: deck.width,
+                        height: deck.height,
+                    })
+                })();
+                match checked {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        let _ = r.reply.send(Err(error));
+                        return;
+                    }
+                }
+            }
+            _ => Snapshot::None,
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (tool, args, repaint) = (r.tool.clone(), r.args.clone(), ctx.clone());
+        let spawned = std::thread::Builder::new()
+            .name("mcp-media".into())
+            .spawn(move || {
+                let _ = tx.send(crate::mcp::media::run(&tool, &args, snapshot));
+                repaint.request_repaint();
+            });
+        match spawned {
+            Ok(_) => self.media_jobs.push(MediaJob {
+                request: r,
+                result: rx,
+            }),
+            Err(error) => {
+                let _ = r.reply.send(Err(format!("unavailable: {error}")));
+            }
+        }
+    }
+    /// Commits finished media jobs: replies directly or inserts the picture as the agent.
+    fn finish_media_jobs(&mut self, ctx: &egui::Context) {
+        use crate::mcp::media::Output;
+        for job in std::mem::take(&mut self.media_jobs) {
+            if job.request.reply.is_closed() {
+                continue;
+            }
+            let output = match job.result.try_recv() {
+                Ok(output) => output,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    self.media_jobs.push(job);
+                    continue;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Err("unavailable: фоновая задача прервана".into())
+                }
+            };
+            let request = job.request;
+            let result = match output {
+                Err(error) => Err(error),
+                Ok(Output::Reply(value)) => Ok(value),
+                Ok(Output::Insert { bytes, info }) => self.insert_media(ctx, &request, bytes, info),
+            };
+            let _ = request.reply.send(result);
+        }
+    }
+    fn insert_media(
+        &mut self,
+        ctx: &egui::Context,
+        request: &crate::mcp::BridgeRequest,
+        bytes: Vec<u8>,
+        info: Value,
+    ) -> Result<Value, String> {
+        // Access may have been revoked while the download was running.
+        if !self.settings.mcp
+            || (self.chat.was_ours(&request.client) && !self.chat.owns(&request.client))
+            || (!self.allowed.contains(&request.client) && !self.chat.owns(&request.client))
+        {
+            return Err("permission_denied: доступ MCP отозван".into());
+        }
+        if self.pending.is_some() {
+            return Err("busy: подтвердите действие в интерфейсе".into());
+        }
+        let target = request
+            .args
+            .get("document_id")
+            .and_then(Value::as_u64)
+            .ok_or("not_found: требуется document_id")?;
+        let dry_run = request.args.get("mode").and_then(Value::as_str) == Some("dry_run");
+        if !dry_run {
+            self.flush_pending(target)?;
+        }
+        let mut args = request.args.clone();
+        if let Some(map) = args.as_object_mut() {
+            for key in ["url", "style", "colors", "seed"] {
+                map.remove(key);
+            }
+            let background = map
+                .get("as_background")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if request.tool == "slides_generate_image"
+                && !background
+                && !map.contains_key("width")
+                && !map.contains_key("height")
+            {
+                map.insert("width".into(), json!(480));
+            }
+            map.insert("bytes".into(), json!(bytes));
+        }
+        let mut result = crate::mcp::tools::dispatch(
+            &mut self.tabs,
+            &mut self.next_id,
+            "slides_add_image",
+            &args,
+            &request.client,
+        )?;
+        if let (Some(target), Some(source)) = (result.as_object_mut(), info.as_object()) {
+            target.extend(source.clone());
+        }
+        if result.get("applied").and_then(Value::as_bool) == Some(true) {
+            self.last_agent = Some((target, request.client.clone(), Instant::now()));
+            self.mark_ai_caret(ctx, target, &request.args);
+        }
+        Ok(result)
     }
     fn finish_mcp_closes(&mut self) {
         for request in std::mem::take(&mut self.pending_mcp_closes) {
@@ -3128,6 +3307,7 @@ impl eframe::App for App {
             _ => {}
         }
         self.finish_mcp_closes();
+        self.finish_media_jobs(&ctx);
         self.events();
         self.finish_workspace(&ctx);
         for (id, action) in std::mem::take(&mut self.deferred) {
@@ -3704,6 +3884,7 @@ mod shell_input_tests {
             client_access: Default::default(),
             mcp_saves: BTreeMap::new(),
             pending_mcp_closes: Vec::new(),
+            media_jobs: Vec::new(),
             pending: None,
             close_after_save: None,
             status: "Готово".into(),
