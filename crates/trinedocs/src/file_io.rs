@@ -118,7 +118,7 @@ pub enum Job {
         id: u64,
         version: u64,
         path: PathBuf,
-        document: Document,
+        document: Box<Document>,
         backup: bool,
         copy: bool,
         export: bool,
@@ -435,18 +435,19 @@ impl Worker {
                             // A PNG export of a deck: the chosen file gets the first shown slide,
                             // the other shown slides go next to it as `Имя (слайд N).png`.
                             let mut more_slides = Vec::new();
-                            let bytes = export_unchanged(&path, expected, || match &document {
-                                crate::native::Document::Slides(deck) if ext == "png" => {
-                                    let mut pictures =
-                                        crate::native::slide_pictures(deck)?.into_iter();
-                                    let (_, first) = pictures
-                                        .next()
-                                        .ok_or("В презентации нет показываемых слайдов")?;
-                                    more_slides = pictures.collect();
-                                    Ok(first)
-                                }
-                                _ => crate::native::export(&document, &ext),
-                            })?;
+                            let bytes =
+                                export_unchanged(&path, expected, || match document.as_ref() {
+                                    crate::native::Document::Slides(deck) if ext == "png" => {
+                                        let mut pictures =
+                                            crate::native::slide_pictures(deck)?.into_iter();
+                                        let (_, first) = pictures
+                                            .next()
+                                            .ok_or("В презентации нет показываемых слайдов")?;
+                                        more_slides = pictures.collect();
+                                        Ok(first)
+                                    }
+                                    _ => crate::native::export(&document, &ext),
+                                })?;
                             crate::util::atomic_write(&path, &bytes, backup)?;
                             for (number, picture) in &more_slides {
                                 crate::native::write_slide_picture(&path, *number, picture)?;

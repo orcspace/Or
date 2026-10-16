@@ -778,10 +778,9 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
         .ctx()
         .data_mut(|data| data.remove_temp::<(u64, u32, u32)>(state_id.with("focus-request")))
         && apply_focus_request(book, &mut state, request)
+        && ui.is_enabled()
     {
-        if ui.is_enabled() {
-            ui.memory_mut(|memory| memory.request_focus(state_id.with("canvas")));
-        }
+        ui.memory_mut(|memory| memory.request_focus(state_id.with("canvas")));
     }
     let formula_id = state_id.with("formula");
     let canvas_id = state_id.with("canvas");
@@ -1061,7 +1060,7 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
     let loaded = ui
         .is_enabled()
         .then_some(())
-        .and_then(|_| state.image_job.as_ref())
+        .and(state.image_job.as_ref())
         .and_then(|job| match job.lock() {
             Ok(receiver) => match receiver.try_recv() {
                 Ok(result) => Some(result),

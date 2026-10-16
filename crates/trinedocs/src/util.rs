@@ -125,11 +125,11 @@ fn replace_file_at(
             .map_err(|e| e.to_string())?;
         drop(file);
         before_replace()?;
-        fs::rename(&tmp, path)
+        fs::rename(tmp, path)
             .map_err(|e| format!("Не удалось атомарно сохранить {}: {e}", path.display()))
     })();
     if result.is_err() {
-        let _ = fs::remove_file(&tmp);
+        let _ = fs::remove_file(tmp);
     }
     result
 }

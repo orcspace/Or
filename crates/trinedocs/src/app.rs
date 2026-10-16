@@ -761,7 +761,7 @@ impl App {
             id,
             version: t.version,
             path,
-            document: t.document.clone(),
+            document: Box::new(t.document.clone()),
             backup: self.settings.backup,
             copy,
             export,
@@ -2016,7 +2016,7 @@ impl App {
         let kind_id = egui::Id::new("home-kind");
         let mut kind_filter: usize = ui.data(|d| d.get_temp(kind_id)).unwrap_or_default();
         egui::ScrollArea::vertical().id_salt("home").show(ui, |ui| {
-            let width = (ui.available_width() - 32.0).max(0.0).min(960.0);
+            let width = (ui.available_width() - 32.0).clamp(0.0, 960.0);
             let inset = ((ui.available_width() - width) * 0.5 - ui.spacing().item_spacing.x).max(0.0);
             ui.horizontal(|ui| {
                 ui.add_space(inset);
@@ -2276,10 +2276,10 @@ impl App {
                         .clicked();
                 });
             self.show_inspector = open;
-            if let Some((id, version, target)) = navigate {
-                if let Err(error) = self.navigate_inspection(ctx, id, version, target) {
-                    self.error = error;
-                }
+            if let Some((id, version, target)) = navigate
+                && let Err(error) = self.navigate_inspection(ctx, id, version, target)
+            {
+                self.error = error;
             }
             if refresh {
                 self.inspect_current();
@@ -2324,10 +2324,10 @@ impl App {
                     for s in self.recoveries.clone() {
                         ui.horizontal(|ui| {
                             ui.label(&s.title);
-                            if ui.button("Восстановить").clicked() {
-                                if let Err(error) = self.restore_snapshot(&s) {
-                                    self.error = error;
-                                }
+                            if ui.button("Восстановить").clicked()
+                                && let Err(error) = self.restore_snapshot(&s)
+                            {
+                                self.error = error;
                             }
                         });
                     }

@@ -1590,7 +1590,9 @@ fn timing_xml(slide: &Slide, size: (f32, f32)) -> String {
         delay: u64,
     }
     // Click groups → sub-groups (start offset in ms) → effects.
-    let mut groups: Vec<(bool, Vec<(u64, Vec<Step<'_>>)>)> = Vec::new();
+    type SubGroup<'a> = (u64, Vec<Step<'a>>);
+    type ClickGroup<'a> = (bool, Vec<SubGroup<'a>>);
+    let mut groups: Vec<ClickGroup<'_>> = Vec::new();
     let (mut previous_start, mut previous_end) = (0.0_f32, 0.0_f32);
     for (index, slot) in slide.animation_steps() {
         let Some(animation) = slide

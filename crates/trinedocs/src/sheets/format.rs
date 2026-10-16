@@ -84,7 +84,7 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
             .parse::<u32>()
             .ok()
             .filter(|den| *den > 0 && *den <= 1_000_000);
-        let mixed = left.trim().split_whitespace().count() > 1;
+        let mixed = left.split_whitespace().count() > 1;
         let sign = if numeric < 0.0 { "-" } else { "" };
         let n = numeric.abs();
         let whole = if mixed { n.floor() } else { 0.0 };
