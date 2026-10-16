@@ -1836,22 +1836,23 @@ impl App {
         let kind_id = egui::Id::new("home-kind");
         let mut kind_filter: usize = ui.data(|d| d.get_temp(kind_id)).unwrap_or_default();
         egui::ScrollArea::vertical().id_salt("home").show(ui, |ui| {
-            let width = ui.available_width().min(960.0);
-            let inset = ((ui.available_width() - width) * 0.5).max(0.0);
+            let width = (ui.available_width() - 32.0).max(0.0).min(960.0);
+            let inset = ((ui.available_width() - width) * 0.5 - ui.spacing().item_spacing.x).max(0.0);
             ui.horizontal(|ui| {
                 ui.add_space(inset);
                 ui.vertical(|ui| {
                     ui.set_width(width);
                     ui.add_space(28.0);
-                    ui.label(egui::RichText::new("Создать").size(20.0).strong());
-                    ui.add_space(12.0);
+                    ui.label(egui::RichText::new("Ваше рабочее пространство").size(26.0).strong());
+                    ui.weak("Документы, таблицы и презентации в одном месте.");
+                    ui.add_space(20.0);
                     let cards = [
-                        ("docs", "Новый документ", egui::Color32::from_rgb(43, 87, 154)),
-                        ("sheets", "Новая таблица", egui::Color32::from_rgb(33, 115, 70)),
-                        ("slides", "Новая презентация", egui::Color32::from_rgb(196, 62, 28)),
+                        ("docs", "Документ", crate::chrome::accent_for("docs", ui.visuals().dark_mode)),
+                        ("sheets", "Таблица", crate::chrome::accent_for("sheets", ui.visuals().dark_mode)),
+                        ("slides", "Презентация", crate::chrome::accent_for("slides", ui.visuals().dark_mode)),
                     ];
-                    let gap = 16.0;
-                    let card_width = ((width - gap * 2.0) / 3.0).clamp(120.0, 220.0);
+                    let gap = 12.0;
+                    let card_width = ((width - gap * 2.0) / 3.0).clamp(132.0, 312.0);
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
                         for (kind, label, color) in cards {
@@ -1909,7 +1910,7 @@ impl App {
                         ui.add_space(24.0);
                         ui.vertical_centered(|ui| {
                             ui.label(egui::RichText::new(if !q.is_empty() || kind_filter != 0 { "Ничего не найдено" } else if filter % 2 == 1 { "Нет закреплённых файлов" } else { "Здесь появятся ваши файлы" }).strong());
-                            ui.label(egui::RichText::new(if !q.is_empty() || kind_filter != 0 { "Измените имя, путь или тип файла." } else if filter % 2 == 1 { "Нажмите ☆ рядом с файлом, чтобы закрепить его." } else { "Создайте файл или перетащите его в окно." }).color(crate::chrome::muted(ui)));
+                            ui.label(egui::RichText::new(if !q.is_empty() || kind_filter != 0 { "Измените имя, путь или тип файла." } else if filter % 2 == 1 { "Откройте ··· рядом с файлом и выберите «Закрепить»." } else { "Создайте файл или перетащите его в окно." }).color(crate::chrome::muted(ui)));
                         });
                     } else {
                         ui.horizontal(|ui| {
@@ -1920,15 +1921,16 @@ impl App {
                     }
                     for p in shown {
                         let pin = self.settings.pinned.contains(p);
-                        let row = ui.allocate_ui(egui::vec2(width, 48.0), |ui| {
-                            let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 48.0), egui::Sense::click());
+                        let row = ui.allocate_ui(egui::vec2(width, 60.0), |ui| {
+                            let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 60.0), egui::Sense::click());
                             response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), p.display().to_string()));
                             let hovered = ui.rect_contains_pointer(rect);
-                            if hovered {
+                            if hovered || response.has_focus() {
                                 ui.painter().rect_filled(rect, 6.0, crate::chrome::hover_fill(ui));
                             }
-                            let (glyph, color) = file_badge(p);
-                            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(egui::vec2(10.0, 6.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+                            let (glyph, _) = file_badge(p);
+                            let color = crate::chrome::accent_for(match file_kind(p) { Some(2) => "sheets", Some(3) => "slides", _ => "docs" }, ui.visuals().dark_mode);
+                            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(egui::vec2(12.0, 8.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
                             crate::chrome::badge(&mut child, glyph, color, 28.0);
                             child.add_space(10.0);
                             child.vertical(|ui| {
@@ -1939,14 +1941,11 @@ impl App {
                             });
                             let mut action = None;
                             child.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if hovered || pin {
-                                    if hovered && crate::chrome::tool(ui, "×", "Удалить из списка", false).clicked() {
-                                        action = Some("remove");
-                                    }
-                                    if crate::chrome::tool(ui, if pin { "★" } else { "☆" }, if pin { "Открепить" } else { "Закрепить" }, false).clicked() {
-                                        action = Some("pin");
-                                    }
-                                }
+                                ui.menu_button("···", |ui| {
+                                    if ui.button(if pin { "Открепить" } else { "Закрепить" }).clicked() { action = Some("pin"); ui.close(); }
+                                    if ui.button("Убрать из списка").clicked() { action = Some("remove"); ui.close(); }
+                                }).response.on_hover_text("Действия с файлом");
+                                if pin { ui.weak("★"); }
                             });
                             (response, action)
                         });
@@ -2497,18 +2496,17 @@ impl eframe::App for App {
         if self.pending.is_some() || self.palette {
             ui.disable();
         }
-        let compact_header = ui.available_width() < 1050.0;
+        let compact_header = ui.available_width() < 900.0;
         egui::Panel::top("shell")
             .frame(
                 egui::Frame::new()
-                    .fill(ui.visuals().window_fill)
-                    .inner_margin(egui::Margin::symmetric(14, 7)),
+                    .fill(ui.visuals().panel_fill)
+                    .inner_margin(egui::Margin::symmetric(12, 6)),
             )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    crate::chrome::badge(ui, "T", crate::chrome::accent(ui), 28.0);
                     if !compact_header {
-                        ui.label(egui::RichText::new("TrineDocs").size(15.0).strong());
+                        ui.label(egui::RichText::new("TrineDocs").size(14.0).strong());
                     }
                     ui.add_space(8.0);
                     ui.menu_button(self.tr("File"), |ui| {
@@ -2575,12 +2573,13 @@ impl eframe::App for App {
                     {
                         command = Some("open")
                     }
-                    if ui
-                        .add_enabled(
-                            self.active.is_some(),
-                            egui::Button::new(self.tr("Save")).frame(false),
-                        )
-                        .clicked()
+                    if crate::chrome::icon_button(
+                        ui,
+                        crate::chrome::Icon::Save,
+                        "Сохранить · Ctrl+S",
+                        self.active.is_some(),
+                    )
+                    .clicked()
                     {
                         command = Some("save")
                     }
@@ -2627,34 +2626,33 @@ impl eframe::App for App {
                                 self.queue_palette_click(&ctx);
                                 ui.close();
                             }
+                            ui.separator();
+                            let dark = ui.visuals().dark_mode;
+                            if ui
+                                .button(if dark {
+                                    "Светлая тема"
+                                } else {
+                                    "Тёмная тема"
+                                })
+                                .clicked()
+                            {
+                                self.settings.theme = if dark { "light" } else { "dark" }.into();
+                                if let Err(error) = self.worker.save_settings(self.settings.clone())
+                                {
+                                    self.error = error;
+                                }
+                                ui.close();
+                            }
                         })
                         .response
                         .on_hover_text("Настройки и команды");
-                        let dark = ui.visuals().dark_mode;
-                        if crate::chrome::tool(
-                            ui,
-                            if dark { "☀" } else { "☾" },
-                            if dark {
-                                "Светлая тема"
-                            } else {
-                                "Тёмная тема"
-                            },
-                            false,
-                        )
-                        .clicked()
-                        {
-                            self.settings.theme = if dark { "light" } else { "dark" }.into();
-                            if let Err(e) = self.worker.save_settings(self.settings.clone()) {
-                                self.error = e;
-                            }
-                        }
                         if ui
                             .add(
-                                egui::Button::new("AI")
+                                egui::Button::new("Ассистент")
                                     .selected(self.show_ai)
                                     .frame_when_inactive(false),
                             )
-                            .on_hover_text("AI-чат и изменения (Ctrl+Shift+A)")
+                            .on_hover_text("AI-чат и изменения · Ctrl+Shift+A")
                             .clicked()
                         {
                             self.show_ai = !self.show_ai;
@@ -2694,9 +2692,10 @@ impl eframe::App for App {
                             ui.spacing_mut().item_spacing.x = 4.0;
                             let home = doc_tab(
                                 ui,
-                                "⌂ Главная",
+                                "Главная",
                                 self.active.is_none(),
                                 egui::Color32::TRANSPARENT,
+                                false,
                             );
                             #[cfg(test)]
                             self.shell_rects.insert((0, "home"), home.rect);
@@ -2709,23 +2708,13 @@ impl eframe::App for App {
                                     ui.spacing_mut().item_spacing.x = 0.0;
                                     let tab = doc_tab(
                                         ui,
-                                        &format!(
-                                            "{}{}",
-                                            t.title,
-                                            if t.dirty() { " •" } else { "" }
-                                        ),
+                                        &t.title,
                                         self.active == Some(t.id),
-                                        match &t.document {
-                                            Document::Docs(_) => {
-                                                egui::Color32::from_rgb(43, 87, 154)
-                                            }
-                                            Document::Sheets(_) => {
-                                                egui::Color32::from_rgb(33, 115, 70)
-                                            }
-                                            Document::Slides(_) => {
-                                                egui::Color32::from_rgb(196, 62, 28)
-                                            }
-                                        },
+                                        crate::chrome::accent_for(
+                                            t.document.kind(),
+                                            ui.visuals().dark_mode,
+                                        ),
+                                        t.dirty(),
                                     );
                                     let tab = tab.on_hover_text(
                                         t.path
@@ -2738,7 +2727,12 @@ impl eframe::App for App {
                                     if tab.clicked() {
                                         self.deferred.push((t.id, "activate"));
                                     }
-                                    let close = crate::chrome::tool(ui, "×", "Закрыть", false);
+                                    let close = crate::chrome::icon_button(
+                                        ui,
+                                        crate::chrome::Icon::Close,
+                                        "Закрыть документ",
+                                        true,
+                                    );
                                     ui.add_space(6.0);
                                     #[cfg(test)]
                                     self.shell_rects.insert((t.id, "close"), close.rect);
@@ -2760,45 +2754,54 @@ impl eframe::App for App {
                     .inner_margin(egui::Margin::symmetric(12, 5)),
             )
             .show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.small(&self.status);
-                    if let Some(t) = self.current() {
-                        ui.separator();
-                        ui.small(match &t.document {
-                            Document::Docs(_) => "Документ",
-                            Document::Sheets(_) => "Таблица",
-                            Document::Slides(_) => "Презентация",
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let Some(tab) = self.current() {
+                            if tab.read_only {
+                                ui.weak("Только чтение");
+                            }
+                            if tab.save_locked {
+                                ui.weak("Файл занят")
+                                    .on_hover_text("Правки можно сохранить в отдельную копию.");
+                            }
+                            ui.label(
+                                egui::RichText::new(if self.saving.contains(&tab.id) {
+                                    "Сохранение…"
+                                } else if tab.dirty() {
+                                    "Не сохранено"
+                                } else if tab.path.is_none() {
+                                    "Новый файл"
+                                } else {
+                                    "Сохранено"
+                                })
+                                .small()
+                                .color(crate::chrome::muted(ui)),
+                            );
+                        }
+                        if let Some((id, name, time)) = &self.last_agent
+                            && Some(*id) == self.active
+                            && time.elapsed().as_secs_f32() < 1.5
+                        {
+                            ui.label(
+                                egui::RichText::new("AI")
+                                    .small()
+                                    .color(crate::chrome::accent(ui)),
+                            )
+                            .on_hover_text(name);
+                            ctx.request_repaint();
+                        }
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(&self.status)
+                                        .small()
+                                        .color(crate::chrome::muted(ui)),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text(&self.status);
                         });
-                        if t.dirty() {
-                            ui.label(
-                                egui::RichText::new("● Не сохранено")
-                                    .small()
-                                    .color(ui.visuals().warn_fg_color),
-                            );
-                        } else {
-                            ui.label(
-                                egui::RichText::new("Сохранено")
-                                    .small()
-                                    .color(crate::chrome::muted(ui)),
-                            );
-                        }
-                        if t.save_locked {
-                            ui.label(
-                                egui::RichText::new("Файл занят · правки можно сохранить копией")
-                                    .color(ui.visuals().warn_fg_color),
-                            );
-                        }
-                    }
-                    if let Some((id, name, time)) = &self.last_agent
-                        && Some(*id) == self.active
-                        && time.elapsed().as_secs_f32() < 1.5
-                    {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(156, 116, 237),
-                            format!("AI · {name}"),
-                        );
-                        ctx.request_repaint();
-                    }
+                    });
                 });
             });
         if let Some(id) = self.current().filter(|t| t.save_locked).map(|t| t.id) {
@@ -2833,14 +2836,27 @@ impl eframe::App for App {
                         .unwrap_or_default(),
                 });
             egui::Panel::right("ai-review")
-                .default_size(340.0)
+                .default_size(320.0)
                 .min_size(260.0)
-                .frame(
-                    egui::Frame::new()
-                        .fill(ui.visuals().panel_fill)
-                        .inner_margin(egui::Margin::symmetric(12, 10)),
-                )
+                .max_size(480.0)
+                .frame(crate::chrome::sidebar_frame(ui))
                 .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Ассистент").strong());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if crate::chrome::icon_button(
+                                ui,
+                                crate::chrome::Icon::Close,
+                                "Закрыть панель ассистента · Ctrl+Shift+A",
+                                true,
+                            )
+                            .clicked()
+                            {
+                                self.show_ai = false;
+                            }
+                        });
+                    });
+                    ui.add_space(4.0);
                     let changes = if pending_changes > 0 {
                         format!("Изменения · {pending_changes}")
                     } else {
@@ -2848,38 +2864,45 @@ impl eframe::App for App {
                     };
                     crate::chrome::tabs(ui, &mut self.ai_tab, &["Чат", &changes]);
                     ui.add_space(6.0);
-                    egui::CollapsingHeader::new("Задачи ИИ").show(ui, |ui| {
-                        egui::ScrollArea::vertical()
-                            .id_salt("workspace-history")
-                            .max_height(140.0)
-                            .show(ui, |ui| {
-                                for task in self.workspace_jobs.iter().rev().take(12) {
-                                    let status = task.status();
-                                    let label = match task.state() {
-                                        "preparing" => "Подготовка",
-                                        "completed" => "Применено",
-                                        "preview" => "Предпросмотр",
-                                        "cancelled" => "Отменено",
-                                        _ => "Не применено",
-                                    };
-                                    ui.label(format!(
-                                        "{label} · документов {}",
-                                        task.targets.len()
-                                    ));
-                                    ui.weak(
-                                        task.targets
-                                            .iter()
-                                            .map(|target| target.2.as_str())
-                                            .collect::<Vec<_>>()
-                                            .join(" · "),
-                                    );
-                                    if let Some(error) = status["error"].as_str() {
-                                        ui.weak(error);
+                    if !self.workspace_jobs.is_empty() {
+                        egui::CollapsingHeader::new(format!(
+                            "Задания · {}",
+                            self.workspace_jobs.len()
+                        ))
+                        .id_salt("workspace-job-history")
+                        .show(ui, |ui| {
+                            egui::ScrollArea::vertical()
+                                .id_salt("workspace-history")
+                                .max_height(140.0)
+                                .show(ui, |ui| {
+                                    for task in self.workspace_jobs.iter().rev().take(12) {
+                                        let status = task.status();
+                                        let label = match task.state() {
+                                            "preparing" => "Подготовка",
+                                            "completed" => "Применено",
+                                            "preview" => "Предпросмотр",
+                                            "cancelled" => "Отменено",
+                                            _ => "Не применено",
+                                        };
+                                        ui.label(format!(
+                                            "{label} · документов {}",
+                                            task.targets.len()
+                                        ));
+                                        ui.weak(
+                                            task.targets
+                                                .iter()
+                                                .map(|target| target.2.as_str())
+                                                .collect::<Vec<_>>()
+                                                .join(" · "),
+                                        );
+                                        if let Some(error) = status["error"].as_str() {
+                                            ui.weak(error);
+                                        }
+                                        ui.separator();
                                     }
-                                    ui.separator();
-                                }
-                            });
-                    });
+                                });
+                        });
+                    }
                     if self.ai_tab == 0 {
                         if self.chat.show(ui, document, self.settings.mcp) {
                             (self.settings.chat_models, self.settings.chat_efforts) =
@@ -3171,125 +3194,74 @@ fn new_card(
     color: egui::Color32,
     width: f32,
 ) -> egui::Response {
-    let preview_height = width * 0.62;
-    let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(width, preview_height + 34.0),
-        egui::Sense::click(),
+    let response = ui.add_sized(
+        [width, 104.0],
+        egui::Button::new("")
+            .fill(crate::chrome::surface(ui))
+            .corner_radius(10)
+            .stroke(egui::Stroke::new(1.0, crate::chrome::border(ui))),
     );
     response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
-    });
-    let painter = ui.painter();
-    let preview = egui::Rect::from_min_size(rect.min, egui::vec2(width, preview_height));
-    let hovered = response.hovered();
-    let line = crate::chrome::border(ui);
-    painter.rect_filled(preview, 10.0, crate::chrome::workspace(ui));
-    let page = preview.shrink2(egui::vec2(width * 0.16, 12.0));
-    let page = if kind == "slides" {
-        egui::Rect::from_center_size(
-            preview.center(),
-            egui::vec2(page.width(), (page.width() * 0.5625).min(page.height())),
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            ui.is_enabled(),
+            format!("Создать: {label}"),
         )
+    });
+    let rect = response.rect;
+    let color = if ui.is_enabled() {
+        color
     } else {
-        page
+        crate::chrome::muted(ui)
     };
-    painter.rect_filled(page, 6.0, egui::Color32::WHITE);
+    let icon = egui::Rect::from_min_size(rect.min + egui::vec2(16.0, 14.0), egui::vec2(24.0, 28.0));
+    let painter = ui.painter();
     painter.rect_stroke(
-        page,
-        6.0,
-        egui::Stroke::new(1.0, line),
+        icon,
+        3.0,
+        egui::Stroke::new(1.5, color),
         egui::StrokeKind::Inside,
     );
-    let ink = egui::Color32::from_gray(214);
-    match kind {
-        "sheets" => {
-            let cols = 4;
-            let rows = 5;
-            for c in 1..cols {
-                let x = page.left() + page.width() * c as f32 / cols as f32;
-                painter.vline(
-                    x,
-                    page.top() + 6.0..=page.bottom() - 6.0,
-                    egui::Stroke::new(1.0, ink),
-                );
-            }
-            for r in 1..rows {
-                let y = page.top() + page.height() * r as f32 / rows as f32;
-                painter.hline(
-                    page.left() + 6.0..=page.right() - 6.0,
-                    y,
-                    egui::Stroke::new(1.0, ink),
-                );
-            }
-            let head = egui::Rect::from_min_size(
-                page.min + egui::vec2(6.0, 6.0),
-                egui::vec2(page.width() - 12.0, page.height() / rows as f32 - 6.0),
-            );
-            painter.rect_filled(head, 2.0, color.gamma_multiply(0.18));
-        }
-        "slides" => {
-            let title = egui::Rect::from_center_size(
-                page.center() - egui::vec2(0.0, page.height() * 0.1),
-                egui::vec2(page.width() * 0.6, 6.0),
-            );
-            painter.rect_filled(title, 3.0, color.gamma_multiply(0.55));
-            let sub = egui::Rect::from_center_size(
-                page.center() + egui::vec2(0.0, page.height() * 0.12),
-                egui::vec2(page.width() * 0.38, 4.0),
-            );
-            painter.rect_filled(sub, 2.0, ink);
-        }
-        _ => {
-            let mut y = page.top() + 12.0;
-            let mut index = 0;
-            while y < page.bottom() - 10.0 {
-                let w = if index == 0 {
-                    0.45
-                } else if index % 4 == 3 {
-                    0.6
-                } else {
-                    0.86
-                };
-                let bar = egui::Rect::from_min_size(
-                    egui::pos2(page.left() + 10.0, y),
-                    egui::vec2(
-                        (page.width() - 20.0) * w,
-                        if index == 0 { 5.0 } else { 3.0 },
-                    ),
-                );
-                painter.rect_filled(
-                    bar,
-                    1.5,
-                    if index == 0 {
-                        color.gamma_multiply(0.55)
-                    } else {
-                        ink
-                    },
-                );
-                y += if index == 0 { 12.0 } else { 8.0 };
-                index += 1;
-            }
-        }
+    for row in 0..3 {
+        let y = icon.top() + 8.0 + row as f32 * 5.0;
+        painter.hline(
+            icon.left() + 5.0..=icon.right() - 5.0,
+            y,
+            egui::Stroke::new(1.0, color),
+        );
     }
-    let edge = if hovered {
-        egui::Stroke::new(2.0, color)
-    } else {
-        egui::Stroke::new(1.0, line)
-    };
-    painter.rect_stroke(preview, 10.0, edge, egui::StrokeKind::Inside);
+    if kind == "sheets" {
+        painter.vline(
+            icon.center().x,
+            icon.top() + 4.0..=icon.bottom() - 4.0,
+            egui::Stroke::new(1.0, color),
+        );
+    }
     painter.text(
-        egui::pos2(rect.left() + 2.0, preview.bottom() + 10.0),
+        rect.min + egui::vec2(16.0, 62.0),
         egui::Align2::LEFT_TOP,
         label,
-        egui::FontId::proportional(13.5),
+        egui::FontId::proportional(14.0),
         ui.visuals().text_color(),
     );
-    if hovered {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    painter.text(
+        rect.min + egui::vec2(16.0, 81.0),
+        egui::Align2::LEFT_TOP,
+        "Создать",
+        egui::FontId::proportional(11.0),
+        crate::chrome::muted(ui),
+    );
+    if response.hovered() || response.has_focus() {
+        painter.rect_stroke(
+            rect,
+            10.0,
+            egui::Stroke::new(1.0, color),
+            egui::StrokeKind::Inside,
+        );
     }
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
+
 /// Coloured letter badge of a recent file, by extension.
 fn file_badge(path: &std::path::Path) -> (&'static str, egui::Color32) {
     let ext = path
@@ -3315,41 +3287,65 @@ fn file_kind(path: &std::path::Path) -> Option<usize> {
         _ => None,
     }
 }
-fn doc_tab(ui: &mut egui::Ui, label: &str, selected: bool, color: egui::Color32) -> egui::Response {
-    let text = egui::RichText::new(label).size(12.5);
+fn doc_tab(
+    ui: &mut egui::Ui,
+    label: &str,
+    selected: bool,
+    color: egui::Color32,
+    dirty: bool,
+) -> egui::Response {
+    let mut short: String = label.chars().take(32).collect();
+    if label.chars().nth(32).is_some() {
+        short.push('…');
+    }
+    let text = egui::RichText::new(&short).size(13.0);
     let width = (ui
         .painter()
         .layout_no_wrap(
-            label.to_owned(),
-            egui::FontId::proportional(12.5),
+            short.clone(),
+            egui::FontId::proportional(13.0),
             ui.visuals().text_color(),
         )
         .size()
         .x
-        + 2.0 * ui.spacing().button_padding.x)
-        .min(240.0);
+        + 20.0)
+        .clamp(64.0, 200.0);
     let response = ui.add_sized(
-        [width, 26.0],
-        egui::Button::new(if selected { text.strong() } else { text })
-            .selected(selected)
-            .frame_when_inactive(false)
-            .corner_radius(6)
-            .truncate()
-            .min_size(egui::vec2(0.0, 26.0)),
+        [width, 30.0],
+        egui::Button::new(if selected {
+            text.strong()
+        } else {
+            text.color(crate::chrome::muted(ui))
+        })
+        .fill(if selected {
+            crate::chrome::surface(ui)
+        } else {
+            egui::Color32::TRANSPARENT
+        })
+        .frame_when_inactive(selected)
+        .corner_radius(6)
+        .truncate()
+        .min_size(egui::vec2(64.0, 30.0)),
     );
-    if color != egui::Color32::TRANSPARENT {
-        let r = response.rect;
-        ui.painter().rect_filled(
-            egui::Rect::from_min_size(
-                egui::pos2(r.left() + 6.0, r.bottom() - 3.0),
-                egui::vec2(r.width() - 12.0, 2.0),
-            ),
-            1.0,
-            if selected {
-                color
-            } else {
-                egui::Color32::TRANSPARENT
-            },
+    if dirty {
+        ui.painter().circle_filled(
+            egui::pos2(response.rect.right() - 5.0, response.rect.center().y),
+            2.0,
+            crate::chrome::accent(ui),
+        );
+    }
+    if selected {
+        let color = if color == egui::Color32::TRANSPARENT {
+            crate::chrome::accent(ui)
+        } else {
+            color
+        };
+        ui.painter().line_segment(
+            [
+                response.rect.left_bottom() + egui::vec2(8.0, -1.0),
+                response.rect.right_bottom() - egui::vec2(8.0, 1.0),
+            ],
+            egui::Stroke::new(2.0, color),
         );
     }
     response

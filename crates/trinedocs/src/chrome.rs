@@ -23,25 +23,25 @@ struct Palette {
 fn palette(dark: bool) -> Palette {
     if dark {
         Palette {
-            text: Color32::from_rgb(242, 242, 242),
-            weak: Color32::from_rgb(166, 166, 166),
-            border: Color32::from_rgb(64, 64, 64),
-            chrome: Color32::from_rgb(41, 41, 41),
-            workspace: Color32::from_rgb(28, 28, 28),
-            surface: Color32::from_rgb(48, 48, 48),
-            hover: Color32::from_rgb(61, 61, 61),
-            pressed: Color32::from_rgb(77, 77, 77),
+            text: Color32::from_rgb(235, 237, 241),
+            weak: Color32::from_rgb(169, 175, 185),
+            border: Color32::from_rgb(65, 70, 79),
+            chrome: Color32::from_rgb(32, 35, 41),
+            workspace: Color32::from_rgb(24, 27, 32),
+            surface: Color32::from_rgb(37, 41, 48),
+            hover: Color32::from_rgb(48, 53, 62),
+            pressed: Color32::from_rgb(60, 67, 78),
         }
     } else {
         Palette {
-            text: Color32::from_rgb(36, 36, 36),
-            weak: Color32::from_rgb(112, 112, 112),
-            border: Color32::from_rgb(224, 224, 224),
-            chrome: Color32::from_rgb(255, 255, 255),
-            workspace: Color32::from_rgb(243, 243, 243),
+            text: Color32::from_rgb(34, 39, 47),
+            weak: Color32::from_rgb(98, 106, 117),
+            border: Color32::from_rgb(224, 228, 234),
+            chrome: Color32::from_rgb(250, 251, 252),
+            workspace: Color32::from_rgb(241, 243, 246),
             surface: Color32::WHITE,
-            hover: Color32::from_rgb(240, 240, 240),
-            pressed: Color32::from_rgb(224, 224, 224),
+            hover: Color32::from_rgb(237, 240, 244),
+            pressed: Color32::from_rgb(224, 230, 238),
         }
     }
 }
@@ -54,6 +54,35 @@ pub fn hover_fill(ui: &Ui) -> Color32 {
 pub fn border(ui: &Ui) -> Color32 {
     palette(ui.visuals().dark_mode).border
 }
+pub fn surface(ui: &Ui) -> Color32 {
+    palette(ui.visuals().dark_mode).surface
+}
+pub fn accent_for(kind: &str, dark: bool) -> Color32 {
+    match (kind, dark) {
+        ("sheets", false) => Color32::from_rgb(22, 112, 68),
+        ("sheets", true) => Color32::from_rgb(108, 202, 151),
+        ("slides", false) => Color32::from_rgb(176, 71, 35),
+        ("slides", true) => Color32::from_rgb(245, 161, 127),
+        (_, false) => Color32::from_rgb(39, 94, 175),
+        (_, true) => Color32::from_rgb(139, 180, 240),
+    }
+}
+pub fn separator(ui: &mut Ui) {
+    ui.add_space(4.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(1.0, 18.0), egui::Sense::hover());
+    ui.painter().vline(
+        rect.center().x,
+        rect.y_range(),
+        Stroke::new(1.0, border(ui)),
+    );
+    ui.add_space(4.0);
+}
+pub fn sidebar_frame(ui: &Ui) -> egui::Frame {
+    egui::Frame::new()
+        .fill(surface(ui))
+        .inner_margin(egui::Margin::symmetric(12, 12))
+}
+
 /// Applies the shell style; cheap to call every frame (re-applied only on change).
 pub fn style(ctx: &egui::Context, kind: &str, reduced_motion: bool) {
     let key = egui::Id::new("trinedocs-style");
@@ -68,14 +97,7 @@ pub fn style(ctx: &egui::Context, kind: &str, reduced_motion: bool) {
     ctx.data_mut(|d| d.insert_temp(key, wanted));
     ctx.all_styles_mut(|style| {
         let dark = style.visuals.dark_mode;
-        let accent = match (kind, dark) {
-            ("sheets", false) => Color32::from_rgb(16, 124, 65),
-            ("sheets", true) => Color32::from_rgb(84, 184, 124),
-            ("slides", false) => Color32::from_rgb(196, 62, 28),
-            ("slides", true) => Color32::from_rgb(240, 128, 96),
-            (_, false) => Color32::from_rgb(24, 90, 189),
-            (_, true) => Color32::from_rgb(110, 160, 236),
-        };
+        let accent = accent_for(kind, dark);
         let p = palette(dark);
         let v = &mut style.visuals;
         v.override_text_color = Some(p.text);
@@ -83,7 +105,7 @@ pub fn style(ctx: &egui::Context, kind: &str, reduced_motion: bool) {
         v.window_fill = p.surface;
         v.panel_fill = p.chrome;
         v.extreme_bg_color = p.surface;
-        v.text_edit_bg_color = Some(p.surface);
+        v.text_edit_bg_color = Some(p.workspace);
         v.faint_bg_color = p.workspace;
         v.code_bg_color = p.hover;
         v.window_stroke = Stroke::new(1.0, p.border);
@@ -91,15 +113,15 @@ pub fn style(ctx: &egui::Context, kind: &str, reduced_motion: bool) {
         v.menu_corner_radius = 10.into();
         v.window_shadow = egui::Shadow {
             offset: [0, 4],
-            blur: 16,
+            blur: 12,
             spread: 0,
-            color: Color32::from_black_alpha(if dark { 110 } else { 38 }),
+            color: Color32::from_black_alpha(if dark { 80 } else { 20 }),
         };
         v.popup_shadow = egui::Shadow {
             offset: [0, 3],
-            blur: 10,
+            blur: 12,
             spread: 0,
-            color: Color32::from_black_alpha(if dark { 100 } else { 30 }),
+            color: Color32::from_black_alpha(if dark { 70 } else { 24 }),
         };
         v.selection.bg_fill = accent.gamma_multiply(if dark { 0.45 } else { 0.22 });
         v.selection.stroke = Stroke::new(1.0, accent);
@@ -122,21 +144,21 @@ pub fn style(ctx: &egui::Context, kind: &str, reduced_motion: bool) {
         v.widgets.noninteractive.weak_bg_fill = p.chrome;
         v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, p.border);
         v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, p.text);
-        v.widgets.inactive.bg_fill = p.surface;
+        v.widgets.inactive.bg_fill = p.hover;
         v.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
-        v.widgets.inactive.bg_stroke = Stroke::new(1.0, p.border);
+        v.widgets.inactive.bg_stroke = Stroke::NONE;
         v.widgets.hovered.bg_fill = p.hover;
         v.widgets.hovered.weak_bg_fill = p.hover;
-        v.widgets.hovered.bg_stroke = Stroke::new(1.0, accent.gamma_multiply(0.55));
+        v.widgets.hovered.bg_stroke = Stroke::NONE;
         v.widgets.active.bg_fill = p.pressed;
         v.widgets.active.weak_bg_fill = p.pressed;
         v.widgets.active.bg_stroke = Stroke::new(1.0, accent);
         v.widgets.open.bg_fill = p.hover;
         v.widgets.open.weak_bg_fill = p.hover;
-        style.spacing.item_spacing = egui::vec2(4.0, 4.0);
-        style.spacing.button_padding = egui::vec2(7.0, 3.0);
-        style.spacing.interact_size = egui::vec2(24.0, 24.0);
-        style.spacing.menu_margin = egui::Margin::same(4);
+        style.spacing.item_spacing = egui::vec2(6.0, 6.0);
+        style.spacing.button_padding = egui::vec2(8.0, 5.0);
+        style.spacing.interact_size = egui::vec2(28.0, 28.0);
+        style.spacing.menu_margin = egui::Margin::same(8);
         style.spacing.combo_height = 360.0;
         style.spacing.tooltip_width = 360.0;
         style.animation_time = if reduced_motion { 0.0 } else { 0.12 };
@@ -146,7 +168,7 @@ pub fn style(ctx: &egui::Context, kind: &str, reduced_motion: bool) {
         v.text_cursor.blink = true;
         style
             .text_styles
-            .insert(TextStyle::Body, FontId::proportional(13.0));
+            .insert(TextStyle::Body, FontId::proportional(14.0));
         style
             .text_styles
             .insert(TextStyle::Button, FontId::proportional(13.0));
@@ -155,7 +177,7 @@ pub fn style(ctx: &egui::Context, kind: &str, reduced_motion: bool) {
             .insert(TextStyle::Small, FontId::proportional(11.0));
         style
             .text_styles
-            .insert(TextStyle::Heading, FontId::proportional(22.0));
+            .insert(TextStyle::Heading, FontId::proportional(24.0));
     });
 }
 /// Ribbon tabs: plain labels, the active one underlined with the app accent.
@@ -174,7 +196,7 @@ pub fn tabs(ui: &mut Ui, active: &mut usize, labels: &[&str]) {
                 .add(
                     egui::Button::new(text)
                         .frame_when_inactive(false)
-                        .min_size(egui::vec2(56.0, 28.0)),
+                        .min_size(egui::vec2(52.0, 32.0)),
                 )
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
             if response.clicked() {
@@ -186,7 +208,7 @@ pub fn tabs(ui: &mut Ui, active: &mut usize, labels: &[&str]) {
                         response.rect.left_bottom() + egui::vec2(12.0, -1.0),
                         response.rect.right_bottom() - egui::vec2(12.0, 1.0),
                     ],
-                    Stroke::new(2.5, accent(ui)),
+                    Stroke::new(2.0, accent(ui)),
                 );
             }
         }
@@ -199,7 +221,7 @@ pub fn ribbon<R>(ui: &mut Ui, content: impl FnOnce(&mut Ui) -> R) -> R {
     let line = border(ui);
     let response = egui::Frame::new()
         .fill(fill)
-        .inner_margin(egui::Margin::symmetric(6, 4))
+        .inner_margin(egui::Margin::symmetric(12, 6))
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             egui::ScrollArea::horizontal()
@@ -467,13 +489,19 @@ pub fn color_menu(
 }
 pub fn badge(ui: &mut Ui, label: &str, color: Color32, size: f32) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
-    ui.painter().rect_filled(rect, 6, color);
+    ui.painter().rect_filled(rect, 6, surface(ui));
+    ui.painter().rect_stroke(
+        rect,
+        6,
+        Stroke::new(1.0, border(ui)),
+        egui::StrokeKind::Inside,
+    );
     ui.painter().text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
         label,
-        FontId::proportional(size * 0.62),
-        Color32::WHITE,
+        FontId::proportional(size * 0.52),
+        color,
     );
     response
 }
@@ -484,13 +512,15 @@ pub enum Icon {
     Undo,
     Redo,
     Search,
+    Save,
+    Close,
 }
 pub fn icon_button(ui: &mut Ui, icon: Icon, label: &str, enabled: bool) -> egui::Response {
     let enabled = enabled && ui.is_enabled();
     let response = ui.add_enabled(
         enabled,
         egui::Button::new("")
-            .frame(false)
+            .frame_when_inactive(false)
             .min_size(egui::vec2(28.0, 28.0)),
     );
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
@@ -506,7 +536,7 @@ pub fn icon_button(ui: &mut Ui, icon: Icon, label: &str, enabled: bool) -> egui:
     } else {
         muted(ui).gamma_multiply(0.45)
     };
-    let stroke = Stroke::new(1.5, color);
+    let stroke = Stroke::new(1.75, color);
     let painter = ui.painter();
     match icon {
         Icon::Open => {
@@ -549,6 +579,36 @@ pub fn icon_button(ui: &mut Ui, icon: Icon, label: &str, enabled: bool) -> egui:
                 stroke,
             );
             painter.line(vec![p(-3.0, -7.0), p(-7.0, -3.0), p(-3.0, 1.0)], stroke);
+        }
+        Icon::Save => {
+            painter.rect_stroke(
+                egui::Rect::from_center_size(center, egui::vec2(14.0, 16.0)),
+                2.0,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+            painter.line(
+                vec![
+                    point(-3.0, -7.0),
+                    point(-3.0, -2.0),
+                    point(4.0, -2.0),
+                    point(4.0, -7.0),
+                ],
+                stroke,
+            );
+            painter.line(
+                vec![
+                    point(-3.0, 7.0),
+                    point(-3.0, 2.0),
+                    point(3.0, 2.0),
+                    point(3.0, 7.0),
+                ],
+                stroke,
+            );
+        }
+        Icon::Close => {
+            painter.line_segment([point(-4.0, -4.0), point(4.0, 4.0)], stroke);
+            painter.line_segment([point(4.0, -4.0), point(-4.0, 4.0)], stroke);
         }
         Icon::Search => {
             painter.circle_stroke(point(-2.0, -2.0), 5.5, stroke);

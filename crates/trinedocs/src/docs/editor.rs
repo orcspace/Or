@@ -654,11 +654,6 @@ pub fn show_with_edits(ui: &mut egui::Ui, doc: &mut Doc, edits: Option<&[TextEdi
                 if !rect.intersects(visible) {
                     continue;
                 }
-                ui.painter().rect_filled(
-                    rect.translate(egui::vec2(0.0, 3.0)),
-                    3.0,
-                    Color32::from_black_alpha(14),
-                );
                 ui.painter().rect_filled(rect, 2.0, Color32::WHITE);
                 ui.painter().rect_stroke(
                     rect,
@@ -872,6 +867,7 @@ fn cell_editor_id(canvas_id: egui::Id, doc: &Doc, state: &EditorState) -> egui::
 }
 /// Returns keyboard focus to where the user was typing: the active table cell or the page.
 fn refocus(ui: &egui::Ui, doc: &Doc, state: &EditorState, canvas_id: egui::Id) {
+    egui::Popup::close_all(ui.ctx());
     let target = if state.table_cell.is_some() {
         cell_editor_id(canvas_id, doc, state)
     } else {
@@ -1121,57 +1117,33 @@ fn table_grid_picker(
         ui.close();
     }
 }
-/// Style gallery card: a preview of the style with its name underneath.
 fn style_card(ui: &mut egui::Ui, style: &str, selected: bool) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(70.0, 48.0), Sense::click());
-    let accent = crate::chrome::accent(ui);
-    if selected || response.hovered() {
-        ui.painter()
-            .rect_filled(rect, 4.0, crate::chrome::hover_fill(ui));
-    }
-    ui.painter().rect_stroke(
-        rect,
-        4.0,
-        Stroke::new(
-            1.0,
-            if selected {
-                accent
-            } else {
-                crate::chrome::border(ui)
-            },
-        ),
-        egui::StrokeKind::Inside,
-    );
-    let text = ui.visuals().text_color();
-    let (size, bold, italic, color) = match style {
-        "Title" => (19.0, false, false, text),
-        "Heading1" => (16.0, true, false, accent),
-        "Heading2" => (14.0, true, false, accent),
-        "Heading3" => (13.0, true, false, text),
-        "Quote" => (13.0, false, true, crate::chrome::muted(ui)),
-        _ => (13.0, false, false, text),
+    let (size, bold, italic) = match style {
+        "Title" => (17.0, false, false),
+        "Heading1" => (16.0, true, false),
+        "Heading2" => (15.0, true, false),
+        "Heading3" => (14.0, true, false),
+        "Quote" => (13.0, false, true),
+        _ => (13.0, false, false),
     };
     let family = crate::fonts::egui_family(ui.ctx(), crate::fonts::DEFAULT_FAMILY, bold, italic);
-    ui.painter().text(
-        rect.center_top() + egui::vec2(0.0, 18.0),
-        Align2::CENTER_CENTER,
-        "АаБб",
-        FontId::new(size, family),
-        color,
-    );
-    ui.painter().text(
-        rect.center_bottom() - egui::vec2(0.0, 9.0),
-        Align2::CENTER_CENTER,
-        style_label(style),
-        FontId::proportional(10.5),
-        crate::chrome::muted(ui),
-    );
-    response
-        .on_hover_text(style_label(style))
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
+    ui.add_sized(
+        [220.0, 30.0],
+        egui::Button::new(egui::RichText::new(style_label(style)).font(FontId::new(size, family)))
+            .selected(selected)
+            .frame_when_inactive(false),
+    )
+    .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 fn rgb(c: [u8; 3]) -> Color32 {
     Color32::from_rgb(c[0], c[1], c[2])
+}
+fn command_menu(ui: &mut egui::Ui, title: &str, width: f32, content: impl FnOnce(&mut egui::Ui)) {
+    ui.menu_button(title, |ui| {
+        ui.set_min_width(width.clamp(180.0, 320.0));
+        ui.spacing_mut().item_spacing.y = 8.0;
+        content(ui);
+    });
 }
 fn toolbar(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id: egui::Id) {
     if state
@@ -1196,155 +1168,80 @@ fn toolbar(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id:
     });
 }
 fn home_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id: egui::Id) {
-    use crate::chrome::{group, tool};
-    group(ui, "Буфер обмена", 96.0, |ui| {
-        if tool(
-            ui,
-            "📋  Вставить",
-            "Вставить текст или рисунок · Ctrl+V",
-            false,
-        )
-        .clicked()
+    use crate::chrome::tool;
+    ui.push_id("docs-quick-commands", |ui| {
+        if tool(ui, "Вставить", "Текст или рисунок · Ctrl+V", false).clicked()
         {
             refocus(ui, doc, state, canvas_id);
             crate::clipboard::paste(ui.ctx());
         }
-        ui.horizontal(|ui| {
-            let can_copy = state.selected() || state.table_cell.is_some();
-            for (glyph, tip, command) in [
-                ("✂", "Вырезать · Ctrl+X", egui::ViewportCommand::RequestCut),
-                (
-                    "⧉",
-                    "Копировать · Ctrl+C",
-                    egui::ViewportCommand::RequestCopy,
-                ),
-            ] {
-                if ui
-                    .add_enabled_ui(can_copy, |ui| tool(ui, glyph, tip, false))
-                    .inner
-                    .clicked()
-                {
-                    refocus(ui, doc, state, canvas_id);
-                    ui.ctx().send_viewport_cmd(command);
-                }
-            }
-            let painter_on = state.format_painter.is_some();
-            if tool(
-                ui,
-                "🖌",
-                "Формат по образцу: выделите текст-образец, нажмите и выделите целевой текст",
-                painter_on,
-            )
-            .clicked()
-            {
-                state.format_painter = if painter_on {
-                    None
-                } else {
-                    Some(state.typing.clone())
-                };
+        crate::chrome::separator(ui);
+        let mut font = state.typing.font.clone();
+        if crate::chrome::font_picker(ui, "docs-font-quick", &mut font, 128.0) {
+            state.apply_format(doc, |format| format.font = font.clone());
+            refocus(ui, doc, state, canvas_id);
+        }
+        let mut size = state.typing.size;
+        if crate::chrome::size_picker(ui, "docs-size-quick", &mut size) {
+            state.apply_format(doc, |format| format.size = size.clamp(4.0, 144.0));
+        }
+        let typing = state.typing.clone();
+        for (label, tip, on, index) in [
+            (
+                egui::RichText::new("Ж").strong(),
+                "Полужирный · Ctrl+B",
+                typing.bold,
+                0,
+            ),
+            (
+                egui::RichText::new("К").italics(),
+                "Курсив · Ctrl+I",
+                typing.italic,
+                1,
+            ),
+            (
+                egui::RichText::new("Ч").underline(),
+                "Подчёркнутый · Ctrl+U",
+                typing.underline,
+                2,
+            ),
+        ] {
+            if tool(ui, label, tip, on).clicked() {
+                state.apply_format(doc, |format| match index {
+                    0 => format.bold = !on,
+                    1 => format.italic = !on,
+                    _ => format.underline = !on,
+                });
                 refocus(ui, doc, state, canvas_id);
             }
+        }
+        if let Some(Some(color)) =
+            crate::chrome::color_menu(ui, "A", "Цвет шрифта", Some(typing.color), None)
+        {
+            state.apply_format(doc, |format| format.color = color);
+            refocus(ui, doc, state, canvas_id);
+        }
+    });
+    command_menu(ui, "Стили", 240.0, |ui| {
+        let current = doc
+            .paragraphs
+            .get(state.cursor.paragraph)
+            .map(|p| p.style.clone())
+            .unwrap_or_else(|| "Normal".into());
+        ui.vertical(|ui| {
+            ui.add_enabled_ui(state.table_cell.is_none(), |ui| {
+                for style in [
+                    "Normal", "Title", "Heading1", "Heading2", "Heading3", "Quote",
+                ] {
+                    if style_card(ui, style, current == style).clicked() {
+                        apply_style(doc, state, style);
+                        refocus(ui, doc, state, canvas_id);
+                    }
+                }
+            });
         });
     });
-    group(ui, "Шрифт", 262.0, |ui| {
-        ui.horizontal(|ui| {
-            let mut font = state.typing.font.clone();
-            if crate::chrome::font_picker(ui, "docs-font", &mut font, 130.0) {
-                state.apply_format(doc, |f| f.font = font.clone());
-                refocus(ui, doc, state, canvas_id);
-            }
-            let mut size = state.typing.size;
-            if crate::chrome::size_picker(ui, "docs-size", &mut size) {
-                let size = size.clamp(4.0, 144.0);
-                state.apply_format(doc, |f| f.size = size);
-            }
-            for (glyph, tip, grow) in [
-                ("A⁺", "Увеличить размер шрифта · Ctrl+]", true),
-                ("A⁻", "Уменьшить размер шрифта · Ctrl+[", false),
-            ] {
-                if tool(ui, glyph, tip, false).clicked() {
-                    let size = crate::chrome::step_size(state.typing.size, grow).clamp(4.0, 144.0);
-                    state.apply_format(doc, |f| f.size = size);
-                    refocus(ui, doc, state, canvas_id);
-                }
-            }
-        });
-        ui.horizontal(|ui| {
-            let t = state.typing.clone();
-            for (label, tip, on, which) in [
-                (
-                    egui::RichText::new("Ж").strong(),
-                    "Полужирный · Ctrl+B",
-                    t.bold,
-                    0,
-                ),
-                (
-                    egui::RichText::new("К").italics(),
-                    "Курсив · Ctrl+I",
-                    t.italic,
-                    1,
-                ),
-                (
-                    egui::RichText::new("Ч").underline(),
-                    "Подчёркнутый · Ctrl+U",
-                    t.underline,
-                    2,
-                ),
-                (
-                    egui::RichText::new("abc").strikethrough(),
-                    "Зачёркнутый",
-                    t.strike,
-                    3,
-                ),
-                (
-                    egui::RichText::new("x₂"),
-                    "Подстрочный знак",
-                    t.script == -1,
-                    4,
-                ),
-                (
-                    egui::RichText::new("x²"),
-                    "Надстрочный знак",
-                    t.script == 1,
-                    5,
-                ),
-            ] {
-                if tool(ui, label, tip, on).clicked() {
-                    state.apply_format(doc, |f| match which {
-                        0 => f.bold = !on,
-                        1 => f.italic = !on,
-                        2 => f.underline = !on,
-                        3 => f.strike = !on,
-                        4 => f.script = if on { 0 } else { -1 },
-                        _ => f.script = if on { 0 } else { 1 },
-                    });
-                    refocus(ui, doc, state, canvas_id);
-                }
-            }
-            if let Some(color) = crate::chrome::color_menu(
-                ui,
-                "ab",
-                "Цвет выделения текста",
-                t.highlight.or(Some([255, 255, 0])),
-                Some("Нет цвета"),
-            ) {
-                state.apply_format(doc, |f| f.highlight = color);
-                refocus(ui, doc, state, canvas_id);
-            }
-            if let Some(Some(color)) =
-                crate::chrome::color_menu(ui, "A", "Цвет шрифта", Some(t.color), None)
-            {
-                state.apply_format(doc, |f| f.color = color);
-                refocus(ui, doc, state, canvas_id);
-            }
-            if tool(ui, "A✕", "Очистить всё форматирование", false).clicked()
-            {
-                state.apply_format(doc, |f| *f = TextFormat::default());
-                refocus(ui, doc, state, canvas_id);
-            }
-        });
-    });
-    group(ui, "Абзац", 168.0, |ui| {
+    command_menu(ui, "Абзац", 168.0, |ui| {
         let (list, current) = current_paragraph(doc, state)
             .map(|p| (p.list, p.align))
             .unwrap_or_default();
@@ -1400,115 +1297,244 @@ fn home_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id
             }
         });
     });
-    group(ui, "Стили", 6.0 * 72.0, |ui| {
-        let current = doc
-            .paragraphs
-            .get(state.cursor.paragraph)
-            .map(|p| p.style.clone())
-            .unwrap_or_else(|| "Normal".into());
-        ui.horizontal(|ui| {
-            ui.add_enabled_ui(state.table_cell.is_none(), |ui| {
-                for style in [
-                    "Normal", "Title", "Heading1", "Heading2", "Heading3", "Quote",
+    if tool(ui, "Найти", "Найти · Ctrl+F", state.show_find).clicked() {
+        toggle_find(ui, state, canvas_id);
+    }
+    ui.menu_button("Ещё", |ui| {
+        command_menu(ui, "Буфер обмена", 96.0, |ui| {
+            if tool(
+                ui,
+                "📋  Вставить",
+                "Вставить текст или рисунок · Ctrl+V",
+                false,
+            )
+            .clicked()
+            {
+                refocus(ui, doc, state, canvas_id);
+                crate::clipboard::paste(ui.ctx());
+            }
+            ui.horizontal(|ui| {
+                let can_copy = state.selected() || state.table_cell.is_some();
+                for (glyph, tip, command) in [
+                    ("✂", "Вырезать · Ctrl+X", egui::ViewportCommand::RequestCut),
+                    (
+                        "⧉",
+                        "Копировать · Ctrl+C",
+                        egui::ViewportCommand::RequestCopy,
+                    ),
                 ] {
-                    if style_card(ui, style, current == style).clicked() {
-                        apply_style(doc, state, style);
+                    if ui
+                        .add_enabled_ui(can_copy, |ui| tool(ui, glyph, tip, false))
+                        .inner
+                        .clicked()
+                    {
+                        refocus(ui, doc, state, canvas_id);
+                        ui.ctx().send_viewport_cmd(command);
+                    }
+                }
+                let painter_on = state.format_painter.is_some();
+                if tool(
+                    ui,
+                    "🖌",
+                    "Формат по образцу: выделите текст-образец, нажмите и выделите целевой текст",
+                    painter_on,
+                )
+                .clicked()
+                {
+                    state.format_painter = if painter_on {
+                        None
+                    } else {
+                        Some(state.typing.clone())
+                    };
+                    refocus(ui, doc, state, canvas_id);
+                }
+            });
+        });
+        command_menu(ui, "Шрифт", 262.0, |ui| {
+            ui.horizontal(|ui| {
+                let mut font = state.typing.font.clone();
+                if crate::chrome::font_picker(ui, "docs-font", &mut font, 130.0) {
+                    state.apply_format(doc, |f| f.font = font.clone());
+                    refocus(ui, doc, state, canvas_id);
+                }
+                let mut size = state.typing.size;
+                if crate::chrome::size_picker(ui, "docs-size", &mut size) {
+                    let size = size.clamp(4.0, 144.0);
+                    state.apply_format(doc, |f| f.size = size);
+                }
+                for (glyph, tip, grow) in [
+                    ("A⁺", "Увеличить размер шрифта · Ctrl+]", true),
+                    ("A⁻", "Уменьшить размер шрифта · Ctrl+[", false),
+                ] {
+                    if tool(ui, glyph, tip, false).clicked() {
+                        let size =
+                            crate::chrome::step_size(state.typing.size, grow).clamp(4.0, 144.0);
+                        state.apply_format(doc, |f| f.size = size);
                         refocus(ui, doc, state, canvas_id);
                     }
                 }
             });
+            ui.horizontal(|ui| {
+                let t = state.typing.clone();
+                for (label, tip, on, which) in [
+                    (
+                        egui::RichText::new("Ж").strong(),
+                        "Полужирный · Ctrl+B",
+                        t.bold,
+                        0,
+                    ),
+                    (
+                        egui::RichText::new("К").italics(),
+                        "Курсив · Ctrl+I",
+                        t.italic,
+                        1,
+                    ),
+                    (
+                        egui::RichText::new("Ч").underline(),
+                        "Подчёркнутый · Ctrl+U",
+                        t.underline,
+                        2,
+                    ),
+                    (
+                        egui::RichText::new("abc").strikethrough(),
+                        "Зачёркнутый",
+                        t.strike,
+                        3,
+                    ),
+                    (
+                        egui::RichText::new("x₂"),
+                        "Подстрочный знак",
+                        t.script == -1,
+                        4,
+                    ),
+                    (
+                        egui::RichText::new("x²"),
+                        "Надстрочный знак",
+                        t.script == 1,
+                        5,
+                    ),
+                ] {
+                    if tool(ui, label, tip, on).clicked() {
+                        state.apply_format(doc, |f| match which {
+                            0 => f.bold = !on,
+                            1 => f.italic = !on,
+                            2 => f.underline = !on,
+                            3 => f.strike = !on,
+                            4 => f.script = if on { 0 } else { -1 },
+                            _ => f.script = if on { 0 } else { 1 },
+                        });
+                        refocus(ui, doc, state, canvas_id);
+                    }
+                }
+                if let Some(color) = crate::chrome::color_menu(
+                    ui,
+                    "ab",
+                    "Цвет выделения текста",
+                    t.highlight.or(Some([255, 255, 0])),
+                    Some("Нет цвета"),
+                ) {
+                    state.apply_format(doc, |f| f.highlight = color);
+                    refocus(ui, doc, state, canvas_id);
+                }
+                if let Some(Some(color)) =
+                    crate::chrome::color_menu(ui, "A", "Цвет шрифта", Some(t.color), None)
+                {
+                    state.apply_format(doc, |f| f.color = color);
+                    refocus(ui, doc, state, canvas_id);
+                }
+                if tool(ui, "A✕", "Очистить всё форматирование", false).clicked()
+                {
+                    state.apply_format(doc, |f| *f = TextFormat::default());
+                    refocus(ui, doc, state, canvas_id);
+                }
+            });
         });
-    });
-    group(ui, "Редактирование", 104.0, |ui| {
-        if tool(ui, "🔍  Найти", "Найти · Ctrl+F", false).clicked() {
-            toggle_find(ui, state, canvas_id);
-        }
-        ui.horizontal(|ui| {
-            if tool(ui, "Заменить", "Заменить · Ctrl+H", false).clicked() {
-                open_find(ui, state, canvas_id, true);
+        command_menu(ui, "Редактирование", 104.0, |ui| {
+            if tool(ui, "🔍  Найти", "Найти · Ctrl+F", false).clicked() {
+                toggle_find(ui, state, canvas_id);
             }
-            if tool(ui, "⬚", "Выделить всё · Ctrl+A", false).clicked() {
-                state.table_cell = None;
-                let paragraph = doc.paragraphs.len().saturating_sub(1);
-                let offset = doc
-                    .paragraphs
-                    .last()
-                    .map(Paragraph::len)
-                    .unwrap_or_default();
-                state.anchor = Position::default();
-                state.cursor = Position { paragraph, offset };
-                ui.memory_mut(|m| m.request_focus(canvas_id));
-            }
+            ui.horizontal(|ui| {
+                if tool(ui, "Заменить", "Заменить · Ctrl+H", false).clicked() {
+                    open_find(ui, state, canvas_id, true);
+                }
+                if tool(ui, "⬚", "Выделить всё · Ctrl+A", false).clicked() {
+                    state.table_cell = None;
+                    let paragraph = doc.paragraphs.len().saturating_sub(1);
+                    let offset = doc
+                        .paragraphs
+                        .last()
+                        .map(Paragraph::len)
+                        .unwrap_or_default();
+                    state.anchor = Position::default();
+                    state.cursor = Position { paragraph, offset };
+                    refocus(ui, doc, state, canvas_id);
+                }
+            });
         });
     });
 }
 fn insert_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id: egui::Id) {
-    use crate::chrome::{group, tool};
+    use crate::chrome::tool;
     let big = |text: &str| {
         egui::Button::new(egui::RichText::new(text).size(12.5))
             .frame_when_inactive(false)
-            .min_size(egui::vec2(60.0, 50.0))
+            .min_size(egui::vec2(60.0, 28.0))
     };
-    group(ui, "Таблицы", 64.0, |ui| {
-        let response = ui.add(big("▦\nТаблица")).on_hover_text("Вставить таблицу");
-        egui::Popup::menu(&response).show(|ui| table_grid_picker(ui, doc, state, canvas_id));
-    });
-    group(ui, "Иллюстрации", 64.0, |ui| {
-        let response = ui
-            .add_enabled(state.pending_image.is_none(), big("🖼\nРисунок"))
-            .on_hover_text("Вставить рисунок из файла (PNG, JPEG)");
-        if response.clicked() {
-            start_image_load(ui, doc, state);
-        }
-        if !doc.images.is_empty() {
-            response.context_menu(|ui| {
-                if ui.button("Размер и описание…").clicked() {
-                    state.show_objects = true;
-                    ui.close();
-                }
-            });
-        }
-    });
-    group(ui, "Ссылки", 64.0, |ui| {
-        let response = ui
-            .add(big("🔗\nСсылка"))
-            .on_hover_text("Вставить гиперссылку · Ctrl+K");
-        egui::Popup::menu(&response).show(|ui| {
-            ui.label("Адрес");
-            ui.add(
-                egui::TextEdit::singleline(&mut state.link)
-                    .hint_text("https://")
-                    .desired_width(260.0),
-            );
-            if ui
-                .add_enabled(!state.link.trim().is_empty(), egui::Button::new("Вставить"))
-                .clicked()
-            {
-                let link = state.link.trim().to_string();
-                if !state.selected() {
-                    let start = state.cursor;
-                    if state.insert(doc, &link) {
-                        state.anchor = start;
-                    }
-                }
-                state.apply_format(doc, |f| {
-                    f.link = Some(link.clone());
-                    f.underline = true;
-                    f.color = [5, 99, 193];
-                });
-                ui.memory_mut(|m| m.request_focus(canvas_id));
+    let response = ui.add(big("Таблица")).on_hover_text("Вставить таблицу");
+    egui::Popup::menu(&response).show(|ui| table_grid_picker(ui, doc, state, canvas_id));
+    let response = ui
+        .add_enabled(state.pending_image.is_none(), big("Рисунок…"))
+        .on_hover_text("Вставить рисунок из файла (PNG, JPEG)");
+    if response.clicked() {
+        start_image_load(ui, doc, state);
+    }
+    if !doc.images.is_empty() {
+        response.context_menu(|ui| {
+            if ui.button("Размер и описание…").clicked() {
+                state.show_objects = true;
                 ui.close();
             }
         });
+    }
+    let response = ui
+        .add(big("Ссылка"))
+        .on_hover_text("Вставить гиперссылку · Ctrl+K");
+    egui::Popup::menu(&response).show(|ui| {
+        ui.label("Адрес");
+        ui.add(
+            egui::TextEdit::singleline(&mut state.link)
+                .hint_text("https://")
+                .desired_width(260.0),
+        );
+        if ui
+            .add_enabled(!state.link.trim().is_empty(), egui::Button::new("Вставить"))
+            .clicked()
+        {
+            let link = state.link.trim().to_string();
+            if !state.selected() {
+                let start = state.cursor;
+                if state.insert(doc, &link) {
+                    state.anchor = start;
+                }
+            }
+            state.apply_format(doc, |f| {
+                f.link = Some(link.clone());
+                f.underline = true;
+                f.color = [5, 99, 193];
+            });
+            egui::Popup::close_all(ui.ctx());
+            ui.memory_mut(|m| m.request_focus(canvas_id));
+            ui.close();
+        }
     });
-    group(ui, "Колонтитулы", 150.0, |ui| {
+    command_menu(ui, "Колонтитулы", 150.0, |ui| {
         ui.menu_button(
             "Верхний и нижний колонтитулы…",
             |ui| page_headers(ui, doc, canvas_id),
         );
         ui.checkbox(&mut doc.page.page_numbers, "Номера страниц");
     });
-    group(ui, "Текст и символы", 150.0, |ui| {
+    command_menu(ui, "Текст и символы", 150.0, |ui| {
         ui.horizontal(|ui| {
             let symbols = tool(ui, "Ω  Символ", "Вставить символ", false);
             egui::Popup::menu(&symbols).show(|ui| {
@@ -1550,6 +1576,7 @@ fn insert_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_
             {
                 p.page_break_before = true;
             }
+            egui::Popup::close_all(ui.ctx());
             ui.memory_mut(|m| m.request_focus(canvas_id));
         }
         if tool(
@@ -1561,6 +1588,7 @@ fn insert_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_
         .clicked()
         {
             delete_empty_pages(doc, state);
+            egui::Popup::close_all(ui.ctx());
             ui.memory_mut(|m| m.request_focus(canvas_id));
         }
     });
@@ -1599,9 +1627,8 @@ fn delete_empty_pages(doc: &mut Doc, state: &mut EditorState) {
     });
 }
 fn layout_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id: egui::Id) {
-    use crate::chrome::group;
     let previous_page = doc.page.clone();
-    group(ui, "Параметры страницы", 250.0, |ui| {
+    command_menu(ui, "Параметры страницы", 250.0, |ui| {
         ui.horizontal(|ui| {
             ui.menu_button("Поля", |ui| {
                 for (name, value) in [("Обычные", 72.0), ("Узкие", 36.0), ("Широкие", 144.0)]
@@ -1673,10 +1700,11 @@ fn layout_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_
             && let Some(p) = doc.paragraphs.get_mut(state.cursor.paragraph)
         {
             p.page_break_before = !p.page_break_before;
+            egui::Popup::close_all(ui.ctx());
             ui.memory_mut(|m| m.request_focus(canvas_id));
         }
     });
-    group(ui, "Абзац", 300.0, |ui| {
+    command_menu(ui, "Абзац", 300.0, |ui| {
         paragraph_controls(ui, doc, state, true);
     });
     if doc.page != previous_page {
@@ -1684,8 +1712,8 @@ fn layout_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_
     }
 }
 fn view_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id: egui::Id) {
-    use crate::chrome::{group, tool};
-    group(ui, "Масштаб", 230.0, |ui| {
+    use crate::chrome::tool;
+    command_menu(ui, "Масштаб", 230.0, |ui| {
         ui.horizontal(|ui| {
             for (label, zoom) in [("75%", 0.75), ("100%", 1.0), ("125%", 1.25), ("150%", 1.5)] {
                 if tool(ui, label, "Масштаб", (state.zoom - zoom).abs() < 0.01).clicked() {
@@ -1699,14 +1727,14 @@ fn view_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id
                 ((ui.ctx().content_rect().width() - 100.0) / doc.page.width).clamp(0.5, 2.5);
         }
     });
-    group(ui, "Навигация", 150.0, |ui| {
+    command_menu(ui, "Навигация", 150.0, |ui| {
         outline_menu(ui, doc, state);
         if tool(ui, "🔍  Поиск", "Найти / заменить · Ctrl+F / Ctrl+H", false).clicked()
         {
             toggle_find(ui, state, canvas_id);
         }
     });
-    group(ui, "Объекты", 120.0, |ui| {
+    command_menu(ui, "Объекты", 120.0, |ui| {
         if ui
             .add_enabled(
                 !doc.images.is_empty(),
@@ -1719,12 +1747,12 @@ fn view_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id
     });
 }
 fn table_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id: egui::Id) {
-    use crate::chrome::{group, tool};
+    use crate::chrome::tool;
     let Some(cursor) = state.table_cell else {
         return;
     };
     let mut command = None;
-    group(ui, "Строки и столбцы", 196.0, |ui| {
+    command_menu(ui, "Строки и столбцы", 196.0, |ui| {
         ui.horizontal(|ui| {
             if tool(ui, "⬆  Вставить сверху", "Вставить строку сверху", false).clicked()
             {
@@ -1746,7 +1774,7 @@ fn table_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_i
             }
         });
     });
-    group(ui, "Удаление", 176.0, |ui| {
+    command_menu(ui, "Удаление", 176.0, |ui| {
         ui.horizontal(|ui| {
             if tool(ui, "Удалить строку", "Удалить текущую строку", false).clicked()
             {
@@ -1762,7 +1790,7 @@ fn table_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_i
             command = Some(TableCommand::DeleteTable);
         }
     });
-    group(ui, "Оформление", 170.0, |ui| {
+    command_menu(ui, "Оформление", 170.0, |ui| {
         ui.horizontal(|ui| {
             let fill = active_cell(doc, Some(cursor)).map(|c| c.fill);
             if let Some(color) =
@@ -1812,7 +1840,7 @@ fn table_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_i
         }
         ui.weak(format!("Ячейка {}:{}", cursor.row + 1, cursor.column + 1));
     });
-    group(ui, "Размер ячейки", 150.0, |ui| {
+    command_menu(ui, "Размер ячейки", 150.0, |ui| {
         let fallback = {
             let columns = doc
                 .tables
@@ -1861,9 +1889,11 @@ fn table_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_i
         }
     });
     if let Some(command) = command {
+        egui::Popup::close_all(ui.ctx());
         table_command(doc, state, command);
         state.focus_cell = state.table_cell.is_some();
         if state.table_cell.is_none() {
+            egui::Popup::close_all(ui.ctx());
             ui.memory_mut(|m| m.request_focus(canvas_id));
         }
     }
@@ -2187,6 +2217,7 @@ fn find_shortcut(event: &Event) -> Option<bool> {
     }
 }
 fn open_find(ui: &mut egui::Ui, state: &mut EditorState, canvas_id: egui::Id, replacement: bool) {
+    egui::Popup::close_all(ui.ctx());
     state.show_find = true;
     state.find_focus = Some(replacement);
     state.preedit.clear();
@@ -2194,6 +2225,7 @@ fn open_find(ui: &mut egui::Ui, state: &mut EditorState, canvas_id: egui::Id, re
 }
 fn toggle_find(ui: &mut egui::Ui, state: &mut EditorState, canvas_id: egui::Id) {
     if state.show_find {
+        egui::Popup::close_all(ui.ctx());
         state.show_find = false;
         state.find_focus = None;
         ui.memory_mut(|m| m.request_focus(canvas_id));
