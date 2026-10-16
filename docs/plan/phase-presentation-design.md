@@ -67,3 +67,5 @@
 
 ## Выполненные проверки завершения
 `cargo fmt --all -- --check`, `git diff --check`, `python -B tools/spec_registry.py check` (442 REQ / 361 PAR), 4 Python regression-теста и check_assets проходят. Публичный Openverse API с фильтром jpg/png и лицензий ответил HTTP 200. Это не проверка исполнения Rust/GUI; локальная сборка не выполнялась.
+
+Первый CI на GitHub обнаружил три старых несовместимых byte/string сравнения в Sheets XML и две недостижимые ветки описаний Slides. Исправлены в исходном коде, без изменения формата или зависимости. Rust-проверки повторяются только на GitHub.

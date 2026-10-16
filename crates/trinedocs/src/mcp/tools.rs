@@ -248,8 +248,7 @@ fn hint(name: &str) -> Option<&'static str> {
         "docs_insert_image" => {
             "Insert image bytes after paragraph_id. Optional width/height in points; one dimension preserves the natural aspect ratio. The full request must fit the transport limit of 1 MiB."
         }
-        "slides_add_text" | "slides_add_shape" | "slides_add_image" | "slides_add_table"
-        | "slides_add_chart" => {
+        "slides_add_text" | "slides_add_shape" | "slides_add_image" => {
             "Create an element on slide_id. Optional x/y (top-left, points) and width/height override its initial geometry; one image dimension preserves its natural aspect ratio. slides_add_image with as_background=true fills the whole slide and goes to the back. For web or generated pictures use slides_add_image_url / slides_generate_image. Read slides_design_guide before designing a deck. The full request must fit 1 MiB."
         }
         "docs_find" => {
@@ -296,10 +295,10 @@ fn hint(name: &str) -> Option<&'static str> {
             "Set named ranges: object names {\"Name\": \"Sheet1!A1:B5\"}; a null value deletes the name."
         }
         "slides_add_table" => {
-            "Add a table to slide_id with rows and columns (default 3×3, up to 1000); fill it with slides_write_table."
+            "Add a table to slide_id with rows and columns (default 3×3, up to 1000); fill it with slides_write_table. Optional x/y/width/height in points."
         }
         "slides_add_chart" => {
-            "Add a column chart to slide_id: values (array of numbers) and optional labels (array of strings)."
+            "Add a column chart to slide_id: values (array of numbers) and optional labels (array of strings). Optional x/y/width/height in points."
         }
         "slides_update_slide" => {
             "Patch slide_id with object slide: title, background [r,g,b], hidden, layout, section, notes, transition."

@@ -1988,7 +1988,7 @@ fn typed_formula_strings(xml: &[u8], sheet: &super::model::Sheet) -> Result<Vec<
     loop {
         let event = reader.read_event().map_err(|error| error.to_string())?;
         match event {
-            Event::Start(e) if e.local_name().as_ref() == b"c" => {
+            Event::Start(e) if e.local_name().as_ref() == "c" => {
                 let values = attrs(&e, &reader)?;
                 result = values
                     .get("r")
@@ -2010,7 +2010,7 @@ fn typed_formula_strings(xml: &[u8], sheet: &super::model::Sheet) -> Result<Vec<
                         .map_err(|error| error.to_string())?;
                 }
             }
-            Event::Start(e) if e.local_name().as_ref() == b"v" && result.is_some() => {
+            Event::Start(e) if e.local_name().as_ref() == "v" && result.is_some() => {
                 writer
                     .write_event(Event::Start(e.borrow()))
                     .map_err(|error| error.to_string())?;
@@ -2024,7 +2024,7 @@ fn typed_formula_strings(xml: &[u8], sheet: &super::model::Sheet) -> Result<Vec<
                     .write_event(Event::End(e.to_end()))
                     .map_err(|error| error.to_string())?;
             }
-            Event::End(e) if e.local_name().as_ref() == b"c" => {
+            Event::End(e) if e.local_name().as_ref() == "c" => {
                 result = None;
                 writer
                     .write_event(Event::End(e))
