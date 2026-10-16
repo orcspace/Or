@@ -15,6 +15,7 @@ pub struct Presentation {
     pointer: bool,
     notes: bool,
     blank: u8,
+    blank_since: Option<f64>,
     /// The black "end of slide show" screen after the last slide.
     ended: bool,
     strokes: Vec<Vec<Pos2>>,
@@ -50,6 +51,7 @@ impl Presentation {
         self.click_times.clear();
         self.strokes.clear();
         self.blank = 0;
+        self.blank_since = None;
         self.ended = false;
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
         ctx.request_repaint();
@@ -63,7 +65,18 @@ impl Presentation {
         self.click_times.clear();
         self.strokes.clear();
         self.blank = 0;
+        self.blank_since = None;
         self.ended = false;
+    }
+    fn set_blank(&mut self, blank: u8, time: f64) {
+        if blank == 0 {
+            if let Some(started) = self.blank_since.take() {
+                self.slide_started += (time - started).max(0.0);
+            }
+        } else if self.blank == 0 {
+            self.blank_since = Some(time);
+        }
+        self.blank = blank;
     }
     fn click_steps(deck: &Deck, index: usize) -> usize {
         deck.slides
@@ -87,7 +100,7 @@ impl Presentation {
         }
         if self.blank != 0 {
             // B / W blanking: the first advance only brings the slide back.
-            self.blank = 0;
+            self.set_blank(0, time);
             return;
         }
         let count = Self::click_steps(deck, self.index);
@@ -112,8 +125,12 @@ impl Presentation {
     fn previous(&mut self, deck: &Deck, time: f64) {
         if self.ended || self.blank != 0 {
             // Back from the end screen (or a blanked screen) shows the slide again.
+            if self.ended {
+                self.slide_started = time;
+                self.click_times.fill(-1.0e6);
+            }
             self.ended = false;
-            self.blank = 0;
+            self.set_blank(0, time);
             return;
         }
         if self.clicks > 0 {
@@ -141,10 +158,16 @@ impl Presentation {
         if self.ended
             || self.blank != 0
             || !deck.slides.get(self.index).is_some_and(|slide| {
-                slide
-                    .transition
-                    .advance_after
-                    .is_some_and(|seconds| time - self.slide_started >= f64::from(seconds))
+                slide.transition.advance_after.is_some_and(|seconds| {
+                    let transition = if slide.transition.effect == "none" {
+                        0.0
+                    } else {
+                        slide.transition.duration
+                    };
+                    let effects =
+                        super::editor::animation_end(slide, &self.click_times).max(transition);
+                    time - self.slide_started >= f64::from(effects + seconds)
+                })
             })
         {
             return false;
@@ -240,10 +263,10 @@ pub fn show(ui: &mut egui::Ui, deck: &Deck, state: &mut Presentation) {
         state.move_to(deck, index, time);
     }
     if ctx.input(|i| i.key_pressed(egui::Key::B)) {
-        state.blank = if state.blank == 1 { 0 } else { 1 };
+        state.set_blank(if state.blank == 1 { 0 } else { 1 }, time);
     }
     if ctx.input(|i| i.key_pressed(egui::Key::W)) {
-        state.blank = if state.blank == 2 { 0 } else { 2 };
+        state.set_blank(if state.blank == 2 { 0 } else { 2 }, time);
     }
     if ctx.input(|i| i.key_pressed(egui::Key::P)) {
         state.notes = !state.notes;
@@ -264,7 +287,8 @@ pub fn show(ui: &mut egui::Ui, deck: &Deck, state: &mut Presentation) {
             let mut advanced_automatically = false;
             if let Some(slide) = deck.slides.get(state.index) {
                 let elapsed = (time - state.slide_started) as f32;
-                let progress = (elapsed / slide.transition.duration.max(0.05)).clamp(0.0, 1.0);
+                let progress =
+                    super::editor::motion_progress(elapsed, 0.0, slide.transition.duration);
                 if state.blank != 0 {
                     painter.rect_filled(
                         outer,
@@ -455,6 +479,57 @@ pub fn show(ui: &mut egui::Ui, deck: &Deck, state: &mut Presentation) {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn review5_automatic_advance_waits_for_the_last_effect_and_untriggered_clicks()
+    -> Result<(), String> {
+        let mut deck = Deck::default();
+        deck.add_slide("blank");
+        let slide = &mut deck.slides[0];
+        slide.transition.advance_after = Some(2.0);
+        slide.elements[0].animation.effect = "fade".into();
+        slide.elements[0].animation.trigger = "with_previous".into();
+        slide.elements[0].animation.duration = 5.0;
+        slide.elements[1].animation.effect = "fade".into();
+        slide.elements[1].animation.trigger = "with_previous".into();
+        slide.elements[1].animation.duration = 1.0;
+        let mut state = Presentation {
+            active: true,
+            ..Default::default()
+        };
+        assert!(!state.advance_timed(&deck, 6.0));
+        assert!(state.advance_timed(&deck, 7.0));
+        state.move_to(&deck, 0, 10.0);
+        deck.slides[0].elements[0].animation.trigger = "on_click".into();
+        assert!(!state.advance_timed(&deck, 100.0));
+        state.next(&deck, 100.0);
+        assert!(!state.advance_timed(&deck, 106.0));
+        assert!(state.advance_timed(&deck, 107.0));
+        Ok(())
+    }
+    #[test]
+    fn review5_blanking_pauses_the_slide_clock_and_returning_from_the_end_restarts_it() {
+        let mut deck = Deck::default();
+        deck.add_slide("blank");
+        deck.slides[0].transition.advance_after = Some(2.0);
+        deck.slides[1].transition.advance_after = Some(2.0);
+        let mut state = Presentation {
+            active: true,
+            ..Default::default()
+        };
+        state.set_blank(1, 1.0);
+        assert!(!state.advance_timed(&deck, 10.0));
+        state.next(&deck, 11.0);
+        assert_eq!(state.index, 0);
+        assert!(!state.advance_timed(&deck, 11.0));
+        assert!(state.advance_timed(&deck, 12.0));
+        assert!(state.advance_timed(&deck, 14.0));
+        assert!(state.ended);
+        state.previous(&deck, 20.0);
+        assert!(!state.ended);
+        assert!(!state.advance_timed(&deck, 21.0));
+        assert!(state.advance_timed(&deck, 22.0));
+    }
+
     #[test]
     fn starting_on_a_trailing_hidden_slide_uses_the_last_visible_slide() -> Result<(), String> {
         let mut deck = Deck::empty();

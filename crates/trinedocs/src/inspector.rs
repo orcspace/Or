@@ -32,8 +32,62 @@ impl Target {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Category {
+    #[default]
+    All,
+    Structure,
+    Images,
+    Formulas,
+    Bounds,
+    Readability,
+}
+impl Category {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "all" => Some(Self::All),
+            "structure" => Some(Self::Structure),
+            "images" => Some(Self::Images),
+            "formulas" => Some(Self::Formulas),
+            "bounds" => Some(Self::Bounds),
+            "readability" => Some(Self::Readability),
+            _ => None,
+        }
+    }
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Structure => "structure",
+            Self::Images => "images",
+            Self::Formulas => "formulas",
+            Self::Bounds => "bounds",
+            Self::Readability => "readability",
+        }
+    }
+
+    pub const ALL: [Self; 6] = [
+        Self::All,
+        Self::Structure,
+        Self::Images,
+        Self::Formulas,
+        Self::Bounds,
+        Self::Readability,
+    ];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "Все замечания",
+            Self::Structure => "Структура",
+            Self::Images => "Изображения",
+            Self::Formulas => "Формулы",
+            Self::Bounds => "Границы слайда",
+            Self::Readability => "Читаемость",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Finding {
+    pub category: Category,
     pub location: String,
     pub message: String,
     pub target: Target,
@@ -45,9 +99,28 @@ pub struct Report {
     pub scope: &'static str,
 }
 impl Report {
-    fn push(&mut self, location: String, message: impl Into<String>, target: Target) {
+    pub fn filtered(&self, query: &str, category: Category) -> Vec<&Finding> {
+        let query = query.trim().to_lowercase();
+        self.findings
+            .iter()
+            .filter(|finding| {
+                (category == Category::All || category == finding.category)
+                    && (query.is_empty()
+                        || finding.location.to_lowercase().contains(&query)
+                        || finding.message.to_lowercase().contains(&query))
+            })
+            .collect()
+    }
+    fn push(
+        &mut self,
+        category: Category,
+        location: String,
+        message: impl Into<String>,
+        target: Target,
+    ) {
         if self.findings.len() < LIMIT {
             self.findings.push(Finding {
+                category,
                 location,
                 message: message.into(),
                 target,
@@ -63,7 +136,70 @@ pub struct Inspection {
     pub title: String,
     pub report: Report,
 }
+impl Inspection {
+    pub fn page(
+        &self,
+        query: &str,
+        category: Category,
+        index: usize,
+        count: usize,
+        current_version: u64,
+    ) -> serde_json::Value {
+        use serde_json::json;
+        let filtered = self.report.filtered(query, category);
+        let count = count.clamp(1, 100);
+        let findings: Vec<_> = filtered.iter().skip(index).take(count).map(|finding| {
+            let target = match finding.target {
+                Target::Paragraph(id) => json!({"kind":"paragraph","paragraph_id":id}),
+                Target::Cell { sheet, row, col } => json!({"kind":"cell","sheet_id":sheet,"row":row,"col":col}),
+                Target::Element { slide, element } => json!({"kind":"element","slide_id":slide,"element_id":element}),
+            };
+            json!({"category":finding.category.code(),"location":finding.location,"message":finding.message,"target":target})
+        }).collect();
+        json!({"status":"completed","document_id":self.id,"version":self.version,"current_version":current_version,
+            "stale":self.version != current_version,"scope":self.report.scope,
+            "findings":findings,"offset":index,"page_size":count,"filtered_total":filtered.len(),
+            "stored_total":self.report.findings.len(),"omitted":self.report.omitted,
+            "truncated":self.report.omitted > 0})
+    }
+
+    pub fn copy_report(&self, query: &str, category: Category, unchanged: bool) -> String {
+        use std::fmt::Write;
+        let short = |text: &str, limit: usize| text.chars().take(limit).collect::<String>();
+        let findings = self.report.filtered(query, category);
+        let mut text = format!(
+            "Проверка: {}\nДокумент {}, версия {}\n{}\nОбласть: {}\nФильтр: {}; поиск: {}\nСовпадений среди сохранённых замечаний: {} из {}. Не включено в отчёт: {}.\n",
+            short(&self.title, 200),
+            self.id,
+            self.version,
+            if unchanged {
+                "Снимок актуален."
+            } else {
+                "УСТАРЕЛО: документ изменён или закрыт после проверки."
+            },
+            short(self.report.scope, 500),
+            category.label(),
+            short(query, 160),
+            findings.len(),
+            self.report.findings.len(),
+            self.report.omitted
+        );
+        for finding in findings {
+            let _ = writeln!(
+                text,
+                "\n{} — {}\n{}",
+                finding.category.label(),
+                short(&finding.location, 512),
+                short(&finding.message, 512)
+            );
+        }
+        text
+    }
+}
+
 pub struct Task {
+    pub id: u64,
+    pub version: u64,
     result: Receiver<Inspection>,
 }
 impl Task {
@@ -88,7 +224,11 @@ impl Task {
                 ctx.request_repaint();
             })
             .map_err(|error| error.to_string())?;
-        Ok(Self { result })
+        Ok(Self {
+            id,
+            version,
+            result,
+        })
     }
     pub fn poll(&self) -> Option<Result<Inspection, String>> {
         match self.result.try_recv() {
@@ -116,6 +256,7 @@ pub fn inspect(document: &Document) -> Report {
                     let location = format!("Абзац {}", index + 1);
                     if paragraph.text().trim().is_empty() {
                         report.push(
+                            Category::Structure,
                             location.clone(),
                             "Пустой заголовок.",
                             Target::Paragraph(paragraph.id),
@@ -123,6 +264,7 @@ pub fn inspect(document: &Document) -> Report {
                     }
                     if level > previous + 1 {
                         report.push(
+                            Category::Structure,
                             location,
                             format!("Пропущен уровень заголовка: {previous} → {level}."),
                             Target::Paragraph(paragraph.id),
@@ -134,6 +276,7 @@ pub fn inspect(document: &Document) -> Report {
             for (index, image) in doc.images.iter().enumerate() {
                 if image.alt.trim().is_empty() {
                     report.push(
+                        Category::Images,
                         format!("Изображение {}", index + 1),
                         "Добавьте описание изображения.",
                         Target::Paragraph(image.after_paragraph_id),
@@ -150,6 +293,7 @@ pub fn inspect(document: &Document) -> Report {
                         let error: String = error.chars().take(120).collect();
                         if let Some((row, col)) = crate::sheets::model::parse_address(address) {
                             report.push(
+                                Category::Formulas,
                                 format!("{name}!{address}"),
                                 format!("Ошибка ячейки: {error}."),
                                 Target::Cell {
@@ -182,6 +326,7 @@ pub fn inspect(document: &Document) -> Report {
                         || element.y + element.h > deck.height
                     {
                         report.push(
+                            Category::Bounds,
                             location.clone(),
                             "Объект выходит за границы слайда.",
                             target,
@@ -197,6 +342,7 @@ pub fn inspect(document: &Document) -> Report {
                     }
                     if element.font_size < 18.0 {
                         report.push(
+                            Category::Readability,
                             location.clone(),
                             "Шрифт меньше 18 pt: проверьте читаемость при показе.",
                             target,
@@ -215,11 +361,21 @@ pub fn inspect(document: &Document) -> Report {
                         4.5
                     };
                     if contrast(element.color, background) < required {
-                        report.push(location.clone(), "Низкий контраст текста с фоном.", target);
+                        report.push(
+                            Category::Readability,
+                            location.clone(),
+                            "Низкий контраст текста с фоном.",
+                            target,
+                        );
                     }
                     let lines = crate::slides::model::text_lines(element).len();
                     if lines as f32 * element.font_size * 1.2 + 10.0 > element.h {
-                        report.push(location, "Текст может не помещаться в рамку.", target);
+                        report.push(
+                            Category::Readability,
+                            location,
+                            "Текст может не помещаться в рамку.",
+                            target,
+                        );
                     }
                 }
             }
@@ -323,5 +479,39 @@ mod tests {
             .insert(0);
         assert!(!anchor.available(&Document::Sheets(book)));
         Ok(())
+    }
+
+    #[test]
+    fn filtered_copy_preserves_staleness_scope_and_omission_information() {
+        let mut report = Report {
+            scope: "Проверяются только заголовки.",
+            omitted: 8,
+            ..Default::default()
+        };
+        report.push(
+            Category::Structure,
+            "Абзац 7".into(),
+            "Пропущен уровень.",
+            Target::Paragraph(7),
+        );
+        report.push(
+            Category::Images,
+            "Изображение 2".into(),
+            "Нет описания.",
+            Target::Paragraph(7),
+        );
+        assert_eq!(report.filtered("АБЗАЦ", Category::All).len(), 1);
+        assert!(report.filtered("АБЗАЦ", Category::Images).is_empty());
+        let inspection = Inspection {
+            id: 4,
+            version: 9,
+            title: "Document".into(),
+            report,
+        };
+        let copy = inspection.copy_report("УРОВЕНЬ", Category::Structure, false);
+        assert!(copy.contains("УСТАРЕЛО") && copy.contains("версия 9"));
+        assert!(copy.contains("Не включено в отчёт: 8"));
+        assert!(copy.contains("Пропущен уровень") && !copy.contains("Нет описания"));
+        assert!(copy.contains("Проверяются только заголовки"));
     }
 }

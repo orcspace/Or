@@ -72,6 +72,16 @@ impl Settings {
             true,
         )
     }
+    pub fn toggle_pin(&mut self, path: PathBuf) -> Result<(), String> {
+        if self.pinned.contains(&path) {
+            self.pinned.retain(|p| p != &path);
+        } else if self.pinned.len() >= 50 {
+            return Err("Можно закрепить до 50 файлов. Сначала открепите один из них.".into());
+        } else {
+            self.pinned.push(path);
+        }
+        Ok(())
+    }
     pub fn remember(&mut self, path: PathBuf) {
         self.recent.retain(|p| p != &path);
         self.recent.insert(0, path);
@@ -125,6 +135,25 @@ mod tests {
         assert_eq!(settings.language, "en");
         assert_eq!(settings.recent.len(), 1);
         std::fs::remove_dir_all(root).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    #[test]
+    fn pins_do_not_disappear_due_to_a_different_limit_after_restart() -> Result<(), String> {
+        let mut settings = super::Settings::default();
+        for index in 0..50 {
+            settings.toggle_pin(format!("C:/pin-{index}.docx").into())?;
+        }
+        let before = settings.pinned.clone();
+        assert!(settings.toggle_pin("C:/extra.docx".into()).is_err());
+        assert_eq!(settings.pinned, before);
+        let reloaded: super::Settings =
+            serde_json::from_slice(&serde_json::to_vec(&settings).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+        assert_eq!(reloaded.normalized().pinned, before);
+        settings.toggle_pin(before[0].clone())?;
+        settings.toggle_pin("C:/extra.docx".into())?;
+        assert_eq!(settings.pinned.len(), 50);
         Ok(())
     }
 }

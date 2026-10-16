@@ -806,6 +806,9 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
     let row = book.selection.row;
     let col = book.selection.col;
     if state.last != (id, row, col) {
+        if state.last.0 != id {
+            state.selected_image = None;
+        }
         changed |= commit(book, &mut state);
         if !state.editing {
             state.last = (id, row, col);
@@ -826,6 +829,9 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
     let row = book.selection.row;
     let col = book.selection.col;
     if state.last != (id, row, col) {
+        if state.last.0 != id {
+            state.selected_image = None;
+        }
         changed |= commit(book, &mut state);
         if !state.editing {
             state.last = (id, row, col);
@@ -1753,6 +1759,7 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                             } else {
                                 None
                             };
+                            let previous = (book.selection.row, book.selection.col);
                             let selection = &mut book.selection;
                             match key {
                                 _ if jump.is_some() => {
@@ -1793,9 +1800,15 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                                 }
                                 _ => continue,
                             }
+                            let requested = (selection.row, selection.col);
+                            let target = book
+                                .active_sheet()
+                                .map_or(previous, |sheet| jump_target(sheet, previous, requested));
+                            book.selection.row = target.0;
+                            book.selection.col = target.1;
                             if !modifiers.shift {
-                                selection.anchor_row = selection.row;
-                                selection.anchor_col = selection.col;
+                                book.selection.anchor_row = target.0;
+                                book.selection.anchor_col = target.1;
                             }
                             state.scroll_to_selection = true;
                         }
@@ -1983,6 +1996,29 @@ fn visible_index(mut index: u32, count: u32, direction: i8, hidden: &BTreeSet<u3
         };
     }
     Some(index)
+}
+fn jump_target(sheet: &Sheet, previous: (u32, u32), requested: (u32, u32)) -> (u32, u32) {
+    let axis = |value, old, max, hidden: &BTreeSet<u32>| {
+        let direction = if value < old { -1 } else { 1 };
+        visible_index(value, max, direction, hidden)
+            .or_else(|| visible_index(value, max, -direction, hidden))
+    };
+    let Some(row) = axis(requested.0, previous.0, MAX_ROWS, &sheet.hidden_rows) else {
+        return previous;
+    };
+    let Some(col) = axis(requested.1, previous.1, MAX_COLS, &sheet.hidden_cols) else {
+        return previous;
+    };
+    let target = sheet
+        .merges
+        .iter()
+        .find(|range| range.contains(row, col))
+        .map_or((row, col), |range| (range.r0, range.c0));
+    if sheet.hidden_rows.contains(&target.0) || sheet.hidden_cols.contains(&target.1) {
+        previous
+    } else {
+        target
+    }
 }
 fn step_cell(sheet: &Sheet, row: u32, col: u32, dr: i8, dc: i8) -> (u32, u32) {
     let merge = sheet.merges.iter().find(|range| range.contains(row, col));
@@ -2632,6 +2668,45 @@ mod tests {
     }
 
     use super::*;
+    #[test]
+    fn review5_jumps_skip_hidden_axes_and_covered_merge_children() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.set_range(
+            id,
+            0,
+            0,
+            &[vec!["1".into()], vec!["2".into()], vec!["3".into()]],
+        )?;
+        let sheet = book.active_sheet_mut().ok_or("sheet")?;
+        sheet.hidden_rows.insert(2);
+        sheet.hidden_cols.insert(0);
+        assert_eq!(sheet.data_edge(0, 0, 1, 0), (1, 0));
+        assert_eq!(jump_target(sheet, (5, 3), (0, 0)), (0, 1));
+        sheet.hidden_cols.clear();
+        sheet.merges.push(Range::new(10, 1, 12, 3));
+        assert_eq!(jump_target(sheet, (20, 5), (11, 2)), (10, 1));
+        Ok(())
+    }
+    #[test]
+    fn review5_changing_sheets_clears_the_old_selected_image() -> Result<(), String> {
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx)?;
+        let mut book = Book::default();
+        book.add_sheet("Second")?;
+        let state = frame(&ctx, &mut book, Vec::new(), false)?;
+        let mut state = state;
+        state.selected_image = Some(999);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.ctx()
+                .data_mut(|data| data.insert_temp(ui.id().with("sheets-editor"), state.clone()));
+        });
+        output.textures_delta.clear();
+        book.active = 1;
+        let state = frame(&ctx, &mut book, Vec::new(), false)?;
+        assert_eq!(state.selected_image, None);
+        Ok(())
+    }
     #[test]
     fn same_frame_text_and_paste_preserve_the_pending_draft() -> Result<(), String> {
         let ctx = egui::Context::default();

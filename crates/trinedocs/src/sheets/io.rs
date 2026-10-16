@@ -3,7 +3,7 @@ use super::model::{
 };
 use calamine::{Data, Reader as _, open_workbook_auto_from_rs};
 use quick_xml::{
-    Reader, Writer,
+    NsReader as Reader, Writer,
     events::{BytesStart, BytesText, Event},
 };
 use rust_xlsxwriter::{
@@ -62,7 +62,7 @@ pub fn write(book: &Book, ext: &str) -> Result<Vec<u8>, String> {
         }
         "html" => {
             let mut out = String::from(
-                "<!doctype html><meta charset=\"utf-8\"><style>td{border:1px solid #d6dbe1;padding:4px}table{border-collapse:collapse}</style>",
+                "<!doctype html><meta charset=\"utf-8\"><style>td{border:1px solid #d6dbe1;padding:4px;white-space:pre-wrap}table{border-collapse:collapse}</style>",
             );
             for s in &book.sheets {
                 let (r, c) = s.extent();
@@ -103,12 +103,12 @@ pub fn write(book: &Book, ext: &str) -> Result<Vec<u8>, String> {
             let s = book.active_sheet().ok_or("Нет активного листа")?;
             let (r, c) = s.extent();
             let rows = book.read_range(s.id, 0, 0, r, c)?;
-            let mut out = format!("# {}\n\n", s.name);
+            let mut out = format!("# {}\n\n", markdown_text(&s.name));
             for (i, row) in rows.iter().enumerate() {
                 out.push_str(&format!(
                     "| {} |\n",
                     row.iter()
-                        .map(|s| s.replace('|', "\\|").replace('\n', "<br>"))
+                        .map(|s| markdown_text(s))
                         .collect::<Vec<_>>()
                         .join(" | ")
                 ));
@@ -120,6 +120,24 @@ pub fn write(book: &Book, ext: &str) -> Result<Vec<u8>, String> {
         }
         _ => Err(format!("Не поддерживается сохранение {ext}")),
     }
+}
+fn markdown_text(text: &str) -> String {
+    let mut out = String::new();
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    for c in normalized.chars() {
+        match c {
+            '\n' => out.push_str("<br>"),
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            c if c.is_ascii_punctuation() => {
+                out.push('\\');
+                out.push(c);
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 pub fn decode_text(bytes: &[u8]) -> Result<String, String> {
     if bytes.starts_with(&[0xff, 0xfe]) || bytes.starts_with(&[0xfe, 0xff]) {
@@ -254,11 +272,23 @@ pub fn to_csv(rows: &[Vec<String>], separator: char) -> String {
         .collect::<Vec<_>>()
         .join("\r\n")
 }
-fn attrs(e: &BytesStart<'_>, _reader: &Reader<&[u8]>) -> Result<BTreeMap<String, String>, String> {
+fn attrs(e: &BytesStart<'_>, reader: &Reader<&[u8]>) -> Result<BTreeMap<String, String>, String> {
     e.attributes()
         .map(|a| {
             let a = a.map_err(|e| e.to_string())?;
-            let key = a.key.as_ref().to_string();
+            let (namespace, local) = reader.resolver().resolve_attribute(a.key);
+            let key = match namespace {
+                quick_xml::name::ResolveResult::Bound(namespace)
+                    if matches!(
+                        namespace.as_ref(),
+                        "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+                            | "http://purl.oclc.org/ooxml/officeDocument/relationships"
+                    ) =>
+                {
+                    format!("r:{}", local.as_ref())
+                }
+                _ => a.key.as_ref().to_string(),
+            };
             let value = a
                 .normalized_value(quick_xml::XmlVersion::Implicit1_0)
                 .map_err(|e| e.to_string())?
@@ -896,6 +926,26 @@ fn xml_bool(value: Option<&String>, default: bool) -> bool {
     })
 }
 fn rgb(a: &BTreeMap<String, String>) -> Option<[u8; 3]> {
+    rgb_with_palette(a, &[])
+}
+fn rgb_with_palette(a: &BTreeMap<String, String>, palette: &[[u8; 3]]) -> Option<[u8; 3]> {
+    if let Some(index) = a.get("indexed").and_then(|v| v.parse::<usize>().ok()) {
+        const DEFAULT: [u32; 64] = [
+            0x000000, 0xFFFFFF, 0xFF0000, 0x00FF00, 0x0000FF, 0xFFFF00, 0xFF00FF, 0x00FFFF,
+            0x000000, 0xFFFFFF, 0xFF0000, 0x00FF00, 0x0000FF, 0xFFFF00, 0xFF00FF, 0x00FFFF,
+            0x800000, 0x008000, 0x000080, 0x808000, 0x800080, 0x008080, 0xC0C0C0, 0x808080,
+            0x9999FF, 0x993366, 0xFFFFCC, 0xCCFFFF, 0x660066, 0xFF8080, 0x0066CC, 0xCCCCFF,
+            0x000080, 0xFF00FF, 0xFFFF00, 0x00FFFF, 0x800080, 0x800000, 0x008080, 0x0000FF,
+            0x00CCFF, 0xCCFFFF, 0xCCFFCC, 0xFFFF99, 0x99CCFF, 0xFF99CC, 0xCC99FF, 0xFFCC99,
+            0x3366FF, 0x33CCCC, 0x99CC00, 0xFFCC00, 0xFF9900, 0xFF6600, 0x666699, 0x969696,
+            0x003366, 0x339966, 0x003300, 0x333300, 0x993300, 0x993366, 0x333399, 0x333333,
+        ];
+        if !palette.is_empty() {
+            return palette.get(index).copied();
+        }
+        let colour = *DEFAULT.get(index)?;
+        return Some([(colour >> 16) as u8, (colour >> 8) as u8, colour as u8]);
+    }
     let s = a.get("rgb")?;
     let s = if s.len() == 8 {
         s.get(2..)?
@@ -947,11 +997,37 @@ fn builtin(id: u32) -> String {
     }
     .into()
 }
+fn indexed_palette(bytes: &[u8]) -> Result<Vec<[u8; 3]>, String> {
+    let mut palette = Vec::new();
+    let mut reader = Reader::from_str(std::str::from_utf8(bytes).map_err(|e| e.to_string())?);
+    let mut inside = false;
+    loop {
+        match reader.read_event().map_err(|e| e.to_string())? {
+            Event::Start(e) | Event::Empty(e) if local(&e) == "indexedColors" => inside = true,
+            Event::Start(e) | Event::Empty(e) if inside && local(&e) == "rgbColor" => {
+                let colour = rgb(&attrs(&e, &reader)?).ok_or("Недопустимая indexedColor")?;
+                palette.push(colour);
+                if palette.len() > 64 {
+                    return Err("Слишком много indexedColors".into());
+                }
+            }
+            Event::End(e) if e.local_name().as_ref() == "indexedColors" => inside = false,
+            Event::DocType(_) => return Err("DTD запрещён".into()),
+            Event::Eof => break,
+            _ => (),
+        }
+    }
+    Ok(palette)
+}
 fn styles(bytes: &[u8]) -> Result<Vec<CellFormat>, String> {
+    let palette = indexed_palette(bytes)?;
     let mut reader = Reader::from_str(std::str::from_utf8(bytes).map_err(|e| e.to_string())?);
     let mut section = String::new();
     let mut fonts = Vec::new();
     let mut fills = Vec::new();
+    let mut borders = Vec::new();
+    let mut current_border = false;
+    let mut current_fill_active = false;
     let mut formats = Vec::new();
     let mut num_formats = BTreeMap::new();
     let mut current_font = CellFormat::default();
@@ -970,7 +1046,10 @@ fn styles(bytes: &[u8]) -> Result<Vec<CellFormat>, String> {
                 if empty && tag == "fill" && section == "fills" {
                     fills.push(None);
                 }
-                if matches!(tag.as_str(), "fonts" | "fills" | "cellXfs" | "cellStyleXfs") {
+                if matches!(
+                    tag.as_str(),
+                    "fonts" | "fills" | "borders" | "cellXfs" | "cellStyleXfs"
+                ) {
                     section = tag.clone();
                 }
                 if tag == "font" {
@@ -978,6 +1057,28 @@ fn styles(bytes: &[u8]) -> Result<Vec<CellFormat>, String> {
                 }
                 if tag == "fill" {
                     current_fill = None;
+                    current_fill_active = false;
+                }
+                if tag == "border" {
+                    current_border = false;
+                    if empty {
+                        borders.push(false);
+                    }
+                }
+                if section == "borders"
+                    && matches!(
+                        tag.as_str(),
+                        "left" | "right" | "top" | "bottom" | "diagonal" | "start" | "end"
+                    )
+                {
+                    current_border |= a
+                        .get("style")
+                        .is_some_and(|style| !style.is_empty() && style != "none");
+                }
+                if section == "fills" && tag == "patternFill" {
+                    current_fill_active = a
+                        .get("patternType")
+                        .is_some_and(|pattern| pattern != "none");
                 }
                 if section == "fonts" {
                     match tag.as_str() {
@@ -999,15 +1100,15 @@ fn styles(bytes: &[u8]) -> Result<Vec<CellFormat>, String> {
                         }
                         "strike" => current_font.strike = xml_bool(a.get("val"), true),
                         "color" => {
-                            if let Some(color) = rgb(&a) {
+                            if let Some(color) = rgb_with_palette(&a, &palette) {
                                 current_font.color = color;
                             }
                         }
                         _ => (),
                     }
                 }
-                if section == "fills" && tag == "fgColor" {
-                    current_fill = rgb(&a);
+                if section == "fills" && tag == "fgColor" && current_fill_active {
+                    current_fill = rgb_with_palette(&a, &palette);
                 }
                 if tag == "numFmt"
                     && let (Some(id), Some(code)) = (
@@ -1036,7 +1137,12 @@ fn styles(bytes: &[u8]) -> Result<Vec<CellFormat>, String> {
                         .and_then(|i| fills.get(i))
                         .copied()
                         .flatten();
-                    fmt.border = a.get("borderId").is_some_and(|s| s != "0");
+                    fmt.border = a
+                        .get("borderId")
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .and_then(|index| borders.get(index))
+                        .copied()
+                        .unwrap_or(false);
                     formats.push(fmt);
                 }
                 if section == "cellXfs"
@@ -1069,6 +1175,9 @@ fn styles(bytes: &[u8]) -> Result<Vec<CellFormat>, String> {
                 if tag == "fill" {
                     fills.push(current_fill);
                 }
+                if tag == "border" {
+                    borders.push(current_border);
+                }
                 if tag == section {
                     section.clear();
                 }
@@ -1087,6 +1196,11 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
         .find(|(kind, _)| kind.ends_with("/styles"))
         .map(|(_, target)| target.as_str())
         .unwrap_or("xl/styles.xml");
+    let palette = parts
+        .get(style_path)
+        .map(|bytes| indexed_palette(bytes))
+        .transpose()?
+        .unwrap_or_default();
     let formats = parts
         .get(style_path)
         .map(|b| styles(b))
@@ -1222,7 +1336,7 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
                             .unwrap_or(0.0) as u32;
                     }
                 }
-                "tabColor" => s.tab_color = rgb(a),
+                "tabColor" => s.tab_color = rgb_with_palette(a, &palette),
                 "autoFilter" => s.filter = a.get("ref").and_then(|v| parse_range(v).ok()),
                 _ => (),
             }
@@ -1793,8 +1907,8 @@ fn write_xlsx(book: &Book) -> Result<Vec<u8>, String> {
             });
             chart.title().set_name(&model.title);
             chart
-                .set_width(model.width.clamp(80.0, 4000.0) as u32)
-                .set_height(model.height.clamp(80.0, 4000.0) as u32);
+                .set_width(model.width.round().clamp(1.0, 4000.0) as u32)
+                .set_height(model.height.round().clamp(1.0, 4000.0) as u32);
             let r = model.range;
             let data_start = if r.r1 > r.r0 { r.r0 + 1 } else { r.r0 };
             let start_col = if r.c1 > r.c0 { r.c0 + 1 } else { r.c0 };
@@ -1954,6 +2068,92 @@ fn patch_formula_string_results(bytes: Vec<u8>, book: &Book) -> Result<Vec<u8>, 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn review5_indexed_colours_and_inactive_fill_and_empty_border_preserve_visuals()
+    -> Result<(), String> {
+        let model=styles(br#"<styleSheet><fonts><font><color indexed="10"/></font></fonts><fills><fill><patternFill patternType="none"><fgColor rgb="FFFF0000"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor indexed="12"/></patternFill></fill></fills><borders><border/><border><left/><right/><top/><bottom/></border><border><left style="thin"/></border></borders><cellXfs><xf fontId="0" fillId="0" borderId="1"/><xf fontId="0" fillId="1" borderId="2"/></cellXfs></styleSheet>"#)?;
+        assert_eq!(model[0].color, [255, 0, 0]);
+        assert_eq!(model[0].fill, None);
+        assert!(!model[0].border);
+        assert_eq!(model[1].fill, Some([0, 0, 255]));
+        assert!(model[1].border);
+        let custom=styles(br#"<styleSheet><fonts><font><color indexed="0"/></font></fonts><cellXfs><xf fontId="0"/></cellXfs><colors><indexedColors><rgbColor rgb="00ABCDEF"/></indexedColors></colors></styleSheet>"#)?;
+        assert_eq!(custom[0].color, [0xAB, 0xCD, 0xEF]);
+        Ok(())
+    }
+    #[test]
+    fn review5_relationship_attribute_aliases_work_in_workbook_and_drawing() -> Result<(), String> {
+        let mut book = Book::default();
+        book.active_sheet_mut().ok_or("sheet")?.name = "Sheet1".into();
+        let parts=BTreeMap::from([
+            ("xl/workbook.xml".into(),br#"<workbook xmlns:rel="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" rel:id="sheet"/></sheets></workbook>"#.to_vec()),
+            ("xl/_rels/workbook.xml.rels".into(),br#"<Relationships><Relationship Id="sheet" Target="worksheets/sheet1.xml"/></Relationships>"#.to_vec()),
+            ("xl/styles.xml".into(),br#"<styleSheet><fonts><font><b/></font></fonts><cellXfs><xf fontId="0"/></cellXfs></styleSheet>"#.to_vec()),
+            ("xl/worksheets/sheet1.xml".into(),br#"<worksheet><sheetData><row r="1"><c r="A1" s="0"/></row></sheetData></worksheet>"#.to_vec()),
+        ]);
+        read_metadata(&mut book, &parts)?;
+        assert!(
+            book.active_sheet()
+                .and_then(|s| s.cell(0, 0))
+                .ok_or("cell")?
+                .fmt
+                .bold
+        );
+        let drawings = drawing_pictures(
+            r#"<wsDr xmlns:link="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><oneCellAnchor><from><row>0</row><col>0</col></from><ext cx="9525" cy="9525"/><pic><blip link:embed="picture"/></pic></oneCellAnchor></wsDr>"#,
+        )?;
+        assert_eq!(drawings.len(), 1);
+        assert_eq!(drawings[0].embed, "picture");
+        Ok(())
+    }
+    #[test]
+    fn review5_export_preserves_small_chart_width_and_literal_markdown_and_html_whitespace()
+    -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.set_range(
+            id,
+            0,
+            0,
+            &[
+                vec!["Name".into(), "Value".into()],
+                vec!["one".into(), "1".into()],
+            ],
+        )?;
+        let chart = book.add_chart(
+            id,
+            ChartKind::Column,
+            super::super::model::Range::new(0, 0, 1, 1),
+            "Small",
+        )?;
+        let model = book
+            .active_sheet_mut()
+            .ok_or("sheet")?
+            .charts
+            .iter_mut()
+            .find(|c| c.id == chart)
+            .ok_or("chart")?;
+        model.width = 23.0;
+        model.height = 37.0;
+        let parts = crate::package::read_zip(&write(&book, "xlsx")?)?;
+        let drawing = std::str::from_utf8(parts.get("xl/drawings/drawing1.xml").ok_or("drawing")?)
+            .map_err(|e| e.to_string())?;
+        assert!(drawing.contains("<xdr:colOff>219075</xdr:colOff>"));
+        book.set_cell(
+            id,
+            0,
+            0,
+            "*literal* [link](https://invalid) <b>&name\nnext  line",
+        )?;
+        let md = String::from_utf8(write(&book, "md")?).map_err(|e| e.to_string())?;
+        assert!(md.contains(
+            r"\*literal\* \[link\]\(https\:\/\/invalid\) &lt;b&gt;&amp;name<br>next  line"
+        ));
+        let html = String::from_utf8(write(&book, "html")?).map_err(|e| e.to_string())?;
+        assert!(html.contains("white-space:pre-wrap"));
+        assert!(html.contains("&lt;b&gt;&amp;name\nnext  line"));
+        Ok(())
+    }
     #[test]
     fn review4_xlsx_formula_cache_keeps_numeric_boolean_and_error_looking_text_typed()
     -> Result<(), String> {

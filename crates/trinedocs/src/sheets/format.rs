@@ -76,31 +76,47 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
         return date_display(numeric, &section);
     }
     if bare.contains('/') && bare.contains('?') {
+        let (left, right) = bare.split_once('/').unwrap_or(("", ""));
+        let denominator = right
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse::<u32>()
+            .ok()
+            .filter(|den| *den > 0 && *den <= 1_000_000);
+        let mixed = left.trim().split_whitespace().count() > 1;
         let sign = if numeric < 0.0 { "-" } else { "" };
         let n = numeric.abs();
-        let whole = n.floor();
-        let fraction = n.fract();
-        let max_den = if bare.contains("??") { 99 } else { 9 };
-        let mut best = (0u32, 1u32, f64::INFINITY);
-        for den in 1..=max_den {
-            let numerator = (fraction * f64::from(den)).round() as u32;
-            let diff = (fraction - f64::from(numerator) / f64::from(den)).abs();
+        let whole = if mixed { n.floor() } else { 0.0 };
+        let fraction = n - whole;
+        let max_den = 10u32.pow(
+            right
+                .chars()
+                .take_while(|c| matches!(c, '?' | '#' | '0'))
+                .count()
+                .clamp(1, 3) as u32,
+        ) - 1;
+        let mut best = (0.0, 1u32, f64::INFINITY);
+        let candidates = denominator.map_or(1..=max_den, |den| den..=den);
+        for den in candidates {
+            let numerator = round_half_away(fraction * f64::from(den), 0);
+            let diff = (fraction - numerator / f64::from(den)).abs();
             if diff < best.2 {
                 best = (numerator, den, diff);
             }
         }
-        if best.0 == 0 {
+        if mixed && best.0 == 0.0 {
             return format!("{sign}{whole:.0}");
         }
-        if best.0 == best.1 {
+        if mixed && best.0 == f64::from(best.1) {
             return format!("{sign}{:.0}", whole + 1.0);
         }
         return format!(
-            "{sign}{}{}/{}",
-            if whole == 0.0 {
-                String::new()
-            } else {
+            "{sign}{}{:.0}/{}",
+            if mixed && whole != 0.0 {
                 format!("{whole:.0} ")
+            } else {
+                String::new()
             },
             best.0,
             best.1
@@ -156,6 +172,11 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
                 n,
                 decimals,
                 digits,
+                integer_pattern
+                    .chars()
+                    .filter(|c| matches!(c, '0' | '#' | '?'))
+                    .count()
+                    .clamp(1, 15),
                 !pattern
                     .get(exponent + 1..)
                     .is_some_and(|tail| tail.starts_with('-')),
@@ -211,14 +232,25 @@ fn fixed(n: f64, decimals: usize) -> String {
     format!("{:.decimals$}", round_half_away(n, decimals))
 }
 /// Scientific formatting preserves the requested exponent sign and half-away ties.
-fn scientific(n: f64, decimals: usize, exponent_digits: usize, positive_sign: bool) -> String {
+fn scientific(
+    n: f64,
+    decimals: usize,
+    exponent_digits: usize,
+    integer_digits: usize,
+    positive_sign: bool,
+) -> String {
     let raw = format!("{n:E}");
     let (mantissa, exponent) = raw.split_once('E').unwrap_or((&raw, "0"));
-    let mut mantissa = round_half_away(mantissa.parse::<f64>().unwrap_or(0.0), decimals);
-    let mut exponent: i32 = exponent.parse().unwrap_or(0);
-    if mantissa.abs() >= 10.0 {
-        mantissa /= 10.0;
-        exponent += 1;
+    let raw_exponent: i32 = exponent.parse().unwrap_or(0);
+    let group = integer_digits as i32;
+    let mut exponent = raw_exponent.div_euclid(group) * group;
+    let mut mantissa = round_half_away(
+        mantissa.parse::<f64>().unwrap_or(0.0) * 10f64.powi(raw_exponent - exponent),
+        decimals,
+    );
+    if mantissa.abs() >= 10f64.powi(group) {
+        mantissa /= 10f64.powi(group);
+        exponent += group;
     }
     let sign = if exponent < 0 {
         "-"
@@ -244,7 +276,7 @@ pub fn general_number(n: f64, digits: usize) -> String {
     let exponent = n.abs().log10().floor() as i32;
     if exponent >= (digits as i32).max(11) || exponent < -9 {
         let mantissa = if digits <= 10 { 5 } else { digits - 1 };
-        let text = scientific(n, mantissa, 2, true);
+        let text = scientific(n, mantissa, 2, 1, true);
         let (m, e) = text.split_once('E').unwrap_or((&text, ""));
         let m = if m.contains('.') {
             m.trim_end_matches('0').trim_end_matches('.')
@@ -655,6 +687,28 @@ fn date_display(serial: f64, code: &str) -> String {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn review5_scientific_integer_placeholders_control_the_exponent_group() {
+        for (number, code, expected) in [
+            (12_200_000.0, "#0.0E+0", "12.2E+6"),
+            (12_345.0, "##0.0E+0", "12.3E+3"),
+            (0.012345, "##0.0E+0", "12.3E-3"),
+            (999.99, "##0.0E+0", "1.0E+3"),
+        ] {
+            assert_eq!(display(&Value::Number(number), code, false), expected);
+        }
+    }
+    #[test]
+    fn review5_fraction_patterns_keep_fixed_denominators_and_improper_values() {
+        for (number, code, expected) in [
+            (1.25, "# ?/8", "1 2/8"),
+            (1.25, "?/??", "5/4"),
+            (0.125, "# ???/???", "1/8"),
+            (-1.25, "# ?/8", "-1 2/8"),
+        ] {
+            assert_eq!(display(&Value::Number(number), code, false), expected);
+        }
+    }
     #[test]
     fn review4_scientific_exponent_sign_follows_the_format() {
         for (number, code, expected) in [
