@@ -170,6 +170,23 @@
     "evidence": []
   },
   {
+    "id": "REQ-00-011",
+    "source": "AGENTS.md",
+    "section": 0,
+    "heading": "AGENTS.md — TrineDocs",
+    "clause": "> **Рабочий процесс (приоритет над всем ниже):** репозиторий — https://github.com/orcspace/Or (ветка `main`, в ней слиты все ветки). Вся работа ведётся только в GitHub: правки через коммиты/PR в `main`, проверки, сборка и установщик Windows 11 (`TrineDocs-Setup.exe`) — через GitHub Actions (`.github/workflows/release.yml`, запуск по тегу `v*` или вручную). На локальном ПК ничего не собираем и не тестируем; в локальной папке `V:\\Desk\\Or` остаётся только этот файл. Последняя версия всегда в GitHub.",
+    "phases": [
+      0
+    ],
+    "tests": [
+      "T-00-SPEC",
+      "T-00-BUILD",
+      "T-00-UI"
+    ],
+    "status": "planned",
+    "evidence": []
+  },
+  {
     "id": "REQ-01-001",
     "source": "AGENTS.md",
     "section": 1,
