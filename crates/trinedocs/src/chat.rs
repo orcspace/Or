@@ -536,7 +536,6 @@ impl Chat {
     /// Model and effort pickers of the current provider.
     fn model_row(&mut self, ui: &mut Ui) {
         let index = self.provider.index();
-        let muted = crate::chrome::muted(ui);
         let enabled = self.turn.is_none();
         let current = self.model[index].clone();
         let mut model = current.clone();
@@ -572,10 +571,10 @@ impl Chat {
         ui.add_enabled_ui(enabled, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                ui.label(RichText::new("Модель").small().color(muted));
                 egui::ComboBox::from_id_salt(("chat-model", index))
-                    .selected_text(RichText::new(model_text).small())
-                    .width(118.0)
+                    .selected_text(RichText::new(format!("Модель: {model_text}")).small())
+                    .width((ui.available_width() - 112.0).max(112.0))
+                    .truncate()
                     .show_ui(ui, |ui| match self.provider {
                         Provider::Claude => {
                             for (id, label) in CLAUDE_MODELS {
@@ -591,11 +590,11 @@ impl Chat {
                         }
                     })
                     .response
-                    .on_hover_text("Модель для следующих сообщений");
-                ui.label(RichText::new("Усилие").small().color(muted));
+                    .on_hover_text(format!("Модель для следующих сообщений: {}", if current.is_empty() { "по умолчанию" } else { &current }));
                 egui::ComboBox::from_id_salt(("chat-effort", index))
-                    .selected_text(RichText::new(effort_label(&effort)).small())
+                    .selected_text(RichText::new(format!("Глубина: {}", effort_label(&effort))).small())
                     .width(104.0)
+                    .truncate()
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut effort, String::new(), "По умолчанию");
                         for id in &efforts {
@@ -639,15 +638,6 @@ impl Chat {
             ui.spacing_mut().item_spacing.x = 4.0;
             for provider in [Provider::Claude, Provider::Codex] {
                 let access = self.access[provider.index()];
-                let dot = match access {
-                    Access::Ready => Color32::from_rgb(60, 170, 90),
-                    Access::LoggedOut => Color32::from_rgb(220, 160, 40),
-                    Access::Missing => muted,
-                    Access::Checking => muted.gamma_multiply(0.5),
-                };
-                let (dot_rect, _) =
-                    ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-                ui.painter().circle_filled(dot_rect.center(), 3.5, dot);
                 let response = ui
                     .add_enabled(
                         self.turn.is_none(),
@@ -675,11 +665,6 @@ impl Chat {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.menu_button(RichText::new("⋯").size(16.0), |ui| {
-                    if ui.button("Новый чат").clicked() {
-                        self.clear();
-                        ui.close();
-                    }
-                    ui.separator();
                     ui.label(
                         RichText::new("Своя модель (полный ID)")
                             .small()
@@ -715,17 +700,38 @@ impl Chat {
                         self.refresh(ui.ctx());
                         ui.close();
                     }
-                });
+                })
+                .response
+                .on_hover_text("Параметры чата");
+                if ui
+                    .add(egui::Button::new("Новый").frame_when_inactive(false))
+                    .on_hover_text("Начать новый чат")
+                    .clicked()
+                {
+                    self.clear();
+                }
             });
         });
         self.model_row(ui);
         ui.add_space(4.0);
         let access = self.access[self.provider.index()];
+        if matches!(access, Access::Missing | Access::LoggedOut) {
+            ui.label(
+                RichText::new(match access {
+                    Access::Missing => "CLI не найден · параметры чата",
+                    _ => "Нужен вход · параметры чата",
+                })
+                .small()
+                .color(muted),
+            );
+        }
+        ui.separator();
+        ui.add_space(4.0);
         let mut send = false;
         let mut stop = false;
         let mut retry = false;
-        let input_height = 92.0;
-        let list_height = (ui.available_height() - input_height).max(80.0);
+        let input_height = if mcp_enabled { 124.0 } else { 144.0 };
+        let list_height = (ui.available_height() - input_height).max(40.0);
         egui::ScrollArea::vertical()
             .id_salt("chat-messages")
             .max_height(list_height)
@@ -734,9 +740,9 @@ impl Chat {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 if self.messages.is_empty() {
-                    ui.add_space(24.0);
+                    ui.add_space(20.0);
                     ui.vertical_centered(|ui| {
-                        ui.label(RichText::new("Чат с документом").strong());
+                        ui.label(RichText::new("Что сделаем с документом?").strong());
                         ui.add_space(4.0);
                         let hint = match access {
                             Access::Missing => format!(
@@ -756,7 +762,8 @@ impl Chat {
                                 if ui
                                     .add(
                                         egui::Button::new(RichText::new(suggestion).small())
-                                            .corner_radius(10),
+                                            .frame_when_inactive(false)
+                                            .corner_radius(6),
                                     )
                                     .clicked()
                                 {
@@ -767,13 +774,13 @@ impl Chat {
                         }
                     });
                 }
-                for message in &self.messages {
+                for (message_index, message) in self.messages.iter().enumerate() {
                     match message.role {
                         Role::User => {
                             ui.add_space(6.0);
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                 egui::Frame::new()
-                                    .fill(crate::chrome::hover_fill(ui))
+                                    .fill(ui.visuals().faint_bg_color)
                                     .corner_radius(10)
                                     .inner_margin(egui::Margin::symmetric(10, 6))
                                     .show(ui, |ui| {
@@ -785,7 +792,8 @@ impl Chat {
                             });
                         }
                         Role::Assistant => {
-                            ui.add_space(6.0);
+                            ui.add_space(12.0);
+                            ui.label(RichText::new("Ассистент").small().color(muted));
                             markdown(ui, &message.text);
                             if ui
                                 .add(
@@ -800,21 +808,34 @@ impl Chat {
                             }
                         }
                         Role::Tool => {
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(format!("↳ {}", tool_label(&message.text)))
-                                        .small()
-                                        .color(muted),
-                                )
-                                .wrap(),
-                            );
+                            let technical = |message: &Message| {
+                                message.role == Role::Tool
+                                    && !message.text.chars().any(char::is_whitespace)
+                            };
+                            if !technical(message) {
+                                ui.add(egui::Label::new(RichText::new(&message.text).small().color(muted)).wrap());
+                            } else if message_index == 0 || !technical(&self.messages[message_index - 1]) {
+                                let tools: Vec<_> = self.messages[message_index..].iter()
+                                    .take_while(|message| technical(message)).collect();
+                                let title = if tools.len() == 1 { tool_label(&message.text) }
+                                    else { format!("Действия · {}", tools.len()) };
+                                egui::CollapsingHeader::new(RichText::new(title).small().color(muted))
+                                    .id_salt(("chat-tool", message_index))
+                                    .show_background(false)
+                                    .show(ui, |ui| {
+                                        for message in tools {
+                                            ui.add(egui::Label::new(RichText::new(tool_label(&message.text)).small().color(muted)).wrap())
+                                                .on_hover_text(&message.text);
+                                        }
+                                    });
+                            }
                         }
                         Role::Error => {
                             ui.add_space(4.0);
                             ui.add(
                                 egui::Label::new(
                                     RichText::new(&message.text)
-                                        .color(Color32::from_rgb(210, 70, 60)),
+                                        .color(ui.visuals().error_fg_color),
                                 )
                                 .wrap()
                                 .selectable(true),
@@ -833,8 +854,8 @@ impl Chat {
                         let seconds = turn.started.elapsed().as_secs();
                         let status = if turn.replied { "Работает" } else { "Думает" };
                         ui.label(
-                            RichText::new(format!("{status}… {seconds} с · Esc — стоп"))
-                                .color(muted),
+                            RichText::new(format!("{status}… {seconds} с"))
+                                .small().color(muted),
                         );
                     });
                 } else if self.messages.last().is_some_and(|m| m.role == Role::Error)
@@ -857,14 +878,50 @@ impl Chat {
             });
         ui.add_space(6.0);
         egui::Frame::new()
-            .stroke(egui::Stroke::new(1.0, crate::chrome::border(ui)))
+            .fill(ui.visuals().faint_bg_color)
+            .stroke(egui::Stroke::new(0.5, crate::chrome::border(ui)))
             .corner_radius(10)
             .inner_margin(egui::Margin::symmetric(8, 6))
             .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if let Some(document) = document.as_ref().filter(|d| !d.selection.is_empty()) {
+                        let count = document.selection.chars().count();
+                        let label = if self.attach_selection {
+                            format!("Выделение · {count} симв.")
+                        } else {
+                            "Выделение не передаётся".to_string()
+                        };
+                        if ui
+                            .add(
+                                egui::Button::new(RichText::new(label).small())
+                                    .selected(self.attach_selection)
+                                    .frame_when_inactive(false)
+                                    .corner_radius(6),
+                            )
+                            .on_hover_text("Передать выделенный фрагмент ассистенту")
+                            .clicked()
+                        {
+                            self.attach_selection = !self.attach_selection;
+                        }
+                    } else if let Some(document) = &document {
+                        ui.add(
+                            egui::Label::new(RichText::new(&document.title).small().color(muted))
+                                .truncate(),
+                        );
+                    }
+                });
+                if !mcp_enabled {
+                    ui.label(
+                        RichText::new("Инструменты документов выключены")
+                            .small()
+                            .color(ui.visuals().warn_fg_color),
+                    )
+                    .on_hover_text("Включите MCP в настройках, чтобы ассистент видел документы.");
+                }
                 let edit = ui.add(
                     egui::TextEdit::multiline(&mut self.input)
                         .id_salt("chat-input")
-                        .hint_text("Сообщение…  (Enter — отправить)")
+                        .hint_text("Напишите сообщение…")
                         .frame(egui::Frame::NONE)
                         .desired_rows(2)
                         .desired_width(f32::INFINITY)
@@ -886,43 +943,21 @@ impl Chat {
                     stop = true;
                 }
                 ui.horizontal(|ui| {
-                    if let Some(document) = document.as_ref().filter(|d| !d.selection.is_empty()) {
-                        let count = document.selection.chars().count();
-                        let label = if self.attach_selection {
-                            format!("✂ Выделение · {count} симв.")
-                        } else {
-                            "✂ Выделение не передаётся".to_string()
-                        };
-                        if ui
-                            .add(
-                                egui::Button::new(RichText::new(label).small())
-                                    .selected(self.attach_selection)
-                                    .corner_radius(10),
-                            )
-                            .on_hover_text("Передать выделенный фрагмент ассистенту")
-                            .clicked()
-                        {
-                            self.attach_selection = !self.attach_selection;
-                        }
-                    } else if let Some(document) = &document {
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(format!("📄 {}", document.title))
-                                    .small()
-                                    .color(muted),
-                            )
-                            .truncate(),
-                        );
-                    }
+                    ui.label(RichText::new("Enter ↵").small().color(muted))
+                        .on_hover_text("Enter — отправить · Shift+Enter — новая строка");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if self.turn.is_some() {
-                            if ui.button("■ Стоп").clicked() {
+                            if ui
+                                .button("Остановить")
+                                .on_hover_text("Остановить ответ · Esc в поле сообщения")
+                                .clicked()
+                            {
                                 stop = true;
                             }
                         } else if ui
                             .add_enabled(
                                 !self.input.trim().is_empty(),
-                                egui::Button::new("Отправить ↑"),
+                                egui::Button::new("Отправить"),
                             )
                             .clicked()
                         {

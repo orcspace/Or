@@ -9,7 +9,7 @@
 | Подчёркивание |Ctrl+U|Cmd+U|форматируемый текст|
 | Сохранить |Ctrl+S|Cmd+S|локальный документ; облачный уже autosave|
 | Палитра команд |Ctrl+K|Cmd+K|app|
-| AI-панель |Ctrl+J|Cmd+J|AI enabled, document context|
+| AI-панель |Ctrl+Shift+A|Cmd+Shift+A|AI enabled, document context|
 | Правка ячейки |F2|F2|Sheets|
 | Показ с начала |F5|F5|Slides|
 | Показ с текущего |Shift+F5|Shift+F5|Slides|
