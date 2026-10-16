@@ -1621,3 +1621,236 @@ fn review3_range_paste_rejects_merged_cells_before_modifying_any_destination() -
     );
     Ok(())
 }
+
+#[test]
+fn review4_unicode_names_and_named_sum_ranges_keep_identity() -> Result<(), String> {
+    let mut book = Book::default();
+    let id = book.active_id();
+    book.set_range(
+        id,
+        0,
+        0,
+        &[
+            vec!["yes".into(), "10".into()],
+            vec!["yes".into(), "20".into()],
+        ],
+    )?;
+    book.names.insert("Данные".into(), "=B1:B2".into());
+    book.names.insert("Начало".into(), "=B1".into());
+    book.names.insert("Копия".into(), "=НАЧАЛО".into());
+    for (formula, expected) in [
+        ("=SUM(ДАННЫЕ)", 30.0),
+        ("=ROW(НАЧАЛО)", 1.0),
+        ("=SUMIF(A1:A2,\"yes\",КОПИЯ)", 30.0),
+        ("=AVERAGEIF(A1:A2,\"yes\",КОПИЯ)", 15.0),
+    ] {
+        assert_eq!(
+            formula::evaluate(&book, id, formula),
+            Value::Number(expected),
+            "{formula}"
+        );
+    }
+    Ok(())
+}
+#[test]
+fn review4_days_preserves_numeric_fractions_and_rejects_invalid_serials() {
+    let book = Book::default();
+    let id = book.active_id();
+    assert_eq!(
+        formula::evaluate(&book, id, "=DAYS(2.75,1.5)"),
+        Value::Number(1.25)
+    );
+    assert_eq!(
+        formula::evaluate(&book, id, "=DAYS(\"2026-10-15\",\"2026-10-13\")"),
+        Value::Number(2.0)
+    );
+    for formula in ["=DAYS(-1,1)", "=DAYS(1,2958466)", "=DAYS(3000000,1)"] {
+        assert_eq!(
+            formula::evaluate(&book, id, formula),
+            Value::Error("#NUM!".into()),
+            "{formula}"
+        );
+    }
+    assert_eq!(
+        formula::evaluate(&book, id, "=DAYS(\"invalid\",1)"),
+        Value::Error("#VALUE!".into())
+    );
+}
+#[test]
+fn review4_financial_payment_type_is_zero_or_nonzero_not_a_multiplier() {
+    let book = Book::default();
+    let id = book.active_id();
+    for (prefix, standard) in [
+        ("PMT(0.05,12,1000,0,", "=PMT(0.05,12,1000,0,1)"),
+        ("PV(0.05,12,-100,0,", "=PV(0.05,12,-100,0,1)"),
+        ("FV(0.05,12,-100,0,", "=FV(0.05,12,-100,0,1)"),
+        ("NPER(0.05,-100,1000,0,", "=NPER(0.05,-100,1000,0,1)"),
+        ("RATE(12,-100,1000,0,", "=RATE(12,-100,1000,0,1)"),
+        ("IPMT(0.05,2,12,1000,0,", "=IPMT(0.05,2,12,1000,0,1)"),
+        ("PPMT(0.05,2,12,1000,0,", "=PPMT(0.05,2,12,1000,0,1)"),
+    ] {
+        let expected = formula::evaluate(&book, id, standard);
+        assert!(
+            matches!(&expected, Value::Number(_)),
+            "{standard}: {expected:?}"
+        );
+        for kind in ["2", "-1", "0.5"] {
+            let actual = format!("={prefix}{kind})");
+            assert_eq!(formula::evaluate(&book, id, &actual), expected, "{actual}");
+        }
+    }
+}
+#[test]
+fn review4_mround_compares_signs_before_a_product_can_underflow() {
+    let book = Book::default();
+    let id = book.active_id();
+    for formula in ["=MROUND(1E-200,-1E-200)", "=MROUND(-1E-200,1E-200)"] {
+        assert_eq!(
+            formula::evaluate(&book, id, formula),
+            Value::Error("#NUM!".into())
+        );
+    }
+    assert_eq!(
+        formula::evaluate(&book, id, "=MROUND(2E-200,1E-200)"),
+        Value::Number(2E-200)
+    );
+}
+#[test]
+fn review4_statistics_keep_finite_results_at_large_and_small_scales() -> Result<(), String> {
+    let mut book = Book::default();
+    let id = book.active_id();
+    book.set_range(
+        id,
+        0,
+        0,
+        &[
+            vec!["-1E200".into(), "-1E-200".into()],
+            vec!["0".into(), "0".into()],
+            vec!["1E200".into(), "1E-200".into()],
+        ],
+    )?;
+    for (formula, expected) in [
+        ("=CORREL(A1:A3,B1:B3)", 1.0),
+        ("=PEARSON(A1:A3,B1:B3)", 1.0),
+        ("=RSQ(A1:A3,B1:B3)", 1.0),
+        ("=HARMEAN(1E-308,1E-308,1E-308)", 1E-308),
+        ("=AVERAGE(1E308,1E308)", 1E308),
+        ("=STDEV.P(-1E-200,1E-200)", 1E-200),
+        ("=VAR.P(-1E154,1E154)", 1E308),
+        ("=MEDIAN(1E308,1E308)", 1E308),
+    ] {
+        let Value::Number(actual) = formula::evaluate(&book, id, formula) else {
+            return Err(formula.into());
+        };
+        assert!(
+            ((actual / expected) - 1.0).abs() < 1E-12,
+            "{formula}: {actual}"
+        );
+    }
+    book.set_range(id, 0, 2, &[vec!["-1E308".into()], vec!["1E308".into()]])?;
+    assert_eq!(
+        formula::evaluate(&book, id, "=PERCENTILE(C1:C2,0.5)"),
+        Value::Number(0.0)
+    );
+    assert_eq!(
+        formula::evaluate(&book, id, "=CORREL(A1:A3,A1:A1)"),
+        Value::Error("#N/A".into())
+    );
+    Ok(())
+}
+#[test]
+fn review4_statistical_argument_counts_reject_ignored_parameters() -> Result<(), String> {
+    let mut book = Book::default();
+    let id = book.active_id();
+    book.set_range(id, 0, 0, &[vec!["1".into()], vec!["2".into()]])?;
+    for formula in [
+        "=COUNTBLANK(A1,A2)",
+        "=LARGE(A1:A2,1,99)",
+        "=SMALL(A1:A2,1,99)",
+        "=PERCENTILE(A1:A2,0.5,99)",
+        "=QUARTILE(A1:A2,2,99)",
+    ] {
+        assert_eq!(
+            formula::evaluate(&book, id, formula),
+            Value::Error("#VALUE!".into()),
+            "{formula}"
+        );
+    }
+    assert_eq!(
+        formula::evaluate(&book, id, "=RANK(1,A1:A2,1)"),
+        Value::Number(1.0)
+    );
+    Ok(())
+}
+#[test]
+fn review4_rewrites_fail_atomically_when_reference_growth_exceeds_cell_limit() -> Result<(), String>
+{
+    let mut book = Book::default();
+    let id = book.active_id();
+    let formula = format!("=A1&\"{}\"", "x".repeat(32767 - 6));
+    assert_eq!(formula.len(), 32767);
+    book.set_cell(id, 0, 1, &formula)?;
+    let before = book.clone();
+    assert!(
+        book.fill(id, Range::new(0, 1, 0, 1), Range::new(1, 1, 9, 1))
+            .is_err()
+    );
+    assert_eq!(book, before);
+    assert!(book.edit_dimension(id, 0, 9, true, false).is_err());
+    assert_eq!(book, before);
+    let other = book.add_sheet("B")?;
+    let prefix = "=B!A1&\"";
+    book.set_cell(
+        id,
+        0,
+        1,
+        &format!("{prefix}{}\"", "x".repeat(32767 - prefix.len() - 1)),
+    )?;
+    let before = book.clone();
+    assert!(
+        book.rename_sheet(other, "A much longer sheet name")
+            .is_err()
+    );
+    assert_eq!(book, before);
+    book.set_cell(id, 0, 1, &formula)?;
+    for row in 0..10 {
+        book.set_input(id, row, 0, &(10 - row).to_string())?;
+    }
+    book.recalculate();
+    let before = book.clone();
+    assert!(
+        book.sort(id, Range::new(0, 0, 9, 1), &[(0, false)], false)
+            .is_err()
+    );
+    assert_eq!(book, before);
+    book.validate()
+}
+#[test]
+fn review4_reordering_a_background_sheet_preserves_active_id_selection_and_cell_ids()
+-> Result<(), String> {
+    let mut book = Book::default();
+    let first = book.active_id();
+    let second = book.add_sheet("Second")?;
+    book.add_sheet("Third")?;
+    let cell = book.set_cell(first, 3, 4, "editing here")?;
+    book.selection = Selection {
+        row: 3,
+        col: 4,
+        anchor_row: 1,
+        anchor_col: 2,
+    };
+    let selection = book.selection.clone();
+    book.move_sheet(second, 0)?;
+    assert_eq!(book.active_id(), first);
+    assert_eq!(book.selection, selection);
+    assert_eq!(
+        book.active_sheet()
+            .and_then(|sheet| sheet.cell(3, 4))
+            .map(|value| value.id),
+        Some(cell)
+    );
+    book.move_sheet(first, 2)?;
+    assert_eq!(book.active_id(), first);
+    assert_eq!(book.selection, selection);
+    book.validate()
+}

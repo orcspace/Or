@@ -116,6 +116,17 @@ impl Default for Paragraph {
         }
     }
 }
+pub fn heading_level(style: &str) -> Option<u8> {
+    match style {
+        "Heading1" => Some(1),
+        "Heading2" => Some(2),
+        "Heading3" => Some(3),
+        "Heading4" => Some(4),
+        "Heading5" => Some(5),
+        "Heading6" => Some(6),
+        _ => None,
+    }
+}
 impl Paragraph {
     pub fn text(&self) -> String {
         self.runs.iter().map(|r| r.text.as_str()).collect()
@@ -195,13 +206,13 @@ impl Paragraph {
             run.format.bold = bold;
             run.format.italic = style == "Quote";
         }
-        self.spacing_before = if style.starts_with("Heading") {
+        self.spacing_before = if heading_level(style).is_some() {
             12.0
         } else {
             0.0
         };
         // Like Word's built-in headings, a heading stays with the text that follows it.
-        self.keep_next = style.starts_with("Heading") || style == "Title";
+        self.keep_next = heading_level(style).is_some() || style == "Title";
     }
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -772,7 +783,7 @@ impl Doc {
                             .get(i)
                             .copied()
                             .unwrap_or(body_width as f32 / columns as f32)
-                            .max(12.0),
+                            .max(1.0),
                     )
                 })
                 .collect();
@@ -780,14 +791,17 @@ impl Doc {
             let scale = (body_width / raw_sum).min(1.0);
             for row in &table.rows {
                 let mut row_lines = 1.0_f64;
-                for (ci, cell) in row.iter().enumerate() {
+                let mut grid_start = 0;
+                for cell in row {
                     let width = (widths
-                        .get(ci)
-                        .copied()
-                        .unwrap_or(body_width / columns as f64)
+                        .iter()
+                        .skip(grid_start)
+                        .take(cell.span())
+                        .sum::<f64>()
                         * scale
-                        - 10.0)
-                        .max(1.0);
+                        - f64::from(table.cell_margin[1] + table.cell_margin[3]))
+                    .max(1.0);
+                    grid_start += cell.span();
                     cells += 1;
                     if cells > 100000 {
                         return Err("Таблицы Docs превышают 100 000 ячеек".into());
@@ -1554,26 +1568,37 @@ impl Doc {
                 || doc.images.iter().any(|i| i.after_paragraph_id == id)
         };
         let mut changed = false;
-        // Hard page breaks at the end of a paragraph push its empty remainder onto the page.
+        // Remove only the hard break belonging to this blank page, including internal ones.
         for &pi in &on_page {
             if let Some(p) = self.paragraphs.get_mut(pi) {
-                let text = p.text();
-                if let Some(cut) = text.rfind('\u{000c}')
-                    && text.get(cut..).is_some_and(blank)
-                {
-                    let keep = text
-                        .get(..cut)
-                        .map(|s| s.chars().count())
-                        .unwrap_or_default();
-                    let format = p.format_at(keep);
-                    let runs = p.slice(0, keep);
-                    p.runs = runs;
-                    if p.runs.is_empty() {
-                        p.runs.push(Run {
+                let chars: Vec<char> = p.text().chars().collect();
+                let mut spans = layout
+                    .rows
+                    .iter()
+                    .filter(|row| row.page == page && row.paragraph == pi)
+                    .filter_map(|row| {
+                        if chars.get(row.end) == Some(&'\u{000c}') {
+                            Some((row.start, row.end + 1))
+                        } else if row.start > 0 && chars.get(row.start - 1) == Some(&'\u{000c}') {
+                            Some((row.start - 1, row.end))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                spans.sort_unstable();
+                spans.dedup();
+                for (from, to) in spans.into_iter().rev() {
+                    let format = p.format_at(from);
+                    let mut runs = p.slice(0, from);
+                    runs.extend(p.slice(to, p.len()));
+                    if runs.is_empty() {
+                        runs.push(Run {
                             text: String::new(),
                             format,
                         });
                     }
+                    p.runs = runs;
                     p.normalize();
                     changed = true;
                 }
@@ -1654,7 +1679,7 @@ impl Doc {
     pub fn outline(&self) -> Vec<(u64, String, String)> {
         self.paragraphs
             .iter()
-            .filter(|p| p.style.starts_with("Heading") || p.style == "Title")
+            .filter(|p| heading_level(&p.style).is_some() || p.style == "Title")
             .map(|p| (p.id, p.style.clone(), p.text()))
             .collect()
     }
@@ -1928,15 +1953,32 @@ fn next_page(layout: &mut Layout, setup: &PageSetup, y: &mut f32) {
 }
 fn render_row(page: &mut Page, row: &Row) {
     if !row.marker.is_empty() {
-        page.items.push(Primitive::Text {
+        let format = row
+            .segments
+            .first()
+            .map(|segment| segment.format.clone())
+            .unwrap_or_default();
+        page.items.push(Primitive::TextStyled {
             x: row.x - 18.0,
             y: row.y,
             text: row.marker.clone(),
-            size: 11.0,
-            color: [24, 28, 35],
+            size: format.size,
+            color: format.color,
+            font: format.font,
+            bold: format.bold,
+            italic: format.italic,
         });
     }
     for seg in &row.segments {
+        let size = seg.format.size * if seg.format.script != 0 { 0.75 } else { 1.0 };
+        let glyph_y = row.y
+            + if seg.format.script > 0 {
+                -3.0
+            } else if seg.format.script < 0 {
+                3.0
+            } else {
+                0.0
+            };
         if let Some(color) = seg.format.highlight {
             page.items.push(Primitive::Rect {
                 x: seg.x,
@@ -1950,16 +1992,9 @@ fn render_row(page: &mut Page, row: &Row) {
         if seg.text != "\t" {
             page.items.push(Primitive::TextStyled {
                 x: seg.x,
-                y: row.y
-                    + if seg.format.script > 0 {
-                        -3.0
-                    } else if seg.format.script < 0 {
-                        3.0
-                    } else {
-                        0.0
-                    },
+                y: glyph_y,
                 text: seg.text.clone(),
-                size: seg.format.size * if seg.format.script != 0 { 0.75 } else { 1.0 },
+                size,
                 color: seg.format.color,
                 bold: seg.format.bold,
                 italic: seg.format.italic,
@@ -1969,9 +2004,9 @@ fn render_row(page: &mut Page, row: &Row) {
         if seg.format.underline || seg.format.link.is_some() {
             page.items.push(Primitive::Line {
                 x1: seg.x,
-                y1: row.y + seg.format.size * 1.13,
+                y1: glyph_y + size * 1.13,
                 x2: seg.x + seg.width,
-                y2: row.y + seg.format.size * 1.13,
+                y2: glyph_y + size * 1.13,
                 width: 0.7,
                 color: seg.format.color,
             });
@@ -1979,9 +2014,9 @@ fn render_row(page: &mut Page, row: &Row) {
         if seg.format.strike {
             page.items.push(Primitive::Line {
                 x1: seg.x,
-                y1: row.y + seg.format.size * 0.6,
+                y1: glyph_y + size * 0.6,
                 x2: seg.x + seg.width,
-                y2: row.y + seg.format.size * 0.6,
+                y2: glyph_y + size * 0.6,
                 width: 0.7,
                 color: seg.format.color,
             });
@@ -2326,7 +2361,7 @@ fn render_table(layout: &mut Layout, setup: &PageSetup, table: &Table, y: &mut f
                 .get(i)
                 .copied()
                 .unwrap_or(usable_width / columns as f32)
-                .max(12.0)
+                .max(1.0)
         })
         .collect();
     let raw_sum: f32 = widths.iter().sum();
@@ -2399,7 +2434,7 @@ fn table_row(
                 .skip(*start)
                 .take(cell.span())
                 .sum::<f32>()
-                .max(12.0)
+                .max(1.0)
         })
         .collect();
     // A merged cell below continues this one: no line between them.

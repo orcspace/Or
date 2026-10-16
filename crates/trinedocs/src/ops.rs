@@ -96,6 +96,9 @@ impl Tab {
                     return Err("Тип открытого документа нельзя изменить операцией правки".into());
                 }
                 preserve_allocator_floor(&mut document, allocator_floor(&self.document));
+                if matches!(&author, Author::Agent { .. }) {
+                    preserve_sheets_view(&mut document, &self.document);
+                }
                 document.validate()?;
                 if document == self.document {
                     return Ok(());
@@ -151,6 +154,7 @@ impl Tab {
                     .before
                     .clone();
                 preserve_allocator_floor(&mut restored, allocator_floor(&self.document));
+                preserve_sheets_view(&mut restored, &self.document);
                 restored.validate()?;
                 let edits = self
                     .undo
@@ -180,6 +184,7 @@ impl Tab {
                     .after
                     .clone();
                 preserve_allocator_floor(&mut restored, allocator_floor(&self.document));
+                preserve_sheets_view(&mut restored, &self.document);
                 restored.validate()?;
                 let edits = self.redo.last().and_then(|c| c.docs_edits.clone());
                 self.preflight_docs_edits(edits.as_deref())?;
@@ -251,6 +256,102 @@ impl Tab {
         Ok(())
     }
 }
+pub struct WorkspaceUpdate {
+    pub id: u64,
+    pub base_version: u64,
+    pub document: Document,
+    pub changed_ids: Vec<u64>,
+}
+/// Preflight every target before committing any target. The caller owns the UI thread.
+pub fn apply_workspace(
+    tabs: &mut [Tab],
+    updates: Vec<WorkspaceUpdate>,
+    author: Author,
+    dry_run: bool,
+) -> Result<serde_json::Value, String> {
+    use serde_json::json;
+    if updates.is_empty() || updates.len() > 4 {
+        return Err("invalid_args: пакет содержит от 1 до 4 документов".into());
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    let mut prepared = Vec::new();
+    let mut results = Vec::new();
+    for mut update in updates {
+        if !ids.insert(update.id) {
+            return Err("invalid_args: повторный документ в готовом пакете".into());
+        }
+        let index = tabs
+            .iter()
+            .position(|tab| tab.id == update.id)
+            .ok_or("not_found: документ пакета закрыт")?;
+        let tab = &tabs[index];
+        if tab.read_only {
+            return Err(format!("read_only: документ {}", tab.id));
+        }
+        if tab.version != update.base_version {
+            return Err(format!(
+                "conflict: документ {} имеет версию {}, ожидалась {}",
+                tab.id, tab.version, update.base_version
+            ));
+        }
+        if tab.document.kind() != update.document.kind() {
+            return Err("invalid_args: нельзя менять тип документа".into());
+        }
+        preserve_allocator_floor(&mut update.document, allocator_floor(&tab.document));
+        preserve_sheets_view(&mut update.document, &tab.document);
+        update.document.validate()?;
+        let changed = update.document != tab.document;
+        if !changed {
+            update.changed_ids.clear();
+        }
+        let next_version = if changed {
+            tab.version.checked_add(1).ok_or("Исчерпаны версии")?
+        } else {
+            tab.version
+        };
+        results.push(json!({
+            "document_id":tab.id, "version":if dry_run {tab.version} else {next_version},
+            "applied":changed && !dry_run, "would_change":changed,
+            "undo_group_id":(changed && !dry_run).then_some(next_version),
+            "changed_ids":update.changed_ids.iter().take(256).copied().collect::<Vec<_>>(),
+            "changed_ids_count":update.changed_ids.len(),
+        }));
+        if changed && !dry_run {
+            prepared.push((index, next_version, update.document));
+        }
+    }
+    let applied = !prepared.is_empty();
+    for (index, version, document) in prepared {
+        let tab = &mut tabs[index];
+        let change = Change {
+            id: version,
+            before: tab.document.clone(),
+            after: document.clone(),
+            label: "AI: пакет документов".into(),
+            author: author.clone(),
+            accepted: false,
+            docs_edits: None,
+        };
+        tab.undo.push(change.clone());
+        if matches!(&author, Author::Agent { .. }) {
+            tab.ai.push(change);
+        }
+        tab.document = document;
+        tab.version = version;
+        tab.redo.clear();
+        tab.enqueue_docs_edits(None);
+        tab.last_edit = Instant::now();
+        tab.last_author = author.clone();
+        if tab.undo.len() > 100 {
+            tab.undo.remove(0);
+        }
+        if tab.ai.len() > 100 {
+            tab.ai.remove(0);
+        }
+    }
+    Ok(json!({"applied":applied,"preview":dry_run,"documents":results}))
+}
+
 fn preserve_sheets_view(destination: &mut Document, source: &Document) {
     if let (Document::Sheets(destination), Document::Sheets(source)) = (destination, source) {
         if let Some(sheet_id) = source.sheets.get(source.active).map(|sheet| sheet.id)
@@ -642,6 +743,30 @@ mod sheets_view_tests {
     }
 
     #[test]
+    fn agent_replacement_and_history_preserve_live_sheet_navigation() -> Result<(), String> {
+        let mut book = Book::default();
+        let first = book.active_id();
+        let second = book.add_sheet("Second")?;
+        book.active = 0;
+        let mut tab = Tab::new(1, Document::Sheets(book.clone()), "Book".into(), None);
+        book.set_cell(first, 0, 0, "AI")?;
+        if let Document::Sheets(current) = &mut tab.document {
+            current.active = 1;
+            current.selection.row = 7;
+            current.selection.anchor_row = 7;
+        }
+        agent_change(&mut tab, book)?;
+        for action in [None, Some(Op::Undo), Some(Op::Redo)] {
+            if let Some(action) = action {
+                tab.apply(action)?;
+            }
+            assert!(
+                matches!(&tab.document,Document::Sheets(book) if book.active_id()==second && book.selection.row==7)
+            );
+        }
+        Ok(())
+    }
+    #[test]
     fn ai_rollback_of_unhide_selects_a_visible_sheet() -> Result<(), String> {
         let mut book = Book::default();
         let visible = book.active_id();
@@ -798,6 +923,151 @@ mod sheets_view_tests {
         assert_eq!(tab.document, before);
         assert_eq!(tab.version, version);
         assert_eq!((tab.undo.len(), tab.redo.len(), tab.ai.len()), history);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod workspace_tests {
+    use super::*;
+    fn updates(tabs: &[Tab]) -> Result<Vec<WorkspaceUpdate>, String> {
+        tabs.iter()
+            .map(|tab| {
+                let mut document = tab.document.clone();
+                match &mut document {
+                    Document::Docs(doc) => {
+                        let id = doc.paragraphs[0].id;
+                        doc.insert_text(id, 0, "Batch ")?;
+                    }
+                    Document::Sheets(book) => {
+                        book.set_cell(book.active_id(), 0, 0, "42")?;
+                    }
+                    Document::Slides(deck) => {
+                        deck.slides[0].notes = "Batch".into();
+                    }
+                }
+                Ok(WorkspaceUpdate {
+                    id: tab.id,
+                    base_version: tab.version,
+                    document,
+                    changed_ids: Vec::new(),
+                })
+            })
+            .collect()
+    }
+    fn tabs() -> Result<Vec<Tab>, String> {
+        ["docs", "sheets", "slides"]
+            .iter()
+            .enumerate()
+            .map(|(index, kind)| {
+                Ok(Tab::new(
+                    index as u64 + 1,
+                    Document::create(kind)?,
+                    kind.to_string(),
+                    None,
+                ))
+            })
+            .collect()
+    }
+    #[test]
+    fn conflicting_last_document_leaves_every_document_and_history_unchanged() -> Result<(), String>
+    {
+        let mut tabs = tabs()?;
+        let before = tabs.clone();
+        let mut staged = updates(&tabs)?;
+        staged.last_mut().ok_or("last")?.base_version = 99;
+        assert!(
+            apply_workspace(
+                &mut tabs,
+                staged,
+                Author::Agent {
+                    name: "agent".into()
+                },
+                false
+            )
+            .is_err()
+        );
+        for (tab, original) in tabs.iter().zip(before) {
+            assert_eq!(tab.document, original.document);
+            assert_eq!(tab.version, original.version);
+            assert!(tab.undo.is_empty() && tab.ai.is_empty());
+        }
+        Ok(())
+    }
+    #[test]
+    fn preview_is_readonly_and_commit_creates_independent_author_undo_groups() -> Result<(), String>
+    {
+        let mut tabs = tabs()?;
+        let before: Vec<_> = tabs.iter().map(|tab| tab.document.clone()).collect();
+        let staged = updates(&tabs)?;
+        let result = apply_workspace(
+            &mut tabs,
+            staged,
+            Author::Agent {
+                name: "agent".into(),
+            },
+            true,
+        )?;
+        assert_eq!(result["applied"], false);
+        assert!(
+            tabs.iter()
+                .all(|tab| tab.version == 0 && tab.undo.is_empty())
+        );
+        let staged = updates(&tabs)?;
+        let result = apply_workspace(
+            &mut tabs,
+            staged,
+            Author::Agent {
+                name: "agent".into(),
+            },
+            false,
+        )?;
+        assert_eq!(result["applied"], true);
+        assert!(
+            tabs.iter()
+                .all(|tab| tab.version == 1 && tab.undo.len() == 1 && tab.ai.len() == 1)
+        );
+        for (tab, expected) in tabs.iter_mut().zip(before) {
+            tab.apply(Op::Undo)?;
+            let mut expected = expected;
+            preserve_allocator_floor(&mut expected, allocator_floor(&tab.document));
+            assert_eq!(tab.document, expected);
+        }
+        Ok(())
+    }
+    #[test]
+    fn commit_keeps_current_sheets_view_and_rejects_readonly_targets() -> Result<(), String> {
+        let mut tabs = tabs()?;
+        let staged = updates(&tabs)?;
+        let Document::Sheets(book) = &mut tabs[1].document else {
+            return Err("book".into());
+        };
+        book.selection.row = 12;
+        book.selection.anchor_row = 12;
+        apply_workspace(
+            &mut tabs,
+            staged,
+            Author::Agent {
+                name: "agent".into(),
+            },
+            false,
+        )?;
+        assert!(matches!(&tabs[1].document,Document::Sheets(book) if book.selection.row==12));
+        let staged = updates(&tabs)?;
+        let before = tabs[0].document.clone();
+        tabs[2].read_only = true;
+        assert!(
+            apply_workspace(
+                &mut tabs,
+                staged,
+                Author::Agent {
+                    name: "agent".into()
+                },
+                false
+            )
+            .is_err()
+        );
+        assert_eq!(tabs[0].document, before);
         Ok(())
     }
 }

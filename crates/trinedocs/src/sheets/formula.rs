@@ -886,7 +886,7 @@ impl<'a> Engine<'a> {
                     .book
                     .names
                     .iter()
-                    .find(|(k, _)| k.eq_ignore_ascii_case(n))
+                    .find(|(k, _)| k.to_lowercase() == n.to_lowercase())
                     .map(|(_, v)| v.clone())
                     .ok_or("#NAME?")?;
                 if self.depth >= 256 {
@@ -1009,7 +1009,7 @@ impl<'a> Engine<'a> {
                     .book
                     .names
                     .iter()
-                    .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                    .find(|(key, _)| key.to_lowercase() == name.to_lowercase())
                     .map(|(_, input)| input)
                     .ok_or("#NAME?")?;
                 self.reference(&parse(input)?, depth + 1)
@@ -1130,7 +1130,7 @@ impl<'a> Engine<'a> {
             let projected;
             let expr = if matches!(name, "SUMIF" | "AVERAGEIF")
                 && index == 2
-                && let Expr::Reference(target, range) = expr
+                && let Some((target, range)) = self.reference(expr, 0)?
             {
                 let criteria: &Grid = evaluated.first().ok_or("#VALUE!")?;
                 let r1 = range
@@ -1272,7 +1272,7 @@ impl<'a> Engine<'a> {
             | "COUNTBLANK" | "MEDIAN" | "MODE" | "MODE.SNGL" | "STDEV" | "STDEV.S" | "STDEVP"
             | "STDEV.P" | "VAR" | "VAR.S" | "VARP" | "VAR.P" | "DEVSQ" | "AVEDEV" | "GEOMEAN"
             | "HARMEAN" | "SUMSQ" => {
-                arity(1, 255)?;
+                arity(1, if name == "COUNTBLANK" { 1 } else { 255 })?;
                 if name == "COUNTA" {
                     return num(a
                         .iter()
@@ -1322,15 +1322,33 @@ impl<'a> Engine<'a> {
                 if vals.is_empty() {
                     return Err("#DIV/0!".into());
                 }
-                let mean = sum / count;
-                let dev = vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>();
+                let magnitude = vals.iter().copied().map(f64::abs).fold(0.0, f64::max);
+                let scale = if magnitude > 1e150 || magnitude < 1e-150 {
+                    magnitude
+                } else {
+                    1.0
+                };
+                let normalized_mean = if scale == 0.0 {
+                    0.0
+                } else {
+                    vals.iter().map(|value| value / scale).sum::<f64>() / count
+                };
+                let mean = normalized_mean * scale;
+                let normalized_dev = if scale == 0.0 {
+                    0.0
+                } else {
+                    vals.iter()
+                        .map(|value| (value / scale - normalized_mean).powi(2))
+                        .sum::<f64>()
+                };
+                let dev = normalized_dev * scale * scale;
                 match name {
                     "AVERAGE" | "AVERAGEA" => num(mean),
                     "MEDIAN" => {
                         vals.sort_by(f64::total_cmp);
                         let i = vals.len() / 2;
                         num(if vals.len().is_multiple_of(2) {
-                            (vals[i - 1] + vals[i]) / 2.0
+                            interpolate(vals[i - 1], vals[i], 0.5)
                         } else {
                             vals[i]
                         })
@@ -1360,7 +1378,15 @@ impl<'a> Engine<'a> {
                         }
                     }
                     "DEVSQ" => num(dev),
-                    "AVEDEV" => num(vals.iter().map(|v| (v - mean).abs()).sum::<f64>() / count),
+                    "AVEDEV" => num(if scale == 0.0 {
+                        0.0
+                    } else {
+                        vals.iter()
+                            .map(|v| (v / scale - normalized_mean).abs())
+                            .sum::<f64>()
+                            / count
+                            * scale
+                    }),
                     "GEOMEAN" => {
                         if vals.iter().any(|v| *v <= 0.0) {
                             Err("#NUM!".into())
@@ -1372,7 +1398,8 @@ impl<'a> Engine<'a> {
                         if vals.iter().any(|v| *v <= 0.0) {
                             Err("#NUM!".into())
                         } else {
-                            num(count / vals.iter().map(|v| 1.0 / v).sum::<f64>())
+                            let minimum = vals.iter().copied().fold(f64::INFINITY, f64::min);
+                            num(minimum * (count / vals.iter().map(|v| minimum / v).sum::<f64>()))
                         }
                     }
                     _ => {
@@ -1380,11 +1407,12 @@ impl<'a> Engine<'a> {
                         if sample && vals.len() < 2 {
                             return Err("#DIV/0!".into());
                         }
-                        let variance = dev / (count - f64::from(u8::from(sample)));
+                        let normalized_variance =
+                            normalized_dev / (count - f64::from(u8::from(sample)));
                         num(if name.starts_with("STDEV") {
-                            variance.sqrt()
+                            normalized_variance.sqrt() * scale
                         } else {
-                            variance
+                            normalized_variance * scale * scale
                         })
                     }
                 }
@@ -1597,7 +1625,7 @@ impl<'a> Engine<'a> {
                         }
                     }
                     "MROUND" => {
-                        if x * y < 0.0 {
+                        if x != 0.0 && y != 0.0 && x.is_sign_negative() != y.is_sign_negative() {
                             Err("#NUM!".into())
                         } else if y == 0.0 {
                             num(0.0)
@@ -1716,7 +1744,7 @@ impl<'a> Engine<'a> {
             }
             "LARGE" | "SMALL" | "PERCENTILE" | "PERCENTILE.INC" | "QUARTILE" | "QUARTILE.INC"
             | "RANK" | "RANK.EQ" => {
-                arity(2, 3)?;
+                arity(2, if name.starts_with("RANK") { 3 } else { 2 })?;
                 if name.starts_with("RANK") {
                     let target = n(0)?;
                     let mut vals = numbers(&a[1..2], false)?;
@@ -1753,7 +1781,7 @@ impl<'a> Engine<'a> {
                 let pos = p * (vals.len() - 1) as f64;
                 let low = pos.floor() as usize;
                 let high = pos.ceil() as usize;
-                num(vals[low] + (vals[high] - vals[low]) * pos.fract())
+                num(interpolate(vals[low], vals[high], pos.fract()))
             }
             "SUMIF" | "COUNTIF" | "AVERAGEIF" | "SUMIFS" | "COUNTIFS" | "AVERAGEIFS" => {
                 conditional(name, a).and_then(num)
@@ -2282,7 +2310,18 @@ impl<'a> Engine<'a> {
             }
             "DAYS" => {
                 arity(2, 2)?;
-                num(n(0)?.floor() - n(1)?.floor())
+                let date = |index: usize| -> CalcResult<f64> {
+                    match a.get(index).ok_or("#VALUE!")?.first() {
+                        Value::Text(text) => date_text_serial(&text, self.book.locale_ru),
+                        value => value.number(),
+                    }
+                };
+                let end = date(0)?;
+                let start = date(1)?;
+                if !(0.0..2958466.0).contains(&end) || !(0.0..2958466.0).contains(&start) {
+                    return Err("#NUM!".into());
+                }
+                num(end - start)
             }
             "WEEKDAY" => {
                 arity(1, 2)?;
@@ -2324,30 +2363,7 @@ impl<'a> Engine<'a> {
             }
             "DATEVALUE" => {
                 arity(1, 1)?;
-                let s = text(0)?;
-                let pieces: Vec<_> = s.trim().split(['-', '/', '.']).collect();
-                if pieces.len() != 3 {
-                    return Err("#VALUE!".into());
-                }
-                let v: Vec<i64> = pieces
-                    .iter()
-                    .map(|p| p.parse::<i64>().map_err(|_| "#VALUE!".to_string()))
-                    .collect::<CalcResult<_>>()?;
-                let (y, m, d) = if pieces[0].len() == 4 {
-                    (v[0], v[1], v[2])
-                } else if self.book.locale_ru {
-                    (v[2], v[1], v[0])
-                } else {
-                    (v[2], v[0], v[1])
-                };
-                if !(1900..=9999).contains(&y)
-                    || !(1..=12).contains(&m)
-                    || d < 1
-                    || d > days_in_month(y, m)
-                {
-                    return Err("#VALUE!".into());
-                }
-                num(date_serial(y, m, d))
+                num(date_text_serial(&text(0)?, self.book.locale_ru)?)
             }
             "TIMEVALUE" => {
                 arity(1, 1)?;
@@ -2478,7 +2494,7 @@ impl<'a> Engine<'a> {
                 let periods = n(1)?;
                 let third = n(2)?;
                 let fourth = default_n(3, 0.0)?;
-                let kind = default_n(4, 0.0)?;
+                let kind = if default_n(4, 0.0)? == 0.0 { 0.0 } else { 1.0 };
                 if periods == 0.0 && (name == "PMT") {
                     return Err("#DIV/0!".into());
                 }
@@ -2577,7 +2593,7 @@ impl<'a> Engine<'a> {
                 let payment = n(1)?;
                 let present = n(2)?;
                 let future = default_n(3, 0.0)?;
-                let kind = default_n(4, 0.0)?;
+                let kind = if default_n(4, 0.0)? == 0.0 { 0.0 } else { 1.0 };
                 if rate == 0.0 {
                     if payment == 0.0 {
                         return Err("#NUM!".into());
@@ -2597,7 +2613,7 @@ impl<'a> Engine<'a> {
                 let payment = n(1)?;
                 let present = n(2)?;
                 let future = default_n(3, 0.0)?;
-                let kind = default_n(4, 0.0)?;
+                let kind = if default_n(4, 0.0)? == 0.0 { 0.0 } else { 1.0 };
                 let mut rate = default_n(5, 0.1)?;
                 if periods <= 0.0 {
                     return Err("#NUM!".into());
@@ -2634,7 +2650,7 @@ impl<'a> Engine<'a> {
                 let periods = n(2)?;
                 let present = n(3)?;
                 let future = default_n(4, 0.0)?;
-                let kind = default_n(5, 0.0)?;
+                let kind = if default_n(5, 0.0)? == 0.0 { 0.0 } else { 1.0 };
                 if period < 1.0 || period > periods.ceil() || rate <= -1.0 {
                     return Err("#NUM!".into());
                 }
@@ -2770,6 +2786,32 @@ impl<'a> Engine<'a> {
                     return Err("#DIV/0!".into());
                 }
                 let count = pairs.len() as f64;
+                if matches!(name, "CORREL" | "PEARSON" | "RSQ") {
+                    let scale_y = pairs.iter().map(|p| p.0.abs()).fold(0.0, f64::max);
+                    let scale_x = pairs.iter().map(|p| p.1.abs()).fold(0.0, f64::max);
+                    if scale_x == 0.0 || scale_y == 0.0 {
+                        return Err("#DIV/0!".into());
+                    }
+                    let mean_y = pairs.iter().map(|p| p.0 / scale_y).sum::<f64>() / count;
+                    let mean_x = pairs.iter().map(|p| p.1 / scale_x).sum::<f64>() / count;
+                    let (mut xy, mut xx, mut yy) = (0.0, 0.0, 0.0);
+                    for (y, x) in &pairs {
+                        let x = x / scale_x - mean_x;
+                        let y = y / scale_y - mean_y;
+                        xy += x * y;
+                        xx += x * x;
+                        yy += y * y;
+                    }
+                    if xx == 0.0 || yy == 0.0 {
+                        return Err("#DIV/0!".into());
+                    }
+                    let correlation = (xy / (xx.sqrt() * yy.sqrt())).clamp(-1.0, 1.0);
+                    return num(if name == "RSQ" {
+                        correlation * correlation
+                    } else {
+                        correlation
+                    });
+                }
                 let mean_y = pairs.iter().map(|p| p.0).sum::<f64>() / count;
                 let mean_x = pairs.iter().map(|p| p.1).sum::<f64>() / count;
                 let sxy = pairs
@@ -3082,6 +3124,39 @@ impl<'a> Engine<'a> {
         }
     }
 }
+fn interpolate(low: f64, high: f64, fraction: f64) -> f64 {
+    if low.is_sign_negative() == high.is_sign_negative() {
+        low + (high - low) * fraction
+    } else {
+        low * (1.0 - fraction) + high * fraction
+    }
+}
+fn date_text_serial(source: &str, locale_ru: bool) -> CalcResult<f64> {
+    let pieces: Vec<_> = source.trim().split(['-', '/', '.']).collect();
+    if pieces.len() != 3 {
+        return Err("#VALUE!".into());
+    }
+    let values: Vec<i64> = pieces
+        .iter()
+        .map(|part| part.parse::<i64>().map_err(|_| "#VALUE!".to_string()))
+        .collect::<CalcResult<_>>()?;
+    let (year, month, day) = if pieces[0].len() == 4 {
+        (values[0], values[1], values[2])
+    } else if locale_ru {
+        (values[2], values[1], values[0])
+    } else {
+        (values[2], values[0], values[1])
+    };
+    if !(1900..=9999).contains(&year)
+        || !(1..=12).contains(&month)
+        || day < 1
+        || day > days_in_month(year, month)
+    {
+        return Err("#VALUE!".into());
+    }
+    Ok(date_serial(year, month, day))
+}
+
 fn contains_subtotal(expr: &Expr) -> bool {
     match expr {
         Expr::Call(name, args) => name == "SUBTOTAL" || args.iter().any(contains_subtotal),

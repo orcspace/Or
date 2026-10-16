@@ -2,7 +2,7 @@
 
 Первичный feature inventory по заданию и первым проверенным пробелам. Полная сверка всех вкладок Office ещё не завершена. Внутри каждого PAR-пункта варианты поведения проверяются отдельно. Ни одна функция не объявлена готовой. P2 не удаляется из конечного объёма; поздние фазы ждут решения владельца ADR-0005.
 
-Всего функций/вариантов: **359**.
+Всего функций/вариантов: **360**.
 
 | PAR ID | Режим | Функция | P | Фаза | REQ | MCP / пробел | Import | Export | Статус |
 |---|---|---|---|---|---|---|---|---|---|
@@ -365,3 +365,4 @@
 | PAR-TRI-037 | Sheets | Список ошибок ячеек и формул на всех листах с адресами и ограниченной выдачей | P1 | 8 | REQ-11-008 | UI read-only inspector; GAP: отдельная bounded MCP-сводка ошибок UI: переход из замечания по stable ID; для картинки Docs — к абзацу-якорю, скрытые/устаревшие цели недоступны. Runtime navigation не проверялась. | n/a | n/a | implemented_unverified |
 | PAR-TRI-038 | Docs | Карта фактического оформления: отличия прямого форматирования от стилей и переход к примерам | P1 | 8 | REQ-11-005 | GAP: read-only style audit со stable paragraph/run anchors | planned | n/a | planned |
 | PAR-TRI-039 | Slides | Автоматическая повестка презентации из разделов и заголовков с явным предпросмотром | P1 | 8 | REQ-11-011 | GAP: preview agenda + обычные slides ops после выбора | planned | planned | planned |
+| PAR-TRI-040 | TrineDocs | Параллельная подготовка AI-правок нескольких открытых Docs/Sheets/Slides с общим preflight commit | P1 | 8 | REQ-M06-072 | workspace_documents/apply/job_status/cancel; 4 документа/32 операции; GAP: полный apply_ops, дисковые side effects, persistent jobs и runtime-приёмка | not applicable | not applicable | partial |

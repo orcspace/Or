@@ -151,7 +151,17 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
             .filter(|c| *c == '0')
             .count()
             .max(1);
-        localize(&scientific(n, decimals, digits), ru)
+        localize(
+            &scientific(
+                n,
+                decimals,
+                digits,
+                !pattern
+                    .get(exponent + 1..)
+                    .is_some_and(|tail| tail.starts_with('-')),
+            ),
+            ru,
+        )
     } else if pattern.split('.').next().is_some_and(|s| s.contains(',')) {
         group(&fixed(), ru)
     } else {
@@ -200,14 +210,25 @@ pub fn snap(x: f64) -> f64 {
 fn fixed(n: f64, decimals: usize) -> String {
     format!("{:.decimals$}", round_half_away(n, decimals))
 }
-/// `1.23E+03`: Excel always signs the exponent and pads it to the pattern's digit count.
-fn scientific(n: f64, decimals: usize, exponent_digits: usize) -> String {
-    let text = format!("{n:.decimals$E}");
-    let (mantissa, exponent) = text.split_once('E').unwrap_or((&text, "0"));
-    let exponent: i32 = exponent.parse().unwrap_or(0);
-    let sign = if exponent < 0 { '-' } else { '+' };
+/// Scientific formatting preserves the requested exponent sign and half-away ties.
+fn scientific(n: f64, decimals: usize, exponent_digits: usize, positive_sign: bool) -> String {
+    let raw = format!("{n:E}");
+    let (mantissa, exponent) = raw.split_once('E').unwrap_or((&raw, "0"));
+    let mut mantissa = round_half_away(mantissa.parse::<f64>().unwrap_or(0.0), decimals);
+    let mut exponent: i32 = exponent.parse().unwrap_or(0);
+    if mantissa.abs() >= 10.0 {
+        mantissa /= 10.0;
+        exponent += 1;
+    }
+    let sign = if exponent < 0 {
+        "-"
+    } else if positive_sign {
+        "+"
+    } else {
+        ""
+    };
     format!(
-        "{mantissa}E{sign}{:0exponent_digits$}",
+        "{mantissa:.decimals$}E{sign}{:0exponent_digits$}",
         exponent.unsigned_abs()
     )
 }
@@ -223,7 +244,7 @@ pub fn general_number(n: f64, digits: usize) -> String {
     let exponent = n.abs().log10().floor() as i32;
     if exponent >= (digits as i32).max(11) || exponent < -9 {
         let mantissa = if digits <= 10 { 5 } else { digits - 1 };
-        let text = scientific(n, mantissa, 2);
+        let text = scientific(n, mantissa, 2, true);
         let (m, e) = text.split_once('E').unwrap_or((&text, ""));
         let m = if m.contains('.') {
             m.trim_end_matches('0').trim_end_matches('.')
@@ -634,6 +655,28 @@ fn date_display(serial: f64, code: &str) -> String {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn review4_scientific_exponent_sign_follows_the_format() {
+        for (number, code, expected) in [
+            (1234.0, "0.0E-00", "1.2E03"),
+            (0.01234, "0.0E-00", "1.2E-02"),
+            (1234.0, "0.0E+00", "1.2E+03"),
+        ] {
+            assert_eq!(display(&Value::Number(number), code, false), expected);
+        }
+    }
+    #[test]
+    fn review4_scientific_ties_round_away_and_carry_into_the_exponent() {
+        for (number, code, expected) in [
+            (2.675, "0.00E+00", "2.68E+00"),
+            (-2.675, "0.00E+00", "-2.68E+00"),
+            (9.95, "0.0E+00", "1.0E+01"),
+        ] {
+            assert_eq!(display(&Value::Number(number), code, false), expected);
+        }
+        assert!(!display(&Value::Number(f64::from_bits(1)), "0.0E+00", false).contains("NaN"));
+    }
+
     use super::*;
     #[test]
     fn review2_elapsed_units_share_the_clock_rounding_carry() {
