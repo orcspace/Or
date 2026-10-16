@@ -2275,7 +2275,10 @@ impl<'a> Engine<'a> {
                 }
                 if let Some(i) = best {
                     Ok(Grid::scalar(a[2].values[i].clone()))
-                } else if let Some(fallback) = args.get(3) {
+                } else if let Some(fallback) = args
+                    .get(3)
+                    .filter(|expr| !matches!(expr, Expr::Literal(Value::Empty)))
+                {
                     self.eval(fallback, sheet, row, col)
                 } else {
                     Err("#N/A".into())
@@ -3188,7 +3191,12 @@ fn value_text(source: &str, ru: bool) -> CalcResult<f64> {
         number = inner.trim_end();
         percent += 1;
     }
-    let decimal = if ru && number.contains(',') { ',' } else { '.' };
+    let decimal = match (number.rfind(','), number.rfind('.')) {
+        // With both separators present, the last one is the decimal mark.
+        (Some(comma), Some(dot)) => if comma > dot { ',' } else { '.' },
+        (Some(_), None) if ru => ',',
+        _ => '.',
+    };
     let group = if decimal == ',' { '.' } else { ',' };
     let compact: String = number
         .chars()

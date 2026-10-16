@@ -972,6 +972,9 @@ pub fn validate_args(name: &str, a: &Value) -> Result<(), String> {
     if !a.is_object() {
         return Err("Аргументы должны быть объектом".into());
     }
+    if name == "replace_document_model" && a.get("base_version").is_none() {
+        return Err("invalid_args: replace_document_model требует base_version".into());
+    }
     for (key, value) in a.as_object().ok_or("Аргументы должны быть объектом")?
     {
         let valid = if INTEGER_ARGS.contains(&key.as_str()) {
@@ -981,7 +984,8 @@ pub fn validate_args(name: &str, a: &Value) -> Result<(), String> {
                 .as_str()
                 .is_some_and(|s| s.chars().count() <= 1_000_000)
         } else if OBJECT_ARGS.contains(&key.as_str()) {
-            value.is_object()
+            // The model of a raw replacement is parsed after the version check.
+            value.is_object() || (name == "replace_document_model" && key == "model")
         } else if ARRAY_ARGS.contains(&key.as_str()) {
             value.as_array().is_some_and(|array| {
                 array.len() <= if key == "bytes" { 1024 * 1024 } else { 100_000 }
@@ -1011,9 +1015,6 @@ pub fn validate_args(name: &str, a: &Value) -> Result<(), String> {
     }
     if a.get("base_version").is_some_and(|v| v.as_u64().is_none()) {
         return Err("base_version должен быть u64".into());
-    }
-    if name == "replace_document_model" && a.get("base_version").is_none() {
-        return Err("invalid_args: replace_document_model требует base_version".into());
     }
     if a.get("title")
         .and_then(Value::as_str)
@@ -2496,6 +2497,12 @@ fn dispatch_inner(
                 .set_animations(steps);
         }
         (_, "replace_document_model") => {
+            if a.get("base_version")
+                .and_then(Value::as_u64)
+                .is_some_and(|v| v != t.version)
+            {
+                return Err(format!("conflict: текущая версия {}", t.version));
+            }
             doc = parse(a, "model")?;
             if doc.kind() != t.document.kind() {
                 return Err("Нельзя изменить тип документа".into());

@@ -1291,7 +1291,8 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
                             .and_then(|v| v.parse::<f32>().ok())
                             .filter(|w| w.is_finite() && *w > 0.0)
                         {
-                            let pixels = if w < 1.0 { w * 12.0 } else { w * 7.0 + 5.0 };
+                            // Stored widths already include the cell padding (pixels / 7).
+                            let pixels = w * 7.0;
                             s.widths.insert(c, pixels.clamp(1.0, 1800.0));
                         }
                         if xml_bool(a.get("hidden"), false) {
@@ -1934,7 +1935,30 @@ fn write_xlsx(book: &Book) -> Result<Vec<u8>, String> {
             ws.insert_chart(model.row, model.col as u16, &chart)
                 .map_err(|e| e.to_string())?;
         }
+        if !sheet.images.is_empty() {
+            // The reader measures pictures on 96 x 26 px cells; give the writer
+            // the same grid so the saved bottom-right anchor maps back exactly.
+            ws.set_default_row_height_pixels(26);
+        }
         for model in &sheet.images {
+            let mut reach = model.width.max(1.0) + model.x_offset.max(0.0);
+            let mut col = model.col;
+            while reach > 0.0 && col < super::model::MAX_COLS {
+                if sheet.hidden_cols.contains(&col) {
+                    col += 1;
+                    continue;
+                }
+                let size = match sheet.widths.get(&col) {
+                    Some(width) => *width,
+                    None => {
+                        ws.set_column_width_pixels(col as u16, 96)
+                            .map_err(|e| e.to_string())?;
+                        96.0
+                    }
+                };
+                reach -= size.round().max(1.0);
+                col += 1;
+            }
             let mut image = Image::new_from_buffer(&model.bytes).map_err(|e| e.to_string())?;
             let (w, h) = (image.width().max(1.0), image.height().max(1.0));
             image = image

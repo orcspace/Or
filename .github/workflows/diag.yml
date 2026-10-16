@@ -12,7 +12,15 @@ jobs:
         with:
           toolchain: 1.98.1
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756
-      - name: test
+      - name: lint
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $f = (cargo fmt --all -- --check 2>&1 | Out-String)
+          if ($f) { $m = ($f -replace '\r','' -replace '%','%25' -replace "`n",'%0A'); if ($m.Length -gt 3000) { $m = $m.Substring(0,3000) }; Write-Output "::error title=fmt::$m" }
+          $c = (cargo clippy --locked --workspace --all-targets -- -D warnings 2>&1 | Out-String)
+          $errs = [regex]::Matches($c, '(?m)^(error|warning)(\[.*?\])?: .*\r?\n\s+--> .*')
+          $k=0; foreach ($e in $errs) { $k++; if ($k -gt 8) { break }; $m = ($e.Value -replace '\r','' -replace '%','%25' -replace "`n",'%0A'); Write-Output "::error title=clippy::$m" }      - name: test
         shell: pwsh
         run: |
           cargo test --locked -p trinedocs --lib 2>&1 | Out-File t.log -Encoding utf8
@@ -21,3 +29,4 @@ jobs:
           $i = 0
           foreach ($b in $blocks) { $i++; $m = ($b.Groups[2].Value -replace '\r','' -replace '%','%25' -replace "`n",'%0A'); if ($m.Length -gt 1500) { $m = $m.Substring(0,1500) }; Write-Output "::error title=$($b.Groups[1].Value)::$m" }
           "blocks=$i"
+
