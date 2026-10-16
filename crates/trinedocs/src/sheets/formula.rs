@@ -3193,7 +3193,13 @@ fn value_text(source: &str, ru: bool) -> CalcResult<f64> {
     }
     let decimal = match (number.rfind(','), number.rfind('.')) {
         // With both separators present, the last one is the decimal mark.
-        (Some(comma), Some(dot)) => if comma > dot { ',' } else { '.' },
+        (Some(comma), Some(dot)) => {
+            if comma > dot {
+                ','
+            } else {
+                '.'
+            }
+        }
         (Some(_), None) if ru => ',',
         _ => '.',
     };

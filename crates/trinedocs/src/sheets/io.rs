@@ -2062,34 +2062,74 @@ fn typed_formula_strings(xml: &[u8], sheet: &super::model::Sheet) -> Result<Vec<
     }
     Ok(writer.into_inner())
 }
+fn fractional_row_heights(sheet: &super::model::Sheet) -> Vec<(u32, f32)> {
+    sheet
+        .row_heights
+        .iter()
+        .map(|(row, height)| (*row, height.clamp(1.0, 600.0)))
+        .filter(|(_, height)| (height - height.round()).abs() > 0.005)
+        .collect()
+}
+// rust_xlsxwriter stores row heights in whole pixels; restore the exact points.
+fn patch_row_heights(xml: &[u8], rows: &[(u32, f32)]) -> Result<Vec<u8>, String> {
+    let mut text = String::from_utf8(xml.to_vec()).map_err(|e| e.to_string())?;
+    for (row, height) in rows {
+        let open = format!("<row r=\"{}\"", row + 1);
+        let Some(start) = text.find(&open) else {
+            continue;
+        };
+        let Some(length) = text[start..].find('>') else {
+            continue;
+        };
+        let tag = &text[start..start + length];
+        let Some(ht) = tag.find(" ht=\"") else {
+            continue;
+        };
+        let value = ht + " ht=\"".len();
+        let Some(quote) = tag[value..].find('"') else {
+            continue;
+        };
+        let points = f64::from(*height) * 72.0 / 96.0;
+        text.replace_range(start + value..start + value + quote, &format!("{points}"));
+    }
+    Ok(text.into_bytes())
+}
 fn patch_formula_string_results(bytes: Vec<u8>, book: &Book) -> Result<Vec<u8>, String> {
-    if !book.sheets.iter().any(|sheet| {
+    let has_strings = |sheet: &super::model::Sheet| {
         sheet
             .cells
             .values()
             .any(|cell| ambiguous_formula_string(cell).is_some())
-    }) {
+    };
+    if !book
+        .sheets
+        .iter()
+        .any(|sheet| has_strings(sheet) || !fractional_row_heights(sheet).is_empty())
+    {
         return Ok(bytes);
     }
     let mut parts = crate::package::read_zip(&bytes)?;
     for (index, sheet) in book.sheets.iter().enumerate() {
-        if !sheet
-            .cells
-            .values()
-            .any(|cell| ambiguous_formula_string(cell).is_some())
-        {
+        let rows = fractional_row_heights(sheet);
+        if !has_strings(sheet) && rows.is_empty() {
             continue;
         }
         let path = format!("xl/worksheets/sheet{}.xml", index + 1);
         let xml = parts
             .get(&path)
             .ok_or("Нет XML-части экспортируемого листа")?;
-        let updated = typed_formula_strings(xml, sheet)?;
+        let mut updated = if has_strings(sheet) {
+            typed_formula_strings(xml, sheet)?
+        } else {
+            xml.clone()
+        };
+        if !rows.is_empty() {
+            updated = patch_row_heights(&updated, &rows)?;
+        }
         parts.insert(path, updated);
     }
     crate::package::write_zip(parts.into_iter().collect())
 }
-
 #[cfg(test)]
 mod tests {
     #[test]
