@@ -165,6 +165,8 @@ pub struct App {
     error: String,
     show_settings: bool,
     show_inspector: bool,
+    inspector_query: String,
+    inspector_category: crate::inspector::Category,
     inspection: Option<crate::inspector::Task>,
     inspection_result: Option<crate::inspector::Inspection>,
     workspace_jobs: Vec<crate::mcp::workspace::Task>,
@@ -257,6 +259,8 @@ impl App {
             error: font_error,
             show_settings: false,
             show_inspector: false,
+            inspector_query: String::new(),
+            inspector_category: Default::default(),
             inspection: None,
             inspection_result: None,
             workspace_jobs: Vec::new(),
@@ -357,6 +361,80 @@ impl App {
             Err(error) => self.error = error,
         }
     }
+    fn inspection_request(&mut self, args: &Value, ctx: &egui::Context) -> Result<Value, String> {
+        let object = args.as_object().ok_or("invalid_args: требуется объект")?;
+        if object.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "document_id" | "query" | "kind" | "index" | "count" | "refresh"
+            )
+        }) {
+            return Err("invalid_args: неизвестный аргумент проверки".into());
+        }
+        let id = args
+            .get("document_id")
+            .and_then(Value::as_u64)
+            .filter(|id| *id > 0)
+            .ok_or("invalid_args: требуется document_id")?;
+        let tab = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == id)
+            .ok_or("not_found: документ не открыт")?;
+        let query = match args.get("query") {
+            None => "",
+            Some(value) => value
+                .as_str()
+                .filter(|query| query.chars().count() <= 160)
+                .ok_or("invalid_args: query до 160 символов")?,
+        };
+        let category = crate::inspector::Category::parse(match args.get("kind") {
+            None => "all",
+            Some(value) => value.as_str().ok_or("invalid_args: kind")?,
+        })
+        .ok_or("invalid_args: неизвестный kind")?;
+        let integer = |key: &str, default: usize| -> Result<usize, String> {
+            args.get(key).map_or(Ok(default), |value| {
+                value
+                    .as_u64()
+                    .and_then(|n| usize::try_from(n).ok())
+                    .ok_or_else(|| format!("invalid_args: {key}"))
+            })
+        };
+        let index = integer("index", 0)?;
+        let count = integer("count", 100)?;
+        if !(1..=100).contains(&count) {
+            return Err("invalid_args: count от 1 до 100".into());
+        }
+        let refresh = args.get("refresh").map_or(Ok(false), |value| {
+            value.as_bool().ok_or("invalid_args: refresh")
+        })?;
+        if let Some(task) = &self.inspection {
+            if task.id != id {
+                return Err("busy: выполняется проверка другого документа".into());
+            }
+            return Ok(
+                serde_json::json!({"status":"preparing","document_id":id,"version":task.version}),
+            );
+        }
+        if !refresh
+            && let Some(result) = &self.inspection_result
+            && result.id == id
+        {
+            return Ok(result.page(query, category, index, count, tab.version));
+        }
+        let task = crate::inspector::Task::start(
+            id,
+            tab.version,
+            tab.title.clone(),
+            tab.document.clone(),
+            ctx.clone(),
+        )?;
+        let version = task.version;
+        self.inspection = Some(task);
+        Ok(serde_json::json!({"status":"preparing","document_id":id,"version":version}))
+    }
+
     fn restore_snapshot(&mut self, snapshot: &crate::recovery::Snapshot) -> Result<(), String> {
         if self.pending.is_some() {
             return Err("Сначала завершите подтверждение".into());
@@ -1439,6 +1517,11 @@ impl App {
                 let _ = r.reply.send(result);
                 continue;
             }
+            if r.tool == "inspect_document" {
+                let result = self.inspection_request(&r.args, ctx);
+                let _ = r.reply.send(result);
+                continue;
+            }
             let dry_run = r.args.get("mode").and_then(Value::as_str) == Some("dry_run");
             let id = r.args.get("document_id").and_then(Value::as_u64);
             if id.is_some_and(|id| !self.tabs.iter().any(|t| t.id == id)) {
@@ -1870,7 +1953,7 @@ impl App {
                         let (response, action) = row.inner;
                         match action {
                             Some("pin") => {
-                                if pin { self.settings.pinned.retain(|v| v != p); } else { self.settings.pinned.push(p.clone()); }
+                                if let Err(error) = self.settings.toggle_pin(p.clone()) { self.error = error; }
                                 if let Err(e) = self.worker.save_settings(self.settings.clone()) { self.error = e; }
                             }
                             Some(_) => {
@@ -1921,13 +2004,59 @@ impl App {
                             ui.label("Документ изменён или закрыт после проверки.");
                         }
                         ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.inspector_query)
+                                    .hint_text("Поиск по месту и описанию")
+                                    .char_limit(160)
+                                    .desired_width(260.0),
+                            );
+                            if ui.button("Сбросить").clicked() {
+                                self.inspector_query.clear();
+                                self.inspector_category = Default::default();
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            egui::ComboBox::from_id_salt("inspector-category")
+                                .selected_text(self.inspector_category.label())
+                                .show_ui(ui, |ui| {
+                                    for category in crate::inspector::Category::ALL {
+                                        ui.selectable_value(
+                                            &mut self.inspector_category,
+                                            category,
+                                            category.label(),
+                                        );
+                                    }
+                                });
+                            if ui.button("Копировать отчёт").clicked() {
+                                ctx.copy_text(result.copy_report(
+                                    &self.inspector_query,
+                                    self.inspector_category,
+                                    unchanged,
+                                ));
+                                self.status = "Отчёт проверки скопирован".into();
+                            }
+                        });
+                        let findings = result
+                            .report
+                            .filtered(&self.inspector_query, self.inspector_category);
+                        if !result.report.findings.is_empty() {
+                            ui.weak(format!(
+                                "Показано {} из {} сохранённых замечаний.",
+                                findings.len(),
+                                result.report.findings.len()
+                            ));
+                            if findings.is_empty() {
+                                ui.label("По этому фильтру замечаний нет.");
+                            }
+                        }
                         if result.report.findings.is_empty() {
                             ui.label("По поддерживаемым проверкам замечаний нет.");
                         }
                         egui::ScrollArea::vertical()
                             .max_height(420.0)
                             .show(ui, |ui| {
-                                for finding in &result.report.findings {
+                                for finding in findings {
                                     if ui
                                         .add_enabled(
                                             unchanged
@@ -1953,7 +2082,7 @@ impl App {
                             });
                         if result.report.omitted > 0 {
                             ui.weak(format!(
-                                "Ещё замечаний: {}. Показаны первые 200.",
+                                "Ещё замечаний: {}. Фильтр применяется к первым 200.",
                                 result.report.omitted
                             ));
                         }
@@ -3585,6 +3714,8 @@ mod shell_input_tests {
             error: font_error,
             show_settings: false,
             show_inspector: false,
+            inspector_query: String::new(),
+            inspector_category: Default::default(),
             inspection: None,
             inspection_result: None,
             workspace_jobs: Vec::new(),
@@ -4548,6 +4679,72 @@ mod shell_input_tests {
         assert_eq!(app.tabs[0].version, version);
         assert!(app.tabs[0].undo.is_empty());
         assert_eq!(app.active, Some(10));
+        Ok(())
+    }
+
+    #[test]
+    fn inspection_mcp_pages_a_read_only_snapshot_and_reports_staleness() -> Result<(), String> {
+        let mut app = fixture()?;
+        let ctx = app.editor_ctx.clone();
+        let tab = app.tabs.iter_mut().find(|tab| tab.id == 11).ok_or("tab")?;
+        let Document::Sheets(book) = &mut tab.document else {
+            return Err("book".into());
+        };
+        book.set_cell(book.active_id(), 0, 0, "=1/0")?;
+        app.inspection_result = Some(crate::inspector::Inspection {
+            id: tab.id,
+            version: tab.version,
+            title: tab.title.clone(),
+            report: crate::inspector::inspect(&tab.document),
+        });
+        let document = tab.document.clone();
+        let history = (tab.version, tab.undo.len(), tab.redo.len(), tab.ai.len());
+        let active = app.active;
+        let mut reply = mcp_request(
+            &mut app,
+            "inspect_document",
+            json!({"document_id":11,"kind":"formulas","query":"A1","count":1}),
+        )?;
+        app.mcp_requests(&ctx);
+        let result = reply.try_recv().map_err(|error| error.to_string())??;
+        assert_eq!(result["status"], "completed");
+        assert_eq!(result["stale"], false);
+        assert_eq!(result["findings"][0]["target"]["kind"], "cell");
+        assert_eq!(result["filtered_total"], 1);
+        let tab = app.tabs.iter_mut().find(|tab| tab.id == 11).ok_or("tab")?;
+        assert_eq!(tab.document, document);
+        assert_eq!(
+            (tab.version, tab.undo.len(), tab.redo.len(), tab.ai.len()),
+            history
+        );
+        assert_eq!(app.active, active);
+        tab.version += 1;
+        let stale = app.inspection_request(&json!({"document_id":11,"index":1}), &ctx)?;
+        assert_eq!(stale["stale"], true);
+        assert_eq!(stale["findings"].as_array().map(Vec::len), Some(0));
+        assert!(
+            app.inspection_request(&json!({"document_id":11,"kind":"typo"}), &ctx)
+                .is_err()
+        );
+        assert!(
+            app.inspection_request(&json!({"document_id":11,"count":101}), &ctx)
+                .is_err()
+        );
+        assert!(
+            app.inspection_request(&json!({"document_id":11,"refresh":"true"}), &ctx)
+                .is_err()
+        );
+        let pending = app.inspection_request(&json!({"document_id":11,"refresh":true}), &ctx)?;
+        assert_eq!(pending["status"], "preparing");
+        assert!(
+            app.inspection_request(&json!({"document_id":10}), &ctx)
+                .is_err()
+        );
+        assert_eq!(app.active, active);
+        let poll = app.inspection_request(&json!({"document_id":11}), &ctx)?;
+        assert_eq!(poll["status"], "preparing");
+        assert!(crate::mcp::tools::read_only("inspect_document"));
+        assert!(!crate::mcp::workspace::batchable("inspect_document"));
         Ok(())
     }
 }

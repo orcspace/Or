@@ -722,7 +722,8 @@ impl Doc {
                 .iter()
                 .map(|r| r.format.size)
                 .fold(11.0_f32, f32::max);
-            if f64::from(size * 1.28 * p.line_spacing) > body_height {
+            let height = f64::from(paragraph_line_height(p, &p.format_at(0), size));
+            if height > body_height {
                 return Err("Строка текста выше доступной области страницы".into());
             }
             let width = (body_width
@@ -734,8 +735,14 @@ impl Doc {
                     .chars()
                     .filter(|c| matches!(*c, '\u{000b}' | '\u{000c}' | '\n'))
                     .count() as f64;
-            estimated_height += line_count * f64::from(size * 1.28 * p.line_spacing)
-                + f64::from(p.spacing_before + p.spacing_after);
+            estimated_height += line_count * height
+                + f64::from(p.spacing_before + p.spacing_after)
+                + p.runs
+                    .iter()
+                    .flat_map(|run| run.text.chars())
+                    .filter(|ch| *ch == '\u{000c}')
+                    .count() as f64
+                    * body_height;
             if p.page_break_before {
                 estimated_height += body_height;
             }
@@ -818,7 +825,8 @@ impl Doc {
                             .iter()
                             .map(|r| r.format.size)
                             .fold(11.0_f32, f32::max);
-                        let line_height = f64::from(size * 1.28 * p.line_spacing);
+                        let line_height =
+                            f64::from(paragraph_line_height(p, &p.format_at(0), size));
                         if line_height + f64::from(p.spacing_before + p.spacing_after) + 10.0
                             > body_height
                         {
@@ -1167,6 +1175,14 @@ impl Doc {
             if let Some(p) = self.paragraphs.get_mut(i) {
                 let from = if i == a.paragraph { a.offset } else { 0 };
                 let to = if i == b.paragraph { b.offset } else { p.len() };
+                if p.is_empty() {
+                    if i < b.paragraph {
+                        for run in &mut p.runs {
+                            apply(&mut run.format);
+                        }
+                    }
+                    continue;
+                }
                 let mut runs = p.slice(0, from);
                 let mut middle = p.slice(from, to);
                 for run in &mut middle {
@@ -2585,6 +2601,58 @@ fn table_row(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn review5_validation_accounts_for_explicit_line_height() -> Result<(), String> {
+        let mut doc = Doc::from_text("small exact line");
+        doc.page.height = 144.0;
+        doc.page.margin_top = 50.0;
+        doc.page.margin_bottom = 50.0;
+        let paragraph = &mut doc.paragraphs[0];
+        paragraph.runs[0].format.size = 80.0;
+        paragraph.line_points = 12.0;
+        paragraph.line_exact = true;
+        doc.validate()?;
+        doc.paragraphs[0].line_points = 100.0;
+        assert!(doc.validate().is_err());
+        Ok(())
+    }
+    #[test]
+    fn review5_hard_page_breaks_are_charged_as_pages_before_layout() {
+        let doc = Doc::from_text(&"\u{000c}".repeat(9001));
+        assert!(doc.validate().is_err());
+    }
+    #[test]
+    fn review5_selection_format_keeps_an_empty_paragraph_mark() {
+        let mut doc = Doc::from_text("before\n\nafter");
+        doc.paragraphs[1].runs[0].format.italic = true;
+        doc.format_range(
+            Position {
+                paragraph: 0,
+                offset: 0,
+            },
+            Position {
+                paragraph: 2,
+                offset: 5,
+            },
+            |format| format.bold = true,
+        );
+        assert!(doc.paragraphs[1].runs[0].format.bold);
+        assert!(doc.paragraphs[1].runs[0].format.italic);
+        let mut doc = Doc::from_text("selected\n");
+        doc.format_range(
+            Position {
+                paragraph: 0,
+                offset: 0,
+            },
+            Position {
+                paragraph: 1,
+                offset: 0,
+            },
+            |format| format.bold = true,
+        );
+        assert!(!doc.paragraphs[1].runs[0].format.bold);
+    }
+
     #[test]
     fn normalizing_keeps_valid_asymmetric_page_margins() -> Result<(), String> {
         let mut doc = Doc::from_text("Narrow body");

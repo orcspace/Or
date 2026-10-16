@@ -368,20 +368,20 @@ pub fn show(ui: &mut egui::Ui, deck: &mut Deck) -> bool {
                         if let Some(slide) = deck.slide_mut(state.slide_id) {
                             crate::docs::editor::reconcile_text_edit(
                                 ui.ctx(),
-                                memory_id.with("notes"),
+                                memory_id.with(("notes", state.slide_id)),
                                 &slide.notes,
                             );
                             changed |= ui
                                 .add(
                                     egui::TextEdit::multiline(&mut slide.notes)
-                                        .id(memory_id.with("notes"))
+                                        .id(memory_id.with(("notes", state.slide_id)))
                                         .desired_rows(8)
                                         .desired_width(f32::INFINITY),
                                 )
                                 .changed();
                             crate::docs::editor::remember_text_edit(
                                 ui.ctx(),
-                                memory_id.with("notes"),
+                                memory_id.with(("notes", state.slide_id)),
                                 &slide.notes,
                             );
                         }
@@ -393,16 +393,24 @@ pub fn show(ui: &mut egui::Ui, deck: &mut Deck) -> bool {
         && let Some(slide) = deck.slide_mut(state.slide_id)
     {
         ui.label(egui::RichText::new("Заметки докладчика").color(crate::chrome::muted(ui)));
-        crate::docs::editor::reconcile_text_edit(ui.ctx(), memory_id.with("notes"), &slide.notes);
+        crate::docs::editor::reconcile_text_edit(
+            ui.ctx(),
+            memory_id.with(("notes", state.slide_id)),
+            &slide.notes,
+        );
         changed |= ui
             .add_sized(
                 Vec2::new(ui.available_width(), 70.0),
                 egui::TextEdit::multiline(&mut slide.notes)
-                    .id(memory_id.with("notes"))
+                    .id(memory_id.with(("notes", state.slide_id)))
                     .desired_rows(3),
             )
             .changed();
-        crate::docs::editor::remember_text_edit(ui.ctx(), memory_id.with("notes"), &slide.notes);
+        crate::docs::editor::remember_text_edit(
+            ui.ctx(),
+            memory_id.with(("notes", state.slide_id)),
+            &slide.notes,
+        );
     }
     if ui.is_enabled()
         && !ui.ctx().text_edit_focused()
@@ -1571,9 +1579,16 @@ fn properties(ui: &mut egui::Ui, e: &mut Element) -> bool {
                             ui.horizontal(|ui| {
                                 for (ci, value) in row.iter_mut().enumerate() {
                                     ui.push_id(ci, |ui| {
+                                        let id = ui.id().with(("table-cell", e.id, ri, ci));
+                                        crate::docs::editor::reconcile_text_edit(
+                                            ui.ctx(),
+                                            id,
+                                            value,
+                                        );
                                         changed |= ui
                                             .add(
                                                 egui::TextEdit::singleline(value)
+                                                    .id(id)
                                                     .desired_width(65.0),
                                             )
                                             .on_hover_text(format!(
@@ -1582,6 +1597,11 @@ fn properties(ui: &mut egui::Ui, e: &mut Element) -> bool {
                                                 ci + 1
                                             ))
                                             .changed();
+                                        crate::docs::editor::remember_text_edit(
+                                            ui.ctx(),
+                                            id,
+                                            value,
+                                        );
                                     });
                                 }
                             });
@@ -1644,9 +1664,13 @@ fn properties(ui: &mut egui::Ui, e: &mut Element) -> bool {
                                     .get(index)
                                     .cloned()
                                     .unwrap_or_else(|| (index + 1).to_string());
+                                let id = ui.id().with(("chart-label", e.id, index));
+                                crate::docs::editor::reconcile_text_edit(ui.ctx(), id, &label);
                                 if ui
                                     .add(
-                                        egui::TextEdit::singleline(&mut label).desired_width(100.0),
+                                        egui::TextEdit::singleline(&mut label)
+                                            .id(id)
+                                            .desired_width(100.0),
                                     )
                                     .changed()
                                 {
@@ -1654,10 +1678,11 @@ fn properties(ui: &mut egui::Ui, e: &mut Element) -> bool {
                                         labels.resize_with(index + 1, String::new);
                                     }
                                     if let Some(stored) = labels.get_mut(index) {
-                                        *stored = label;
+                                        stored.clone_from(&label);
                                         changed = true;
                                     }
                                 }
+                                crate::docs::editor::remember_text_edit(ui.ctx(), id, &label);
                                 changed |= ui
                                     .add(egui::DragValue::new(value).range(-1.0e20..=1.0e20))
                                     .changed();
@@ -2368,6 +2393,46 @@ fn align(slide: &mut Slide, ids: &[u64], axis: &str, width: f32, height: f32) {
 pub fn rgb(c: [u8; 3]) -> Color32 {
     Color32::from_rgb(c[0], c[1], c[2])
 }
+fn animation_start(
+    element: &Element,
+    click_times: &[f32],
+    click: &mut usize,
+    previous_start: f32,
+    previous_end: f32,
+) -> f32 {
+    match element.animation.trigger.as_str() {
+        "on_click" => {
+            let start =
+                click_times.get(*click).copied().unwrap_or(f32::INFINITY) + element.animation.delay;
+            *click += 1;
+            start
+        }
+        "after_previous" => previous_end + element.animation.delay,
+        _ => previous_start + element.animation.delay,
+    }
+}
+pub(crate) fn animation_end(slide: &Slide, click_times: &[f32]) -> f32 {
+    let (mut previous_start, mut previous_end, mut latest, mut click) = (0.0, 0.0, 0.0_f32, 0);
+    for element in slide
+        .elements
+        .iter()
+        .filter(|element| element.animation.effect != "none")
+    {
+        previous_start = animation_start(
+            element,
+            click_times,
+            &mut click,
+            previous_start,
+            previous_end,
+        );
+        previous_end = previous_start + element.animation.duration;
+        latest = latest.max(previous_end);
+    }
+    latest
+}
+pub(crate) fn motion_progress(elapsed: f32, start: f32, duration: f32) -> f32 {
+    ((elapsed - start) / duration.max(0.001)).clamp(0.0, 1.0)
+}
 pub fn paint_slide(
     ctx: &egui::Context,
     painter: &egui::Painter,
@@ -2389,20 +2454,14 @@ pub fn paint_slide(
         if let Some((time, click_times)) = animation
             && element.animation.effect != "none"
         {
-            let start = match element.animation.trigger.as_str() {
-                "on_click" => {
-                    let start = click_times
-                        .get(click_count)
-                        .copied()
-                        .unwrap_or(f32::INFINITY)
-                        + element.animation.delay;
-                    click_count += 1;
-                    start
-                }
-                "after_previous" => previous_end + element.animation.delay,
-                _ => previous_start + element.animation.delay,
-            };
-            let progress = ((time - start) / element.animation.duration.max(0.05)).clamp(0.0, 1.0);
+            let start = animation_start(
+                element,
+                click_times,
+                &mut click_count,
+                previous_start,
+                previous_end,
+            );
+            let progress = motion_progress(time, start, element.animation.duration);
             previous_end = start + element.animation.duration;
             previous_start = start;
             let ease = 1.0 - (1.0 - progress).powi(3);
@@ -2640,6 +2699,12 @@ fn paint_element(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn review5_short_supported_animations_finish_at_their_declared_duration() {
+        assert_eq!(motion_progress(0.01, 0.0, 0.01), 1.0);
+        assert_eq!(motion_progress(0.005, 0.0, 0.01), 0.5);
+        assert_eq!(motion_progress(0.001, 0.0, 0.001), 1.0);
+    }
+    #[test]
     fn inspection_focus_keeps_the_target_first_and_selects_its_whole_group() -> Result<(), String> {
         let ctx = egui::Context::default();
         crate::fonts::install(&ctx)?;
@@ -2854,8 +2919,12 @@ mod tests {
                         .data(|data| data.get_temp::<State>(memory_id))
                         .unwrap_or_default();
                     state.show_notes = true;
+                    if deck.slide(state.slide_id).is_none() {
+                        state.slide_id = deck.slides.first().map_or(0, |slide| slide.id);
+                    }
+                    let notes_id = memory_id.with(("notes", state.slide_id));
                     ui.ctx().data_mut(|data| data.insert_temp(memory_id, state));
-                    ui.memory_mut(|memory| memory.request_focus(memory_id.with("notes")));
+                    ui.memory_mut(|memory| memory.request_focus(notes_id));
                 }
                 show(ui, deck);
                 saved = ui.ctx().data_mut(|data| data.get_temp::<State>(memory_id));

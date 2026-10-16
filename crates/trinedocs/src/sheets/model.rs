@@ -273,6 +273,11 @@ impl Sheet {
         } else {
             (col, MAX_COLS - 1)
         };
+        let hidden = if vertical {
+            &self.hidden_rows
+        } else {
+            &self.hidden_cols
+        };
         let filled: BTreeSet<u32> = self
             .cells
             .iter()
@@ -280,12 +285,18 @@ impl Sheet {
             .filter_map(|(key, _)| parse_address(key))
             .filter(|&(r, c)| if vertical { c == col } else { r == row })
             .map(|(r, c)| if vertical { r } else { c })
+            .filter(|position| !hidden.contains(position))
             .collect();
-        let step = |p: u32| -> Option<u32> {
-            if forward {
-                (p < limit).then_some(p + 1)
-            } else {
-                p.checked_sub(1)
+        let step = |mut p: u32| -> Option<u32> {
+            loop {
+                p = if forward {
+                    p.checked_add(1).filter(|p| *p <= limit)?
+                } else {
+                    p.checked_sub(1)?
+                };
+                if !hidden.contains(&p) {
+                    return Some(p);
+                }
             }
         };
         let target = match step(pos) {
@@ -472,10 +483,9 @@ impl Book {
             return Err("Недопустимый счётчик ID".into());
         }
         if self.names.len() > 10000
-            || self
-                .names
-                .iter()
-                .any(|(name, value)| name.is_empty() || name.len() > 255 || value.len() > 32767)
+            || self.names.iter().any(|(name, value)| {
+                name.is_empty() || name.chars().count() > 255 || value.len() > 32767
+            })
         {
             return Err("Недопустимое имя диапазона".into());
         }
@@ -514,7 +524,9 @@ impl Book {
     fn validate_name(&self, name: &str, except: Option<u64>) -> Result<(), String> {
         if name.is_empty()
             || name.chars().count() > 31
-            || name.chars().any(|c| "[]:*?/\\".contains(c))
+            || name
+                .chars()
+                .any(|c| c.is_control() || "[]:*?/\\".contains(c))
             || name.starts_with('\'')
             || name.ends_with('\'')
         {
@@ -871,6 +883,19 @@ impl Book {
         source.validate()?;
         target.validate()?;
         let s = self.sheet_by_id(sheet).ok_or("Лист не найден")?;
+        if s.merges.iter().any(|merge| {
+            merge.r0 <= target.r1
+                && target.r0 <= merge.r1
+                && merge.c0 <= target.c1
+                && target.c0 <= merge.c1
+                && (target.r0 != target.r1
+                    || target.c0 != target.c1
+                    || (target.r0, target.c0) != (merge.r0, merge.c0))
+        }) {
+            return Err(
+                "Заполнение затрагивает объединённые ячейки: сначала разъедините их".into(),
+            );
+        }
         let snapshot = s.clone();
         for r in target.r0..=target.r1 {
             for c in target.c0..=target.c1 {
@@ -882,6 +907,12 @@ impl Book {
                     r as i64 - sr as i64,
                     c as i64 - sc as i64,
                 );
+                if input.is_empty() && original.fmt == CellFormat::default() {
+                    if let Some(sheet) = self.sheet_by_id_mut(sheet) {
+                        sheet.cells.remove(&address(r, c));
+                    }
+                    continue;
+                }
                 self.set_input(sheet, r, c, &input)?;
                 if let Some(dst) = self.sheet_by_id_mut(sheet).and_then(|s| s.cell_mut(r, c)) {
                     dst.fmt = original.fmt;

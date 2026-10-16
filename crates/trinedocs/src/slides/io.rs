@@ -1342,15 +1342,16 @@ fn write_pptx(deck: &Deck) -> Result<Vec<u8>, String> {
             _ => String::new(),
         };
         let transition = if !effect.is_empty() || slide.transition.advance_after.is_some() {
+            let speed = if slide.transition.duration > 0.75 {
+                "slow"
+            } else if slide.transition.duration < 0.3 {
+                "fast"
+            } else {
+                "med"
+            };
+            let duration = (slide.transition.duration * 1000.0).round() as u32;
             format!(
-                "<p:transition spd=\"{}\"{advance}>{effect}</p:transition>",
-                if slide.transition.duration > 0.75 {
-                    "slow"
-                } else if slide.transition.duration < 0.3 {
-                    "fast"
-                } else {
-                    "med"
-                }
+                "<mc:AlternateContent xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" xmlns:p14=\"http://schemas.microsoft.com/office/powerpoint/2010/main\"><mc:Choice Requires=\"p14\"><p:transition spd=\"{speed}\" p14:dur=\"{duration}\"{advance}>{effect}</p:transition></mc:Choice><mc:Fallback><p:transition spd=\"{speed}\"{advance}>{effect}</p:transition></mc:Fallback></mc:AlternateContent>"
             )
         } else {
             String::new()
@@ -1452,6 +1453,18 @@ fn write_pptx(deck: &Deck) -> Result<Vec<u8>, String> {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn review5_external_pptx_keeps_exact_transition_duration() -> Result<(), String> {
+        let mut deck = Deck::default();
+        deck.slides[0].transition.effect = "fade".into();
+        deck.slides[0].transition.duration = 1.375;
+        let mut parts = read_zip(&write(&deck, "pptx")?)?;
+        parts.remove("customXml/trinedocs-deck.json");
+        let imported = read(&write_zip(parts.into_iter().collect())?, "pptx")?;
+        assert_eq!(imported.slides[0].transition.effect, "fade");
+        assert!((imported.slides[0].transition.duration - 1.375).abs() < 0.001);
+        Ok(())
+    }
     #[test]
     fn fallback_shapes_and_partial_run_properties_import_without_losing_text_style()
     -> Result<(), String> {

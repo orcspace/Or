@@ -259,7 +259,7 @@ fn insert_ribbon_text(
     } else {
         state.insert(doc, text);
     }
-    refocus(ui, state, canvas_id);
+    refocus(ui, doc, state, canvas_id);
 }
 
 pub fn request_focus(ctx: &egui::Context, tab_id: u64, paragraph_id: u64) {
@@ -764,14 +764,7 @@ pub fn show_with_edits(ui: &mut egui::Ui, doc: &mut Doc, edits: Option<&[TextEdi
     ui.horizontal(|ui| {
         ui.weak(format!(
             "Страница {} из {}  ·  {} слов  ·  {} знаков",
-            layout
-                .rows
-                .iter()
-                .rev()
-                .find(|r| r.paragraph == state.cursor.paragraph
-                    && state.cursor.offset >= r.start
-                    && state.cursor.offset <= r.end)
-                .map_or(1, |r| r.page + 1),
+            current_page(&layout, &state),
             layout.pages.len(),
             words,
             chars
@@ -814,12 +807,7 @@ pub fn show_with_edits(ui: &mut egui::Ui, doc: &mut Doc, edits: Option<&[TextEdi
     if state.previous.as_deref() != Some(doc) {
         state.previous = Some(std::sync::Arc::new(doc.clone()));
     }
-    let selection = if state.selected() {
-        let (a, b) = state.range();
-        doc.selected_text(a, b)
-    } else {
-        String::new()
-    };
+    let selection = editor_selection(ui.ctx(), doc, &state, canvas_id);
     let tab = ui.ctx().data(|d| d.get_temp::<u64>(active_tab_id()));
     ui.ctx().data_mut(|d| {
         d.insert_temp(selection_id(), (tab, selection));
@@ -827,13 +815,65 @@ pub fn show_with_edits(ui: &mut egui::Ui, doc: &mut Doc, edits: Option<&[TextEdi
     });
     changed
 }
-fn cell_editor_id(canvas_id: egui::Id) -> egui::Id {
-    canvas_id.with("table-cell-editor")
+fn editor_selection(
+    ctx: &egui::Context,
+    doc: &Doc,
+    state: &EditorState,
+    canvas_id: egui::Id,
+) -> String {
+    if let Some(cell) = state.table_cell.and_then(|cursor| cell_ref(doc, cursor)) {
+        return egui::text_edit::TextEditState::load(ctx, cell_editor_id(canvas_id, doc, state))
+            .and_then(|widget| widget.cursor.char_range())
+            .map(|range| {
+                let [start, end] = range.sorted_cursors();
+                cell_text(cell)
+                    .chars()
+                    .skip(start.index.0)
+                    .take(end.index.0.saturating_sub(start.index.0))
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+    if state.selected() {
+        let (start, end) = state.range();
+        doc.selected_text(start, end)
+    } else {
+        String::new()
+    }
+}
+fn current_page(layout: &Layout, state: &EditorState) -> usize {
+    if let Some(cursor) = state.table_cell {
+        return layout
+            .cells
+            .iter()
+            .filter(|cell| {
+                cell.table == cursor.table && cell.row == cursor.row && cell.column == cursor.column
+            })
+            .min_by_key(|cell| cell.page.abs_diff(state.table_page.unwrap_or(cell.page)))
+            .map_or(1, |cell| cell.page + 1);
+    }
+    layout
+        .rows
+        .iter()
+        .rev()
+        .find(|row| {
+            row.paragraph == state.cursor.paragraph
+                && state.cursor.offset >= row.start
+                && state.cursor.offset <= row.end
+        })
+        .map_or(1, |row| row.page + 1)
+}
+fn cell_editor_id(canvas_id: egui::Id, doc: &Doc, state: &EditorState) -> egui::Id {
+    let cell = state
+        .table_cell
+        .and_then(|cursor| cell_ref(doc, cursor))
+        .map(|cell| cell.id);
+    canvas_id.with(("table-cell-editor", cell))
 }
 /// Returns keyboard focus to where the user was typing: the active table cell or the page.
-fn refocus(ui: &egui::Ui, state: &EditorState, canvas_id: egui::Id) {
+fn refocus(ui: &egui::Ui, doc: &Doc, state: &EditorState, canvas_id: egui::Id) {
     let target = if state.table_cell.is_some() {
-        cell_editor_id(canvas_id)
+        cell_editor_id(canvas_id, doc, state)
     } else {
         canvas_id
     };
@@ -1065,7 +1105,7 @@ fn table_grid_picker(
         state.table_columns = c + 1;
         state.table_rows = r + 1;
         insert_table(doc, state);
-        refocus(ui, state, canvas_id);
+        refocus(ui, doc, state, canvas_id);
         ui.close();
     }
     ui.separator();
@@ -1077,7 +1117,7 @@ fn table_grid_picker(
     });
     if ui.button("Вставить таблицу").clicked() {
         insert_table(doc, state);
-        refocus(ui, state, canvas_id);
+        refocus(ui, doc, state, canvas_id);
         ui.close();
     }
 }
@@ -1166,7 +1206,7 @@ fn home_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id
         )
         .clicked()
         {
-            refocus(ui, state, canvas_id);
+            refocus(ui, doc, state, canvas_id);
             crate::clipboard::paste(ui.ctx());
         }
         ui.horizontal(|ui| {
@@ -1184,7 +1224,7 @@ fn home_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id
                     .inner
                     .clicked()
                 {
-                    refocus(ui, state, canvas_id);
+                    refocus(ui, doc, state, canvas_id);
                     ui.ctx().send_viewport_cmd(command);
                 }
             }
@@ -1202,7 +1242,7 @@ fn home_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id
                 } else {
                     Some(state.typing.clone())
                 };
-                refocus(ui, state, canvas_id);
+                refocus(ui, doc, state, canvas_id);
             }
         });
     });
@@ -1211,7 +1251,7 @@ fn home_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id
             let mut font = state.typing.font.clone();
             if crate::chrome::font_picker(ui, "docs-font", &mut font, 130.0) {
                 state.apply_format(doc, |f| f.font = font.clone());
-                refocus(ui, state, canvas_id);
+                refocus(ui, doc, state, canvas_id);
             }
             let mut size = state.typing.size;
             if crate::chrome::size_picker(ui, "docs-size", &mut size) {
@@ -1225,7 +1265,7 @@ fn home_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id
                 if tool(ui, glyph, tip, false).clicked() {
                     let size = crate::chrome::step_size(state.typing.size, grow).clamp(4.0, 144.0);
                     state.apply_format(doc, |f| f.size = size);
-                    refocus(ui, state, canvas_id);
+                    refocus(ui, doc, state, canvas_id);
                 }
             }
         });
@@ -1278,7 +1318,7 @@ fn home_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id
                         4 => f.script = if on { 0 } else { -1 },
                         _ => f.script = if on { 0 } else { 1 },
                     });
-                    refocus(ui, state, canvas_id);
+                    refocus(ui, doc, state, canvas_id);
                 }
             }
             if let Some(color) = crate::chrome::color_menu(
@@ -1289,18 +1329,18 @@ fn home_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id
                 Some("Нет цвета"),
             ) {
                 state.apply_format(doc, |f| f.highlight = color);
-                refocus(ui, state, canvas_id);
+                refocus(ui, doc, state, canvas_id);
             }
             if let Some(Some(color)) =
                 crate::chrome::color_menu(ui, "A", "Цвет шрифта", Some(t.color), None)
             {
                 state.apply_format(doc, |f| f.color = color);
-                refocus(ui, state, canvas_id);
+                refocus(ui, doc, state, canvas_id);
             }
             if tool(ui, "A✕", "Очистить всё форматирование", false).clicked()
             {
                 state.apply_format(doc, |f| *f = TextFormat::default());
-                refocus(ui, state, canvas_id);
+                refocus(ui, doc, state, canvas_id);
             }
         });
     });
@@ -1317,7 +1357,7 @@ fn home_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id
                     selected_paragraphs(doc, state, |p| {
                         p.list = if p.list == kind { List::None } else { kind }
                     });
-                    refocus(ui, state, canvas_id);
+                    refocus(ui, doc, state, canvas_id);
                 }
             }
             for (glyph, tip, delta) in [
@@ -1328,7 +1368,7 @@ fn home_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id
                     selected_paragraphs(doc, state, |p| {
                         p.indent = (p.indent + delta).clamp(0.0, 250.0)
                     });
-                    refocus(ui, state, canvas_id);
+                    refocus(ui, doc, state, canvas_id);
                 }
             }
             ui.menu_button("↕", |ui| paragraph_spacing(ui, doc, state))
@@ -1355,7 +1395,7 @@ fn home_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id
             {
                 if crate::chrome::alignment_button(ui, index, tip, current == align).clicked() {
                     selected_paragraphs(doc, state, |p| p.align = align);
-                    refocus(ui, state, canvas_id);
+                    refocus(ui, doc, state, canvas_id);
                 }
             }
         });
@@ -1373,7 +1413,7 @@ fn home_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id
                 ] {
                     if style_card(ui, style, current == style).clicked() {
                         apply_style(doc, state, style);
-                        refocus(ui, state, canvas_id);
+                        refocus(ui, doc, state, canvas_id);
                     }
                 }
             });
@@ -1462,7 +1502,10 @@ fn insert_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_
         });
     });
     group(ui, "Колонтитулы", 150.0, |ui| {
-        ui.menu_button("Верхний и нижний колонтитулы…", |ui| page_headers(ui, doc));
+        ui.menu_button(
+            "Верхний и нижний колонтитулы…",
+            |ui| page_headers(ui, doc, canvas_id),
+        );
         ui.checkbox(&mut doc.page.page_numbers, "Номера страниц");
     });
     group(ui, "Текст и символы", 150.0, |ui| {
@@ -1964,11 +2007,17 @@ fn paragraph_spacing(ui: &mut egui::Ui, doc: &mut Doc, state: &EditorState) {
         selected_paragraphs(doc, state, |p| p.page_break_before = page_break);
     }
 }
-fn page_headers(ui: &mut egui::Ui, doc: &mut Doc) {
-    ui.label("Верхний колонтитул");
-    ui.text_edit_singleline(&mut doc.page.header);
-    ui.label("Нижний колонтитул");
-    ui.text_edit_singleline(&mut doc.page.footer);
+fn page_headers(ui: &mut egui::Ui, doc: &mut Doc, canvas_id: egui::Id) {
+    for (label, salt, text) in [
+        ("Верхний колонтитул", "header", &mut doc.page.header),
+        ("Нижний колонтитул", "footer", &mut doc.page.footer),
+    ] {
+        let id = canvas_id.with(salt);
+        ui.label(label);
+        reconcile_text_edit(ui.ctx(), id, text);
+        ui.add(egui::TextEdit::singleline(&mut *text).id(id));
+        remember_text_edit(ui.ctx(), id, text);
+    }
     ui.checkbox(&mut doc.page.page_numbers, "Номера страниц");
 }
 fn outline_menu(ui: &mut egui::Ui, doc: &Doc, state: &mut EditorState) {
@@ -2356,7 +2405,7 @@ fn cell_editor(
     let Some(cursor) = state.table_cell else {
         return;
     };
-    let id = cell_editor_id(canvas_id);
+    let id = cell_editor_id(canvas_id, doc, state);
     if ui.is_enabled() && ui.memory(|m| m.has_focus(id)) {
         let (forward, back, escape) = ui.input_mut(|i| {
             (
@@ -3162,6 +3211,76 @@ fn today() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn review5_cell_widget_identity_follows_stable_ids_and_selection_uses_that_cell()
+    -> Result<(), String> {
+        let ctx = egui::Context::default();
+        let mut doc = Doc::from_text("unrelated body selection");
+        let table = doc.add_table(doc.paragraphs[0].id, 2, 1)?;
+        doc.set_cell_text(table, 0, 0, "a🌍bc")?;
+        let canvas = egui::Id::new("cell-selection");
+        let mut state = EditorState {
+            table_cell: Some(TableCursor {
+                table,
+                row: 0,
+                column: 0,
+            }),
+            ..Default::default()
+        };
+        let first = cell_editor_id(canvas, &doc, &state);
+        let mut widget = egui::text_edit::TextEditState::default();
+        widget
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(1),
+                egui::text::CCursor::new(3),
+            )));
+        widget.store(&ctx, first);
+        assert_eq!(editor_selection(&ctx, &doc, &state, canvas), "🌍b");
+        state.table_cell = Some(TableCursor {
+            table,
+            row: 1,
+            column: 0,
+        });
+        assert_ne!(cell_editor_id(canvas, &doc, &state), first);
+        state.table_cell = Some(TableCursor {
+            table,
+            row: 0,
+            column: 0,
+        });
+        let before = doc.clone();
+        doc.edit_table(table, TableEdit::InsertRow(0))?;
+        state.table_cell = rebase_active_cell(&before, &doc, state.table_cell.ok_or("cursor")?);
+        assert_eq!(cell_editor_id(canvas, &doc, &state), first);
+        Ok(())
+    }
+    #[test]
+    fn review5_status_page_follows_the_selected_table_fragment() {
+        let cursor = TableCursor {
+            table: 12,
+            row: 1,
+            column: 2,
+        };
+        let mut layout = Layout::default();
+        for page in [0, 3] {
+            layout.cells.push(CellBox {
+                table: 12,
+                row: 1,
+                column: 2,
+                page,
+                x: 0.0,
+                y: 0.0,
+                w: 10.0,
+                h: 10.0,
+            });
+        }
+        let state = EditorState {
+            table_cell: Some(cursor),
+            table_page: Some(3),
+            ..Default::default()
+        };
+        assert_eq!(current_page(&layout, &state), 4);
+    }
     #[test]
     fn review4_text_baseline_reuses_storage_and_rebases_external_unicode_edit() -> Result<(), String>
     {

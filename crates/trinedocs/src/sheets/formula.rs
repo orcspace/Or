@@ -104,7 +104,7 @@ fn lexer(input: &str) -> CalcResult<Vec<Token>> {
                 return Err("#NUM!".into());
             }
             TokenKind::Number(n)
-        } else if ch.is_alphabetic() || ch == '_' || ch == '$' || ch == '#' {
+        } else if ch.is_alphabetic() || matches!(ch, '_' | '$' | '#' | '\\') {
             i += ch.len_utf8();
             while i < input.len() {
                 let c = input
@@ -1670,7 +1670,7 @@ impl<'a> Engine<'a> {
                 let vals = numbers(a, false)?;
                 let mut result = if name == "GCD" { 0u64 } else { 1 };
                 for x in vals {
-                    if !(0.0..=9e15).contains(&x) {
+                    if !(0.0..9007199254740992.0).contains(&x) {
                         return Err("#NUM!".into());
                     }
                     let v = x.trunc() as u64;
@@ -1685,6 +1685,9 @@ impl<'a> Engine<'a> {
                             .and_then(|n| n.checked_mul(v))
                             .ok_or("#NUM!")?
                     };
+                }
+                if result >= 9_007_199_254_740_992 {
+                    return Err("#NUM!".into());
                 }
                 num(result as f64)
             }
@@ -1995,7 +1998,11 @@ impl<'a> Engine<'a> {
             }
             "VALUE" | "NUMBERVALUE" => {
                 arity(1, if name == "VALUE" { 1 } else { 3 })?;
-                let mut s = text(0)?.trim().to_string();
+                let raw = text(0)?;
+                if name == "VALUE" {
+                    return num(value_text(&raw, self.book.locale_ru)?);
+                }
+                let mut s = raw.trim().to_string();
                 let mut divisor = 1.0;
                 while s.ends_with('%') {
                     s.pop();
@@ -2076,11 +2083,31 @@ impl<'a> Engine<'a> {
                 {
                     return Err("#VALUE!".into());
                 }
-                string(char::from_u32(code as u32).ok_or("#VALUE!")?.to_string())
+                if name == "CHAR" {
+                    let byte = [code as u8];
+                    let encoding = ansi_encoding(self.book.locale_ru);
+                    let (text, errors) = encoding.decode_without_bom_handling(&byte);
+                    if errors {
+                        return Err("#VALUE!".into());
+                    }
+                    string(text.into_owned())
+                } else {
+                    string(char::from_u32(code as u32).ok_or("#VALUE!")?.to_string())
+                }
             }
             "CODE" | "UNICODE" => {
                 arity(1, 1)?;
-                num(u32::from(text(0)?.chars().next().ok_or("#VALUE!")?) as f64)
+                let first = text(0)?.chars().next().ok_or("#VALUE!")?.to_string();
+                if name == "CODE" {
+                    let (bytes, _, errors) = ansi_encoding(self.book.locale_ru).encode(&first);
+                    num(if errors {
+                        63.0
+                    } else {
+                        f64::from(*bytes.first().ok_or("#VALUE!")?)
+                    })
+                } else {
+                    num(u32::from(first.chars().next().ok_or("#VALUE!")?) as f64)
+                }
             }
             "ROWS" | "COLUMNS" => {
                 arity(1, 1)?;
@@ -2367,31 +2394,7 @@ impl<'a> Engine<'a> {
             }
             "TIMEVALUE" => {
                 arity(1, 1)?;
-                let input = text(0)?.trim().to_ascii_uppercase();
-                let (clock, afternoon) = if let Some(clock) = input.strip_suffix("AM") {
-                    (clock.trim(), Some(false))
-                } else if let Some(clock) = input.strip_suffix("PM") {
-                    (clock.trim(), Some(true))
-                } else {
-                    (input.as_str(), None)
-                };
-                let vals = clock
-                    .split(':')
-                    .map(|part| part.trim().parse::<u32>().map_err(|_| "#VALUE!"))
-                    .collect::<Result<Vec<_>, _>>()?;
-                if !(if afternoon.is_some() { 1 } else { 2 }..=3).contains(&vals.len()) {
-                    return Err("#VALUE!".into());
-                }
-                let mut hour = vals[0];
-                let minute = vals.get(1).copied().unwrap_or(0);
-                let second = vals.get(2).copied().unwrap_or(0);
-                if hour > if afternoon.is_some() { 12 } else { 23 } || minute > 59 || second > 59 {
-                    return Err("#VALUE!".into());
-                }
-                if let Some(afternoon) = afternoon {
-                    hour = hour % 12 + if afternoon { 12 } else { 0 };
-                }
-                num(f64::from(hour * 3600 + minute * 60 + second) / 86400.0)
+                num(time_text_serial(&text(0)?)?)
             }
             "DATEDIF" => {
                 arity(3, 3)?;
@@ -2436,56 +2439,64 @@ impl<'a> Engine<'a> {
             "NETWORKDAYS" | "WORKDAY" => {
                 arity(2, 3)?;
                 let initial = n(0)?.floor();
-                let offset = n(1)?.trunc();
-                if !(0.0..=2958465.0).contains(&initial)
-                    || offset.abs()
-                        > if name == "WORKDAY" {
-                            100000.0
-                        } else {
-                            2958465.0
-                        }
-                {
-                    return Err("#NUM!".into());
+                if !(0.0..=2958465.0).contains(&initial) {
+                    return Err("#VALUE!".into());
                 }
                 let start = initial as i64;
-                let holidays: HashSet<i64> = a
-                    .get(2)
-                    .map(|g| numbers(std::slice::from_ref(g), false))
-                    .transpose()?
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|v| v.floor() as i64)
-                    .collect();
-                let is_work = |d: i64| {
-                    let dow = (d - 2).rem_euclid(7);
-                    dow < 5 && !holidays.contains(&d)
-                };
-                if name == "NETWORKDAYS" {
-                    let end = offset as i64;
-                    if end < 0 {
-                        return Err("#NUM!".into());
-                    }
-                    let lo = start.min(end);
-                    let hi = start.max(end);
-                    if hi - lo > 1_000_000 {
-                        return Err("#NUM!".into());
-                    }
-                    num((lo..=hi).filter(|d| is_work(*d)).count() as f64
-                        * if end < start { -1.0 } else { 1.0 })
-                } else {
-                    let days = offset as i64;
-                    let mut d = start;
-                    let mut remaining = days.abs();
-                    while remaining > 0 {
-                        d += if days < 0 { -1 } else { 1 };
-                        if is_work(d) {
-                            remaining -= 1;
+                let mut holidays = std::collections::BTreeSet::new();
+                if let Some(grid) = a.get(2) {
+                    for date in numbers(std::slice::from_ref(grid), false)? {
+                        if !(0.0..2958466.0).contains(&date) {
+                            return Err("#VALUE!".into());
                         }
+                        holidays.insert(date.floor() as i64);
                     }
-                    if !(0..=2958465).contains(&d) {
+                }
+                let amount = n(1)?.trunc();
+                if name == "NETWORKDAYS" {
+                    if !(0.0..=2958465.0).contains(&amount) {
+                        return Err("#VALUE!".into());
+                    }
+                    let end = amount as i64;
+                    let count = working_days(start.min(end), start.max(end), &holidays);
+                    num(count as f64 * if end < start { -1.0 } else { 1.0 })
+                } else {
+                    if amount.abs() > 2958466.0 {
                         return Err("#NUM!".into());
                     }
-                    num(d as f64)
+                    if amount == 0.0 {
+                        return num(start as f64);
+                    }
+                    let wanted = amount.abs() as i64;
+                    if amount > 0.0 {
+                        if working_days(start + 1, 2958465, &holidays) < wanted {
+                            return Err("#NUM!".into());
+                        }
+                        let (mut low, mut high) = (start + 1, 2958465);
+                        while low < high {
+                            let middle = low + (high - low) / 2;
+                            if working_days(start + 1, middle, &holidays) >= wanted {
+                                high = middle;
+                            } else {
+                                low = middle + 1;
+                            }
+                        }
+                        num(low as f64)
+                    } else {
+                        if working_days(0, start - 1, &holidays) < wanted {
+                            return Err("#NUM!".into());
+                        }
+                        let (mut low, mut high) = (0, start - 1);
+                        while low < high {
+                            let middle = low + (high - low + 1) / 2;
+                            if working_days(middle, start - 1, &holidays) >= wanted {
+                                low = middle;
+                            } else {
+                                high = middle - 1;
+                            }
+                        }
+                        num(low as f64)
+                    }
                 }
             }
             "PMT" | "PV" | "FV" => {
@@ -2498,12 +2509,8 @@ impl<'a> Engine<'a> {
                 if periods == 0.0 && (name == "PMT") {
                     return Err("#DIV/0!".into());
                 }
-                let growth = (1.0 + rate).powf(periods);
-                let annuity = if rate == 0.0 {
-                    periods
-                } else {
-                    (growth - 1.0) / rate * (1.0 + rate * kind)
-                };
+                let growth = growth(rate, periods);
+                let annuity = annuity(rate, periods, kind);
                 num(match name {
                     "PMT" => {
                         if annuity == 0.0 {
@@ -2538,6 +2545,8 @@ impl<'a> Engine<'a> {
             "IRR" => {
                 arity(1, 2)?;
                 let vals = numbers(&a[..1], false)?;
+                let scale = vals.iter().map(|v| v.abs()).fold(0.0, f64::max);
+                let vals: Vec<_> = vals.into_iter().map(|v| v / scale).collect();
                 if !vals.iter().any(|v| *v < 0.0) || !vals.iter().any(|v| *v > 0.0) {
                     return Err("#NUM!".into());
                 }
@@ -2600,12 +2609,15 @@ impl<'a> Engine<'a> {
                     }
                     return num(-(present + future) / payment);
                 }
-                let z = payment * (1.0 + rate * kind) / rate;
-                let ratio = (z - future) / (present + z);
-                if !ratio.is_finite() || ratio <= 0.0 || rate <= -1.0 {
+                if rate <= -1.0 {
                     return Err("#NUM!".into());
                 }
-                num(ratio.ln() / (1.0 + rate).ln())
+                let delta =
+                    -rate * (present + future) / (payment * (1.0 + rate * kind) + present * rate);
+                if !delta.is_finite() || delta <= -1.0 {
+                    return Err("#NUM!".into());
+                }
+                num(delta.ln_1p() / rate.ln_1p())
             }
             "RATE" => {
                 arity(3, 6)?;
@@ -2619,12 +2631,7 @@ impl<'a> Engine<'a> {
                     return Err("#NUM!".into());
                 }
                 let balance = |r: f64| -> f64 {
-                    if r.abs() < 1e-12 {
-                        present + payment * periods + future
-                    } else {
-                        let growth = (1.0 + r).powf(periods);
-                        present * growth + payment * (1.0 + r * kind) * (growth - 1.0) / r + future
-                    }
+                    present * growth(r, periods) + payment * annuity(r, periods, kind) + future
                 };
                 for _ in 0..100 {
                     let step = 1e-7;
@@ -2654,21 +2661,15 @@ impl<'a> Engine<'a> {
                 if period < 1.0 || period > periods.ceil() || rate <= -1.0 {
                     return Err("#NUM!".into());
                 }
-                let annuity = |r: f64, count: f64| -> f64 {
-                    if r == 0.0 {
-                        count
-                    } else {
-                        ((1.0 + r).powf(count) - 1.0) / r * (1.0 + r * kind)
-                    }
-                };
+                let annuity = |r: f64, count: f64| annuity(r, count, kind);
                 let total = annuity(rate, periods);
                 if total == 0.0 {
                     return Err("#DIV/0!".into());
                 }
-                let payment = -(present * (1.0 + rate).powf(periods) + future) / total;
+                let payment = -(present * growth(rate, periods) + future) / total;
                 // Balance after `count` periods with the FV sign convention.
                 let fv = |count: f64| -> f64 {
-                    -(present * (1.0 + rate).powf(count) + payment * annuity(rate, count))
+                    -(present * growth(rate, count) + payment * annuity(rate, count))
                 };
                 let interest = if period == 1.0 {
                     if kind != 0.0 { 0.0 } else { -present * rate }
@@ -3122,6 +3123,132 @@ impl<'a> Engine<'a> {
             }
             _ => Err("#NAME?".into()),
         }
+    }
+}
+fn ansi_encoding(ru: bool) -> &'static encoding_rs::Encoding {
+    if ru {
+        encoding_rs::WINDOWS_1251
+    } else {
+        encoding_rs::WINDOWS_1252
+    }
+}
+fn time_text_serial(source: &str) -> CalcResult<f64> {
+    let input = source.trim().to_ascii_uppercase();
+    let (clock, afternoon) = if let Some(clock) = input.strip_suffix("AM") {
+        (clock.trim(), Some(false))
+    } else if let Some(clock) = input.strip_suffix("PM") {
+        (clock.trim(), Some(true))
+    } else {
+        (input.as_str(), None)
+    };
+    let vals = clock
+        .split(':')
+        .map(|part| part.trim().parse::<u32>().map_err(|_| "#VALUE!"))
+        .collect::<Result<Vec<_>, _>>()?;
+    if !(if afternoon.is_some() { 1 } else { 2 }..=3).contains(&vals.len()) {
+        return Err("#VALUE!".into());
+    }
+    let mut hour = vals[0];
+    let minute = vals.get(1).copied().unwrap_or(0);
+    let second = vals.get(2).copied().unwrap_or(0);
+    if hour > if afternoon.is_some() { 12 } else { 23 } || minute > 59 || second > 59 {
+        return Err("#VALUE!".into());
+    }
+    if let Some(afternoon) = afternoon {
+        hour = hour % 12 + if afternoon { 12 } else { 0 };
+    }
+    Ok(f64::from(hour * 3600 + minute * 60 + second) / 86400.0)
+}
+fn value_text(source: &str, ru: bool) -> CalcResult<f64> {
+    let text = source.trim();
+    if let Ok(date) = date_text_serial(text, ru) {
+        return Ok(date);
+    }
+    if let Ok(time) = time_text_serial(text) {
+        return Ok(time);
+    }
+    for (offset, _) in text.char_indices().filter(|(_, c)| matches!(c, ' ' | 'T')) {
+        if let (Ok(date), Ok(time)) = (
+            date_text_serial(&text[..offset], ru),
+            time_text_serial(&text[offset + 1..]),
+        ) {
+            return Ok(date + time);
+        }
+    }
+    let mut number = text;
+    let mut negative = false;
+    if let Some(inner) = number.strip_prefix('(').and_then(|n| n.strip_suffix(')')) {
+        number = inner.trim();
+        negative = true;
+    }
+    let currency = |c: char| matches!(c, '$' | '€' | '£' | '¥' | '₽' | '₸');
+    number = number.trim_matches(currency).trim();
+    let mut percent = 0usize;
+    while let Some(inner) = number.strip_suffix('%') {
+        number = inner.trim_end();
+        percent += 1;
+    }
+    let decimal = if ru && number.contains(',') { ',' } else { '.' };
+    let group = if decimal == ',' { '.' } else { ',' };
+    let compact: String = number
+        .chars()
+        .filter(|c| !matches!(c, ' ' | '\u{a0}'))
+        .collect();
+    let mut normalized = String::new();
+    let mut fractional = false;
+    for c in compact.chars() {
+        if c == decimal {
+            if fractional {
+                return Err("#VALUE!".into());
+            }
+            normalized.push('.');
+            fractional = true;
+        } else if c == group {
+            if fractional {
+                return Err("#VALUE!".into());
+            }
+        } else {
+            normalized.push(c);
+        }
+    }
+    let mut value = normalized.parse::<f64>().map_err(|_| "#VALUE!")?;
+    if !value.is_finite() {
+        return Err("#NUM!".into());
+    }
+    for _ in 0..percent {
+        value /= 100.0;
+    }
+    finite(if negative { -value } else { value })
+}
+fn working_days(first: i64, last: i64, holidays: &std::collections::BTreeSet<i64>) -> i64 {
+    if first > last {
+        return 0;
+    }
+    let days = last - first + 1;
+    let weekday = |date: i64| (date - 2).rem_euclid(7) < 5;
+    days / 7 * 5
+        + (0..days % 7)
+            .filter(|offset| weekday(first + offset))
+            .count() as i64
+        - holidays
+            .range(first..=last)
+            .filter(|date| weekday(**date))
+            .count() as i64
+}
+fn growth(rate: f64, periods: f64) -> f64 {
+    if rate > -1.0 {
+        (rate.ln_1p() * periods).exp()
+    } else {
+        (1.0 + rate).powf(periods)
+    }
+}
+fn annuity(rate: f64, periods: f64, kind: f64) -> f64 {
+    if rate == 0.0 {
+        periods
+    } else if rate > -1.0 {
+        (rate.ln_1p() * periods).exp_m1() / rate * (1.0 + rate * kind)
+    } else {
+        ((1.0 + rate).powf(periods) - 1.0) / rate * (1.0 + rate * kind)
     }
 }
 fn interpolate(low: f64, high: f64, fraction: f64) -> f64 {

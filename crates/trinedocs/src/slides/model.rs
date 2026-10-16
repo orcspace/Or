@@ -520,6 +520,9 @@ impl Deck {
         values: &[Vec<String>],
     ) -> Result<(), String> {
         let cells = self.table_cells_mut(slide_id, element_id)?;
+        if values.iter().all(Vec::is_empty) {
+            return Ok(());
+        }
         let width = values.iter().map(Vec::len).max().unwrap_or(0);
         let rows = cells.len().max(row.saturating_add(values.len()));
         let columns = cells
@@ -1153,6 +1156,24 @@ pub fn text_lines(element: &Element) -> Vec<String> {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn review5_writing_no_table_values_never_resizes_or_normalizes_the_table() -> Result<(), String>
+    {
+        let mut deck = Deck::default();
+        let slide = deck.slides[0].id;
+        let table = deck.add_element(
+            slide,
+            ElementKind::Table {
+                cells: vec![vec!["one".into()], vec!["two".into(), "three".into()]],
+            },
+        )?;
+        let before = deck.clone();
+        deck.write_table(slide, table, 999, 999, &[])?;
+        deck.write_table(slide, table, 999, 999, &[vec![], vec![]])?;
+        assert_eq!(deck, before);
+        Ok(())
+    }
+
     #[test]
     fn tiny_chart_values_use_the_same_full_scale_as_ordinary_values() -> Result<(), String> {
         let mut deck = Deck::empty();

@@ -215,7 +215,12 @@ fn decode_text(bytes: &[u8]) -> Result<String, String> {
             .collect();
         return String::from_utf16(&units).map_err(|e| e.to_string());
     }
-    let content = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
+    if let Some(content) = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]) {
+        return std::str::from_utf8(content)
+            .map(str::to_owned)
+            .map_err(|error| format!("Некорректный UTF-8 после BOM: {error}"));
+    }
+    let content = bytes;
     if let Ok(text) = std::str::from_utf8(content) {
         return Ok(text.into());
     }
@@ -275,8 +280,12 @@ fn apply_rpr(format: &mut TextFormat, node: &Node) {
     if let Some(n) = node.child("sz") {
         format.size = number(n.value(), format.size * 2.0) / 2.0;
     }
-    if let Some(n) = node.child("color").and_then(Node::value).and_then(color) {
-        format.color = n;
+    if let Some(value) = node.child("color").and_then(Node::value) {
+        if value == "auto" {
+            format.color = TextFormat::default().color;
+        } else if let Some(rgb) = color(value) {
+            format.color = rgb;
+        }
     }
     if let Some(n) = node.child("rFonts")
         && let Some(font) = n
@@ -320,6 +329,20 @@ fn apply_rpr(format: &mut TextFormat, node: &Node) {
             "darkGray" => Some([128, 128, 128]),
             "lightGray" => Some([192, 192, 192]),
             _ => Some([230, 230, 230]),
+        };
+    }
+}
+fn apply_style_rpr(format: &mut TextFormat, node: &Node) {
+    let previous = (format.bold, format.italic, format.strike);
+    apply_rpr(format, node);
+    for (tag, old, value) in [
+        ("b", previous.0, &mut format.bold),
+        ("i", previous.1, &mut format.italic),
+        ("strike", previous.2, &mut format.strike),
+    ] {
+        *value = match bool_prop(node, tag) {
+            Some(true) => !old,
+            Some(false) | None => old,
         };
     }
 }
@@ -399,12 +422,12 @@ fn apply_ppr(p: &mut Paragraph, node: &Node, num_formats: &BTreeMap<String, List
 fn body_blocks<'a>(nodes: &'a [Node], out: &mut Vec<&'a Node>, depth: usize) {
     for node in nodes {
         match node.name.as_str() {
-            "sdt" if depth < 32 => {
+            "sdt" if depth < 128 => {
                 if let Some(content) = node.child("sdtContent") {
                     body_blocks(&content.children, out, depth + 1);
                 }
             }
-            "customXml" if depth < 32 => body_blocks(&node.children, out, depth + 1),
+            "customXml" if depth < 128 => body_blocks(&node.children, out, depth + 1),
             _ => out.push(node),
         }
     }
@@ -413,17 +436,23 @@ fn style_chain<'a>(
     styles: &'a BTreeMap<String, Node>,
     id: &str,
     out: &mut Vec<&'a Node>,
-    depth: usize,
-) {
-    if depth > 12 {
-        return;
-    }
-    if let Some(style) = styles.get(id) {
-        if let Some(base) = style.child("basedOn").and_then(Node::value) {
-            style_chain(styles, base, out, depth + 1);
+) -> Result<(), String> {
+    let mut current = Some(id);
+    let mut chain = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(id) = current {
+        if !seen.insert(id.to_string()) {
+            return Err("Циклическое наследование стилей DOCX".into());
         }
-        out.push(style);
+        let Some(style) = styles.get(id) else { break };
+        if chain.len() >= 4096 {
+            return Err("Цепочка стилей DOCX превышает безопасный лимит".into());
+        }
+        chain.push(style);
+        current = style.child("basedOn").and_then(Node::value);
     }
+    out.extend(chain.into_iter().rev());
+    Ok(())
 }
 /// Document-wide defaults of a DOCX: run format and paragraph layout (`w:docDefaults`).
 struct Defaults<'a> {
@@ -462,7 +491,7 @@ fn paragraph(
     table_style: &[&Node],
     nums: &BTreeMap<String, List>,
     rels: &BTreeMap<String, String>,
-) -> Paragraph {
+) -> Result<Paragraph, String> {
     let id = doc.alloc_id();
     let default_format = defaults.format;
     let mut p = Paragraph {
@@ -479,10 +508,10 @@ fn paragraph(
     // Word layers a table style between the document defaults and the paragraph style,
     // which is why "Table Grid" cells have no spacing after paragraphs.
     let mut chain = table_style.to_vec();
-    style_chain(styles, style, &mut chain, 0);
+    style_chain(styles, style, &mut chain)?;
     for n in chain {
         if let Some(rpr) = n.child("rPr") {
-            apply_rpr(&mut format, rpr);
+            apply_style_rpr(&mut format, rpr);
         }
         if let Some(ppr) = n.child("pPr") {
             apply_ppr(&mut p, ppr, nums);
@@ -500,10 +529,10 @@ fn paragraph(
         if let Some(n) = run.child("rPr") {
             if let Some(id) = n.child("rStyle").and_then(Node::value) {
                 let mut character_styles = Vec::new();
-                style_chain(styles, id, &mut character_styles, 0);
+                style_chain(styles, id, &mut character_styles)?;
                 for style in character_styles {
                     if let Some(rpr) = style.child("rPr") {
-                        apply_rpr(&mut fmt, rpr);
+                        apply_style_rpr(&mut fmt, rpr);
                     }
                 }
             }
@@ -542,7 +571,7 @@ fn paragraph(
         });
     }
     p.normalize();
-    p
+    Ok(p)
 }
 /// `Some(true)` when any edge of a `tblBorders`/`tcBorders` element is drawn.
 fn borders_visible(node: Option<&Node>) -> Option<bool> {
@@ -764,7 +793,7 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
     for node in blocks {
         match node.name.as_str() {
             "p" => {
-                let p = paragraph(node, &mut doc, &styles, &defaults, &[], &nums, &rels);
+                let p = paragraph(node, &mut doc, &styles, &defaults, &[], &nums, &rels)?;
                 let mut drawings = Vec::new();
                 visible_drawings(node, &mut drawings);
                 // Our spacer between adjacent tables is not part of the document.
@@ -830,7 +859,7 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
                     .and_then(|n| n.child("tblStyle"))
                     .and_then(Node::value)
                 {
-                    style_chain(&styles, style, &mut chain, 0);
+                    style_chain(&styles, style, &mut chain)?;
                 }
                 let mut rows = Vec::new();
                 let mut row_heights = Vec::new();
@@ -876,7 +905,7 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
                         for p in blocks.into_iter().filter(|n| n.name == "p") {
                             paragraphs.push(paragraph(
                                 p, &mut doc, &styles, &defaults, &chain, &nums, &rels,
-                            ));
+                            )?);
                         }
                         if paragraphs.is_empty() {
                             let id = doc.alloc_id();
@@ -1211,7 +1240,67 @@ fn r_xml(run: &Run) -> String {
     }
     format!("<w:r><w:rPr>{properties}</w:rPr>{text}</w:r>")
 }
-fn p_xml(p: &Paragraph, links: &mut Vec<(String, String)>) -> String {
+#[derive(Default)]
+struct ExportNumbering {
+    paragraphs: BTreeMap<u64, usize>,
+    starts: Vec<[usize; 9]>,
+}
+impl ExportNumbering {
+    fn record(&mut self, paragraphs: &[Paragraph]) {
+        let mut counters = [0_usize; 9];
+        let mut current = None;
+        let mut start_level = 0;
+        for paragraph in paragraphs {
+            let level = usize::from(paragraph.list_level).min(8);
+            match paragraph.list {
+                List::None => {
+                    counters.fill(0);
+                    current = None;
+                }
+                List::Bullet => {
+                    counters[level..].fill(0);
+                    current = None;
+                }
+                List::Number => {
+                    if current.is_none() || level < start_level {
+                        let mut starts = counters.map(|value| value + 1);
+                        starts[level + 1..].fill(1);
+                        let id = self.starts.len() + 2;
+                        self.starts.push(starts);
+                        current = Some(id);
+                        start_level = level;
+                    }
+                    counters[level] += 1;
+                    counters[level + 1..].fill(0);
+                    if let Some(id) = current {
+                        self.paragraphs.insert(paragraph.id, id);
+                    }
+                }
+            }
+        }
+    }
+    fn of(doc: &Doc) -> Self {
+        let mut export = Self::default();
+        export.record(&doc.paragraphs);
+        for cell in doc
+            .tables
+            .iter()
+            .flat_map(|table| table.rows.iter().flatten())
+        {
+            export.record(&cell.paragraphs);
+        }
+        export
+    }
+    fn xml(&self) -> String {
+        self.starts.iter().enumerate().map(|(index, starts)| {
+            let overrides = starts.iter().enumerate().map(|(level, start)| {
+                format!("<w:lvlOverride w:ilvl=\"{level}\"><w:startOverride w:val=\"{start}\"/></w:lvlOverride>")
+            }).collect::<String>();
+            format!("<w:num w:numId=\"{}\"><w:abstractNumId w:val=\"2\"/>{overrides}</w:num>", index + 2)
+        }).collect()
+    }
+}
+fn p_xml(p: &Paragraph, links: &mut Vec<(String, String)>, numbering: &ExportNumbering) -> String {
     let first_indent = if p.first_indent < 0.0 {
         format!("w:hanging=\"{}\"", (-p.first_indent * 20.0).round() as u32)
     } else {
@@ -1249,7 +1338,11 @@ fn p_xml(p: &Paragraph, links: &mut Vec<(String, String)>) -> String {
         properties.push_str(&format!(
             "<w:numPr><w:ilvl w:val=\"{}\"/><w:numId w:val=\"{}\"/></w:numPr>",
             p.list_level,
-            if p.list == List::Bullet { 1 } else { 2 }
+            if p.list == List::Bullet {
+                1
+            } else {
+                numbering.paragraphs.get(&p.id).copied().unwrap_or(2)
+            }
         ));
     }
     properties.push_str(&format!(
@@ -1288,7 +1381,12 @@ fn p_xml(p: &Paragraph, links: &mut Vec<(String, String)>) -> String {
 }
 /// Style of the tiny paragraph written between adjacent tables (skipped on import).
 const TABLE_GAP: &str = "TrineDocsTableGap";
-fn table_xml(table: &Table, usable_width: f32, links: &mut Vec<(String, String)>) -> String {
+fn table_xml(
+    table: &Table,
+    usable_width: f32,
+    links: &mut Vec<(String, String)>,
+    numbering: &ExportNumbering,
+) -> String {
     let columns = table.grid_columns().max(1);
     let widths: Vec<u32> = (0..columns)
         .map(|i| {
@@ -1379,7 +1477,7 @@ fn table_xml(table: &Table, usable_width: f32, links: &mut Vec<(String, String)>
             }
             out.push_str(&format!("<w:tc><w:tcPr>{properties}</w:tcPr>"));
             for p in &cell.paragraphs {
-                out.push_str(&p_xml(p, links));
+                out.push_str(&p_xml(p, links, numbering));
             }
             if cell.paragraphs.is_empty() {
                 out.push_str("<w:p/>");
@@ -1395,6 +1493,7 @@ fn write_docx(doc: &Doc, ext: &str) -> Result<Vec<u8>, String> {
     let mut doc = doc.clone();
     doc.normalize();
     let mut links = Vec::new();
+    let export_numbering = ExportNumbering::of(&doc);
     let mut body = String::new();
     let mut media = Vec::new();
     let usable = doc.page.width - doc.page.margin_left - doc.page.margin_right;
@@ -1403,7 +1502,7 @@ fn write_docx(doc: &Doc, ext: &str) -> Result<Vec<u8>, String> {
     );
     let last_paragraph = doc.paragraphs.last().map(|p| p.id);
     for p in &doc.paragraphs {
-        body.push_str(&p_xml(p, &mut links));
+        body.push_str(&p_xml(p, &mut links, &export_numbering));
         let tables: Vec<&Table> = doc
             .tables
             .iter()
@@ -1411,7 +1510,7 @@ fn write_docx(doc: &Doc, ext: &str) -> Result<Vec<u8>, String> {
             .collect();
         let has_images = doc.images.iter().any(|im| im.after_paragraph_id == p.id);
         for (i, table) in tables.iter().enumerate() {
-            body.push_str(&table_xml(table, usable, &mut links));
+            body.push_str(&table_xml(table, usable, &mut links, &export_numbering));
             // Word merges adjacent tables and needs a paragraph after a final table.
             let followed_by_table = i + 1 < tables.len();
             let ends_body = i + 1 == tables.len() && !has_images && last_paragraph == Some(p.id);
@@ -1434,8 +1533,8 @@ fn write_docx(doc: &Doc, ext: &str) -> Result<Vec<u8>, String> {
         }
     }
     let setup = &doc.page;
-    body.push_str(&format!("<w:sectPr><w:headerReference w:type=\"default\" r:id=\"header\"/><w:footerReference w:type=\"default\" r:id=\"footer\"/><w:pgSz w:w=\"{}\" w:h=\"{}\"/><w:pgMar w:top=\"{}\" w:right=\"{}\" w:bottom=\"{}\" w:left=\"{}\" w:header=\"400\" w:footer=\"400\"/></w:sectPr>",
-        (setup.width*20.0).round() as u32,(setup.height*20.0).round() as u32,(setup.margin_top*20.0).round() as u32,
+    body.push_str(&format!("<w:sectPr><w:headerReference w:type=\"default\" r:id=\"header\"/><w:footerReference w:type=\"default\" r:id=\"footer\"/><w:pgSz w:w=\"{}\" w:h=\"{}\" w:orient=\"{}\"/><w:pgMar w:top=\"{}\" w:right=\"{}\" w:bottom=\"{}\" w:left=\"{}\" w:header=\"400\" w:footer=\"400\"/></w:sectPr>",
+        (setup.width*20.0).round() as u32,(setup.height*20.0).round() as u32,if setup.width > setup.height {"landscape"} else {"portrait"},(setup.margin_top*20.0).round() as u32,
         (setup.margin_right*20.0).round() as u32,(setup.margin_bottom*20.0).round() as u32,(setup.margin_left*20.0).round() as u32));
     let ns = "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:pic=\"http://schemas.openxmlformats.org/drawingml/2006/picture\"";
     let main = format!(
@@ -1514,12 +1613,17 @@ fn write_docx(doc: &Doc, ext: &str) -> Result<Vec<u8>, String> {
             "<w:abstractNum w:abstractNumId=\"{id}\"><w:multiLevelType w:val=\"multilevel\"/>"
         ));
         for level in 0..9 {
+            let marker = if kind == "decimal" {
+                format!("%{}.", level + 1)
+            } else {
+                marker.to_string()
+            };
             numbering.push_str(&format!("<w:lvl w:ilvl=\"{level}\"><w:start w:val=\"1\"/><w:numFmt w:val=\"{kind}\"/><w:lvlText w:val=\"{marker}\"/><w:lvlJc w:val=\"left\"/><w:pPr><w:ind w:left=\"{}\" w:hanging=\"360\"/></w:pPr></w:lvl>",360+level*360));
         }
-        numbering.push_str(&format!(
-            "</w:abstractNum><w:num w:numId=\"{id}\"><w:abstractNumId w:val=\"{id}\"/></w:num>"
-        ));
+        numbering.push_str("</w:abstractNum>");
     }
+    numbering.push_str("<w:num w:numId=\"1\"><w:abstractNumId w:val=\"1\"/></w:num>");
+    numbering.push_str(&export_numbering.xml());
     numbering.push_str("</w:numbering>");
     let header = format!(
         "<w:hdr xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:p><w:r><w:t xml:space=\"preserve\">{}</w:t></w:r></w:p></w:hdr>",
@@ -1765,6 +1869,16 @@ fn escape_markdown(text: &str) -> String {
     }
     out
 }
+fn markdown_list_prefix(text: &str) -> Option<(List, &str)> {
+    if let Some(rest) = text.strip_prefix("- ").or_else(|| text.strip_prefix("* ")) {
+        return Some((List::Bullet, rest));
+    }
+    text.split_once(". ")
+        .filter(|(prefix, _)| {
+            !prefix.is_empty() && prefix.len() <= 9 && prefix.bytes().all(|ch| ch.is_ascii_digit())
+        })
+        .map(|(_, rest)| (List::Number, rest))
+}
 fn read_markdown(text: &str) -> Doc {
     let mut doc = Doc::default();
     doc.paragraphs.clear();
@@ -1786,21 +1900,15 @@ fn read_markdown(text: &str) -> Doc {
             ..Paragraph::default()
         };
         let mut text = line;
-        let headings = line.chars().take_while(|c| *c == '#').count();
-        if (1..=6).contains(&headings) && line.as_bytes().get(headings) == Some(&b' ') {
+        if let Some((list, rest)) = markdown_list_prefix(text) {
+            p.list = list;
+            text = rest;
+        }
+        let headings = text.chars().take_while(|c| *c == '#').count();
+        if (1..=6).contains(&headings) && text.as_bytes().get(headings) == Some(&b' ') {
             p.set_style(&format!("Heading{headings}"));
-            text = line.get(headings + 1..).unwrap_or_default();
-        } else if let Some(rest) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
-            p.list = List::Bullet;
-            text = rest;
-        } else if let Some((prefix, rest)) = line
-            .split_once(". ")
-            .filter(|(prefix, _)| !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit()))
-        {
-            let _ = prefix;
-            p.list = List::Number;
-            text = rest;
-        } else if let Some(rest) = line.strip_prefix("> ") {
+            text = text.get(headings + 1..).unwrap_or_default();
+        } else if let Some(rest) = text.strip_prefix("> ") {
             p.set_style("Quote");
             text = rest;
         }
@@ -1812,6 +1920,11 @@ fn read_markdown(text: &str) -> Doc {
 fn write_markdown(doc: &Doc) -> String {
     let mut out = String::new();
     for p in &doc.paragraphs {
+        match p.list {
+            List::Bullet => out.push_str("- "),
+            List::Number => out.push_str("1. "),
+            List::None => {}
+        }
         if let Some(level) = heading_level(&p.style) {
             let level = usize::from(level);
             out.push_str(&"#".repeat(level));
@@ -1819,12 +1932,10 @@ fn write_markdown(doc: &Doc) -> String {
         } else if p.style == "Quote" {
             out.push_str("> ");
         }
-        match p.list {
-            List::Bullet => out.push_str("- "),
-            List::Number => out.push_str("1. "),
-            List::None => {}
-        }
         for r in &p.runs {
+            if r.text.is_empty() {
+                continue;
+            }
             let emphasis = match (r.format.bold, r.format.italic) {
                 (true, true) => "***",
                 (true, false) => "**",
@@ -2298,6 +2409,216 @@ fn read_html(text: &str) -> Result<Doc, String> {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn review5_separate_docx_numbered_lists_get_independent_instances() -> Result<(), String> {
+        let mut doc = Doc::from_text("first\nsecond\nseparator\nnew first");
+        for index in [0, 1, 3] {
+            doc.paragraphs[index].list = List::Number;
+        }
+        let parts = read_zip(&write(&doc, "docx")?)?;
+        let root = xml(parts.get("word/document.xml").ok_or("document")?)?;
+        let paragraphs = root
+            .child("body")
+            .ok_or("body")?
+            .children
+            .iter()
+            .filter(|node| node.name == "p")
+            .collect::<Vec<_>>();
+        let num_id = |index: usize| paragraphs[index].descendant("numId").and_then(Node::value);
+        assert_eq!(num_id(0), num_id(1));
+        assert_ne!(num_id(0), num_id(3));
+        let numbering = xml(parts.get("word/numbering.xml").ok_or("numbering")?)?;
+        let new_list = numbering
+            .children
+            .iter()
+            .find(|node| node.name == "num" && node.attr("numId") == num_id(3))
+            .ok_or("new list")?;
+        assert_eq!(
+            new_list
+                .child("lvlOverride")
+                .and_then(|node| node.child("startOverride"))
+                .and_then(Node::value),
+            Some("1")
+        );
+        Ok(())
+    }
+    #[test]
+    fn review5_nested_bullets_preserve_parent_counts_and_reset_child_instances() {
+        let mut doc = Doc::from_text("parent\nchild\nbullet child\nparent two\nchild one");
+        for (paragraph, (list, level)) in doc.paragraphs.iter_mut().zip([
+            (List::Number, 0),
+            (List::Number, 1),
+            (List::Bullet, 1),
+            (List::Number, 0),
+            (List::Number, 1),
+        ]) {
+            paragraph.list = list;
+            paragraph.list_level = level;
+        }
+        let export = ExportNumbering::of(&doc);
+        let second = export.paragraphs[&doc.paragraphs[3].id] - 2;
+        assert_eq!(export.starts[second][0], 2);
+        assert_eq!(export.starts[second][1], 1);
+        assert_eq!(
+            export.paragraphs[&doc.paragraphs[3].id],
+            export.paragraphs[&doc.paragraphs[4].id]
+        );
+    }
+
+    #[test]
+    fn review5_utf8_bom_refuses_broken_utf8_instead_of_guessing_legacy() {
+        assert!(decode_text(&[0xEF, 0xBB, 0xBF, 0xD0]).is_err());
+        assert_eq!(decode_text(&[0xD0]).ok().as_deref(), Some("Р"));
+        assert_eq!(
+            decode_text(&[0xEF, 0xBB, 0xBF, b'A']).ok().as_deref(),
+            Some("A")
+        );
+    }
+    #[test]
+    fn review5_deep_content_controls_keep_visible_text() -> Result<(), String> {
+        let nested = format!(
+            "{}<w:p><w:r><w:t>Deep visible text</w:t></w:r></w:p>{}",
+            "<w:sdt><w:sdtContent>".repeat(40),
+            "</w:sdtContent></w:sdt>".repeat(40)
+        );
+        let document =
+            format!("<w:document xmlns:w=\"urn:w\"><w:body>{nested}</w:body></w:document>");
+        let doc = read(
+            &write_zip(vec![("word/document.xml".into(), document.into_bytes())])?,
+            "docx",
+        )?;
+        assert_eq!(doc.plain_text(), "Deep visible text");
+        Ok(())
+    }
+    #[test]
+    fn review5_style_chains_keep_deep_inheritance_and_refuse_cycles() -> Result<(), String> {
+        let mut styles = BTreeMap::new();
+        for index in 0..20 {
+            let base = if index == 0 {
+                String::new()
+            } else {
+                format!("<w:basedOn w:val=\"S{}\"/>", index - 1)
+            };
+            let props = if index == 0 {
+                "<w:rPr><w:color w:val=\"123456\"/></w:rPr>"
+            } else {
+                ""
+            };
+            styles.insert(
+                format!("S{index}"),
+                xml(format!("<w:style xmlns:w=\"urn:w\">{base}{props}</w:style>").as_bytes())?,
+            );
+        }
+        let mut chain = Vec::new();
+        style_chain(&styles, "S19", &mut chain)?;
+        assert_eq!(chain.len(), 20);
+        let mut format = TextFormat::default();
+        for style in chain {
+            if let Some(props) = style.child("rPr") {
+                apply_style_rpr(&mut format, props);
+            }
+        }
+        assert_eq!(format.color, [0x12, 0x34, 0x56]);
+        styles.insert(
+            "S0".into(),
+            xml(br#"<w:style xmlns:w="urn:w"><w:basedOn w:val="S19"/></w:style>"#)?,
+        );
+        assert!(style_chain(&styles, "S19", &mut Vec::new()).is_err());
+        Ok(())
+    }
+    #[test]
+    fn review5_markdown_keeps_a_heading_or_quote_combined_with_a_list() -> Result<(), String> {
+        for style in ["Heading2", "Quote"] {
+            for list in [List::Number, List::Bullet] {
+                let mut doc = Doc::from_text("Combined");
+                doc.paragraphs[0].set_style(style);
+                doc.paragraphs[0].list = list;
+                let again = read(&write(&doc, "md")?, "md")?;
+                assert_eq!(again.paragraphs[0].style, style);
+                assert_eq!(again.paragraphs[0].list, list);
+                assert_eq!(again.plain_text(), "Combined");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn review5_docx_automatic_color_overrides_the_inherited_color() -> Result<(), String> {
+        let mut format = TextFormat {
+            color: [200, 0, 0],
+            highlight: Some([255, 255, 0]),
+            ..Default::default()
+        };
+        apply_rpr(
+            &mut format,
+            &xml(br#"<w:rPr xmlns:w="urn:w"><w:color w:val="auto"/></w:rPr>"#)?,
+        );
+        assert_eq!(format.color, TextFormat::default().color);
+        assert_eq!(format.highlight, Some([255, 255, 0]));
+        Ok(())
+    }
+    #[test]
+    fn review5_docx_style_toggles_are_relative_and_direct_format_is_absolute() -> Result<(), String>
+    {
+        let properties = xml(br#"<w:rPr xmlns:w="urn:w"><w:b/><w:i/><w:strike/></w:rPr>"#)?;
+        let mut format = TextFormat::default();
+        apply_style_rpr(&mut format, &properties);
+        assert!(format.bold && format.italic && format.strike);
+        apply_style_rpr(&mut format, &properties);
+        assert!(!format.bold && !format.italic && !format.strike);
+        apply_rpr(&mut format, &properties);
+        apply_rpr(&mut format, &properties);
+        assert!(format.bold && format.italic && format.strike);
+        Ok(())
+    }
+    #[test]
+    fn review5_docx_export_uses_each_numbering_level_and_explicit_orientation() -> Result<(), String>
+    {
+        let mut doc = Doc::from_text("landscape");
+        (doc.page.width, doc.page.height) = (841.89, 595.28);
+        let parts = read_zip(&write(&doc, "docx")?)?;
+        let numbering = xml(parts.get("word/numbering.xml").ok_or("numbering")?)?;
+        let decimal = numbering
+            .children
+            .iter()
+            .find(|node| node.name == "abstractNum" && node.attr("abstractNumId") == Some("2"))
+            .ok_or("decimal")?;
+        for (index, level) in decimal
+            .children
+            .iter()
+            .filter(|node| node.name == "lvl")
+            .enumerate()
+        {
+            assert_eq!(
+                level.child("lvlText").and_then(Node::value),
+                Some(format!("%{}.", index + 1).as_str())
+            );
+        }
+        let document = xml(parts.get("word/document.xml").ok_or("document")?)?;
+        assert_eq!(
+            document
+                .descendant("pgSz")
+                .and_then(|node| node.attr("orient")),
+            Some("landscape")
+        );
+        Ok(())
+    }
+    #[test]
+    fn review5_empty_formatted_markdown_paragraph_does_not_create_visible_markers()
+    -> Result<(), String> {
+        let mut doc = Doc::from_text("");
+        let format = &mut doc.paragraphs[0].runs[0].format;
+        format.bold = true;
+        format.italic = true;
+        format.strike = true;
+        format.link = Some("https://example.org".into());
+        assert_eq!(
+            String::from_utf8(write(&doc, "md")?).map_err(|error| error.to_string())?,
+            "\n"
+        );
+        assert_eq!(read(&write(&doc, "md")?, "md")?.plain_text(), "");
+        Ok(())
+    }
     #[test]
     fn review4_docx_normalizes_crlf_once_and_refuses_xml_controls() -> Result<(), String> {
         let mut mixed = Doc::from_text("a");

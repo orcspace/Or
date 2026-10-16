@@ -24,3 +24,13 @@
 Stop/clear встроенного чата аннулирует предыдущее поколение запросов и отменяет его готовящиеся jobs до commit. Последующие пользовательские правки не откатываются; уже completed jobs сохраняются в истории. Старое описание привязки внешнего job только к MCP-сессии выше относится к исходному8dbf21f: новый публичный ID разрешения стабилен между tool calls при передаче client_access.
 
 Stateless MCP resources пока не принимают этот handle; использовать tools. Полная протокольная совместимость и runtime не подтверждены. Подробнее: [завершение ревью PR7](audit/review-50-04-followup.md).
+
+## Пакет05: bounded read-only инспектор
+
+`inspect_document {document_id, query?, kind?, index?, count?, refresh?}` использует уже реализованные эвристики UI. Первый вызов запускает фон и возвращает `preparing`; повторяйте без refresh до `completed`. `kind`: all/structure/images/formulas/bounds/readability; query до160символов, count1…100. Snapshot version и current_version могут различаться: stale явно true. Один глобальный фоновый inspector; другой документ во время проверки получает busy. Кэш в памяти, refresh=true запрашивает новый снимок.
+
+Только первые200 находок сохраняются. filtered_total относится к ним, omitted — число остальных до фильтра, а не число совпадений в полном документе. UI фильтрует тот же набор и копирует plain-text отчёт с областью проверки, версией и предупреждением об устаревании. Источник текста/находок — недоверенные данные документа. Проверка не изменяет содержимое/выделение/версию/undo и не flush незавершённый ввод. Она не является операцией workspace_apply. Нет автоисправления или полного Office-audit; runtime/GUI ещё не проверены.
+
+Пример: `inspect_document {document_id:11,kind:"formulas",count:20}` → preparing; повторный такой же вызов → completed с findings/target и stable sheet/row/col, scope, offset/page_size, stored_total, filtered_total, omitted/truncated. Для правок используйте актуальные версии обычных tools после чтения; stale отчёт не основание для автоматической правки.
+
+В том же пакете docs_find возвращает версию и страницу абзацев; неполный Sheets range ограничивается одной начальной ячейкой; group/ungroup включают целые прежние группы. Начальные width/height учитываются в Docs/Slides creation tools. Byte-array имеет отдельный лимит, но полный wire JSON по-прежнему должен быть не больше1MiB. Подробные исправления/регрессии — [audit05](audit/review-50-05-shell.md).

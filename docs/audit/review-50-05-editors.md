@@ -1,0 +1,42 @@
+# Пакет05 — независимый аудит Docs/Slides
+
+Основа: `8e6c20b` (PR #7 с follow-up). Дата16.10.2026. Найдены и исправлены20 разных production-причин. Подтверждение — чтение старых веток кода и итогового diff; компиляция и runtime не подтверждены. Билды, cargo test/check/clippy, GUI, установщик, CI и релизы не запускались.
+
+| ID | P | Сценарий до изменения | Исправление |
+|---|---|---|---|
+| E5-01 | P1 | DOCX run поверх красного стиля с color=auto оставался красным | apply_rpr различает явный automatic color и отсутствие свойства; automatic text использует цвет обычного текста текущей модели |
+| E5-02 | P1 | Base+Child styles оба включают bold/italic/strike: Word toggle должен снять свойство, импорт оставлял включённым | apply_style_rpr применяет относительные toggle-свойства отдельно от абсолютных прямых rPr |
+| E5-03 | P1 | Вложенные decimal пункты DOCX показывали счётчик уровня0: lvlText=%1. записывался для каждого ilvl | Каждый decimal level записывает собственный %N.; исправление касается exporter, прежнее E21 касалось canvas-счётчиков |
+| E5-04 | P1 | Пустой bold/italic/strike или hyperlink абзац превращался в видимые Markdown-маркеры | Writer не создаёт inline-обёртки вокруг пустого текста |
+| E5-05 | P2 | Альбомный DOCX имел широкие размеры, но не имел w:orient, оставляя orientation метаданные portrait по умолчанию | pgSz явно записывает landscape/portrait по размерам модели |
+| E5-06 | P1 | Переход Slides1.375с при external PPTX round-trip становился1с через spd=slow | Exact milliseconds сохраняются в p14:dur внутри AlternateContent, classic fallback остаётся |
+| E5-07 | P1 | Docs с точной line_points=12 и крупным80pt шрифтом на маленькой странице отвергался; line_points=100 при малой области мог проходить | Validator использует общий paragraph_line_height для тела и таблиц, включая exactly/atLeast и метрики шрифта |
+| E5-08 | P1 | Тысячи U+000C оценивались как обычные строки; документ проходил предел9000 страниц, хотя layout создавал гораздо больше Page | До layout каждый hard page break списывает высоту целой страницы |
+| E5-09 | P2 | Разрешённые моделью motion/transition длительностью1–49мс растягивались до50мс | Общий motion_progress использует минимальную длительность1мс, согласованную с validate |
+| E5-10 | P1 | Переключение между одинаково заполненными ячейками Docs или notes разных слайдов переносило локальный undo/caret чужого объекта | ID TextEdit привязан к stable cell/slide ID. Внешняя смена того же объекта отдельно reconciles текст |
+| E5-11 | P1 | При выборе текста в таблице Docs AI-контекст получал старое body-выделение либо пустую строку | editor_selection читает Unicode selection активного cell TextEdit |
+| E5-12 | P2 | Статус «Страница» при редактировании ячейки на странице4 показывал страницу body-caret | Страница берётся из выбранного CellBox/фрагмента таблицы |
+| E5-13 | P1 | Файл с явным UTF-8 BOM и оборванным UTF-8 байтом молча переинтерпретировался как Windows-1251 | Явная Unicode signature требует корректного UTF-8; legacy fallback остаётся только без signature |
+| E5-14 | P1 | Допустимый XML с40 вложенными sdtContent открывался без видимого текста: body_blocks молча останавливался после32 | Обход допускает весь уже ограниченный XML parser depth128; прежнее E3-08 исправляло плоские cell controls, здесь причина отдельный depth guard |
+| E5-15 | P1 | Стиль с20 поколениями basedOn терял глубокий цвет; цикл мог неоднократно применить свойства и вернуть произвольный частичный стиль | Итеративный обход сохраняет цепь, обнаруживает цикл; предел4096 возвращает ошибку вместо частичного импорта |
+| E5-16 | P2 | Heading/Quote вместе с Number/Bullet сохранялся в Markdown, но чтение распознавало только первый префикс | Writer помещает block-style внутри списка; reader отдельно распознаёт list и heading/quote. Полный Markdown parser не заявлен |
+| E5-17 | P1 | Автопереход через2с пропускал5-секундную анимацию либо ещё не нажатый on_click | Отсчёт After начинается после последнего эффекта; один расчёт animation_start используется для paint и последнего end, pending click блокирует auto |
+| E5-18 | P1 | B/W скрывал экран, но старый таймер продолжал истекать; возврат немедленно перескакивал на следующий слайд | Blackout приостанавливает slide clock; возврат с end screen начинает новый отсчёт текущего слайда |
+| E5-19 | P2 | slides_write_table с values=[] и row=999 расширял таблицу без единого нового значения | Пустая запись — no-op после проверки адресуемой таблицы |
+| E5-20 | P1 | Два отдельных numbered списка после обычного абзаца в DOCX использовали один numId=2 и продолжали старый счётчик в Word | ExportNumbering создаёт независимые num instances/startOverride, сохраняет нужные parent counters и независимость списков внутри ячеек |
+
+Дополнения вне20: закрыты оставшиеся виджеты старой E4-02 — Docs headers/footers, Slides property table cells/chart labels теперь сбрасывают локальный undo и переносят caret при внешнем тексте. Та же причина повторно не считается. Пустой paragraph mark внутри диапазона форматирования сохраняется и меняет формат; это добор прежней E4-09, не новый баг квоты.
+
+Добавлены регрессии `review5_*` в Docs/Slides editor/model/io/present: XML numbering/orientation, style/reset, BOM, глубина controls/styles, Markdown empty/combined prefixes, page/line budget, stable widget/cell selection/status, short motion, exact PPTX duration без native customXml, last-animation auto, blank clock и пустая table write. Они записаны, но НЕ запускались.
+
+Статические проверки семи файлов: rustfmt --check и git diff --check прошли. Общий cargo fmt --all -- --check во время параллельной работы показал только ещё не отформатированный новый Sheets tests.rs; финальный общий check выполняет ведущий после завершения всех авторов.
+
+Независимое review PR7 и его follow-up выполнено: Chat launcher lifecycle, workspace/App/ops, tools/access/server и Sheets diff перечитаны. Финальное независимое review семи текущих Docs/Slides-файлов и ключевых регрессий core-агентом завершено: подтверждённых блокеров по исходнику не найдено. Пограничный добор format_range с empty b.offset0 перечитан отдельно.
+
+Первичные источники, сверены16.10.2026: [OOXML toggle Bold](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.wordprocessing.bold?view=openxml-3.0.1), [LevelText %N](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.wordprocessing.leveltext?view=openxml-3.0.1), [NumberingInstance](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.wordprocessing.numberinginstance?view=openxml-3.0.1), [PageSize orientation](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.wordprocessing.pagesize.orient?view=openxml-3.0.1), [PPTX transition duration](https://learn.microsoft.com/en-us/openspecs/office_standards/ms-pptx/99b95b35-568a-4652-9cba-df3d1175952f), [PowerPoint timing: After начинается после финального эффекта](https://support.microsoft.com/en-us/powerpoint/set-the-timing-and-speed-of-a-transition), [B/W pause](https://support.microsoft.com/en-us/accessibility/powerpoint/use-a-screen-reader-to-show-your-presentation-with-powerpoint), [Unicode BOM](https://www.unicode.org/faq/utf_bom.html), [CommonMark list blocks](https://spec.commonmark.org/0.31.2/#lists). API CCursor/TextEditState прочитаны в локальных egui/epaint0.36.2.
+
+Новых зависимостей/стека нет. Сохраняются ограничения полного Office/OOXML parity, opaque round-trip, сложного Unicode shaping, Markdown/CSS layout, произвольных list restart на импорте и внешних анимаций PPTX. Полноценная визуальная/Office-приёмка и производительность ждут разрешённого запуска.
+
+При собственном повторном чтении снято экспериментальное shd nil/auto clearing: модель не различает shading и highlight, поэтому такое очищение могло затронуть чужое highlight. E5-01 ограничена automatic text color; полноценное раздельное наследование shading/highlight остаётся GAP. Это промежуточное изменение не считалось отдельным багом.
+
+Итоговое независимое review Sheets05 и root05 завершено: перечитаны исправления Sheets, MCP/tools, settings, atomic backup/temp collision и новая inspect_document вместе с UI-фильтрами/копированием. Проверены category/schema, общий tick/poll, bounded first-200 report, stale/refresh, отсутствие изменения active/history при API-чтении, исправленные image args/enum fixtures. Подтверждённых блокеров по исходнику не найдено. Типизация, запуск регрессий и визуальная приёмка не выполнялись.

@@ -1854,3 +1854,206 @@ fn review4_reordering_a_background_sheet_preserves_active_id_selection_and_cell_
     assert_eq!(book.selection, selection);
     book.validate()
 }
+
+#[test]
+fn review5_names_reject_control_characters_without_changing_the_book() -> Result<(), String> {
+    let mut book = Book::default();
+    let before = book.clone();
+    for name in ["Bad\nName", "Bad\tName", "Bad\u{0001}Name"] {
+        assert!(book.add_sheet(name).is_err());
+        assert!(book.rename_sheet(book.active_id(), name).is_err());
+        assert_eq!(book, before);
+    }
+    Ok(())
+}
+#[test]
+fn review5_empty_fill_stays_sparse_and_preserves_unrelated_cells() -> Result<(), String> {
+    let mut book = Book::default();
+    let sheet = book.active_id();
+    let keep = book.set_cell(sheet, 20, 20, "keep")?;
+    book.set_cell(sheet, 1, 1, "erase")?;
+    book.fill(sheet, Range::new(0, 0, 0, 0), Range::new(1, 1, 10, 10))?;
+    let model = book.sheet_by_id(sheet).ok_or("sheet")?;
+    assert_eq!(model.cells.len(), 1);
+    assert_eq!(model.cell(20, 20).ok_or("keep")?.id, keep);
+    Ok(())
+}
+#[test]
+fn review5_fill_rejects_covered_merge_targets_before_changing_any_cells() -> Result<(), String> {
+    let mut book = Book::default();
+    let sheet = book.active_id();
+    book.set_cell(sheet, 0, 0, "Source")?;
+    book.merge(sheet, Range::new(1, 1, 2, 2))?;
+    let before = book.clone();
+    for target in [Range::new(1, 1, 3, 3), Range::new(2, 2, 2, 2)] {
+        assert!(book.fill(sheet, Range::new(0, 0, 0, 0), target).is_err());
+        assert_eq!(book, before);
+    }
+    book.fill(sheet, Range::new(0, 0, 0, 0), Range::new(1, 1, 1, 1))?;
+    assert_eq!(
+        book.sheet_by_id(sheet)
+            .and_then(|s| s.cell(1, 1))
+            .ok_or("anchor")?
+            .value,
+        Value::Text("Source".into())
+    );
+    Ok(())
+}
+
+#[test]
+fn review5_value_uses_locale_and_recognizes_currency_dates_and_times() {
+    for (ru, expression, expected) in [
+        (false, "=VALUE(\"1,000\")", 1000.0),
+        (false, "=VALUE(\"$1,000\")", 1000.0),
+        (false, "=VALUE(\"(1,000.5)\")", -1000.5),
+        (true, "=VALUE(\"1 000,5 ₽\")", 1000.5),
+        (true, "=VALUE(\"1.25\")", 1.25),
+        (false, "=VALUE(\"16:48:00\")-VALUE(\"12:00:00\")", 0.2),
+    ] {
+        let book = Book {
+            locale_ru: ru,
+            ..Default::default()
+        };
+        let Value::Number(actual) = formula::evaluate(&book, book.active_id(), expression) else {
+            panic!("{expression}");
+        };
+        assert!((actual - expected).abs() < 1E-12, "{expression}: {actual}");
+    }
+    let book = Book::default();
+    assert_eq!(
+        formula::evaluate(&book, book.active_id(), "=VALUE(\"2026-10-16\")"),
+        formula::evaluate(&book, book.active_id(), "=DATE(2026,10,16)")
+    );
+}
+#[test]
+fn review5_char_code_use_ansi_while_unicode_functions_keep_scalar_values() {
+    for (ru, formula, expected) in [
+        (false, "=CHAR(128)", Value::Text("€".into())),
+        (false, "=CODE(\"€\")", Value::Number(128.0)),
+        (true, "=CHAR(192)", Value::Text("А".into())),
+        (true, "=CODE(\"А\")", Value::Number(192.0)),
+        (true, "=UNICODE(\"А\")", Value::Number(1040.0)),
+        (true, "=UNICHAR(1040)", Value::Text("А".into())),
+    ] {
+        let book = Book {
+            locale_ru: ru,
+            ..Default::default()
+        };
+        assert_eq!(
+            formula::evaluate(&book, book.active_id(), formula),
+            expected,
+            "{formula}"
+        );
+    }
+}
+#[test]
+fn review5_working_dates_cover_large_valid_spans_and_validate_holidays() -> Result<(), String> {
+    let mut book = Book::default();
+    let id = book.active_id();
+    for (input, expected) in [
+        ("=WORKDAY(2,200000)", 280002.0),
+        ("=WORKDAY(280002,-200000)", 2.0),
+        ("=NETWORKDAYS(2,1400002)", 1000001.0),
+        ("=NETWORKDAYS(1400002,2)", -1000001.0),
+    ] {
+        assert_eq!(
+            formula::evaluate(&book, id, input),
+            Value::Number(expected),
+            "{input}"
+        );
+    }
+    book.set_cell(id, 0, 0, "-1")?;
+    for input in ["=WORKDAY(40000,10,A1)", "=NETWORKDAYS(40000,40010,A1)"] {
+        assert_eq!(
+            formula::evaluate(&book, id, input),
+            Value::Error("#VALUE!".into())
+        );
+    }
+    book.set_range(
+        id,
+        0,
+        0,
+        &[vec!["3".into()], vec!["3".into()], vec!["7".into()]],
+    )?;
+    assert_eq!(
+        formula::evaluate(&book, id, "=WORKDAY(2,5,A1:A3)"),
+        Value::Number(10.0)
+    );
+    assert_eq!(
+        formula::evaluate(&book, id, "=NETWORKDAYS(2,9,A1:A3)"),
+        Value::Number(5.0)
+    );
+    Ok(())
+}
+#[test]
+fn review5_finance_retains_the_zero_rate_limit_and_irr_is_scale_invariant() -> Result<(), String> {
+    let mut book = Book::default();
+    let id = book.active_id();
+    for (input, expected) in [
+        ("=PMT(1E-20,10,100)", -10.0),
+        ("=PV(1E-20,10,-10)", 100.0),
+        ("=FV(1E-20,10,-10)", 100.0),
+        ("=NPER(1E-20,-10,100)", 10.0),
+        ("=PPMT(1E-20,1,10,100)", -10.0),
+    ] {
+        let Value::Number(actual) = formula::evaluate(&book, id, input) else {
+            return Err(input.into());
+        };
+        assert!((actual - expected).abs() < 1E-10, "{input}: {actual}");
+    }
+    book.set_range(
+        id,
+        0,
+        0,
+        &[
+            vec!["-1E308".into()],
+            vec!["1E308".into()],
+            vec!["1E308".into()],
+        ],
+    )?;
+    let Value::Number(actual) = formula::evaluate(&book, id, "=IRR(A1:A3)") else {
+        return Err("IRR".into());
+    };
+    assert!((actual - (5_f64.sqrt() - 1.0) / 2.0).abs() < 1E-9);
+    Ok(())
+}
+#[test]
+fn review5_gcd_and_lcm_use_the_exact_integer_domain() {
+    let book = Book::default();
+    let id = book.active_id();
+    assert_eq!(
+        formula::evaluate(&book, id, "=GCD(9005000000000000,1)"),
+        Value::Number(1.0)
+    );
+    assert_eq!(
+        formula::evaluate(&book, id, "=LCM(100000000,100000003)"),
+        Value::Error("#NUM!".into())
+    );
+}
+
+#[test]
+fn root_review5_defined_name_length_counts_unicode_characters() -> Result<(), String> {
+    let mut book = Book::default();
+    book.names.insert("Я".repeat(255), "=A1".into());
+    book.validate()?;
+    book.names.insert("Ю".repeat(256), "=A1".into());
+    assert!(book.validate().is_err());
+    Ok(())
+}
+
+#[test]
+fn root_review5_defined_name_backslash_prefix_and_unicode_periods_are_evaluable() {
+    let mut book = Book::default();
+    book.names.insert(r"\Бюджет.2026".into(), "=42".into());
+    book.names
+        .insert("_Budget2026".into(), r"=\Бюджет.2026".into());
+    book.names.insert("Данные.2".into(), "=5".into());
+    assert_eq!(
+        formula::evaluate(&book, book.active_id(), r"=\БЮДЖЕТ.2026"),
+        Value::Number(42.0)
+    );
+    assert_eq!(
+        formula::evaluate(&book, book.active_id(), "=_Budget2026+Данные.2"),
+        Value::Number(47.0)
+    );
+}
