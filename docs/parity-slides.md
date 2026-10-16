@@ -23,12 +23,12 @@
 | Указка/перо, очистка | P0 | Реализовано | Рисунки во время показа, не сохраняются в deck |
 | Докладчик: следующий слайд, заметки, таймер | P0 | Частично: на текущем экране | Второй монитор не реализован и подписан в UI |
 | Переходы fade/push/wipe, автопереход | P1 | Реализовано | Временная интерполяция в UI, реальные PPTX transitions и advTm без эффекта; 60 fps не измерены |
-| Входные анимации fade/fly-in/zoom, click/with/after, delay/duration | P1 | Реализовано в локальном показе | Нативный JSON сохраняет; PPTX timing пока не экспортируется, PowerPoint эффекты не воспроизводятся |
+| Входные анимации fade/fly-in/zoom, click/with/after, delay/duration | P1 | Реализовано в локальном показе | Нативный JSON сохраняет; PPTX `p:timing` пишется и читается (Fade, Fly In справа, Zoom; порядок шагов `order`). Не проверено в PowerPoint |
 | Выходные/акцентные/motion/repeat/object-trigger/Morph/timeline | P1 | Нет | Внешний PPTX содержит предупреждение о потерях |
 | PPTX/PPSX/POTX/PPTM открытие | P0 | Частично | Текст, геометрия, картинки, таблицы, диаграммы, заметки и переходы; макросы/внешние relationships не выполняются |
 | PPTX сохранение и нативный ZIP(JSON) | P0 | Реализовано поддерживаемое подмножество | Нативный и PPTX round-trip unit-тесты; собственная модель добавляется customXml JSON, используется только при совпадении manifest остальных частей |
 | PDF | P0 | Реализован через общий render | Display list: текст, таблицы, диаграммы, линии/контуры, прямоугольники/эллипсы, изображения; PDF не сохраняет rotation |
-| PNG | P0 | CPU экспорт первого слайда, 2× | Shared Page/egui tessellation; texture/font/alpha/clipping; 8192/32MP и resource budgets. Rotation отсутствует как в PDF; не экспорт текущего слайда |
+| PNG | P0 | CPU экспорт 2×: меню — первый слайд; MCP `export` — папка со всеми показываемыми слайдами | Shared Page/egui tessellation; texture/font/alpha/clipping; 8192/32MP и resource budgets. Rotation отсутствует как в PDF; не экспорт текущего слайда |
 | Handouts/notes-print | P0 | Нет | Раздаточные и notes-print отсутствуют; не считаются готовыми |
 | Медиа аудио/видео/trim/recording/video-export | P1/P2 | Нет | Нет отключённых команд, выдающих это за готовое |
 | Comments, accessibility, spelling, custom shows, rehearsal, live captions, collaboration | P1/P2 | Нет в Slides | Не считается Office-паритетом |

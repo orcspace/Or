@@ -166,7 +166,8 @@ pub fn design_guide() -> Value {
         "transition_effects": ["fade", "push", "wipe"],
         "image_styles": ["gradient", "radial", "blobs", "waves", "grid", "noise"],
         "limitations": [
-            "Анимации объектов воспроизводятся в TrineDocs, но пока не сохраняются в PPTX timing; переходы сохраняются.",
+            "Анимации объектов и переходы сохраняются в PPTX: эффекты входа Fade, Fly In (справа), Zoom; выделение, выход и пути движения не поддерживаются.",
+            "Экспорт PNG через инструмент export выгружает все показываемые слайды в отдельную папку.",
             "PDF статичен; PDF и PNG не сохраняют поворот объектов.",
             "Поиск и загрузка изображений требуют интернет и curl.exe Windows; поддерживаются PNG и JPEG по HTTPS."
         ]
@@ -182,53 +183,180 @@ fn curl_exe() -> std::path::PathBuf {
 }
 
 /// Fetches an HTTPS resource with hard size/time/redirect limits. No shell is involved.
+/// Every hop is resolved here, all of its addresses must be public, and curl is pinned to the
+/// checked address (`--resolve`), so a DNS name or a redirect cannot reach the local network.
 fn fetch(url: &str, limit: usize, seconds: u32) -> Result<Vec<u8>, String> {
-    check_url(url)?;
+    let started = std::time::Instant::now();
+    let mut current = url.to_string();
+    for _ in 0..=3 {
+        let target = target(&current)?;
+        let pin = if target.literal {
+            None
+        } else {
+            Some(resolve_public(&target)?)
+        };
+        let elapsed = u32::try_from(started.elapsed().as_secs()).unwrap_or(u32::MAX);
+        if elapsed >= seconds {
+            return Err("unavailable: время загрузки истекло".into());
+        }
+        let (status, location, body) = curl_once(&current, &target, pin, limit, seconds - elapsed)?;
+        if (300..400).contains(&status) && !location.is_empty() {
+            current = location;
+            continue;
+        }
+        if !(200..300).contains(&status) {
+            return Err(format!("unavailable: сервер ответил кодом {status}"));
+        }
+        return Ok(body);
+    }
+    Err("unavailable: слишком много перенаправлений".into())
+}
+
+/// One request without following redirects; returns the status, the redirect target and the body.
+fn curl_once(
+    url: &str,
+    target: &Target,
+    pin: Option<std::net::IpAddr>,
+    limit: usize,
+    seconds: u32,
+) -> Result<(u16, String, Vec<u8>), String> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let part = std::env::temp_dir().join(format!(
+        "trinedocs-fetch-{}-{}.part",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     let mut command = std::process::Command::new(curl_exe());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x0800_0000);
     }
+    command.args([
+        "--silent",
+        "--show-error",
+        "--fail",
+        "--proto",
+        "=https",
+        "--connect-timeout",
+        "10",
+        "--max-time",
+        &seconds.to_string(),
+        "--max-filesize",
+        &limit.to_string(),
+        "--user-agent",
+        concat!("TrineDocs/", env!("CARGO_PKG_VERSION")),
+        "--write-out",
+        "%{http_code}\n%{redirect_url}",
+    ]);
+    if let Some(ip) = pin {
+        let address = match ip {
+            std::net::IpAddr::V4(v4) => v4.to_string(),
+            std::net::IpAddr::V6(v6) => format!("[{v6}]"),
+        };
+        command
+            .arg("--resolve")
+            .arg(format!("{}:{}:{address}", target.host, target.port));
+    }
     let output = command
-        .args([
-            "--silent",
-            "--show-error",
-            "--fail",
-            "--location",
-            "--max-redirs",
-            "3",
-            "--proto",
-            "=https",
-            "--proto-redir",
-            "=https",
-            "--connect-timeout",
-            "10",
-            "--max-time",
-            &seconds.to_string(),
-            "--max-filesize",
-            &limit.to_string(),
-            "--user-agent",
-            concat!("TrineDocs/", env!("CARGO_PKG_VERSION")),
-            "--url",
-            url,
-        ])
+        .arg("--output")
+        .arg(&part)
+        .arg("--url")
+        .arg(url)
         .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|e| format!("unavailable: не удалось запустить curl.exe: {e}"))?;
+        .output();
+    let body = std::fs::read(&part);
+    let _ = std::fs::remove_file(&part);
+    let output = output.map_err(|e| format!("unavailable: не удалось запустить curl.exe: {e}"))?;
     if !output.status.success() {
         let message = String::from_utf8_lossy(&output.stderr);
         let message: String = message.trim().chars().take(300).collect();
         return Err(format!("unavailable: загрузка не удалась: {message}"));
     }
-    if output.stdout.len() > limit {
+    let report = String::from_utf8_lossy(&output.stdout);
+    let mut lines = report.lines();
+    let status = lines
+        .next()
+        .and_then(|code| code.trim().parse::<u16>().ok())
+        .ok_or("unavailable: curl не вернул код ответа")?;
+    let location = lines.next().unwrap_or_default().trim().to_string();
+    let body = if (300..400).contains(&status) {
+        Vec::new()
+    } else {
+        body.map_err(|e| format!("unavailable: ответ не прочитан: {e}"))?
+    };
+    if body.len() > limit {
         return Err("too_large: ответ превышает лимит".into());
     }
-    Ok(output.stdout)
+    Ok((status, location, body))
+}
+
+struct Target {
+    host: String,
+    port: u16,
+    /// The host is an IP literal, already checked by `target`.
+    literal: bool,
+}
+
+/// Resolves the host and returns an address to pin, refusing names with any non-public address.
+fn resolve_public(target: &Target) -> Result<std::net::IpAddr, String> {
+    use std::net::ToSocketAddrs;
+    let addresses: Vec<std::net::IpAddr> = (target.host.as_str(), target.port)
+        .to_socket_addrs()
+        .map_err(|e| format!("unavailable: не удалось найти адрес {}: {e}", target.host))?
+        .map(|address| address.ip())
+        .collect();
+    if addresses.iter().any(|ip| !is_public(*ip)) {
+        return Err("permission_denied: адрес ведёт в локальную сеть".into());
+    }
+    addresses
+        .iter()
+        .find(|ip| ip.is_ipv4())
+        .or_else(|| addresses.first())
+        .copied()
+        .ok_or_else(|| format!("unavailable: нет адресов для {}", target.host))
+}
+
+/// Globally routable unicast addresses only.
+fn is_public(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ip) => {
+            let [a, b, c, _] = ip.octets();
+            !(ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || ip.is_broadcast()
+                || ip.is_multicast()
+                || ip.is_documentation()
+                || a == 0
+                || a >= 240
+                || (a == 100 && (64..128).contains(&b))
+                || (a == 192 && b == 0 && c == 0)
+                || (a == 198 && (18..20).contains(&b)))
+        }
+        std::net::IpAddr::V6(ip) => {
+            if let Some(v4) = ip.to_ipv4_mapped() {
+                return is_public(std::net::IpAddr::V4(v4));
+            }
+            let first = ip.segments()[0];
+            !(ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || first & 0xfe00 == 0xfc00
+                || first & 0xffc0 == 0xfe80
+                || (first == 0x2001 && ip.segments()[1] == 0x0db8)
+                || (first == 0x0064 && ip.segments()[1] == 0xff9b))
+        }
+    }
 }
 
 /// Accepts only public HTTPS URLs without credentials or control characters.
 pub fn check_url(url: &str) -> Result<(), String> {
+    target(url).map(|_| ())
+}
+
+fn target(url: &str) -> Result<Target, String> {
     let rest = url
         .strip_prefix("https://")
         .ok_or("invalid_args: url должен начинаться с https://")?;
@@ -239,36 +367,43 @@ pub fn check_url(url: &str) -> Result<(), String> {
     if authority.contains('@') || authority.is_empty() {
         return Err("invalid_args: url не должен содержать учётные данные".into());
     }
-    let host = if authority.starts_with('[') {
-        authority
-            .split(']')
-            .next()
-            .unwrap_or_default()
-            .trim_start_matches('[')
-    } else {
-        authority.split(':').next().unwrap_or_default()
-    }
-    .to_ascii_lowercase();
-    let ipv4 = host.parse::<std::net::Ipv4Addr>().ok();
-    let ipv6 = host.parse::<std::net::Ipv6Addr>().ok();
-    let private = host == "localhost"
+    let (host, port) = match authority.strip_prefix('[') {
+        Some(bracketed) => {
+            let (host, tail) = bracketed
+                .split_once(']')
+                .ok_or("invalid_args: недопустимый url")?;
+            (host, tail.strip_prefix(':'))
+        }
+        None => match authority.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (authority, None),
+        },
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    let port = match port {
+        Some(port) => port
+            .parse::<u16>()
+            .ok()
+            .filter(|p| *p > 0)
+            .ok_or("invalid_args: недопустимый порт")?,
+        None => 443,
+    };
+    let ip = host.parse::<std::net::IpAddr>().ok();
+    let private = host.is_empty()
+        || host == "localhost"
         || host.ends_with(".localhost")
         || host.ends_with(".local")
-        || (!host.contains('.') && ipv6.is_none())
-        || ipv4.is_some_and(|ip| {
-            ip.is_private() || ip.is_loopback() || ip.is_link_local() || ip.is_unspecified()
-        })
-        || ipv6.is_some_and(|ip| {
-            let first = ip.segments()[0];
-            ip.is_loopback()
-                || ip.is_unspecified()
-                || first & 0xfe00 == 0xfc00
-                || first & 0xffc0 == 0xfe80
-        });
+        || host.ends_with(".internal")
+        || (!host.contains('.') && ip.is_none())
+        || ip.is_some_and(|ip| !is_public(ip));
     if private {
         return Err("permission_denied: локальные адреса недоступны".into());
     }
-    Ok(())
+    Ok(Target {
+        host,
+        port,
+        literal: ip.is_some(),
+    })
 }
 
 fn encode_query(text: &str) -> String {
@@ -705,20 +840,30 @@ pub fn export(document: &Document, title: &str, format: &str) -> Result<Value, S
             allowed.join(", ")
         ));
     }
-    let bytes = crate::native::export(document, &format)?;
     let dir = export_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("Не удалось создать папку экспорта: {e}"))?;
     let stem = file_stem(title);
+    let suffix = if format == "png" && matches!(document, Document::Slides(_)) {
+        String::new()
+    } else {
+        format!(".{format}")
+    };
     let path = (1..1000)
         .map(|n| {
             if n == 1 {
-                dir.join(format!("{stem}.{format}"))
+                dir.join(format!("{stem}{suffix}"))
             } else {
-                dir.join(format!("{stem} ({n}).{format}"))
+                dir.join(format!("{stem} ({n}){suffix}"))
             }
         })
         .find(|path| !path.exists())
         .ok_or("conflict: слишком много файлов с таким именем")?;
+    if let Document::Slides(deck) = document
+        && format == "png"
+    {
+        return export_slide_pictures(deck, &path);
+    }
+    let bytes = crate::native::export(document, &format)?;
     crate::util::atomic_write(&path, &bytes, false)?;
     let mut warnings = match document {
         Document::Slides(deck) => deck.export_warnings(),
@@ -727,14 +872,54 @@ pub fn export(document: &Document, title: &str, format: &str) -> Result<Value, S
     if format == "pdf" && matches!(document, Document::Slides(_)) {
         warnings.push("PDF статичен: анимации и переходы не сохраняются".into());
     }
-    if format == "png" {
-        warnings.push("PNG содержит только первый слайд".into());
-    }
     Ok(json!({
         "exported": true,
         "path": path.to_string_lossy(),
         "format": format,
         "bytes": bytes.len(),
+        "warnings": warnings,
+    }))
+}
+
+/// Every slide that is not hidden as `Слайд NN.png` in a new folder `dir`.
+fn export_slide_pictures(
+    deck: &crate::slides::model::Deck,
+    dir: &std::path::Path,
+) -> Result<Value, String> {
+    deck.validate()?;
+    let shown: Vec<(usize, &crate::slides::model::Slide)> = deck
+        .slides
+        .iter()
+        .enumerate()
+        .filter(|(_, slide)| !slide.hidden)
+        .collect();
+    if shown.is_empty() {
+        return Err("invalid_args: в презентации нет показываемых слайдов".into());
+    }
+    std::fs::create_dir(dir).map_err(|e| format!("Не удалось создать папку экспорта: {e}"))?;
+    let mut files = Vec::new();
+    let mut total = 0_usize;
+    for (index, slide) in shown {
+        let bytes = crate::png::write(&deck.page(slide), 2.0)?;
+        let path = dir.join(format!("Слайд {:02}.png", index + 1));
+        crate::util::atomic_write(&path, &bytes, false)?;
+        total += bytes.len();
+        files.push(path.to_string_lossy().into_owned());
+    }
+    let mut warnings = deck.export_warnings();
+    warnings.push("PNG статичен: анимации и переходы не сохраняются".into());
+    if files.len() < deck.slides.len() {
+        warnings.push(format!(
+            "Скрытые слайды не выгружены: {}",
+            deck.slides.len() - files.len()
+        ));
+    }
+    Ok(json!({
+        "exported": true,
+        "path": dir.to_string_lossy(),
+        "files": files,
+        "format": "png",
+        "bytes": total,
         "warnings": warnings,
     }))
 }
@@ -781,6 +966,23 @@ mod tests {
         assert!(check_url("https://192.168.1.4/a.png").is_err());
         assert!(check_url("https://[::1]/a.png").is_err());
         assert!(check_url("https://example.com/a b.png").is_err());
+        assert!(check_url("https://100.64.0.1/a.png").is_err());
+        assert!(check_url("https://[::ffff:10.0.0.1]/a.png").is_err());
+        assert!(check_url("https://router.internal/a.png").is_err());
+        assert!(check_url("https://example.com:0/a.png").is_err());
+        assert!(
+            target("https://Example.com.:8443/a.png")
+                .is_ok_and(|t| t.host == "example.com" && t.port == 8443 && !t.literal)
+        );
+        assert!(is_public(std::net::IpAddr::from([93, 184, 216, 34])));
+        for private in ["169.254.169.254", "0.1.2.3", "fd00::1", "fe80::1", "::1"] {
+            assert!(
+                private
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| !is_public(ip)),
+                "{private}"
+            );
+        }
         assert_eq!(
             encode_query("горы sky&x"),
             "%D0%B3%D0%BE%D1%80%D1%8B+sky%26x"

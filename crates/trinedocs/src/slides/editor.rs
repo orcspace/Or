@@ -1881,6 +1881,14 @@ fn properties(ui: &mut egui::Ui, e: &mut Element) -> bool {
                         .prefix("Задержка "),
                 )
                 .changed();
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut e.animation.order)
+                        .range(0..=999)
+                        .prefix("Порядок "),
+                )
+                .on_hover_text("0 — по порядку слоёв, раньше пронумерованных шагов")
+                .changed();
         });
 
     changed
@@ -2535,13 +2543,15 @@ fn animation_start(
         _ => previous_start + element.animation.delay,
     }
 }
-pub(crate) fn animation_end(slide: &Slide, click_times: &[f32]) -> f32 {
-    let (mut previous_start, mut previous_end, mut latest, mut click) = (0.0, 0.0, 0.0_f32, 0);
-    for element in slide
-        .elements
-        .iter()
-        .filter(|element| element.animation.effect != "none")
-    {
+/// Start time of every animated element, indexed like `slide.elements`; steps run in
+/// `Slide::animation_sequence` order, not in layer order.
+fn animation_schedule(slide: &Slide, click_times: &[f32]) -> Vec<Option<f32>> {
+    let mut starts = vec![None; slide.elements.len()];
+    let (mut previous_start, mut previous_end, mut click) = (0.0, 0.0, 0);
+    for index in slide.animation_sequence() {
+        let Some(element) = slide.elements.get(index) else {
+            continue;
+        };
         previous_start = animation_start(
             element,
             click_times,
@@ -2550,9 +2560,18 @@ pub(crate) fn animation_end(slide: &Slide, click_times: &[f32]) -> f32 {
             previous_end,
         );
         previous_end = previous_start + element.animation.duration;
-        latest = latest.max(previous_end);
+        if let Some(slot) = starts.get_mut(index) {
+            *slot = Some(previous_start);
+        }
     }
-    latest
+    starts
+}
+pub(crate) fn animation_end(slide: &Slide, click_times: &[f32]) -> f32 {
+    animation_schedule(slide, click_times)
+        .iter()
+        .zip(&slide.elements)
+        .filter_map(|(start, e)| start.map(|start| start + e.animation.duration))
+        .fold(0.0_f32, f32::max)
 }
 pub(crate) fn motion_progress(elapsed: f32, start: f32, duration: f32) -> f32 {
     ((elapsed - start) / duration.max(0.001)).clamp(0.0, 1.0)
@@ -2568,26 +2587,16 @@ pub fn paint_slide(
     let painter = painter.with_clip_rect(rect);
     painter.rect_filled(rect, 0.0, rgb(slide.background));
     let scale = (rect.width() / deck.width).min(rect.height() / deck.height);
-    let mut previous_end = 0.0;
-    let mut previous_start = 0.0;
-    let mut click_count = 0;
-    for element in &slide.elements {
+    let schedule =
+        animation.map(|(time, click_times)| (time, animation_schedule(slide, click_times)));
+    for (index, element) in slide.elements.iter().enumerate() {
         let mut animated;
         let mut rendered = element;
         let mut opacity = 1.0;
-        if let Some((time, click_times)) = animation
-            && element.animation.effect != "none"
+        if let Some((time, starts)) = &schedule
+            && let Some(Some(start)) = starts.get(index)
         {
-            let start = animation_start(
-                element,
-                click_times,
-                &mut click_count,
-                previous_start,
-                previous_end,
-            );
-            let progress = motion_progress(time, start, element.animation.duration);
-            previous_end = start + element.animation.duration;
-            previous_start = start;
+            let progress = motion_progress(*time, *start, element.animation.duration);
             let ease = 1.0 - (1.0 - progress).powi(3);
             match element.animation.effect.as_str() {
                 "fade" => opacity = ease,

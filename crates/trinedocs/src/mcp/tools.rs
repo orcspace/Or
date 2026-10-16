@@ -492,7 +492,7 @@ fn slides_definition(name: &'static str) -> Option<rmcp::model::Tool> {
             false,
         ),
         "slides_animate" => (
-            "Animate several objects on slide_id at once. animation {effect fade|fly_in|zoom|none, trigger on_click|with_previous|after_previous, delay, duration} is applied to element_ids; the i-th object gets delay + i*stagger seconds. On-click steps play in the slide's layer order. Animations play in TrineDocs shows but are not yet written to PPTX timing (transitions are).",
+            "Animate several objects on slide_id at once. animation {effect fade|fly_in|zoom|none, trigger on_click|with_previous|after_previous, delay, duration} is applied to element_ids; the i-th object gets delay + i*stagger seconds. Steps play in element_ids order, after animations set earlier on the slide. Saved to PPTX timing (PowerPoint entrance effects Fade, Fly In, Zoom).",
             edit(
                 json!({
                     "slide_id":{"type":"integer","minimum":1},
@@ -522,7 +522,7 @@ fn slides_definition(name: &'static str) -> Option<rmcp::model::Tool> {
             false,
         ),
         "export" => (
-            "Export an open document in the background to a NEW file in Documents\\TrineDocs\\Экспорт (never overwrites). format_extension: pptx|pdf|png for Slides, docx|pdf|txt|md|html for Docs, xlsx|pdf|csv|tsv|html for Sheets; default is the Office format. Returns the file path and format-loss warnings to report to the user.",
+            "Export an open document in the background to a NEW file in Documents\\TrineDocs\\Экспорт (never overwrites). format_extension: pptx|pdf|png for Slides, docx|pdf|txt|md|html for Docs, xlsx|pdf|csv|tsv|html for Sheets; default is the Office format. Slides png writes a new folder with one picture per shown slide. Returns the path (and files for png) plus format-loss warnings to report to the user.",
             json!({"type":"object","required":["document_id"],"properties":{
                 "document_id":{"type":"integer","minimum":1},
                 "format_extension":{"type":"string","enum":["pptx","pdf","png","docx","txt","md","html","xlsx","csv","tsv"]},
@@ -2233,19 +2233,28 @@ fn dispatch_inner(
                 return Err("invalid_range: stagger от 0 до 60 с".into());
             }
             let slide = d.slide_mut(sid).ok_or("Слайд не найден")?;
+            if ids.iter().any(|eid| slide.element(*eid).is_none()) {
+                return Err("Фигура не найдена".into());
+            }
+            // Re-animated objects move to the end of the sequence in element_ids order.
+            for eid in &ids {
+                if let Some(e) = slide.element_mut(*eid) {
+                    e.animation.effect = "none".into();
+                }
+            }
+            let first = slide.next_animation_order();
             for (index, eid) in ids.iter().enumerate() {
                 let e = slide.element_mut(*eid).ok_or("Фигура не найдена")?;
                 e.animation = crate::slides::model::Animation {
                     delay: base.delay + stagger * index as f32,
+                    order: if base.effect == "none" {
+                        0
+                    } else {
+                        first.saturating_add(index as u32)
+                    },
                     ..base.clone()
                 };
                 changed_ids.push(*eid);
-            }
-            if base.trigger == "on_click" && ids.len() > 1 {
-                notes.push(
-                    "Шаги по щелчку воспроизводятся в порядке слоёв слайда; порядок element_ids задаёт только задержку"
-                        .into(),
-                );
             }
         }
         (Document::Slides(d), "slides_align") => {
@@ -2376,10 +2385,24 @@ fn dispatch_inner(
         }
         (Document::Slides(d), "slides_set_animation") => {
             let eid = id(a, "element_id")?;
-            d.slide_mut(id(a, "slide_id")?)
-                .and_then(|s| s.elements.iter_mut().find(|e| e.id == eid))
+            let mut animation: crate::slides::model::Animation = parse(a, "animation")?;
+            let slide = d.slide_mut(id(a, "slide_id")?).ok_or("Слайд не найден")?;
+            let current = slide
+                .element(eid)
                 .ok_or("Фигура не найдена")?
-                .animation = parse(a, "animation")?;
+                .animation
+                .clone();
+            // Without an explicit order a newly animated object plays after the existing steps.
+            if animation.order == 0 && animation.effect != "none" {
+                animation.order = if current.effect != "none" && current.order > 0 {
+                    current.order
+                } else if current.effect == "none" {
+                    slide.next_animation_order()
+                } else {
+                    0
+                };
+            }
+            slide.element_mut(eid).ok_or("Фигура не найдена")?.animation = animation;
         }
         (_, "replace_document_model") => {
             doc = parse(a, "model")?;
@@ -4496,6 +4519,19 @@ mod review04_tests {
         let xs: Vec<f32> = elements.iter().map(|e| e.x).collect();
         // 960 pt minus three 100 pt boxes leaves two 330 pt gaps.
         assert_eq!(xs, vec![0.0, 430.0, 860.0]);
+        assert_eq!(deck.slides[0].animation_sequence(), vec![0, 1, 2]);
+        dispatch(
+            &mut tabs,
+            &mut 2,
+            "slides_animate",
+            &json!({"document_id":1,"slide_id":sid,"element_ids":[ids[2], ids[0]],"animation":{"effect":"zoom","trigger":"on_click","delay":0,"duration":0.5}}),
+            "agent",
+        )?;
+        let Document::Slides(deck) = &tabs[0].document else {
+            return Err("deck".into());
+        };
+        // Re-animated objects play after the untouched one, in element_ids order.
+        assert_eq!(deck.slides[0].animation_sequence(), vec![1, 2, 0]);
         Ok(())
     }
 }

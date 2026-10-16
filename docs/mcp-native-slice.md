@@ -45,7 +45,7 @@ Stateless MCP resources пока не принимают этот handle; исп
   - уменьшение до 1920 px и не больше 1000 КБ, затем обычная вставка `slides_add_image`.
 - `slides_generate_image {document_id, slide_id, style?, colors?, seed?, …}`: локальная процедурная графика gradient/radial/blobs/waves/grid/noise.
 - `slides_format_text {document_id, slide_id?, element_ids?, format}`: пакетно font/font_size/color/bold/italic/fill/stroke/stroke_width. Если ID не указаны, текстовые свойства не применяются к картинкам и линиям. Для неустановленного шрифта возвращается `warnings`.
-- `slides_animate {document_id, slide_id, element_ids, animation, stagger?}`: задержка i-го объекта равна `delay + i·stagger`. Шаги по щелчку идут в порядке слоёв.
+- `slides_animate {document_id, slide_id, element_ids, animation, stagger?}`: задержка i-го объекта равна `delay + i·stagger`. Шаги идут в порядке `element_ids` после анимаций, уже заданных на слайде, и сохраняются в PPTX `p:timing`.
 - `slides_align {document_id, slide_id, element_ids, align, relative_to?}`:
   - align: left/center/right/top/middle/bottom, distribute_horizontal/vertical (от 3 объектов);
   - relative_to: slide/content/selection.
@@ -53,6 +53,7 @@ Stateless MCP resources пока не принимают этот handle; исп
 - `slides_add_*` принимают `x`/`y`; `as_background` у картинок растягивает её на слайд и отправляет назад.
 
 Поиск, загрузка, генерация, экспорт и навык выполняются на потоке `mcp-media`, не больше 4 заданий; сервер ждёт их до 90 с. Вставка коммитится на UI-потоке после повторной проверки прав. Эти инструменты не входят в `workspace_apply`. Ограничения:
-- анимации объектов не пишутся в PPTX timing;
-- DNS-имена, разрешающиеся во внутренние адреса, не отсекаются;
+- в PPTX пишутся только эффекты входа fade/fly-in/zoom;
+- PNG-экспорт через MCP создаёт папку со всеми показываемыми слайдами;
+- загрузка закрепляет проверенный публичный IP (`curl --resolve`) и проверяет каждый редирект;
 - сборка и тесты этого среза не запускались.

@@ -49,6 +49,9 @@ pub struct Animation {
     pub trigger: String,
     pub delay: f32,
     pub duration: f32,
+    /// Position in the slide's animation sequence; 0 keeps the layer order and plays before
+    /// numbered steps. Equal numbers fall back to the layer order.
+    pub order: u32,
 }
 impl Default for Animation {
     fn default() -> Self {
@@ -57,6 +60,7 @@ impl Default for Animation {
             trigger: "with_previous".into(),
             delay: 0.0,
             duration: 0.5,
+            order: 0,
         }
     }
 }
@@ -157,6 +161,28 @@ impl Slide {
     }
     pub fn element_mut(&mut self, id: u64) -> Option<&mut Element> {
         self.elements.iter_mut().find(|e| e.id == id)
+    }
+    /// Indices of animated elements in playback order: by `animation.order`, then by layer.
+    pub fn animation_sequence(&self) -> Vec<usize> {
+        let mut sequence: Vec<usize> = self
+            .elements
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.animation.effect != "none")
+            .map(|(index, _)| index)
+            .collect();
+        sequence.sort_by_key(|index| self.elements[*index].animation.order);
+        sequence
+    }
+    /// The order number that places a new animation after every existing one.
+    pub fn next_animation_order(&self) -> u32 {
+        self.elements
+            .iter()
+            .filter(|e| e.animation.effect != "none")
+            .map(|e| e.animation.order)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
     }
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -403,7 +429,7 @@ impl Deck {
             .any(|s| s.elements.iter().any(|e| e.animation.effect != "none"))
         {
             warnings.push(
-                "Анимации воспроизводятся в TrineDocs; PPTX timing пока не экспортируется".into(),
+                "Анимации объектов попадают в PPTX как эффекты входа PowerPoint (выцветание, вылет, масштаб); PDF и PNG статичны".into(),
             );
         }
         if self
