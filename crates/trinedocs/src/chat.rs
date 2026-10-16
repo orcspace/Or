@@ -218,6 +218,7 @@ pub struct Chat {
     paths: [Option<PathBuf>; 2],
     probe: Option<Receiver<Probe>>,
     client: String,
+    generation: u64,
     needs_login: bool,
     /// Model per provider; empty means the CLI default.
     model: [String; 2],
@@ -254,6 +255,7 @@ impl Chat {
             paths: [None, None],
             probe: None,
             client: format!("TrineDocs Chat {nonce}"),
+            generation: 1,
             needs_login: false,
             model: [String::new(), String::new()],
             effort: [String::new(), String::new()],
@@ -275,10 +277,20 @@ impl Chat {
         (self.model.clone(), self.effort.clone())
     }
     /// True for MCP requests coming from this chat's own CLI process.
-    pub fn owns(&self, client: &str) -> bool {
+    pub(crate) fn client_name(&self) -> String {
+        format!("{} /ход {}", self.client, self.generation)
+    }
+    pub fn was_ours(&self, client: &str) -> bool {
         client
             .strip_prefix(self.client.as_str())
-            .is_some_and(|rest| rest.starts_with(" ·"))
+            .is_some_and(|rest| rest.starts_with(" /ход "))
+    }
+    pub fn owns(&self, client: &str) -> bool {
+        let expected = self.client_name();
+        client == expected
+            || client
+                .strip_prefix(expected.as_str())
+                .is_some_and(|rest| rest.starts_with(" ·"))
     }
     pub fn busy(&self) -> bool {
         self.turn.is_some()
@@ -390,6 +402,7 @@ impl Chat {
         }
     }
     pub fn stop(&mut self) {
+        self.generation = self.generation.saturating_add(1);
         self.poll();
         if let Some(turn) = self.turn.take() {
             kill(&turn.child);
@@ -464,7 +477,7 @@ impl Chat {
         match start(
             provider,
             &exe,
-            &self.client,
+            &self.client_name(),
             session.as_deref(),
             (&model, &effort),
             prompt,
@@ -2066,12 +2079,24 @@ mod tests {
     #[test]
     fn chat_owns_only_its_nonce() {
         let chat = Chat::new();
-        let mine = format!("{} · сессия 3", chat.client);
+        let mine = format!("{} · сессия 3", chat.client_name());
         assert!(chat.owns(&mine));
         assert!(!chat.owns("TrineDocs Chat 0000 · сессия 3"));
-        assert!(!chat.owns(&format!("{}x · сессия 3", chat.client)));
+        assert!(!chat.owns(&format!("{}x · сессия 3", chat.client_name())));
         assert_eq!(toml_string(r"C:\A B\x.exe"), r"'C:\A B\x.exe'");
         assert_eq!(toml_string("O'Neil"), "\"O'Neil\"");
+    }
+    #[test]
+    fn stop_and_clear_revoke_the_previous_client_generation() {
+        let mut chat = Chat::new();
+        let old = format!("{} · сессия 1", chat.client_name());
+        chat.stop();
+        assert!(chat.was_ours(&old));
+        assert!(!chat.owns(&old));
+        assert!(chat.owns(&format!("{} · сессия 2", chat.client_name())));
+        let after = chat.client_name();
+        chat.clear();
+        assert!(!chat.owns(&after));
     }
     #[test]
     fn transcript_keeps_recent_turns() {

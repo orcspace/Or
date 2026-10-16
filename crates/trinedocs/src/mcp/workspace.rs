@@ -86,6 +86,9 @@ pub fn parse(arguments: &Value) -> Result<Plan, String> {
             ));
         }
         super::tools::validate_args(&operation.tool, &operation.arguments)?;
+        if operation.arguments.get("client_access").is_some() {
+            return Err("invalid_args: client_access разрешён только для всего вызова, не внутри operations".into());
+        }
         if operation.arguments.get("mode").is_some() {
             return Err("invalid_args: mode задаётся для всего пакета".into());
         }

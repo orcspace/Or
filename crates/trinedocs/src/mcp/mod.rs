@@ -1,3 +1,4 @@
+pub mod access;
 pub mod integration;
 pub mod register;
 pub mod server;

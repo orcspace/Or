@@ -156,6 +156,7 @@ pub struct App {
     bridge: Option<std::sync::mpsc::Receiver<crate::mcp::BridgeRequest>>,
     allowed: BTreeSet<String>,
     clients: BTreeSet<String>,
+    client_access: crate::mcp::access::Registry,
     mcp_saves: BTreeMap<u64, tokio::sync::oneshot::Sender<Result<Value, String>>>,
     pending_mcp_closes: Vec<crate::mcp::BridgeRequest>,
     pending: Option<Pending>,
@@ -247,6 +248,7 @@ impl App {
             bridge,
             allowed: BTreeSet::new(),
             clients: BTreeSet::new(),
+            client_access: Default::default(),
             mcp_saves: BTreeMap::new(),
             pending_mcp_closes: Vec::new(),
             pending: None,
@@ -1176,7 +1178,7 @@ impl App {
                     .find(|task| {
                         task.id == id
                             && (task.client == client
-                                || (self.chat.owns(&task.client) && self.chat.owns(client)))
+                                || (self.chat.was_ours(&task.client) && self.chat.owns(client)))
                     })
                     .ok_or("not_found: собственное задание не найдено")?;
                 if tool == "workspace_cancel" {
@@ -1191,6 +1193,7 @@ impl App {
         for task in &mut self.workspace_jobs {
             if task.running()
                 && (!self.settings.mcp
+                    || (self.chat.was_ours(&task.client) && !self.chat.owns(&task.client))
                     || (!self.allowed.contains(&task.client) && !self.chat.owns(&task.client))
                     || task.started.elapsed() > crate::mcp::workspace::TIMEOUT)
             {
@@ -1307,6 +1310,10 @@ impl App {
             });
     }
     fn mcp_requests(&mut self, ctx: &egui::Context) {
+        for key in self.client_access.reap() {
+            self.allowed.remove(&key);
+            self.clients.remove(&key);
+        }
         // Agents often send bursts of small edits; drain them in one frame.
         let started = Instant::now();
         for _ in 0..64 {
@@ -1314,7 +1321,7 @@ impl App {
                 ctx.request_repaint();
                 break;
             }
-            let Some(r) = self.bridge.as_ref().and_then(|b| b.try_recv().ok()) else {
+            let Some(mut r) = self.bridge.as_ref().and_then(|b| b.try_recv().ok()) else {
                 break;
             };
             if r.reply.is_closed() || Instant::now() > r.deadline {
@@ -1323,6 +1330,67 @@ impl App {
             if !self.settings.mcp {
                 let _ = r.reply.send(Err("permission_denied: MCP отключён".into()));
                 continue;
+            }
+            if self.chat.was_ours(&r.client) && !self.chat.owns(&r.client) {
+                let _ = r.reply.send(Err("cancelled: ход чата остановлен".into()));
+                continue;
+            }
+            if r.tool == "request_access" {
+                let result = (|| -> Result<Value, String> {
+                    let args = r
+                        .args
+                        .as_object()
+                        .filter(|args| args.keys().all(|key| key == "client_access"))
+                        .ok_or("invalid_args: request_access принимает только client_access")?;
+                    let token = args
+                        .get("client_access")
+                        .map(|v| {
+                            v.as_str()
+                                .ok_or("invalid_args: client_access должен быть строкой")
+                        })
+                        .transpose()?;
+                    if self.chat.owns(&r.client) {
+                        return Ok(
+                            json!({"client_access":null,"status":"allowed","expires_in_seconds":0}),
+                        );
+                    }
+                    let access = self.client_access.request(&r.client, token)?;
+                    let status = if access.denied {
+                        "denied"
+                    } else if self.allowed.contains(&access.key) {
+                        "allowed"
+                    } else {
+                        self.clients.insert(access.key);
+                        "pending"
+                    };
+                    Ok(
+                        json!({"client_access":access.token,"status":status,"expires_in_seconds":access.expires_in_seconds}),
+                    )
+                })();
+                let _ = r.reply.send(result);
+                continue;
+            }
+            if let Some(value) = r.args.get("client_access") {
+                let result = if self.chat.owns(&r.client) {
+                    Err("invalid_args: встроенному чату client_access не требуется".into())
+                } else {
+                    value
+                        .as_str()
+                        .ok_or("invalid_args: client_access должен быть строкой".to_string())
+                        .and_then(|token| self.client_access.resolve(&r.client, token))
+                };
+                match result {
+                    Ok(client) => {
+                        r.client = client;
+                        if let Some(args) = r.args.as_object_mut() {
+                            args.remove("client_access");
+                        }
+                    }
+                    Err(error) => {
+                        let _ = r.reply.send(Err(error));
+                        continue;
+                    }
+                }
             }
             if !self.allowed.contains(&r.client) && !self.chat.owns(&r.client) {
                 self.clients.insert(r.client);
@@ -1513,6 +1581,7 @@ impl App {
             }
             let result = (|| -> Result<Value, String> {
                 if !self.settings.mcp
+                    || (self.chat.was_ours(&request.client) && !self.chat.owns(&request.client))
                     || (!self.allowed.contains(&request.client) && !self.chat.owns(&request.client))
                 {
                     return Err("permission_denied: доступ MCP отозван".into());
@@ -1935,6 +2004,7 @@ impl App {
                         }
                         if ui.button("Запретить").clicked() {
                             self.clients.remove(&client);
+                            self.client_access.deny(&client);
                         }
                     });
                 });
@@ -2099,6 +2169,7 @@ if ui.button("Отмена").clicked(){action=3}});}}
                         changed = true;
                         self.allowed.clear();
                         self.clients.clear();
+                        self.client_access.clear();
                         if self.settings.mcp && self.mcp.is_none() {
                             let (m, b) = crate::mcp::Handle::start(ctx.clone());
                             self.mcp = Some(m);
@@ -3505,6 +3576,7 @@ mod shell_input_tests {
             bridge,
             allowed: BTreeSet::new(),
             clients: BTreeSet::new(),
+            client_access: Default::default(),
             mcp_saves: BTreeMap::new(),
             pending_mcp_closes: Vec::new(),
             pending: None,
@@ -3623,22 +3695,39 @@ mod shell_input_tests {
     }
     type McpReply = tokio::sync::oneshot::Receiver<Result<Value, String>>;
     fn mcp_request(app: &mut App, tool: &str, args: Value) -> Result<McpReply, String> {
+        app.allowed.insert("test-agent".into());
+        mcp_request_as(app, "test-agent", tool, args)
+    }
+    fn mcp_request_as(
+        app: &mut App,
+        client: &str,
+        tool: &str,
+        args: Value,
+    ) -> Result<McpReply, String> {
         let (sender, receiver) = std::sync::mpsc::channel();
         let (reply, response) = tokio::sync::oneshot::channel();
-        let client = "test-agent".to_string();
         app.settings.mcp = true;
-        app.allowed.insert(client.clone());
         app.bridge = Some(receiver);
         sender
             .send(crate::mcp::BridgeRequest {
                 tool: tool.into(),
                 args,
-                client,
+                client: client.into(),
                 reply,
                 deadline: Instant::now() + std::time::Duration::from_secs(10),
             })
-            .map_err(|error| error.to_string())?;
+            .map_err(|e| e.to_string())?;
         Ok(response)
+    }
+    fn mcp_roundtrip_as(
+        app: &mut App,
+        client: &str,
+        tool: &str,
+        args: Value,
+    ) -> Result<Value, String> {
+        let mut response = mcp_request_as(app, client, tool, args)?;
+        app.mcp_requests(&app.editor_ctx.clone());
+        response.try_recv().map_err(|e| e.to_string())?
     }
     fn worker_event(app: &mut App, event: Event) -> Result<(), String> {
         let (sender, receiver) = std::sync::mpsc::channel();
@@ -3677,6 +3766,99 @@ mod shell_input_tests {
                 "test-agent",
                 updates,
             ));
+        Ok(())
+    }
+    #[test]
+    fn stopping_or_clearing_chat_cancels_ready_jobs_and_stale_queued_requests() -> Result<(), String>
+    {
+        for clear in [false, true] {
+            let mut app = fixture()?;
+            ready_workspace(&mut app)?;
+            let old_client = format!("{} · сессия 1", app.chat.client_name());
+            app.workspace_jobs[0].client = old_client.clone();
+            let before: Vec<_> = app.tabs.iter().map(|t| t.document.clone()).collect();
+            if clear {
+                app.chat.clear();
+            } else {
+                app.chat.stop();
+            }
+            app.finish_workspace(&app.editor_ctx.clone());
+            assert_eq!(app.workspace_jobs[0].state(), "cancelled");
+            assert_eq!(
+                before,
+                app.tabs
+                    .iter()
+                    .map(|t| t.document.clone())
+                    .collect::<Vec<_>>()
+            );
+            let result = mcp_roundtrip_as(&mut app, &old_client, "workspace_documents", json!({}));
+            assert!(result.is_err_and(|e| e.starts_with("cancelled:")));
+            assert!(app.clients.is_empty());
+        }
+        Ok(())
+    }
+    #[test]
+    fn stateless_access_keeps_authorization_and_job_owner_without_leaking_the_handle()
+    -> Result<(), String> {
+        let mut app = fixture()?;
+        let pending = mcp_roundtrip_as(&mut app, "Client · сессия 1", "request_access", json!({}))?;
+        assert_eq!(pending["status"], "pending");
+        let token = pending["client_access"]
+            .as_str()
+            .ok_or("handle")?
+            .to_string();
+        let key = app.clients.first().cloned().ok_or("approval")?;
+        assert!(!key.contains(&token));
+        assert!(
+            mcp_roundtrip_as(
+                &mut app,
+                "Client · сессия 2",
+                "workspace_documents",
+                json!({"client_access":token})
+            )
+            .is_err()
+        );
+        app.allowed.insert(key.clone());
+        app.clients.clear();
+        let documents = mcp_roundtrip_as(
+            &mut app,
+            "Client · сессия 3",
+            "workspace_documents",
+            json!({"client_access":token}),
+        )?;
+        assert_eq!(documents["total"], 2);
+        assert!(
+            mcp_roundtrip_as(
+                &mut app,
+                "Other · сессия 4",
+                "workspace_documents",
+                json!({"client_access":token})
+            )
+            .is_err()
+        );
+        ready_workspace(&mut app)?;
+        app.workspace_jobs[0].client = key;
+        let id = app.workspace_jobs[0].id.clone();
+        let cancelled = mcp_roundtrip_as(
+            &mut app,
+            "Client · сессия 5",
+            "workspace_cancel",
+            json!({"client_access":token,"job_id":id}),
+        )?;
+        assert_eq!(cancelled["status"], "cancelled");
+        app.finish_workspace(&app.editor_ctx.clone());
+        assert!(app.tabs.iter().all(|t| t.undo.is_empty()));
+        app.client_access.clear();
+        app.allowed.clear();
+        assert!(
+            mcp_roundtrip_as(
+                &mut app,
+                "Client · сессия 6",
+                "workspace_documents",
+                json!({"client_access":token})
+            )
+            .is_err()
+        );
         Ok(())
     }
     #[test]
