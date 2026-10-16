@@ -49,6 +49,12 @@ pub struct Animation {
     pub trigger: String,
     pub delay: f32,
     pub duration: f32,
+    /// Position in the slide's animation sequence; 0 keeps the layer order and plays before
+    /// numbered steps. Equal numbers fall back to the layer order.
+    pub order: u32,
+    /// Offset in points for the `move` motion path.
+    pub dx: f32,
+    pub dy: f32,
 }
 impl Default for Animation {
     fn default() -> Self {
@@ -57,7 +63,45 @@ impl Default for Animation {
             trigger: "with_previous".into(),
             delay: 0.0,
             duration: 0.5,
+            order: 0,
+            dx: 0.0,
+            dy: 0.0,
         }
+    }
+}
+/// Entrance effects: the object is hidden until the step starts.
+pub const ENTRANCE_EFFECTS: [&str; 3] = ["fade", "fly_in", "zoom"];
+/// Emphasis and motion effects: the object stays visible.
+pub const EMPHASIS_EFFECTS: [&str; 3] = ["pulse", "spin", "move"];
+/// Exit effects: the object is hidden after the step ends.
+pub const EXIT_EFFECTS: [&str; 3] = ["fade_out", "fly_out", "zoom_out"];
+pub fn is_animation_effect(effect: &str) -> bool {
+    effect == "none"
+        || ENTRANCE_EFFECTS.contains(&effect)
+        || EMPHASIS_EFFECTS.contains(&effect)
+        || EXIT_EFFECTS.contains(&effect)
+}
+impl Animation {
+    pub fn is_entrance(&self) -> bool {
+        ENTRANCE_EFFECTS.contains(&self.effect.as_str())
+    }
+    pub fn is_exit(&self) -> bool {
+        EXIT_EFFECTS.contains(&self.effect.as_str())
+    }
+    fn is_valid(&self) -> bool {
+        is_animation_effect(&self.effect)
+            && matches!(
+                self.trigger.as_str(),
+                "with_previous" | "after_previous" | "on_click"
+            )
+            && self.duration.is_finite()
+            && (0.001..=3600.0).contains(&self.duration)
+            && self.delay.is_finite()
+            && (0.0..=86400.0).contains(&self.delay)
+            && self.dx.is_finite()
+            && self.dy.is_finite()
+            && self.dx.abs() <= 100000.0
+            && self.dy.abs() <= 100000.0
     }
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -95,8 +139,42 @@ pub struct Element {
     pub color: [u8; 3],
     pub bold: bool,
     pub italic: bool,
+    pub font: String,
     pub group: Option<u64>,
+    /// The first animation step of the object (usually its entrance).
     pub animation: Animation,
+    /// Further steps of the same object: emphasis, motion, exit, a second entrance.
+    pub more_animations: Vec<Animation>,
+}
+impl Element {
+    /// Every animation of the object with its slot: 0 = `animation`, k = `more_animations[k-1]`.
+    pub fn animations(&self) -> impl Iterator<Item = (usize, &Animation)> {
+        std::iter::once(&self.animation)
+            .chain(&self.more_animations)
+            .enumerate()
+            .filter(|(_, a)| a.effect != "none")
+    }
+    pub fn animation_slot(&self, slot: usize) -> Option<&Animation> {
+        if slot == 0 {
+            Some(&self.animation)
+        } else {
+            self.more_animations.get(slot - 1)
+        }
+    }
+    pub fn is_animated(&self) -> bool {
+        self.animations().next().is_some()
+    }
+    /// Replaces all animations of the object with `list` (empty = none).
+    pub fn set_animations(&mut self, mut list: Vec<Animation>) {
+        list.retain(|a| a.effect != "none");
+        if list.is_empty() {
+            self.animation = Animation::default();
+            self.more_animations.clear();
+        } else {
+            self.animation = list.remove(0);
+            self.more_animations = list;
+        }
+    }
 }
 impl Default for Element {
     fn default() -> Self {
@@ -116,8 +194,10 @@ impl Default for Element {
             color: [31, 41, 55],
             bold: false,
             italic: false,
+            font: "Calibri".into(),
             group: None,
             animation: Animation::default(),
+            more_animations: Vec::new(),
         }
     }
 }
@@ -155,6 +235,45 @@ impl Slide {
     }
     pub fn element_mut(&mut self, id: u64) -> Option<&mut Element> {
         self.elements.iter_mut().find(|e| e.id == id)
+    }
+    /// Animation steps in playback order as (element index, slot): by `order`, then by layer,
+    /// then by slot.
+    pub fn animation_steps(&self) -> Vec<(usize, usize)> {
+        let mut steps: Vec<(u32, usize, usize)> = self
+            .elements
+            .iter()
+            .enumerate()
+            .flat_map(|(index, e)| e.animations().map(move |(slot, a)| (a.order, index, slot)))
+            .collect();
+        steps.sort();
+        steps
+            .into_iter()
+            .map(|(_, index, slot)| (index, slot))
+            .collect()
+    }
+    /// Element index of every animation step in playback order.
+    pub fn animation_sequence(&self) -> Vec<usize> {
+        self.animation_steps()
+            .into_iter()
+            .map(|(index, _)| index)
+            .collect()
+    }
+    /// The order number that places a new animation after every existing one.
+    pub fn next_animation_order(&self) -> u32 {
+        self.elements
+            .iter()
+            .flat_map(|e| e.animations().map(|(_, a)| a.order))
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+    }
+    /// Number of steps that wait for a click.
+    pub fn click_steps(&self) -> usize {
+        self.elements
+            .iter()
+            .flat_map(Element::animations)
+            .filter(|(_, a)| a.trigger == "on_click")
+            .count()
     }
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -218,12 +337,13 @@ impl Deck {
                 id: title_id,
                 x: 60.0,
                 y: 50.0,
-                w: self.width - 120.0,
+                w: (self.width - 120.0).max(1.0),
                 h: 80.0,
                 font_size: 40.0,
                 bold: true,
                 text: "Заголовок".into(),
                 color: self.theme.foreground,
+                font: self.theme.font.clone(),
                 ..Element::default()
             });
             let body_id = self.allocate_id();
@@ -231,18 +351,20 @@ impl Deck {
                 id: body_id,
                 x: 60.0,
                 y: 160.0,
-                w: self.width - 120.0,
-                h: self.height - 200.0,
+                w: (self.width - 120.0).max(1.0),
+                h: (self.height - 200.0).max(1.0),
                 text: if layout == "title" {
                     "Подзаголовок".into()
                 } else {
                     "Текст слайда".into()
                 },
                 color: self.theme.foreground,
+                font: self.theme.font.clone(),
                 ..Element::default()
             });
         }
         self.slides.push(slide);
+        let _ = self.set_layout(id, layout);
         id
     }
     pub fn add_element(&mut self, slide_id: u64, kind: ElementKind) -> Result<u64, String> {
@@ -255,6 +377,7 @@ impl Deck {
             kind,
             color: self.theme.foreground,
             fill: self.theme.accent,
+            font: self.theme.font.clone(),
             ..Element::default()
         };
         match &element.kind {
@@ -319,6 +442,37 @@ impl Deck {
         if !matches!(layout, "title" | "content" | "blank" | "two_content") {
             return Err("Неизвестный макет".into());
         }
+        if self.slide(slide_id).is_none() {
+            return Err("Слайд не найден".into());
+        }
+        let needed = match layout {
+            "blank" => 0,
+            "two_content" => 3,
+            _ => 2,
+        };
+        let count = self
+            .slide(slide_id)
+            .map(|slide| {
+                slide
+                    .elements
+                    .iter()
+                    .filter(|e| matches!(e.kind, ElementKind::Text))
+                    .count()
+            })
+            .unwrap_or(0);
+        for index in count..needed {
+            let id = self.add_element(slide_id, ElementKind::Text)?;
+            if let Some(element) = self.slide_mut(slide_id).and_then(|s| s.element_mut(id)) {
+                element.text = if index == 0 {
+                    "Заголовок"
+                } else if layout == "title" {
+                    "Подзаголовок"
+                } else {
+                    "Текст слайда"
+                }
+                .into();
+            }
+        }
         let width = self.width;
         let height = self.height;
         let Some(slide) = self.slide_mut(slide_id) else {
@@ -363,10 +517,10 @@ impl Deck {
         if self
             .slides
             .iter()
-            .any(|s| s.elements.iter().any(|e| e.animation.effect != "none"))
+            .any(|s| s.elements.iter().any(Element::is_animated))
         {
             warnings.push(
-                "Анимации воспроизводятся в TrineDocs; PPTX timing пока не экспортируется".into(),
+                "Анимации объектов попадают в PPTX как эффекты PowerPoint (вход, выделение, путь, выход); PDF и PNG статичны".into(),
             );
         }
         if self
@@ -394,8 +548,8 @@ impl Deck {
             return Err("Объект не найден".into());
         };
         copy.id = self.allocate_id();
-        copy.x += 20.0;
-        copy.y += 20.0;
+        copy.x = (copy.x + 20.0).clamp(-1_000_000.0, 1_000_000.0);
+        copy.y = (copy.y + 20.0).clamp(-1_000_000.0, 1_000_000.0);
         copy.group = None;
         let id = copy.id;
         if let Some(slide) = self.slide_mut(slide_id) {
@@ -457,6 +611,107 @@ impl Deck {
         }
         Ok(())
     }
+    fn table_cells_mut(
+        &mut self,
+        slide_id: u64,
+        element_id: u64,
+    ) -> Result<&mut Vec<Vec<String>>, String> {
+        match self
+            .slide_mut(slide_id)
+            .ok_or("Слайд не найден")?
+            .element_mut(element_id)
+            .map(|e| &mut e.kind)
+        {
+            Some(ElementKind::Table { cells }) => Ok(cells),
+            Some(_) => Err("invalid_args: объект не является таблицей".into()),
+            None => Err("Объект не найден".into()),
+        }
+    }
+    /// Writes a block of values into a slide table starting at (row, col), growing it as needed.
+    pub fn write_table(
+        &mut self,
+        slide_id: u64,
+        element_id: u64,
+        row: usize,
+        col: usize,
+        values: &[Vec<String>],
+    ) -> Result<(), String> {
+        let cells = self.table_cells_mut(slide_id, element_id)?;
+        if values.iter().all(Vec::is_empty) {
+            return Ok(());
+        }
+        let width = values.iter().map(Vec::len).max().unwrap_or(0);
+        let rows = cells.len().max(row.saturating_add(values.len()));
+        let columns = cells
+            .iter()
+            .map(Vec::len)
+            .max()
+            .unwrap_or(0)
+            .max(col.saturating_add(width))
+            .max(1);
+        if rows > 1000 || columns > 1000 || rows.saturating_mul(columns) > 100000 {
+            return Err(
+                "invalid_range: предел таблицы — 1000 строк, 1000 столбцов и 100 000 ячеек".into(),
+            );
+        }
+        cells.resize_with(rows, Vec::new);
+        for line in cells.iter_mut() {
+            line.resize_with(columns, String::new);
+        }
+        for (r, line) in values.iter().enumerate() {
+            for (c, value) in line.iter().enumerate() {
+                if let Some(cell) = cells.get_mut(row + r).and_then(|l| l.get_mut(col + c)) {
+                    cell.clone_from(value);
+                }
+            }
+        }
+        Ok(())
+    }
+    /// Inserts or deletes a table row (`rows`) or column at `index`; the last row or column cannot be deleted.
+    pub fn edit_table(
+        &mut self,
+        slide_id: u64,
+        element_id: u64,
+        rows: bool,
+        insert: bool,
+        index: usize,
+    ) -> Result<(), String> {
+        let cells = self.table_cells_mut(slide_id, element_id)?;
+        let columns = cells.iter().map(Vec::len).max().unwrap_or(0).max(1);
+        let count = if rows { cells.len() } else { columns };
+        if insert {
+            let new_rows = cells.len().saturating_add(usize::from(rows));
+            let new_columns = columns.saturating_add(usize::from(!rows));
+            if index > count || count >= 1000 || new_rows.saturating_mul(new_columns) > 100000 {
+                return Err("invalid_range: index".into());
+            }
+        } else if index >= count || count <= 1 {
+            return Err("invalid_range: нельзя удалить эту строку или столбец".into());
+        }
+        if insert {
+            for line in cells.iter_mut() {
+                line.resize_with(columns, String::new);
+            }
+            if rows {
+                cells.insert(index, vec![String::new(); columns]);
+            } else {
+                for line in cells.iter_mut() {
+                    line.insert(index, String::new());
+                }
+            }
+        } else {
+            if rows {
+                cells.remove(index);
+            } else {
+                for line in cells.iter_mut() {
+                    if index < line.len() {
+                        line.remove(index);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
     pub fn apply_theme(&mut self, theme: Theme) {
         let old = self.theme.clone();
         for slide in &mut self.slides {
@@ -469,6 +724,9 @@ impl Deck {
                 }
                 if element.fill == old.accent {
                     element.fill = theme.accent;
+                }
+                if element.font == old.font {
+                    element.font.clone_from(&theme.font);
                 }
             }
         }
@@ -536,6 +794,7 @@ impl Deck {
                     || !(0.001..=10000.0).contains(&element.w)
                     || !(0.001..=10000.0).contains(&element.h)
                     || !(1.0..=300.0).contains(&element.font_size)
+                    || element.font.len() > 64
                     || !(0.0..=300.0).contains(&element.stroke_width)
                     || element.x.abs() > 1000000.0
                     || element.y.abs() > 1000000.0
@@ -543,16 +802,9 @@ impl Deck {
                 {
                     return Err("Некорректная геометрия объекта".into());
                 }
-                if !matches!(
-                    element.animation.effect.as_str(),
-                    "none" | "fade" | "fly_in" | "zoom"
-                ) || !matches!(
-                    element.animation.trigger.as_str(),
-                    "with_previous" | "after_previous" | "on_click"
-                ) || !element.animation.duration.is_finite()
-                    || !(0.001..=3600.0).contains(&element.animation.duration)
-                    || !element.animation.delay.is_finite()
-                    || !(0.0..=86400.0).contains(&element.animation.delay)
+                if element.more_animations.len() > 32
+                    || !element.animation.is_valid()
+                    || element.more_animations.iter().any(|a| !a.is_valid())
                 {
                     return Err("Некорректная анимация".into());
                 }
@@ -672,11 +924,12 @@ impl Deck {
             match &element.kind {
                 ElementKind::Text => {}
                 ElementKind::Line | ElementKind::Arrow if element.stroke_width > 0.0 => {
+                    let [x1, y1, x2, y2] = line_points(element);
                     items.push(Primitive::Line {
-                        x1: element.x,
-                        y1: element.y,
-                        x2: element.x + element.w,
-                        y2: element.y + element.h,
+                        x1,
+                        y1,
+                        x2,
+                        y2,
                         width: element.stroke_width,
                         color: element.stroke,
                     })
@@ -734,6 +987,7 @@ impl Deck {
                                 font_size: element.font_size.min(ch * 0.7),
                                 bold: element.bold,
                                 italic: element.italic,
+                                font: element.font.clone(),
                                 ..Element::default()
                             };
                             for (index, line) in text_lines(&cell).into_iter().enumerate() {
@@ -745,6 +999,7 @@ impl Deck {
                                     color: element.color,
                                     bold: element.bold,
                                     italic: element.italic,
+                                    font: element.font.clone(),
                                 });
                             }
                         }
@@ -776,7 +1031,7 @@ impl Deck {
                 }
                 ElementKind::Chart { values, labels } => {
                     let (min, max) = chart_bounds(values);
-                    let range = (max - min).max(f32::EPSILON);
+                    let range = max - min;
                     let plot_height = (element.h - 30.0).max(1.0);
                     let baseline = element.y + plot_height * max / range;
                     let cw = element.w / values.len().max(1) as f32;
@@ -849,6 +1104,7 @@ impl Deck {
                         color: element.color,
                         bold: element.bold,
                         italic: element.italic,
+                        font: element.font.clone(),
                     });
                 }
             }
@@ -881,11 +1137,11 @@ impl Deck {
             }
             if matches!(element.kind, ElementKind::Arrow) && element.stroke_width > 0.0 {
                 let angle = std::f32::consts::TAU / 10.0;
-                let tip_x = element.x + element.w;
-                let tip_y = element.y + element.h;
+                let [x1, y1, tip_x, tip_y] = line_points(element);
+                let (w, h) = (tip_x - x1, tip_y - y1);
                 for a in [angle, -angle] {
-                    let dx = (element.w * a.cos() - element.h * a.sin()) / 4.0;
-                    let dy = (element.w * a.sin() + element.h * a.cos()) / 4.0;
+                    let dx = (w * a.cos() - h * a.sin()) / 4.0;
+                    let dy = (w * a.sin() + h * a.cos()) / 4.0;
                     items.push(Primitive::Line {
                         x1: tip_x,
                         y1: tip_y,
@@ -903,6 +1159,16 @@ impl Deck {
             items,
         }
     }
+}
+
+/// End points `[x1, y1, x2, y2]` of a line or arrow: the frame diagonal from the top-left to
+/// the bottom-right corner, turned by the element rotation around the frame centre.
+pub fn line_points(e: &Element) -> [f32; 4] {
+    let (cx, cy) = (e.x + e.w / 2.0, e.y + e.h / 2.0);
+    let (sin, cos) = e.rotation.to_radians().sin_cos();
+    let (hx, hy) = (e.w / 2.0, e.h / 2.0);
+    let (rx, ry) = (hx * cos - hy * sin, hx * sin + hy * cos);
+    [cx - rx, cy - ry, cx + rx, cy + ry]
 }
 
 fn layout_line_budget(text: &str, width: f32, size: f32) -> usize {
@@ -955,44 +1221,18 @@ pub fn chart_bounds(values: &[f32]) -> (f32, f32) {
         .fold(0.0_f32, f32::max);
     if min == max { (0.0, 1.0) } else { (min, max) }
 }
-fn system_font_bytes(bold: bool, italic: bool) -> &'static [u8] {
-    static FONTS: std::sync::OnceLock<Vec<Vec<u8>>> = std::sync::OnceLock::new();
-    let fonts = FONTS.get_or_init(|| {
-        [(false, false), (true, false), (false, true), (true, true)]
-            .into_iter()
-            .map(|(bold, italic)| crate::fonts::font_bytes(bold, italic).unwrap_or_default())
-            .collect()
-    });
-    fonts
-        .get(usize::from(bold) + 2 * usize::from(italic))
-        .map(Vec::as_slice)
-        .unwrap_or(&[])
-}
 pub fn text_width(text: &str, size: f32, bold: bool, italic: bool) -> f32 {
-    let face = ttf_parser::Face::parse(system_font_bytes(bold, italic), 0).ok();
+    let advances = crate::fonts::advances(crate::fonts::DEFAULT_FAMILY, bold, italic);
     text.chars()
-        .map(|ch| {
-            face.as_ref()
-                .and_then(|f| {
-                    f.glyph_index(ch)
-                        .and_then(|g| f.glyph_hor_advance(g))
-                        .map(|w| f32::from(w) * size / f32::from(f.units_per_em()))
-                })
-                .unwrap_or(size * 0.55)
-        })
+        .map(|ch| advances.get(&ch).map_or(size * 0.55, |w| w * size))
         .sum()
 }
 pub fn text_lines(element: &Element) -> Vec<String> {
-    let font = system_font_bytes(element.bold, element.italic);
-    let face = ttf_parser::Face::parse(font, 0).ok();
+    let advances = crate::fonts::advances(&element.font, element.bold, element.italic);
     let advance = |ch: char| {
-        face.as_ref()
-            .and_then(|f| {
-                f.glyph_index(ch)
-                    .and_then(|g| f.glyph_hor_advance(g))
-                    .map(|w| f32::from(w) * element.font_size / f32::from(f.units_per_em()))
-            })
-            .unwrap_or(element.font_size * 0.55)
+        advances
+            .get(&ch)
+            .map_or(element.font_size * 0.55, |w| w * element.font_size)
     };
     let limit = (element.w - 10.0).max(1.0);
     let mut lines = Vec::new();
@@ -1026,7 +1266,137 @@ pub fn text_lines(element: &Element) -> Vec<String> {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn review5_writing_no_table_values_never_resizes_or_normalizes_the_table() -> Result<(), String>
+    {
+        let mut deck = Deck::default();
+        let slide = deck.slides[0].id;
+        let table = deck.add_element(
+            slide,
+            ElementKind::Table {
+                cells: vec![vec!["one".into()], vec!["two".into(), "three".into()]],
+            },
+        )?;
+        let before = deck.clone();
+        deck.write_table(slide, table, 999, 999, &[])?;
+        deck.write_table(slide, table, 999, 999, &[vec![], vec![]])?;
+        assert_eq!(deck, before);
+        Ok(())
+    }
+
+    #[test]
+    fn tiny_chart_values_use_the_same_full_scale_as_ordinary_values() -> Result<(), String> {
+        let mut deck = Deck::empty();
+        let slide = deck.add_slide("blank");
+        let chart = deck.add_element(
+            slide,
+            ElementKind::Chart {
+                values: vec![1.0e-10, -1.0e-10],
+                labels: vec!["positive".into(), "negative".into()],
+            },
+        )?;
+        let element = deck
+            .slide_mut(slide)
+            .and_then(|s| s.element_mut(chart))
+            .ok_or("chart")?;
+        element.h = 230.0;
+        let page = deck.page(deck.slide(slide).ok_or("slide")?);
+        let bars = page
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                crate::render::Primitive::Rect { h, .. } => Some(*h),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(bars.iter().filter(|h| (**h - 100.0).abs() < 0.001).count() >= 2);
+        deck.validate()
+    }
+
+    #[test]
+    fn layouts_create_their_required_text_boxes_even_from_blank() -> Result<(), String> {
+        let mut deck = Deck::empty();
+        let id = deck.add_slide("two_content");
+        let slide = deck.slide(id).ok_or("slide")?;
+        assert_eq!(slide.elements.len(), 3);
+        assert!(slide.elements[1].x < slide.elements[2].x);
+        let id = deck.add_slide("blank");
+        deck.set_layout(id, "content")?;
+        assert_eq!(deck.slide(id).ok_or("slide")?.elements.len(), 2);
+        deck.validate()?;
+        let mut tiny = Deck {
+            width: 80.0,
+            height: 100.0,
+            ..Deck::empty()
+        };
+        tiny.add_slide("title");
+        tiny.validate()
+    }
+
     use super::*;
+    #[test]
+    fn failed_table_edits_preserve_ragged_data() -> Result<(), String> {
+        let mut deck = Deck::default();
+        let slide = deck.add_slide("blank");
+        let table = deck.add_element(
+            slide,
+            ElementKind::Table {
+                cells: vec![vec!["A".into(), "B".into()], vec!["C".into()]],
+            },
+        )?;
+        let original = deck.clone();
+        for (rows, insert, index) in [
+            (true, true, 9),
+            (false, true, 9),
+            (true, false, 9),
+            (false, false, 9),
+        ] {
+            assert!(deck.edit_table(slide, table, rows, insert, index).is_err());
+            assert_eq!(deck, original);
+        }
+        assert!(
+            deck.write_table(slide, table, 999, 999, &[vec!["X".into()]])
+                .is_err()
+        );
+        assert_eq!(deck, original);
+        Ok(())
+    }
+    #[test]
+    fn table_growth_respects_cell_budget_without_mutation() -> Result<(), String> {
+        let mut deck = Deck::empty();
+        let slide = deck.add_slide("blank");
+        let table = deck.add_element(
+            slide,
+            ElementKind::Table {
+                cells: vec![vec![String::new(); 1000]; 100],
+            },
+        )?;
+        let original = deck.clone();
+        assert!(deck.edit_table(slide, table, true, true, 100).is_err());
+        assert_eq!(deck, original);
+        deck.validate()?;
+        Ok(())
+    }
+    #[test]
+    fn deleting_from_ragged_tables_does_not_expand_them() -> Result<(), String> {
+        let mut deck = Deck::default();
+        let slide = deck.add_slide("blank");
+        let mut cells = vec![vec!["A".into()]; 1000];
+        cells[0] = vec!["B".into(); 1000];
+        let table = deck.add_element(slide, ElementKind::Table { cells })?;
+        deck.validate()?;
+        deck.edit_table(slide, table, false, false, 500)?;
+        deck.validate()?;
+        let cells = deck.table_cells_mut(slide, table)?;
+        assert_eq!(cells[0].len(), 999);
+        assert_eq!(cells[1].len(), 1);
+        deck.edit_table(slide, table, true, false, 0)?;
+        deck.validate()?;
+        let cells = deck.table_cells_mut(slide, table)?;
+        assert_eq!(cells.len(), 999);
+        assert!(cells.iter().all(|row| row.len() == 1));
+        Ok(())
+    }
     #[test]
     fn ids_survive_reorder() {
         let mut d = Deck::default();

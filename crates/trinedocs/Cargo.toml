@@ -32,6 +32,7 @@ ttf-parser = "=0.25.1"
 subsetter = "=0.2.6"
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg"] }
 rfd = { version = "=0.17.2", default-features = false }
+arboard = { version = "=3.6.1", default-features = false, features = ["image-data"] }
 encoding_rs = "=0.8.42"
 chrono = { version = "=0.4.45", default-features = false, features = ["clock"] }
 getrandom = "=0.4.3"

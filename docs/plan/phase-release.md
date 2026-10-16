@@ -32,3 +32,18 @@
 Полный Word/Excel/PowerPoint набор не реализован. Advanced layout/track changes/mail merge, полный Excel function/dynamic/pivot/query/VBA набор, сложные PowerPoint masters/media/animations и second monitor неполны. Font/CJK/RTL/mixed formatting, native dialog shutdown/stale locks, live agent cursor/streaming/Stop/logs, full external corpus/fuzzing/Windows10/IME/DPI/accessibility/FPS не подтверждены. Unknown OOXML может теряться с warning; table external PPTX formatting и shared Page rotation неполны. Нет Authenticode; EXE/installer size goals ещё измеряются.
 
 Успешный preview installer/CI не переводит глобальный DoD в done и не позволяет назвать сборку полностью готовой заменой Office.
+
+## Обновление после первого CI: блокирующий повтор ID
+
+По сообщению root первый preview CI успешно опубликовал preview1.1. Затем найден high дефект Undo/Redo: snapshot снижал allocator next_id и новая ветка правок могла переиспользовать удалённый MCP ID. Эту сборку не отправлять пользователю как итоговую; root планирует preview2 из исправленного source.
+
+Новый ops fix сохраняет allocator floor в Replace/Undo/Redo/AI rollback, отдельно запрещает смену типа документа и сравнивает AI snapshot после нормализации только counter. Независимое read-only ревью сохранено в review-2-slides.md, S-R2-O01..O07. До второй публикации:
+
+1. Закрыть explicit reload namespace/version race: только явное согласие reload, проверка tabID/base_version после фонового чтения, новая TabID для reimport, очистка old history/AI/pending state. Обычный повторный Open same path не считается согласием на замену модели.
+2. Для replace_document_model определить безопасный контракт: stale whole model требует base_version; manually supplied new IDs не должны переиспользовать retired IDs ниже allocator floor. Undo/Redo законно восстанавливают исторические объекты и проверяются отдельно.
+3. Запустить новые регрессии трёх моделей для Undo→новая ветка, Redo→AI rollback, реального последующего content conflict, readonly/overflow/kind mismatch atomicity. После последнего source commit повторить fmt/clippy, dist smoke, NSIS/install/uninstall и CI.
+4. Создать новый уникальный prerelease tag без overwrite первого asset, проверить source SHA/asset SHA256, отправить пользователю только проверенную preview2 ссылку. Первый успешный CI не закрывает баг, найденный после этого CI.
+
+## Source freeze после исправлений ID/reload
+
+Независимое второе source review подтвердило closure: allocator high-water через историю; raw MCP required base_version и typed structural-ID lifecycle; общий MCP guard также блокирует retired group injection; explicit Reload проверяет tab/version/path и создаёт новую TabID; ordinary Open только активирует existing tab; Save/Reload/Close lock guards; canonical storage paths после SaveAs и original shell path при Explorer spawn. Пять новых MCP regressions и новые Ops/Reload/Docs positional regressions ожидают итогового Cargo/CI результата после последнего source freeze. Старые размер/Office/IME/FPS/unsigned ограничения сохраняются. Проверки из основного порядка этой фазы по-прежнему обязательны перед итоговой ссылкой на preview2.

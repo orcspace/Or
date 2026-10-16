@@ -3,6 +3,10 @@ use rmcp::{
     model::*,
     service::{Peer, RequestContext, RoleClient, RoleServer},
 };
+// Upstream negotiates via `initialize` (pre-2026-07-28) and receives results
+// without `resultType`; downstream clients may negotiate 2026-07-28, where the
+// field is required, so the proxy restores the "complete" discriminator and the
+// required list caching hints (`ttlMs: 0`, `cacheScope: "private"` — never cache).
 #[derive(Clone)]
 struct Proxy {
     peer: Peer<RoleClient>,
@@ -33,6 +37,12 @@ impl ServerHandler for Proxy {
         self.peer
             .list_tools(p)
             .await
+            .map(|mut r| {
+                r.result_type.get_or_insert(ResultType::COMPLETE);
+                r.ttl_ms.get_or_insert(0);
+                r.cache_scope.get_or_insert(CacheScope::Private);
+                r
+            })
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))
     }
     async fn call_tool(
@@ -43,7 +53,10 @@ impl ServerHandler for Proxy {
         self.peer
             .call_tool(r)
             .await
-            .map(|r| r.into())
+            .map(|mut r| {
+                r.result_type.get_or_insert(ResultType::COMPLETE);
+                r.into()
+            })
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))
     }
     async fn list_resources(
@@ -54,6 +67,12 @@ impl ServerHandler for Proxy {
         self.peer
             .list_resources(p)
             .await
+            .map(|mut r| {
+                r.result_type.get_or_insert(ResultType::COMPLETE);
+                r.ttl_ms.get_or_insert(0);
+                r.cache_scope.get_or_insert(CacheScope::Private);
+                r
+            })
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))
     }
     async fn read_resource(
@@ -64,7 +83,10 @@ impl ServerHandler for Proxy {
         self.peer
             .read_resource(r)
             .await
-            .map(|r| r.into())
+            .map(|mut r| {
+                r.result_type.get_or_insert(ResultType::COMPLETE);
+                r.into()
+            })
             .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))
     }
 }
@@ -83,6 +105,7 @@ pub fn run() -> Result<(), String> {
                 && let Ok(c) = serde_json::from_slice::<super::server::Connection>(&bytes)
                 && (39217..39317).contains(&c.port)
                 && c.token.len() == 64
+                && c.token.bytes().all(|byte| byte.is_ascii_hexdigit())
                 && tokio::net::TcpStream::connect(("127.0.0.1", c.port))
                     .await
                     .is_ok()
@@ -128,18 +151,22 @@ pub fn run() -> Result<(), String> {
                 .map_err(|e| e.to_string())?,
             config,
         );
-        let client = rmcp::model::ClientConfig::new(
-            ClientCapabilities::default(),
-            Implementation::new(
-                std::env::args()
-                    .skip_while(|a| a != "--client")
-                    .nth(1)
-                    .unwrap_or_else(|| "TrineDocs stdio".into()),
-                env!("CARGO_PKG_VERSION"),
-            ),
+        let client = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            rmcp::model::ClientConfig::new(
+                ClientCapabilities::default(),
+                Implementation::new(
+                    std::env::args()
+                        .skip_while(|a| a != "--client")
+                        .nth(1)
+                        .unwrap_or_else(|| "TrineDocs stdio".into()),
+                    env!("CARGO_PKG_VERSION"),
+                ),
+            )
+            .serve(transport),
         )
-        .serve(transport)
         .await
+        .map_err(|_| "MCP не ответил на инициализацию за 10 секунд".to_string())?
         .map_err(|e| e.to_string())?;
         let proxy = Proxy {
             peer: client.peer().clone(),

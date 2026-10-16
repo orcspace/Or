@@ -3,11 +3,12 @@ use super::model::{
 };
 use calamine::{Data, Reader as _, open_workbook_auto_from_rs};
 use quick_xml::{
-    Reader,
-    events::{BytesStart, Event},
+    NsReader as Reader, Writer,
+    events::{BytesStart, BytesText, Event},
 };
 use rust_xlsxwriter::{
-    Chart, ChartType, Color, Format, FormatAlign, FormatBorder, FormatUnderline, Formula, Workbook,
+    Chart, ChartType, Color, Format, FormatAlign, FormatBorder, FormatUnderline, Formula, Image,
+    Workbook,
 };
 use std::{collections::BTreeMap, io::Cursor};
 
@@ -16,7 +17,8 @@ pub fn read(bytes: &[u8], ext: &str) -> Result<Book, String> {
     if bytes.len() > MAX_FILE {
         return Err("Файл превышает 64 МБ".into());
     }
-    match ext.trim_start_matches('.').to_ascii_lowercase().as_str() {
+    let ext = ext.trim_start_matches('.').to_ascii_lowercase();
+    match ext.as_str() {
         "csv" | "tsv" | "txt" => {
             let text = decode_text(bytes)?;
             let sep = if ext.eq_ignore_ascii_case("tsv") {
@@ -35,7 +37,8 @@ pub fn read(bytes: &[u8], ext: &str) -> Result<Book, String> {
 }
 pub fn write(book: &Book, ext: &str) -> Result<Vec<u8>, String> {
     book.validate()?;
-    match ext.trim_start_matches('.').to_ascii_lowercase().as_str() {
+    let ext = ext.trim_start_matches('.').to_ascii_lowercase();
+    match ext.as_str() {
         "xlsx" => write_xlsx(book),
         "csv" | "tsv" => {
             let s = book.active_sheet().ok_or("Нет активного листа")?;
@@ -59,7 +62,7 @@ pub fn write(book: &Book, ext: &str) -> Result<Vec<u8>, String> {
         }
         "html" => {
             let mut out = String::from(
-                "<!doctype html><meta charset=\"utf-8\"><style>td{border:1px solid #d6dbe1;padding:4px}table{border-collapse:collapse}</style>",
+                "<!doctype html><meta charset=\"utf-8\"><style>td{border:1px solid #d6dbe1;padding:4px;white-space:pre-wrap}table{border-collapse:collapse}</style>",
             );
             for s in &book.sheets {
                 let (r, c) = s.extent();
@@ -100,12 +103,12 @@ pub fn write(book: &Book, ext: &str) -> Result<Vec<u8>, String> {
             let s = book.active_sheet().ok_or("Нет активного листа")?;
             let (r, c) = s.extent();
             let rows = book.read_range(s.id, 0, 0, r, c)?;
-            let mut out = format!("# {}\n\n", s.name);
+            let mut out = format!("# {}\n\n", markdown_text(&s.name));
             for (i, row) in rows.iter().enumerate() {
                 out.push_str(&format!(
                     "| {} |\n",
                     row.iter()
-                        .map(|s| s.replace('|', "\\|").replace('\n', "<br>"))
+                        .map(|s| markdown_text(s))
                         .collect::<Vec<_>>()
                         .join(" | ")
                 ));
@@ -117,6 +120,24 @@ pub fn write(book: &Book, ext: &str) -> Result<Vec<u8>, String> {
         }
         _ => Err(format!("Не поддерживается сохранение {ext}")),
     }
+}
+fn markdown_text(text: &str) -> String {
+    let mut out = String::new();
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    for c in normalized.chars() {
+        match c {
+            '\n' => out.push_str("<br>"),
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            c if c.is_ascii_punctuation() => {
+                out.push('\\');
+                out.push(c);
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 pub fn decode_text(bytes: &[u8]) -> Result<String, String> {
     if bytes.starts_with(&[0xff, 0xfe]) || bytes.starts_with(&[0xfe, 0xff]) {
@@ -213,13 +234,9 @@ pub fn parse_csv(text: &str, separator: char) -> Result<Vec<Vec<String>>, String
             }
         } else if c == '"' && cell.is_empty() && !after_quote {
             quoted = true;
-        } else if after_quote {
-            if c != ' ' && c != '\t' {
-                return Err("CSV: неожиданный символ после кавычки".into());
-            }
-        } else if c == '"' {
-            return Err("CSV: кавычка внутри неэкранированного поля".into());
         } else {
+            // Like Excel, stray quotes and text after a closing quote are kept as text:
+            // `5" pipe` and `"x"z` are common in pasted text.
             cell.push(c);
         }
         if cell.len() > 32767 {
@@ -255,11 +272,23 @@ pub fn to_csv(rows: &[Vec<String>], separator: char) -> String {
         .collect::<Vec<_>>()
         .join("\r\n")
 }
-fn attrs(e: &BytesStart<'_>, _reader: &Reader<&[u8]>) -> Result<BTreeMap<String, String>, String> {
+fn attrs(e: &BytesStart<'_>, reader: &Reader<&[u8]>) -> Result<BTreeMap<String, String>, String> {
     e.attributes()
         .map(|a| {
             let a = a.map_err(|e| e.to_string())?;
-            let key = a.key.as_ref().to_string();
+            let (namespace, local) = reader.resolver().resolve_attribute(a.key);
+            let key = match namespace {
+                quick_xml::name::ResolveResult::Bound(namespace)
+                    if matches!(
+                        namespace.as_ref(),
+                        "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+                            | "http://purl.oclc.org/ooxml/officeDocument/relationships"
+                    ) =>
+                {
+                    format!("r:{}", local.as_ref())
+                }
+                _ => a.key.as_ref().to_string(),
+            };
             let value = a
                 .normalized_value(quick_xml::XmlVersion::Implicit1_0)
                 .map_err(|e| e.to_string())?
@@ -783,6 +812,18 @@ fn read_excel(bytes: &[u8]) -> Result<Book, String> {
         preflight(&p)?;
         Some(p)
     };
+    let mut date_1904 = false;
+    if let Some(workbook) = parts
+        .as_ref()
+        .and_then(|parts| parts.get("xl/workbook.xml"))
+    {
+        each_tag(workbook, |tag, attributes| {
+            if tag == "workbookPr" {
+                date_1904 = xml_bool(attributes.get("date1904"), false);
+            }
+            Ok(())
+        })?;
+    }
     let mut imported = open_workbook_auto_from_rs(Cursor::new(bytes))
         .map_err(|e| format!("Не удалось прочитать книгу: {e}"))?;
     let names = imported.sheet_names().to_vec();
@@ -836,7 +877,7 @@ fn read_excel(bytes: &[u8]) -> Result<Book, String> {
                     Data::Int(n) => n.to_string(),
                     Data::Float(n) => n.to_string(),
                     Data::Bool(v) => if *v { "TRUE" } else { "FALSE" }.into(),
-                    Data::DateTime(d) => d.as_f64().to_string(),
+                    Data::DateTime(d) => normalized_datetime(d, date_1904).to_string(),
                     Data::DateTimeIso(s) | Data::DurationIso(s) => format!("'{s}"),
                     Data::Error(e) => e.to_string(),
                     Data::Empty => String::new(),
@@ -871,7 +912,40 @@ fn read_excel(bytes: &[u8]) -> Result<Book, String> {
     book.validate()?;
     Ok(book)
 }
+fn normalized_datetime(value: &calamine::ExcelDateTime, date_1904: bool) -> f64 {
+    value.as_f64()
+        + if date_1904 && !value.is_duration() {
+            1462.0
+        } else {
+            0.0
+        }
+}
+fn xml_bool(value: Option<&String>, default: bool) -> bool {
+    value.map_or(default, |value| {
+        value == "1" || value.eq_ignore_ascii_case("true")
+    })
+}
 fn rgb(a: &BTreeMap<String, String>) -> Option<[u8; 3]> {
+    rgb_with_palette(a, &[])
+}
+fn rgb_with_palette(a: &BTreeMap<String, String>, palette: &[[u8; 3]]) -> Option<[u8; 3]> {
+    if let Some(index) = a.get("indexed").and_then(|v| v.parse::<usize>().ok()) {
+        const DEFAULT: [u32; 64] = [
+            0x000000, 0xFFFFFF, 0xFF0000, 0x00FF00, 0x0000FF, 0xFFFF00, 0xFF00FF, 0x00FFFF,
+            0x000000, 0xFFFFFF, 0xFF0000, 0x00FF00, 0x0000FF, 0xFFFF00, 0xFF00FF, 0x00FFFF,
+            0x800000, 0x008000, 0x000080, 0x808000, 0x800080, 0x008080, 0xC0C0C0, 0x808080,
+            0x9999FF, 0x993366, 0xFFFFCC, 0xCCFFFF, 0x660066, 0xFF8080, 0x0066CC, 0xCCCCFF,
+            0x000080, 0xFF00FF, 0xFFFF00, 0x00FFFF, 0x800080, 0x800000, 0x008080, 0x0000FF,
+            0x00CCFF, 0xCCFFFF, 0xCCFFCC, 0xFFFF99, 0x99CCFF, 0xFF99CC, 0xCC99FF, 0xFFCC99,
+            0x3366FF, 0x33CCCC, 0x99CC00, 0xFFCC00, 0xFF9900, 0xFF6600, 0x666699, 0x969696,
+            0x003366, 0x339966, 0x003300, 0x333300, 0x993300, 0x993366, 0x333399, 0x333333,
+        ];
+        if !palette.is_empty() {
+            return palette.get(index).copied();
+        }
+        let colour = *DEFAULT.get(index)?;
+        return Some([(colour >> 16) as u8, (colour >> 8) as u8, colour as u8]);
+    }
     let s = a.get("rgb")?;
     let s = if s.len() == 8 {
         s.get(2..)?
@@ -899,35 +973,83 @@ fn builtin(id: u32) -> String {
         11 => "0.00E+00",
         12 => "# ?/?",
         13 => "# ??/??",
-        14 => "mm-dd-yy",
+        // Built-in ids 5-8 and 37-40 are locale currency/accounting formats.
+        5 | 37 => "#,##0 ;(#,##0)",
+        6 | 38 => "#,##0 ;[Red](#,##0)",
+        7 | 39 => "#,##0.00;(#,##0.00)",
+        8 | 40 => "#,##0.00;[Red](#,##0.00)",
+        // Id 14 is the system short date; TrineDocs follows the Russian locale.
+        14 => "dd.mm.yyyy",
         15 => "d-mmm-yy",
         16 => "d-mmm",
         17 => "mmm-yy",
-        18 => "h:mm",
-        19 => "h:mm:ss",
+        18 => "h:mm AM/PM",
+        19 => "h:mm:ss AM/PM",
         20 => "h:mm",
         21 => "h:mm:ss",
-        22 => "m/d/yy h:mm",
+        22 => "dd.mm.yyyy h:mm",
+        45 => "mm:ss",
+        46 => "[h]:mm:ss",
+        47 => "mm:ss.0",
+        48 => "##0.0E+0",
         49 => "@",
         _ => "General",
     }
     .into()
 }
+fn indexed_palette(bytes: &[u8]) -> Result<Vec<[u8; 3]>, String> {
+    let mut palette = Vec::new();
+    let mut reader = Reader::from_str(std::str::from_utf8(bytes).map_err(|e| e.to_string())?);
+    let mut inside = false;
+    loop {
+        match reader.read_event().map_err(|e| e.to_string())? {
+            Event::Start(e) | Event::Empty(e) if local(&e) == "indexedColors" => inside = true,
+            Event::Start(e) | Event::Empty(e) if inside && local(&e) == "rgbColor" => {
+                let colour = rgb(&attrs(&e, &reader)?).ok_or("Недопустимая indexedColor")?;
+                palette.push(colour);
+                if palette.len() > 64 {
+                    return Err("Слишком много indexedColors".into());
+                }
+            }
+            Event::End(e) if e.local_name().as_ref() == "indexedColors" => inside = false,
+            Event::DocType(_) => return Err("DTD запрещён".into()),
+            Event::Eof => break,
+            _ => (),
+        }
+    }
+    Ok(palette)
+}
 fn styles(bytes: &[u8]) -> Result<Vec<CellFormat>, String> {
+    let palette = indexed_palette(bytes)?;
     let mut reader = Reader::from_str(std::str::from_utf8(bytes).map_err(|e| e.to_string())?);
     let mut section = String::new();
     let mut fonts = Vec::new();
     let mut fills = Vec::new();
+    let mut borders = Vec::new();
+    let mut current_border = false;
+    let mut current_fill_active = false;
     let mut formats = Vec::new();
     let mut num_formats = BTreeMap::new();
     let mut current_font = CellFormat::default();
     let mut current_fill = None;
     loop {
-        match reader.read_event().map_err(|e| e.to_string())? {
+        let event = reader.read_event().map_err(|e| e.to_string())?;
+        let empty = matches!(event, Event::Empty(_));
+        match event {
             Event::Start(e) | Event::Empty(e) => {
                 let tag = local(&e);
                 let a = attrs(&e, &reader)?;
-                if matches!(tag.as_str(), "fonts" | "fills" | "cellXfs" | "cellStyleXfs") {
+                // `<font/>` and `<fill/>` have no end tag but still take an index.
+                if empty && tag == "font" && section == "fonts" {
+                    fonts.push(CellFormat::default());
+                }
+                if empty && tag == "fill" && section == "fills" {
+                    fills.push(None);
+                }
+                if matches!(
+                    tag.as_str(),
+                    "fonts" | "fills" | "borders" | "cellXfs" | "cellStyleXfs"
+                ) {
                     section = tag.clone();
                 }
                 if tag == "font" {
@@ -935,6 +1057,28 @@ fn styles(bytes: &[u8]) -> Result<Vec<CellFormat>, String> {
                 }
                 if tag == "fill" {
                     current_fill = None;
+                    current_fill_active = false;
+                }
+                if tag == "border" {
+                    current_border = false;
+                    if empty {
+                        borders.push(false);
+                    }
+                }
+                if section == "borders"
+                    && matches!(
+                        tag.as_str(),
+                        "left" | "right" | "top" | "bottom" | "diagonal" | "start" | "end"
+                    )
+                {
+                    current_border |= a
+                        .get("style")
+                        .is_some_and(|style| !style.is_empty() && style != "none");
+                }
+                if section == "fills" && tag == "patternFill" {
+                    current_fill_active = a
+                        .get("patternType")
+                        .is_some_and(|pattern| pattern != "none");
                 }
                 if section == "fonts" {
                     match tag.as_str() {
@@ -948,23 +1092,23 @@ fn styles(bytes: &[u8]) -> Result<Vec<CellFormat>, String> {
                                 current_font.size = v;
                             }
                         }
-                        "b" => current_font.bold = a.get("val").is_none_or(|s| s != "0"),
-                        "i" => current_font.italic = a.get("val").is_none_or(|s| s != "0"),
+                        "b" => current_font.bold = xml_bool(a.get("val"), true),
+                        "i" => current_font.italic = xml_bool(a.get("val"), true),
                         "u" => {
                             current_font.underline =
                                 a.get("val").is_none_or(|s| s != "none" && s != "0")
                         }
-                        "strike" => current_font.strike = a.get("val").is_none_or(|s| s != "0"),
+                        "strike" => current_font.strike = xml_bool(a.get("val"), true),
                         "color" => {
-                            if let Some(color) = rgb(&a) {
+                            if let Some(color) = rgb_with_palette(&a, &palette) {
                                 current_font.color = color;
                             }
                         }
                         _ => (),
                     }
                 }
-                if section == "fills" && tag == "fgColor" {
-                    current_fill = rgb(&a);
+                if section == "fills" && tag == "fgColor" && current_fill_active {
+                    current_fill = rgb_with_palette(&a, &palette);
                 }
                 if tag == "numFmt"
                     && let (Some(id), Some(code)) = (
@@ -993,7 +1137,12 @@ fn styles(bytes: &[u8]) -> Result<Vec<CellFormat>, String> {
                         .and_then(|i| fills.get(i))
                         .copied()
                         .flatten();
-                    fmt.border = a.get("borderId").is_some_and(|s| s != "0");
+                    fmt.border = a
+                        .get("borderId")
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .and_then(|index| borders.get(index))
+                        .copied()
+                        .unwrap_or(false);
                     formats.push(fmt);
                 }
                 if section == "cellXfs"
@@ -1006,11 +1155,16 @@ fn styles(bytes: &[u8]) -> Result<Vec<CellFormat>, String> {
                         Some("right") => Align::Right,
                         _ => Align::General,
                     };
-                    fmt.wrap = a.get("wrapText").is_some_and(|s| s == "1");
-                    fmt.rotation = a
+                    fmt.wrap = xml_bool(a.get("wrapText"), false);
+                    let rotation: i16 = a
                         .get("textRotation")
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0);
+                    fmt.rotation = if (91..=180).contains(&rotation) {
+                        90 - rotation
+                    } else {
+                        rotation
+                    };
                 }
             }
             Event::End(e) => {
@@ -1020,6 +1174,9 @@ fn styles(bytes: &[u8]) -> Result<Vec<CellFormat>, String> {
                 }
                 if tag == "fill" {
                     fills.push(current_fill);
+                }
+                if tag == "border" {
+                    borders.push(current_border);
                 }
                 if tag == section {
                     section.clear();
@@ -1033,8 +1190,19 @@ fn styles(bytes: &[u8]) -> Result<Vec<CellFormat>, String> {
     Ok(formats)
 }
 fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(), String> {
+    let workbook_rels = relationships("xl/workbook.xml", parts);
+    let style_path = workbook_rels
+        .values()
+        .find(|(kind, _)| kind.ends_with("/styles"))
+        .map(|(_, target)| target.as_str())
+        .unwrap_or("xl/styles.xml");
+    let palette = parts
+        .get(style_path)
+        .map(|bytes| indexed_palette(bytes))
+        .transpose()?
+        .unwrap_or_default();
     let formats = parts
-        .get("xl/styles.xml")
+        .get(style_path)
         .map(|b| styles(b))
         .transpose()?
         .unwrap_or_default();
@@ -1044,14 +1212,7 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
             if tag == "Relationship"
                 && let (Some(id), Some(target)) = (a.get("Id"), a.get("Target"))
             {
-                targets.insert(
-                    id.clone(),
-                    if target.starts_with('/') {
-                        target.trim_start_matches('/').into()
-                    } else {
-                        format!("xl/{target}")
-                    },
-                );
+                targets.insert(id.clone(), resolve_target("xl/workbook.xml", target));
             }
             Ok(())
         })?;
@@ -1059,6 +1220,14 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
     let mut paths = Vec::new();
     if let Some(bytes) = parts.get("xl/workbook.xml") {
         each_tag(bytes, |tag, a| {
+            if tag == "workbookView"
+                && let Some(active) = a
+                    .get("activeTab")
+                    .and_then(|value| value.parse::<usize>().ok())
+                && active < book.sheets.len()
+            {
+                book.active = active;
+            }
             if tag == "sheet"
                 && let (Some(name), Some(id)) = (a.get("name"), a.get("r:id"))
                 && let Some(path) = targets.get(id)
@@ -1122,9 +1291,10 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
                             .and_then(|v| v.parse::<f32>().ok())
                             .filter(|w| w.is_finite() && *w > 0.0)
                         {
-                            s.widths.insert(c, (w * 7.0 + 5.0).clamp(12.0, 1800.0));
+                            let pixels = if w < 1.0 { w * 12.0 } else { w * 7.0 + 5.0 };
+                            s.widths.insert(c, pixels.clamp(1.0, 1800.0));
                         }
-                        if a.get("hidden").is_some_and(|v| v == "1") {
+                        if xml_bool(a.get("hidden"), false) {
                             s.hidden_cols.insert(c);
                         }
                     }
@@ -1143,10 +1313,9 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
                         .and_then(|v| v.parse::<f32>().ok())
                         .filter(|h| h.is_finite() && *h > 0.0)
                     {
-                        s.row_heights
-                            .insert(r, (h * 96.0 / 72.0).clamp(12.0, 600.0));
+                        s.row_heights.insert(r, (h * 96.0 / 72.0).clamp(1.0, 600.0));
                     }
-                    if a.get("hidden").is_some_and(|v| v == "1") {
+                    if xml_bool(a.get("hidden"), false) {
                         s.hidden_rows.insert(r);
                     }
                 }
@@ -1167,12 +1336,20 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
                             .unwrap_or(0.0) as u32;
                     }
                 }
-                "tabColor" => s.tab_color = rgb(a),
+                "tabColor" => s.tab_color = rgb_with_palette(a, &palette),
                 "autoFilter" => s.filter = a.get("ref").and_then(|v| parse_range(v).ok()),
                 _ => (),
             }
             Ok(())
         })?;
+        read_sheet_images(book, id, &path, parts);
+    }
+    if book.active_sheet().is_some_and(|sheet| sheet.hidden) {
+        book.active = book
+            .sheets
+            .iter()
+            .position(|sheet| !sheet.hidden)
+            .ok_or("Книга не содержит видимых листов")?;
     }
     Ok(())
 }
@@ -1258,6 +1435,328 @@ fn read_charts(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(),
     }
     Ok(())
 }
+/// `xl/worksheets/sheet1.xml` → `xl/worksheets/_rels/sheet1.xml.rels`.
+fn rels_path(part: &str) -> String {
+    match part.rsplit_once('/') {
+        Some((dir, file)) => format!("{dir}/_rels/{file}.rels"),
+        None => format!("_rels/{part}.rels"),
+    }
+}
+/// Resolves a relationship target relative to the part that owns it.
+fn resolve_target(part: &str, target: &str) -> String {
+    if let Some(absolute) = target.strip_prefix('/') {
+        return absolute.into();
+    }
+    let mut segments: Vec<&str> = part.split('/').collect();
+    segments.pop();
+    for segment in target.split('/') {
+        match segment {
+            ".." => {
+                segments.pop();
+            }
+            "." | "" => {}
+            other => segments.push(other),
+        }
+    }
+    segments.join("/")
+}
+fn relationships(
+    part: &str,
+    parts: &BTreeMap<String, Vec<u8>>,
+) -> BTreeMap<String, (String, String)> {
+    let mut rels = BTreeMap::new();
+    if let Some(bytes) = parts.get(&rels_path(part)) {
+        let _ = each_tag(bytes, |tag, a| {
+            if tag == "Relationship"
+                && let (Some(id), Some(target)) = (a.get("Id"), a.get("Target"))
+            {
+                rels.insert(
+                    id.clone(),
+                    (
+                        a.get("Type").cloned().unwrap_or_default(),
+                        resolve_target(part, target),
+                    ),
+                );
+            }
+            Ok(())
+        });
+    }
+    rels
+}
+/// Pictures from the sheet's drawing part. Best effort: a broken drawing never blocks opening.
+fn read_sheet_images(
+    book: &mut Book,
+    id: u64,
+    sheet_path: &str,
+    parts: &BTreeMap<String, Vec<u8>>,
+) {
+    for (kind, drawing) in relationships(sheet_path, parts).into_values() {
+        if !kind.ends_with("/drawing") {
+            continue;
+        }
+        let media = relationships(&drawing, parts);
+        let Some(Ok(text)) = parts.get(&drawing).map(|b| std::str::from_utf8(b)) else {
+            continue;
+        };
+        for anchor in drawing_pictures(text).unwrap_or_default() {
+            let Some(bytes) = media
+                .get(&anchor.embed)
+                .and_then(|(_, target)| parts.get(target))
+            else {
+                continue;
+            };
+            let Some(sheet) = book.sheet_by_id(id) else {
+                continue;
+            };
+            let (row, col, x_offset, y_offset, width, height) = picture_geometry(sheet, &anchor);
+            if let Ok(image_id) = book.add_image(id, row, col, bytes.clone())
+                && let Some(image) = book
+                    .sheet_by_id_mut(id)
+                    .and_then(|s| s.images.iter_mut().find(|i| i.id == image_id))
+            {
+                image.x_offset = x_offset;
+                image.y_offset = y_offset;
+                if width > 0.0 && height > 0.0 {
+                    image.width = width.clamp(1.0, 8000.0);
+                    image.height = height.clamp(1.0, 8000.0);
+                }
+                image.alt = anchor.alt;
+            }
+        }
+    }
+}
+#[derive(Default)]
+struct PicturePoint {
+    row: u32,
+    col: u32,
+    row_off: u64,
+    col_off: u64,
+}
+#[derive(Default)]
+struct PictureAnchor {
+    from: PicturePoint,
+    to: Option<PicturePoint>,
+    absolute: Option<(u64, u64)>,
+    cx: u64,
+    cy: u64,
+    embed: String,
+    alt: String,
+}
+fn drawing_pictures(text: &str) -> Result<Vec<PictureAnchor>, String> {
+    let mut reader = Reader::from_str(text);
+    let mut pictures = Vec::new();
+    let mut current: Option<PictureAnchor> = None;
+    let mut point = None;
+    loop {
+        match reader.read_event().map_err(|error| error.to_string())? {
+            Event::Start(e) => {
+                let tag = local(&e);
+                match tag.as_str() {
+                    "oneCellAnchor" | "twoCellAnchor" | "absoluteAnchor" => {
+                        current = Some(PictureAnchor::default());
+                        point = None;
+                    }
+                    "from" => point = Some(false),
+                    "to" => {
+                        point = Some(true);
+                        if let Some(anchor) = current.as_mut() {
+                            anchor.to = Some(PicturePoint::default());
+                        }
+                    }
+                    "row" | "col" | "rowOff" | "colOff" if point.is_some() => {
+                        let value = reader
+                            .read_text(e.name())
+                            .map_err(|error| error.to_string())?
+                            .trim()
+                            .parse::<u64>()
+                            .map_err(|_| "Неверная координата рисунка")?;
+                        if let Some(anchor) = current.as_mut() {
+                            let position = if point == Some(true) {
+                                anchor
+                                    .to
+                                    .as_mut()
+                                    .ok_or("Нет конечной координаты рисунка")?
+                            } else {
+                                &mut anchor.from
+                            };
+                            match tag.as_str() {
+                                "row" => {
+                                    position.row = u32::try_from(value)
+                                        .map_err(|_| "Строка рисунка вне листа")?
+                                }
+                                "col" => {
+                                    position.col = u32::try_from(value)
+                                        .map_err(|_| "Столбец рисунка вне листа")?
+                                }
+                                "rowOff" => position.row_off = value,
+                                _ => position.col_off = value,
+                            }
+                        }
+                    }
+                    _ => picture_attrs(&e, &reader, &tag, current.as_mut())?,
+                }
+            }
+            Event::Empty(e) => picture_attrs(&e, &reader, &local(&e), current.as_mut())?,
+            Event::End(e) => match e.local_name().as_ref() {
+                "from" | "to" => point = None,
+                "oneCellAnchor" | "twoCellAnchor" | "absoluteAnchor" => {
+                    if let Some(anchor) = current.take()
+                        && !anchor.embed.is_empty()
+                    {
+                        pictures.push(anchor);
+                    }
+                }
+                _ => {}
+            },
+            Event::DocType(_) => return Err("DTD запрещён".into()),
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(pictures)
+}
+fn picture_attrs(
+    e: &BytesStart<'_>,
+    reader: &Reader<&[u8]>,
+    tag: &str,
+    anchor: Option<&mut PictureAnchor>,
+) -> Result<(), String> {
+    let Some(anchor) = anchor else { return Ok(()) };
+    let values = attrs(e, reader)?;
+    match tag {
+        "ext" if anchor.cx == 0 => {
+            anchor.cx = values
+                .get("cx")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            anchor.cy = values
+                .get("cy")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+        }
+        "pos" => {
+            if let (Some(x), Some(y)) = (
+                values.get("x").and_then(|value| value.parse().ok()),
+                values.get("y").and_then(|value| value.parse().ok()),
+            ) {
+                anchor.absolute = Some((x, y));
+            }
+        }
+        "blip" => {
+            if let Some(embed) = values.get("r:embed") {
+                anchor.embed = embed.clone();
+            }
+        }
+        "cNvPr" => {
+            if let Some(description) = values.get("descr") {
+                anchor.alt = description.clone();
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+fn drawing_axis_position(
+    index: u32,
+    base: f32,
+    sizes: &BTreeMap<u32, f32>,
+    hidden: &std::collections::BTreeSet<u32>,
+) -> f32 {
+    (index as f32 * base
+        + sizes
+            .range(..index)
+            .filter(|(position, _)| !hidden.contains(position))
+            .map(|(_, size)| *size - base)
+            .sum::<f32>()
+        - hidden.range(..index).count() as f32 * base)
+        .max(0.0)
+}
+fn drawing_axis_index(
+    pixel: f32,
+    count: u32,
+    base: f32,
+    sizes: &BTreeMap<u32, f32>,
+    hidden: &std::collections::BTreeSet<u32>,
+) -> u32 {
+    let (mut low, mut high) = (0, count);
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if drawing_axis_position(middle + 1, base, sizes, hidden) <= pixel {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    low.min(count - 1)
+}
+fn picture_geometry(
+    sheet: &super::model::Sheet,
+    anchor: &PictureAnchor,
+) -> (u32, u32, f32, f32, f32, f32) {
+    let x = drawing_axis_position(anchor.from.col, 96.0, &sheet.widths, &sheet.hidden_cols)
+        + anchor.from.col_off as f32 / 9525.0;
+    let y = drawing_axis_position(
+        anchor.from.row,
+        26.0,
+        &sheet.row_heights,
+        &sheet.hidden_rows,
+    ) + anchor.from.row_off as f32 / 9525.0;
+    let (x, y) = anchor
+        .absolute
+        .map_or((x, y), |(x, y)| (x as f32 / 9525.0, y as f32 / 9525.0));
+    let (row, col, x_offset, y_offset) = if anchor.absolute.is_some() {
+        let row = drawing_axis_index(
+            y,
+            super::model::MAX_ROWS,
+            26.0,
+            &sheet.row_heights,
+            &sheet.hidden_rows,
+        );
+        let col = drawing_axis_index(
+            x,
+            super::model::MAX_COLS,
+            96.0,
+            &sheet.widths,
+            &sheet.hidden_cols,
+        );
+        (
+            row,
+            col,
+            x - drawing_axis_position(col, 96.0, &sheet.widths, &sheet.hidden_cols),
+            y - drawing_axis_position(row, 26.0, &sheet.row_heights, &sheet.hidden_rows),
+        )
+    } else {
+        (
+            anchor.from.row,
+            anchor.from.col,
+            anchor.from.col_off as f32 / 9525.0,
+            anchor.from.row_off as f32 / 9525.0,
+        )
+    };
+    let (width, height) = anchor
+        .to
+        .as_ref()
+        .map(|end| {
+            (
+                drawing_axis_position(end.col, 96.0, &sheet.widths, &sheet.hidden_cols)
+                    + end.col_off as f32 / 9525.0
+                    - x,
+                drawing_axis_position(end.row, 26.0, &sheet.row_heights, &sheet.hidden_rows)
+                    + end.row_off as f32 / 9525.0
+                    - y,
+            )
+        })
+        .filter(|(width, height)| *width > 0.0 && *height > 0.0)
+        .unwrap_or((anchor.cx as f32 / 9525.0, anchor.cy as f32 / 9525.0));
+    (
+        row,
+        col,
+        x_offset.clamp(0.0, 4000.0),
+        y_offset.clamp(0.0, 4000.0),
+        width,
+        height,
+    )
+}
 fn xlsx_format(fmt: &CellFormat) -> Format {
     let mut f = Format::new()
         .set_font_name(&fmt.font)
@@ -1319,11 +1818,11 @@ fn write_xlsx(book: &Book) -> Result<Vec<u8>, String> {
         ws.set_freeze_panes(sheet.frozen_rows, sheet.frozen_cols as u16)
             .map_err(|e| e.to_string())?;
         for (col, width) in &sheet.widths {
-            ws.set_column_width_pixels(*col as u16, width.clamp(12.0, 1800.0) as u32)
+            ws.set_column_width_pixels(*col as u16, width.round().clamp(1.0, 1800.0) as u32)
                 .map_err(|e| e.to_string())?;
         }
         for (row, height) in &sheet.row_heights {
-            ws.set_row_height_pixels(*row, height.clamp(12.0, 600.0) as u32)
+            ws.set_row_height(*row, f64::from(height.clamp(1.0, 600.0)) * 72.0 / 96.0)
                 .map_err(|e| e.to_string())?;
         }
         for row in &sheet.hidden_rows {
@@ -1337,7 +1836,11 @@ fn write_xlsx(book: &Book) -> Result<Vec<u8>, String> {
             ws.autofilter(range.r0, range.c0 as u16, range.r1, range.c1 as u16)
                 .map_err(|e| e.to_string())?;
         }
-        for range in &sheet.merges {
+        for range in sheet
+            .merges
+            .iter()
+            .filter(|range| range.r0 != range.r1 || range.c0 != range.c1)
+        {
             let text = sheet
                 .cell(range.r0, range.c0)
                 .map(|c| c.value.display())
@@ -1404,8 +1907,8 @@ fn write_xlsx(book: &Book) -> Result<Vec<u8>, String> {
             });
             chart.title().set_name(&model.title);
             chart
-                .set_width(model.width.clamp(80.0, 4000.0) as u32)
-                .set_height(model.height.clamp(80.0, 4000.0) as u32);
+                .set_width(model.width.round().clamp(1.0, 4000.0) as u32)
+                .set_height(model.height.round().clamp(1.0, 4000.0) as u32);
             let r = model.range;
             let data_start = if r.r1 > r.r0 { r.r0 + 1 } else { r.r0 };
             let start_col = if r.c1 > r.c0 { r.c0 + 1 } else { r.c0 };
@@ -1431,13 +1934,393 @@ fn write_xlsx(book: &Book) -> Result<Vec<u8>, String> {
             ws.insert_chart(model.row, model.col as u16, &chart)
                 .map_err(|e| e.to_string())?;
         }
+        for model in &sheet.images {
+            let mut image = Image::new_from_buffer(&model.bytes).map_err(|e| e.to_string())?;
+            let (w, h) = (image.width().max(1.0), image.height().max(1.0));
+            image = image
+                .set_scale_width(f64::from(model.width) / w)
+                .set_scale_height(f64::from(model.height) / h);
+            if !model.alt.is_empty() {
+                image = image.set_alt_text(&model.alt);
+            }
+            ws.insert_image_with_offset(
+                model.row,
+                model.col as u16,
+                &image,
+                model.x_offset.max(0.0) as u32,
+                model.y_offset.max(0.0) as u32,
+            )
+            .map_err(|e| e.to_string())?;
+        }
     }
-    workbook.save_to_buffer().map_err(|e| e.to_string())
+    let bytes = workbook
+        .save_to_buffer()
+        .map_err(|error| error.to_string())?;
+    patch_formula_string_results(bytes, book)
 }
+fn ambiguous_formula_string(cell: &super::model::Cell) -> Option<&str> {
+    if !cell.input.starts_with('=') {
+        return None;
+    }
+    let Value::Text(text) = &cell.value else {
+        return None;
+    };
+    (text.parse::<f64>().is_ok()
+        || matches!(
+            text.as_str(),
+            "TRUE"
+                | "FALSE"
+                | "#DIV/0!"
+                | "#N/A"
+                | "#NAME?"
+                | "#NULL!"
+                | "#NUM!"
+                | "#REF!"
+                | "#VALUE!"
+                | "#GETTING_DATA"
+        ))
+    .then_some(text.as_str())
+}
+fn typed_formula_strings(xml: &[u8], sheet: &super::model::Sheet) -> Result<Vec<u8>, String> {
+    let mut reader = Reader::from_reader(xml);
+    let mut writer = Writer::new(Vec::with_capacity(xml.len()));
+    let mut result: Option<&str> = None;
+    loop {
+        let event = reader.read_event().map_err(|error| error.to_string())?;
+        match event {
+            Event::Start(e) if e.local_name().as_ref() == "c" => {
+                let values = attrs(&e, &reader)?;
+                result = values
+                    .get("r")
+                    .and_then(|address| sheet.cells.get(address))
+                    .and_then(ambiguous_formula_string);
+                if result.is_some() {
+                    let mut element = e.into_owned();
+                    element.clear_attributes();
+                    for (key, value) in values.iter().filter(|(key, _)| key.as_str() != "t") {
+                        element.push_attribute((key.as_str(), value.as_str()));
+                    }
+                    element.push_attribute(("t", "str"));
+                    writer
+                        .write_event(Event::Start(element))
+                        .map_err(|error| error.to_string())?;
+                } else {
+                    writer
+                        .write_event(Event::Start(e))
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+            Event::Start(e) if e.local_name().as_ref() == "v" && result.is_some() => {
+                writer
+                    .write_event(Event::Start(e.borrow()))
+                    .map_err(|error| error.to_string())?;
+                writer
+                    .write_event(Event::Text(BytesText::new(result.unwrap_or(""))))
+                    .map_err(|error| error.to_string())?;
+                reader
+                    .read_to_end(e.name())
+                    .map_err(|error| error.to_string())?;
+                writer
+                    .write_event(Event::End(e.to_end()))
+                    .map_err(|error| error.to_string())?;
+            }
+            Event::End(e) if e.local_name().as_ref() == "c" => {
+                result = None;
+                writer
+                    .write_event(Event::End(e))
+                    .map_err(|error| error.to_string())?;
+            }
+            Event::Eof => break,
+            event => writer
+                .write_event(event)
+                .map_err(|error| error.to_string())?,
+        }
+    }
+    Ok(writer.into_inner())
+}
+fn patch_formula_string_results(bytes: Vec<u8>, book: &Book) -> Result<Vec<u8>, String> {
+    if !book.sheets.iter().any(|sheet| {
+        sheet
+            .cells
+            .values()
+            .any(|cell| ambiguous_formula_string(cell).is_some())
+    }) {
+        return Ok(bytes);
+    }
+    let mut parts = crate::package::read_zip(&bytes)?;
+    for (index, sheet) in book.sheets.iter().enumerate() {
+        if !sheet
+            .cells
+            .values()
+            .any(|cell| ambiguous_formula_string(cell).is_some())
+        {
+            continue;
+        }
+        let path = format!("xl/worksheets/sheet{}.xml", index + 1);
+        let xml = parts
+            .get(&path)
+            .ok_or("Нет XML-части экспортируемого листа")?;
+        let updated = typed_formula_strings(xml, sheet)?;
+        parts.insert(path, updated);
+    }
+    crate::package::write_zip(parts.into_iter().collect())
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn review5_indexed_colours_and_inactive_fill_and_empty_border_preserve_visuals()
+    -> Result<(), String> {
+        let model=styles(br#"<styleSheet><fonts><font><color indexed="10"/></font></fonts><fills><fill><patternFill patternType="none"><fgColor rgb="FFFF0000"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor indexed="12"/></patternFill></fill></fills><borders><border/><border><left/><right/><top/><bottom/></border><border><left style="thin"/></border></borders><cellXfs><xf fontId="0" fillId="0" borderId="1"/><xf fontId="0" fillId="1" borderId="2"/></cellXfs></styleSheet>"#)?;
+        assert_eq!(model[0].color, [255, 0, 0]);
+        assert_eq!(model[0].fill, None);
+        assert!(!model[0].border);
+        assert_eq!(model[1].fill, Some([0, 0, 255]));
+        assert!(model[1].border);
+        let custom=styles(br#"<styleSheet><fonts><font><color indexed="0"/></font></fonts><cellXfs><xf fontId="0"/></cellXfs><colors><indexedColors><rgbColor rgb="00ABCDEF"/></indexedColors></colors></styleSheet>"#)?;
+        assert_eq!(custom[0].color, [0xAB, 0xCD, 0xEF]);
+        Ok(())
+    }
+    #[test]
+    fn review5_relationship_attribute_aliases_work_in_workbook_and_drawing() -> Result<(), String> {
+        let mut book = Book::default();
+        book.active_sheet_mut().ok_or("sheet")?.name = "Sheet1".into();
+        let parts=BTreeMap::from([
+            ("xl/workbook.xml".into(),br#"<workbook xmlns:rel="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" rel:id="sheet"/></sheets></workbook>"#.to_vec()),
+            ("xl/_rels/workbook.xml.rels".into(),br#"<Relationships><Relationship Id="sheet" Target="worksheets/sheet1.xml"/></Relationships>"#.to_vec()),
+            ("xl/styles.xml".into(),br#"<styleSheet><fonts><font><b/></font></fonts><cellXfs><xf fontId="0"/></cellXfs></styleSheet>"#.to_vec()),
+            ("xl/worksheets/sheet1.xml".into(),br#"<worksheet><sheetData><row r="1"><c r="A1" s="0"/></row></sheetData></worksheet>"#.to_vec()),
+        ]);
+        read_metadata(&mut book, &parts)?;
+        assert!(
+            book.active_sheet()
+                .and_then(|s| s.cell(0, 0))
+                .ok_or("cell")?
+                .fmt
+                .bold
+        );
+        let drawings = drawing_pictures(
+            r#"<wsDr xmlns:link="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><oneCellAnchor><from><row>0</row><col>0</col></from><ext cx="9525" cy="9525"/><pic><blip link:embed="picture"/></pic></oneCellAnchor></wsDr>"#,
+        )?;
+        assert_eq!(drawings.len(), 1);
+        assert_eq!(drawings[0].embed, "picture");
+        Ok(())
+    }
+    #[test]
+    fn review5_export_preserves_small_chart_width_and_literal_markdown_and_html_whitespace()
+    -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.set_range(
+            id,
+            0,
+            0,
+            &[
+                vec!["Name".into(), "Value".into()],
+                vec!["one".into(), "1".into()],
+            ],
+        )?;
+        let chart = book.add_chart(
+            id,
+            ChartKind::Column,
+            super::super::model::Range::new(0, 0, 1, 1),
+            "Small",
+        )?;
+        let model = book
+            .active_sheet_mut()
+            .ok_or("sheet")?
+            .charts
+            .iter_mut()
+            .find(|c| c.id == chart)
+            .ok_or("chart")?;
+        model.width = 23.0;
+        model.height = 37.0;
+        let parts = crate::package::read_zip(&write(&book, "xlsx")?)?;
+        let drawing = std::str::from_utf8(parts.get("xl/drawings/drawing1.xml").ok_or("drawing")?)
+            .map_err(|e| e.to_string())?;
+        assert!(drawing.contains("<xdr:colOff>219075</xdr:colOff>"));
+        book.set_cell(
+            id,
+            0,
+            0,
+            "*literal* [link](https://invalid) <b>&name\nnext  line",
+        )?;
+        let md = String::from_utf8(write(&book, "md")?).map_err(|e| e.to_string())?;
+        assert!(md.contains(
+            r"\*literal\* \[link\]\(https\:\/\/invalid\) &lt;b&gt;&amp;name<br>next  line"
+        ));
+        let html = String::from_utf8(write(&book, "html")?).map_err(|e| e.to_string())?;
+        assert!(html.contains("white-space:pre-wrap"));
+        assert!(html.contains("&lt;b&gt;&amp;name\nnext  line"));
+        Ok(())
+    }
+    #[test]
+    fn review4_xlsx_formula_cache_keeps_numeric_boolean_and_error_looking_text_typed()
+    -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.set_range(
+            id,
+            0,
+            0,
+            &[vec![
+                "=\"001\"".into(),
+                "=\"TRUE\"".into(),
+                "=\"#N/A\"".into(),
+                "=123".into(),
+                "=TRUE".into(),
+                "=\"NaN\"".into(),
+                "=NA()".into(),
+            ]],
+        )?;
+        let bytes = write(&book, "xlsx")?;
+        let mut imported =
+            open_workbook_auto_from_rs(Cursor::new(bytes)).map_err(|error| error.to_string())?;
+        let range = imported
+            .worksheet_range("Лист1")
+            .map_err(|error| error.to_string())?;
+        for (col, expected) in [
+            (0, Data::String("001".into())),
+            (1, Data::String("TRUE".into())),
+            (2, Data::String("#N/A".into())),
+            (3, Data::Float(123.0)),
+            (4, Data::Bool(true)),
+            (5, Data::String("NaN".into())),
+        ] {
+            assert_eq!(range.get_value((0, col)), Some(&expected));
+        }
+        assert!(matches!(range.get_value((0, 6)), Some(Data::Error(_))));
+        Ok(())
+    }
+    #[test]
+    fn review4_xlsx_keeps_small_dimensions_and_fractional_row_height() -> Result<(), String> {
+        let mut book = Book::default();
+        let sheet = book.active_sheet_mut().ok_or("sheet")?;
+        sheet.widths.insert(0, 6.0);
+        sheet.row_heights.insert(0, 1.5);
+        let bytes = write(&book, "xlsx")?;
+        let again = read(&bytes, "xlsx")?;
+        let sheet = again.active_sheet().ok_or("sheet")?;
+        assert!((sheet.widths.get(&0).copied().unwrap_or(0.0) - 6.0).abs() < 0.1);
+        assert!((sheet.row_heights.get(&0).copied().unwrap_or(0.0) - 1.5).abs() < 0.01);
+        Ok(())
+    }
+    #[test]
+    fn review4_drawing_anchors_use_absolute_position_and_both_cell_markers() -> Result<(), String> {
+        let mut sheet = super::super::model::Sheet::default();
+        sheet.widths.insert(0, 180.0);
+        sheet.row_heights.insert(0, 42.0);
+        let xml = format!(
+            r#"<wsDr xmlns:r="urn:r"><absoluteAnchor><pos x="{}" y="{}"/><ext cx="{}" cy="{}"/><pic><blip r:embed="p"/></pic></absoluteAnchor><twoCellAnchor><from><col>0</col><colOff>{}</colOff><row>0</row><rowOff>{}</rowOff></from><to><col>2</col><colOff>{}</colOff><row>2</row><rowOff>{}</rowOff></to><pic><ext cx="9525" cy="9525"/><blip r:embed="p"/></pic></twoCellAnchor></wsDr>"#,
+            190 * 9525,
+            47 * 9525,
+            40 * 9525,
+            30 * 9525,
+            10 * 9525,
+            5 * 9525,
+            20 * 9525,
+            6 * 9525
+        );
+        let anchors = drawing_pictures(&xml)?;
+        assert_eq!(anchors.len(), 2);
+        assert_eq!(
+            picture_geometry(&sheet, &anchors[0]),
+            (1, 1, 10.0, 5.0, 40.0, 30.0)
+        );
+        assert_eq!(
+            picture_geometry(&sheet, &anchors[1]),
+            (0, 0, 10.0, 5.0, 286.0, 69.0)
+        );
+        Ok(())
+    }
+
     use super::super::model::Range;
     use super::*;
+
+    #[test]
+    fn review2_builtin_twelve_hour_formats_keep_the_period() {
+        for (id, expected) in [(18, "1:30 PM"), (19, "1:30:00 PM")] {
+            assert_eq!(
+                super::super::format::display(&Value::Number(13.5 / 24.0), &builtin(id), false),
+                expected
+            );
+        }
+        assert_eq!(
+            super::super::format::display(&Value::Number(13.5 / 24.0), &builtin(20), false),
+            "13:30"
+        );
+    }
+    #[test]
+    fn review2_degenerate_merged_ranges_do_not_break_xlsx_save() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.set_cell(id, 0, 0, "kept")?;
+        book.merge(id, Range::new(0, 0, 0, 0))?;
+        assert!(book.active_sheet().ok_or("sheet")?.merges.is_empty());
+        book.merge(id, Range::new(0, 0, 1, 0))?;
+        book.edit_dimension(id, 1, 1, true, true)?;
+        assert!(book.active_sheet().ok_or("sheet")?.merges.is_empty());
+        let bytes = write(&book, "xlsx")?;
+        let reopened = read(&bytes, "xlsx")?;
+        assert_eq!(
+            reopened
+                .active_sheet()
+                .and_then(|sheet| sheet.cell(0, 0))
+                .map(|cell| cell.value.clone()),
+            Some(Value::Text("kept".into()))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn review_xlsx_rotation_and_boolean_values() -> Result<(), String> {
+        let formats = styles(br#"<styleSheet><fonts count="1"><font><b val="false"/><i val="0"/><strike val="false"/></font></fonts><cellXfs count="2"><xf fontId="0"><alignment textRotation="135" wrapText="true"/></xf><xf fontId="0"><alignment textRotation="180"/></xf></cellXfs></styleSheet>"#)?;
+        assert_eq!(formats.len(), 2);
+        assert_eq!(formats[0].rotation, -45);
+        assert_eq!(formats[1].rotation, -90);
+        assert!(formats[0].wrap);
+        assert!(!formats[0].bold && !formats[0].italic && !formats[0].strike);
+        formats[0].validate()?;
+        Ok(())
+    }
+
+    #[test]
+    fn review_metadata_resolves_relative_sheet_and_style_targets() -> Result<(), String> {
+        let mut book = Book::default();
+        book.sheets[0].name = "Sheet1".into();
+        let parts = BTreeMap::from([
+            ("xl/workbook.xml".into(), br#"<workbook xmlns:r="urn:r"><sheets><sheet name="Sheet1" r:id="s1"/></sheets></workbook>"#.to_vec()),
+            ("xl/_rels/workbook.xml.rels".into(), br#"<Relationships><Relationship Id="s1" Target="worksheets/../worksheets/custom.xml"/><Relationship Id="st" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles/custom.xml"/></Relationships>"#.to_vec()),
+            ("xl/styles/custom.xml".into(), br#"<styleSheet><fonts><font><b/></font></fonts><cellXfs><xf fontId="0"/></cellXfs></styleSheet>"#.to_vec()),
+            ("xl/worksheets/custom.xml".into(), br#"<worksheet><cols><col min="1" max="1" hidden="true"/></cols><sheetData><row r="1" hidden="true"><c r="A1" s="0"/></row></sheetData></worksheet>"#.to_vec()),
+        ]);
+        read_metadata(&mut book, &parts)?;
+        let sheet = book.active_sheet().ok_or("no sheet")?;
+        assert!(sheet.hidden_rows.contains(&0) && sheet.hidden_cols.contains(&0));
+        assert!(sheet.cell(0, 0).ok_or("missing styled cell")?.fmt.bold);
+        book.validate()?;
+        Ok(())
+    }
+
+    #[test]
+    fn review_1904_dates_normalize_but_durations_keep_their_value() {
+        use calamine::{ExcelDateTime, ExcelDateTimeType};
+        let value = ExcelDateTime::new(0.5, ExcelDateTimeType::DateTime, true);
+        assert_eq!(
+            normalized_datetime(&value, true),
+            super::super::formula::date_serial(1904, 1, 1) + 0.5
+        );
+        let duration = ExcelDateTime::new(2.5, ExcelDateTimeType::TimeDelta, true);
+        assert_eq!(normalized_datetime(&duration, true), 2.5);
+        let phantom = ExcelDateTime::new(60.25, ExcelDateTimeType::DateTime, false);
+        assert_eq!(normalized_datetime(&phantom, false), 60.25);
+        for raw in [1e308, -1.5] {
+            let extreme = ExcelDateTime::new(raw, ExcelDateTimeType::DateTime, false);
+            assert_eq!(normalized_datetime(&extreme, false), raw);
+        }
+        let negative = ExcelDateTime::new(-1.5, ExcelDateTimeType::DateTime, true);
+        assert_eq!(normalized_datetime(&negative, true), 1460.5);
+    }
     #[test]
     fn csv_roundtrip() {
         let rows = vec![
@@ -1451,11 +2334,51 @@ mod tests {
         ];
         assert_eq!(parse_csv(&to_csv(&rows, ';'), ';'), Ok(rows));
         assert!(parse_csv("\"unclosed", ',').is_err());
-        assert!(parse_csv("\"x\"z", ',').is_err());
+        assert_eq!(parse_csv("\"x\"z", ','), Ok(vec![vec!["xz".to_string()]]));
+        assert_eq!(
+            parse_csv("5\" pipe\tОн сказал \"да\"", '\t'),
+            Ok(vec![vec![
+                "5\" pipe".to_string(),
+                "Он сказал \"да\"".to_string()
+            ]])
+        );
         assert_eq!(
             parse_csv("a,b,\r\n", ','),
             Ok(vec![vec!["a".into(), "b".into(), "".into()]])
         );
+    }
+    #[test]
+    fn dotted_tsv_extensions_keep_tabs() -> Result<(), String> {
+        let mut book = Book::default();
+        book.set_range(
+            book.active_id(),
+            0,
+            0,
+            &[vec!["a;b;c".into(), "value".into()]],
+        )?;
+        for ext in ["tsv", ".tsv", ".TSV"] {
+            let bytes = write(&book, ext)?;
+            assert!(decode_text(&bytes)?.contains("\t"));
+            let restored = read(&bytes, ext)?;
+            assert_eq!(
+                restored.read_range(restored.active_id(), 0, 0, 0, 1)?,
+                vec![vec!["a;b;c".to_string(), "value".to_string()]]
+            );
+        }
+        Ok(())
+    }
+    #[test]
+    fn xlsx_keeps_active_sheet() -> Result<(), String> {
+        let mut book = Book::default();
+        book.add_sheet("Second")?;
+        book.active = 1;
+        let restored = read(&write(&book, "xlsx")?, "xlsx")?;
+        assert_eq!(restored.active, 1);
+        assert_eq!(
+            restored.active_sheet().map(|sheet| sheet.name.as_str()),
+            Some("Second")
+        );
+        Ok(())
     }
     #[test]
     fn xlsx_roundtrip() -> Result<(), String> {
@@ -1488,6 +2411,41 @@ mod tests {
         );
         assert_eq!(sheet.cell(2, 1).map(|c| &c.fmt), Some(&fmt));
         assert_eq!(sheet.charts.len(), 1);
+        let again = read(&write(&restored, "xlsx")?, "xlsx")?;
+        let (a, b) = (
+            restored.active_sheet().ok_or("Нет листа")?,
+            again.active_sheet().ok_or("Нет листа")?,
+        );
+        assert_eq!(a.cells, b.cells, "второе поколение xlsx отличается");
+        assert_eq!(a.charts.len(), b.charts.len());
+        Ok(())
+    }
+    #[test]
+    fn xlsx_pictures_round_trip_with_position_and_size() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(40, 20)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .map_err(|e| e.to_string())?;
+        let image = book.add_image(id, 3, 2, png.into_inner())?;
+        if let Some(i) = book
+            .sheet_by_id_mut(id)
+            .and_then(|s| s.images.iter_mut().find(|i| i.id == image))
+        {
+            i.width = 160.0;
+            i.height = 80.0;
+            i.x_offset = 10.0;
+            i.alt = "Логотип".into();
+        }
+        let restored = read(&write(&book, "xlsx")?, "xlsx")?;
+        let sheet = restored.active_sheet().ok_or("Нет листа")?;
+        assert_eq!(sheet.images.len(), 1);
+        let i = sheet.images.first().ok_or("Нет рисунка")?;
+        assert_eq!((i.row, i.col), (3, 2));
+        assert_eq!((i.width.round(), i.height.round()), (160.0, 80.0));
+        assert_eq!(i.x_offset.round(), 10.0);
+        assert_eq!(i.alt, "Логотип");
         Ok(())
     }
     #[test]

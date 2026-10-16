@@ -21,13 +21,8 @@ impl Value {
     pub fn display(&self) -> String {
         match self {
             Self::Empty => String::new(),
-            Self::Number(n) => {
-                if n.is_finite() {
-                    format!("{n}")
-                } else {
-                    "#NUM!".into()
-                }
-            }
+            // As text a number keeps 15 significant digits, so 0.1+0.2 joins as "0.3".
+            Self::Number(n) => super::format::general_number(*n, 15),
             Self::Text(s) | Self::Error(s) => s.clone(),
             Self::Bool(b) => if *b { "TRUE" } else { "FALSE" }.into(),
         }
@@ -86,6 +81,19 @@ pub struct CellFormat {
     pub align: Align,
     pub wrap: bool,
     pub rotation: i16,
+}
+impl CellFormat {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.font.len() > 256
+            || !self.size.is_finite()
+            || !(1.0..=409.0).contains(&self.size)
+            || self.number.len() > 1024
+            || !(-90..=90).contains(&self.rotation)
+        {
+            return Err("Недопустимый формат ячейки".into());
+        }
+        Ok(())
+    }
 }
 impl Default for CellFormat {
     fn default() -> Self {
@@ -177,6 +185,22 @@ pub struct Chart {
     pub width: f32,
     pub height: f32,
 }
+/// A picture floating over the grid, anchored to a cell with a pixel offset (like Excel).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct SheetImage {
+    pub id: u64,
+    pub row: u32,
+    pub col: u32,
+    #[serde(default)]
+    pub x_offset: f32,
+    #[serde(default)]
+    pub y_offset: f32,
+    pub width: f32,
+    pub height: f32,
+    pub bytes: Vec<u8>,
+    #[serde(default)]
+    pub alt: String,
+}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ConditionalRule {
     pub range: Range,
@@ -198,6 +222,7 @@ pub struct Sheet {
     pub frozen_rows: u32,
     pub frozen_cols: u32,
     pub charts: Vec<Chart>,
+    pub images: Vec<SheetImage>,
     pub conditional: Vec<ConditionalRule>,
     pub hidden: bool,
     pub tab_color: Option<[u8; 3]>,
@@ -217,6 +242,7 @@ impl Default for Sheet {
             frozen_rows: 0,
             frozen_cols: 0,
             charts: Vec::new(),
+            images: Vec::new(),
             conditional: Vec::new(),
             hidden: false,
             tab_color: None,
@@ -236,6 +262,66 @@ impl Sheet {
             .keys()
             .filter_map(|k| parse_address(k))
             .fold((0, 0), |(r, c), (rr, cc)| (r.max(rr), c.max(cc)))
+    }
+    /// Excel Ctrl+Arrow target: the end of the current data block, the start of the next
+    /// block, or the sheet edge when nothing else lies in that direction.
+    pub fn data_edge(&self, row: u32, col: u32, d_row: i8, d_col: i8) -> (u32, u32) {
+        let vertical = d_row != 0;
+        let forward = if vertical { d_row > 0 } else { d_col > 0 };
+        let (pos, limit) = if vertical {
+            (row, MAX_ROWS - 1)
+        } else {
+            (col, MAX_COLS - 1)
+        };
+        let hidden = if vertical {
+            &self.hidden_rows
+        } else {
+            &self.hidden_cols
+        };
+        let filled: BTreeSet<u32> = self
+            .cells
+            .iter()
+            .filter(|(_, cell)| !cell.input.is_empty())
+            .filter_map(|(key, _)| parse_address(key))
+            .filter(|&(r, c)| if vertical { c == col } else { r == row })
+            .map(|(r, c)| if vertical { r } else { c })
+            .filter(|position| !hidden.contains(position))
+            .collect();
+        let step = |mut p: u32| -> Option<u32> {
+            loop {
+                p = if forward {
+                    p.checked_add(1).filter(|p| *p <= limit)?
+                } else {
+                    p.checked_sub(1)?
+                };
+                if !hidden.contains(&p) {
+                    return Some(p);
+                }
+            }
+        };
+        let target = match step(pos) {
+            None => pos,
+            Some(next) if filled.contains(&pos) && filled.contains(&next) => {
+                let mut end = next;
+                while let Some(after) = step(end).filter(|p| filled.contains(p)) {
+                    end = after;
+                }
+                end
+            }
+            Some(next) => {
+                let found = if forward {
+                    filled.range(next..).next().copied()
+                } else {
+                    filled.range(..=next).next_back().copied()
+                };
+                found.unwrap_or(if forward { limit } else { 0 })
+            }
+        };
+        if vertical {
+            (target, col)
+        } else {
+            (row, target)
+        }
     }
     pub fn display(&self, row: u32, col: u32, locale_ru: bool) -> String {
         self.cell(row, col)
@@ -266,10 +352,25 @@ impl Default for Book {
     }
 }
 impl Book {
+    fn atomic_edit<R>(
+        &mut self,
+        edit: impl FnOnce(&mut Self) -> Result<R, String>,
+    ) -> Result<R, String> {
+        let mut candidate = self.clone();
+        let result = edit(&mut candidate)?;
+        candidate.validate()?;
+        *self = candidate;
+        Ok(result)
+    }
     pub fn validate(&self) -> Result<(), String> {
         if self.sheets.is_empty()
             || self.sheets.len() > 1024
+            || self.sheets.iter().all(|sheet| sheet.hidden)
             || self.active >= self.sheets.len()
+            || self
+                .sheets
+                .get(self.active)
+                .is_some_and(|sheet| sheet.hidden)
             || self.selection.row >= MAX_ROWS
             || self.selection.col >= MAX_COLS
             || self.selection.anchor_row >= MAX_ROWS
@@ -305,13 +406,9 @@ impl Book {
             }
             for (key, c) in &s.cells {
                 take(c.id)?;
+                c.fmt.validate()?;
                 if parse_address(key).is_none_or(|(r, col)| address(r, col) != *key)
                     || c.input.len() > 32767
-                    || c.fmt.font.len() > 256
-                    || !c.fmt.size.is_finite()
-                    || !(1.0..=409.0).contains(&c.fmt.size)
-                    || c.fmt.number.len() > 1024
-                    || !(-90..=90).contains(&c.fmt.rotation)
                     || matches!(&c.value,Value::Number(n)if !n.is_finite())
                     || matches!(&c.value,Value::Text(t)|Value::Error(t)if t.len()>32767)
                 {
@@ -349,6 +446,27 @@ impl Book {
                     return Err("Недопустимая диаграмма".into());
                 }
             }
+            if s.images.len() > 1000 {
+                return Err("Слишком много рисунков на листе".into());
+            }
+            for image in &s.images {
+                take(image.id)?;
+                if image.row >= MAX_ROWS
+                    || image.col >= MAX_COLS
+                    || ![image.x_offset, image.y_offset, image.width, image.height]
+                        .iter()
+                        .all(|v| v.is_finite())
+                    || !(0.0..=4000.0).contains(&image.x_offset)
+                    || !(0.0..=4000.0).contains(&image.y_offset)
+                    || !(1.0..=8000.0).contains(&image.width)
+                    || !(1.0..=8000.0).contains(&image.height)
+                    || image.bytes.is_empty()
+                    || image.bytes.len() > 32 * 1024 * 1024
+                    || image.alt.len() > 32767
+                {
+                    return Err("Недопустимый рисунок".into());
+                }
+            }
             for rule in &s.conditional {
                 rule.range.validate()?;
                 if !rule.threshold.is_finite()
@@ -365,10 +483,9 @@ impl Book {
             return Err("Недопустимый счётчик ID".into());
         }
         if self.names.len() > 10000
-            || self
-                .names
-                .iter()
-                .any(|(name, value)| name.is_empty() || name.len() > 255 || value.len() > 32767)
+            || self.names.iter().any(|(name, value)| {
+                name.is_empty() || name.chars().count() > 255 || value.len() > 32767
+            })
         {
             return Err("Недопустимое имя диапазона".into());
         }
@@ -407,7 +524,9 @@ impl Book {
     fn validate_name(&self, name: &str, except: Option<u64>) -> Result<(), String> {
         if name.is_empty()
             || name.chars().count() > 31
-            || name.chars().any(|c| "[]:*?/\\".contains(c))
+            || name
+                .chars()
+                .any(|c| c.is_control() || "[]:*?/\\".contains(c))
             || name.starts_with('\'')
             || name.ends_with('\'')
         {
@@ -423,6 +542,9 @@ impl Book {
         Ok(())
     }
     pub fn rename_sheet(&mut self, id: u64, name: &str) -> Result<(), String> {
+        self.atomic_edit(|book| book.rename_sheet_inner(id, name))
+    }
+    fn rename_sheet_inner(&mut self, id: u64, name: &str) -> Result<(), String> {
         self.validate_name(name, Some(id))?;
         let old = self.sheet_by_id(id).ok_or("Лист не найден")?.name.clone();
         for s in &mut self.sheets {
@@ -448,14 +570,25 @@ impl Book {
             .iter()
             .position(|s| s.id == id)
             .ok_or("Лист не найден")?;
+        if !self.sheets[pos].hidden && self.sheets.iter().filter(|sheet| !sheet.hidden).count() == 1
+        {
+            return Err("Нельзя удалить последний видимый лист".into());
+        }
         let removed = self.sheets.remove(pos);
         if self.active > pos {
             self.active -= 1;
         }
         self.active = self.active.min(self.sheets.len().saturating_sub(1));
+        if self.sheets[self.active].hidden
+            && let Some(visible) = self.sheets.iter().position(|sheet| !sheet.hidden)
+        {
+            self.active = visible;
+        }
         for s in &mut self.sheets {
             for cell in s.cells.values_mut() {
-                cell.input = super::formula::invalidate_sheet(&cell.input, &removed.name);
+                if cell.input.starts_with('=') {
+                    cell.input = super::formula::invalidate_sheet(&cell.input, &removed.name);
+                }
             }
         }
         for value in self.names.values_mut() {
@@ -473,9 +606,14 @@ impl Book {
             .iter()
             .position(|s| s.id == id)
             .ok_or("Лист не найден")?;
+        let active = self.active_id();
         let s = self.sheets.remove(pos);
         self.sheets.insert(index, s);
-        self.active = index;
+        self.active = self
+            .sheets
+            .iter()
+            .position(|sheet| sheet.id == active)
+            .unwrap_or(index);
         Ok(())
     }
     pub fn set_cell(&mut self, sheet: u64, row: u32, col: u32, input: &str) -> Result<u64, String> {
@@ -493,6 +631,10 @@ impl Book {
         if row >= MAX_ROWS || col >= MAX_COLS || input.len() > 32767 {
             return Err("Ячейка вне пределов Excel или слишком длинный текст".into());
         }
+        let normalized = super::formula::canonicalize(input);
+        if normalized.len() > 32767 {
+            return Err("Нормализованная формула превышает предел длины ячейки".into());
+        }
         let key = address(row, col);
         let existing = self
             .sheet_by_id(sheet)
@@ -501,7 +643,6 @@ impl Book {
             .get(&key)
             .map(|c| c.id);
         let id = existing.unwrap_or_else(|| self.allocate_id());
-        let normalized = super::formula::canonicalize(input);
         let s = self.sheet_by_id_mut(sheet).ok_or("Лист не найден")?;
         let c = s.cells.entry(key).or_insert_with(|| Cell {
             id,
@@ -525,10 +666,23 @@ impl Book {
             || u64::from(row) + values.len() as u64 > u64::from(MAX_ROWS)
             || values.iter().any(|v| {
                 u64::from(col) + v.len() as u64 > u64::from(MAX_COLS)
-                    || v.iter().any(|x| x.len() > 32767)
+                    || v.iter()
+                        .any(|x| x.len() > 32767 || super::formula::canonicalize(x).len() > 32767)
             })
         {
             return Err("Недопустимый или слишком большой диапазон".into());
+        }
+        let source = self.sheet_by_id(sheet).ok_or("Лист не найден")?;
+        if source.merges.iter().any(|merge| {
+            values.iter().enumerate().any(|(r, line)| {
+                line.iter().enumerate().any(|(c, _)| {
+                    let target = (row + r as u32, col + c as u32);
+                    merge.contains(target.0, target.1)
+                        && (count > 1 || target != (merge.r0, merge.c0))
+                })
+            })
+        }) {
+            return Err("Вставка затрагивает объединённые ячейки: сначала разъедините их".into());
         }
         for (r, line) in values.iter().enumerate() {
             for (c, input) in line.iter().enumerate() {
@@ -559,6 +713,10 @@ impl Book {
     }
     pub fn set_format(&mut self, sheet: u64, range: Range, fmt: CellFormat) -> Result<(), String> {
         range.validate()?;
+        fmt.validate()?;
+        if self.sheet_by_id(sheet).is_none() {
+            return Err("Лист не найден".into());
+        }
         for r in range.r0..=range.r1 {
             for c in range.c0..=range.c1 {
                 if self.sheet_by_id(sheet).and_then(|s| s.cell(r, c)).is_none() {
@@ -574,6 +732,9 @@ impl Book {
     pub fn merge(&mut self, sheet: u64, range: Range) -> Result<(), String> {
         range.validate()?;
         let s = self.sheet_by_id_mut(sheet).ok_or("Лист не найден")?;
+        if range.r0 == range.r1 && range.c0 == range.c1 {
+            return Ok(());
+        }
         if s.merges
             .iter()
             .any(|m| m.r0 <= range.r1 && range.r0 <= m.r1 && m.c0 <= range.c1 && range.c0 <= m.c1)
@@ -590,13 +751,151 @@ impl Book {
         s.merges.push(range);
         Ok(())
     }
+    /// Removes every merged area that intersects `range`.
+    pub fn unmerge(&mut self, sheet: u64, range: Range) -> Result<usize, String> {
+        range.validate()?;
+        let s = self.sheet_by_id_mut(sheet).ok_or("Лист не найден")?;
+        let before = s.merges.len();
+        s.merges.retain(|m| {
+            !(m.r0 <= range.r1 && range.r0 <= m.r1 && m.c0 <= range.c1 && range.c0 <= m.c1)
+        });
+        Ok(before - s.merges.len())
+    }
+    /// Clears contents (`contents`), formats (`formats`) or both in a range.
+    pub fn clear_range(
+        &mut self,
+        sheet: u64,
+        range: Range,
+        contents: bool,
+        formats: bool,
+    ) -> Result<(), String> {
+        range.validate()?;
+        let s = self.sheet_by_id_mut(sheet).ok_or("Лист не найден")?;
+        s.cells.retain(|key, cell| {
+            let Some((r, c)) = parse_address(key) else {
+                return true;
+            };
+            if !range.contains(r, c) {
+                return true;
+            }
+            if contents {
+                cell.input.clear();
+                cell.value = Value::Empty;
+            }
+            if formats {
+                cell.fmt = CellFormat::default();
+            }
+            !(cell.input.is_empty() && cell.fmt == CellFormat::default())
+        });
+        self.recalculate();
+        Ok(())
+    }
+    /// Cells whose input or shown value contains `query`: (row, col, input, display).
+    pub fn find(
+        &self,
+        sheet: u64,
+        query: &str,
+        case_sensitive: bool,
+        limit: usize,
+    ) -> Result<Vec<(u32, u32, String, String)>, String> {
+        let s = self.sheet_by_id(sheet).ok_or("Лист не найден")?;
+        if query.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let fold = |text: &str| {
+            if case_sensitive {
+                text.to_string()
+            } else {
+                text.to_lowercase()
+            }
+        };
+        let needle = fold(query);
+        let mut found = Vec::new();
+        for (key, cell) in &s.cells {
+            let Some((r, c)) = parse_address(key) else {
+                continue;
+            };
+            let shown = s.display(r, c, self.locale_ru);
+            if fold(&cell.input).contains(&needle) || fold(&shown).contains(&needle) {
+                found.push((r, c));
+            }
+        }
+        found.sort_unstable();
+        Ok(found
+            .into_iter()
+            .take(limit)
+            .filter_map(|(r, c)| {
+                s.cell(r, c)
+                    .map(|cell| (r, c, cell.input.clone(), s.display(r, c, self.locale_ru)))
+            })
+            .collect())
+    }
+    pub fn replace_all(
+        &mut self,
+        sheet: u64,
+        query: &str,
+        replacement: &str,
+    ) -> Result<usize, String> {
+        let s = self.sheet_by_id(sheet).ok_or("Лист не найден")?;
+        if query.is_empty() {
+            return Ok(0);
+        }
+        let mut changes = Vec::new();
+        for (key, cell) in &s.cells {
+            if !cell.input.contains(query) {
+                continue;
+            }
+            let matches = cell.input.matches(query).count();
+            let length = matches
+                .checked_mul(replacement.len())
+                .and_then(|added| (cell.input.len() - matches * query.len()).checked_add(added));
+            if length.is_none_or(|length| length > 32767) {
+                return Err("Замена превышает предел длины ячейки".into());
+            }
+            let input = cell.input.replace(query, replacement);
+            let input = super::formula::canonicalize(&input);
+            if input.len() > 32767 {
+                return Err("Нормализованная формула превышает предел длины ячейки".into());
+            }
+            if input != cell.input {
+                changes.push((key.clone(), input));
+            }
+        }
+        let count = changes.len();
+        let s = self.sheet_by_id_mut(sheet).ok_or("Лист не найден")?;
+        for (key, input) in changes {
+            if let Some(cell) = s.cells.get_mut(&key) {
+                cell.input = input;
+            }
+        }
+        if count > 0 {
+            self.recalculate();
+        }
+        Ok(count)
+    }
     pub fn recalculate(&mut self) {
         super::formula::recalculate(self);
     }
     pub fn fill(&mut self, sheet: u64, source: Range, target: Range) -> Result<(), String> {
+        self.atomic_edit(|book| book.fill_inner(sheet, source, target))
+    }
+    fn fill_inner(&mut self, sheet: u64, source: Range, target: Range) -> Result<(), String> {
         source.validate()?;
         target.validate()?;
         let s = self.sheet_by_id(sheet).ok_or("Лист не найден")?;
+        if s.merges.iter().any(|merge| {
+            merge.r0 <= target.r1
+                && target.r0 <= merge.r1
+                && merge.c0 <= target.c1
+                && target.c0 <= merge.c1
+                && (target.r0 != target.r1
+                    || target.c0 != target.c1
+                    || (target.r0, target.c0) != (merge.r0, merge.c0))
+        }) {
+            return Err(
+                "Заполнение затрагивает объединённые ячейки: сначала разъедините их".into(),
+            );
+        }
         let snapshot = s.clone();
         for r in target.r0..=target.r1 {
             for c in target.c0..=target.c1 {
@@ -608,6 +907,12 @@ impl Book {
                     r as i64 - sr as i64,
                     c as i64 - sc as i64,
                 );
+                if input.is_empty() && original.fmt == CellFormat::default() {
+                    if let Some(sheet) = self.sheet_by_id_mut(sheet) {
+                        sheet.cells.remove(&address(r, c));
+                    }
+                    continue;
+                }
                 self.set_input(sheet, r, c, &input)?;
                 if let Some(dst) = self.sheet_by_id_mut(sheet).and_then(|s| s.cell_mut(r, c)) {
                     dst.fmt = original.fmt;
@@ -618,6 +923,15 @@ impl Book {
         Ok(())
     }
     pub fn sort(
+        &mut self,
+        sheet: u64,
+        range: Range,
+        keys: &[(u32, bool)],
+        header: bool,
+    ) -> Result<(), String> {
+        self.atomic_edit(|book| book.sort_inner(sheet, range, keys, header))
+    }
+    fn sort_inner(
         &mut self,
         sheet: u64,
         range: Range,
@@ -636,7 +950,12 @@ impl Book {
             return Err("Сортировка объединённых ячеек не поддерживается".into());
         }
         let start = range.r0 + u32::from(header);
-        let mut rows: Vec<_> = (start..=range.r1)
+        let positions: Vec<_> = (start..=range.r1)
+            .filter(|row| !s.hidden_rows.contains(row))
+            .collect();
+        let mut rows: Vec<_> = positions
+            .iter()
+            .copied()
             .map(|r| {
                 (
                     r,
@@ -656,13 +975,30 @@ impl Book {
                     b.1.get((c - range.c0) as usize)
                         .and_then(Option::as_ref)
                         .map(|x| &x.value);
+                let av = av.unwrap_or(&Value::Empty);
+                let bv = bv.unwrap_or(&Value::Empty);
+                let a_blank = matches!(av, Value::Empty);
+                let b_blank = matches!(bv, Value::Empty);
+                if a_blank != b_blank {
+                    // Empty cells stay after data in either sort direction.
+                    return a_blank.cmp(&b_blank);
+                }
+                let kind = |value: &Value| match value {
+                    Value::Number(_) => 0,
+                    Value::Text(_) => 1,
+                    Value::Bool(_) => 2,
+                    Value::Error(_) => 3,
+                    Value::Empty => 4,
+                };
                 let order = match (av, bv) {
-                    (Some(Value::Number(a)), Some(Value::Number(b))) => a.total_cmp(b),
-                    _ => av
-                        .map(Value::display)
-                        .unwrap_or_default()
-                        .to_lowercase()
-                        .cmp(&bv.map(Value::display).unwrap_or_default().to_lowercase()),
+                    (Value::Number(a), Value::Number(b)) => {
+                        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                    }
+                    (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
+                    (Value::Text(a), Value::Text(b)) | (Value::Error(a), Value::Error(b)) => {
+                        a.to_lowercase().cmp(&b.to_lowercase())
+                    }
+                    _ => kind(av).cmp(&kind(bv)),
                 };
                 if !order.is_eq() {
                     return if *desc { order.reverse() } else { order };
@@ -671,8 +1007,7 @@ impl Book {
             std::cmp::Ordering::Equal
         });
         let s = self.sheet_by_id_mut(sheet).ok_or("Лист не найден")?;
-        for (i, (old, line)) in rows.into_iter().enumerate() {
-            let r = start + i as u32;
+        for (r, (old, line)) in positions.into_iter().zip(rows) {
             for (j, cell) in line.into_iter().enumerate() {
                 let key = address(r, range.c0 + j as u32);
                 s.cells.remove(&key);
@@ -687,6 +1022,16 @@ impl Book {
         Ok(())
     }
     pub fn edit_dimension(
+        &mut self,
+        sheet: u64,
+        index: u32,
+        count: u32,
+        rows: bool,
+        delete: bool,
+    ) -> Result<(), String> {
+        self.atomic_edit(|book| book.edit_dimension_inner(sheet, index, count, rows, delete))
+    }
+    fn edit_dimension_inner(
         &mut self,
         sheet: u64,
         index: u32,
@@ -754,7 +1099,12 @@ impl Book {
                 .charts
                 .iter()
                 .any(|c| shift_index(if rows { c.row } else { c.col }).is_none());
-            if cells_overflow || metadata_overflow || chart_overflow || !ranges_ok {
+            let image_overflow = s
+                .images
+                .iter()
+                .any(|image| shift_index(if rows { image.row } else { image.col }).is_none());
+            if cells_overflow || metadata_overflow || chart_overflow || image_overflow || !ranges_ok
+            {
                 return Err("Вставка вытеснит данные или форматирование за пределы листа".into());
             }
         }
@@ -791,7 +1141,8 @@ impl Book {
                 .filter_map(shift_index)
                 .collect();
         }
-        s.merges.retain_mut(adjust);
+        s.merges
+            .retain_mut(|range| adjust(range) && (range.r0 != range.r1 || range.c0 != range.c1));
         s.charts.retain_mut(|chart| {
             if !adjust(&mut chart.range) {
                 return false;
@@ -800,6 +1151,10 @@ impl Book {
             *anchor = shift_index(*anchor).unwrap_or(index.min(max - 1));
             true
         });
+        for image in &mut s.images {
+            let anchor = if rows { &mut image.row } else { &mut image.col };
+            *anchor = shift_index(*anchor).unwrap_or(index.min(max - 1));
+        }
         s.conditional.retain_mut(|rule| adjust(&mut rule.range));
         if s.filter.as_mut().is_some_and(|filter| !adjust(filter)) {
             s.filter = None;
@@ -887,16 +1242,67 @@ impl Book {
         });
         Ok(id)
     }
+    /// Adds a PNG/JPEG picture at a cell, scaled down to fit 480×320 px.
+    pub fn add_image(
+        &mut self,
+        sheet: u64,
+        row: u32,
+        col: u32,
+        bytes: Vec<u8>,
+    ) -> Result<u64, String> {
+        if row >= MAX_ROWS || col >= MAX_COLS {
+            return Err("Ячейка вне листа".into());
+        }
+        if bytes.len() > 32 * 1024 * 1024 {
+            return Err("Изображение превышает 32 МБ".into());
+        }
+        let image = crate::util::decode_image(&bytes)?;
+        let (w, h) = (image.width().max(1) as f32, image.height().max(1) as f32);
+        let factor = (480.0 / w).min(320.0 / h).min(1.0);
+        let s = self.sheet_by_id(sheet).ok_or("Лист не найден")?;
+        if s.images.len() >= 1000 {
+            return Err("Слишком много рисунков на листе".into());
+        }
+        let id = self.allocate_id();
+        let s = self.sheet_by_id_mut(sheet).ok_or("Лист не найден")?;
+        s.images.push(SheetImage {
+            id,
+            row,
+            col,
+            x_offset: 0.0,
+            y_offset: 0.0,
+            width: (w * factor).max(1.0),
+            height: (h * factor).max(1.0),
+            bytes,
+            alt: String::new(),
+        });
+        Ok(id)
+    }
+    pub fn delete_image(&mut self, sheet: u64, image: u64) -> Result<(), String> {
+        let s = self.sheet_by_id_mut(sheet).ok_or("Лист не найден")?;
+        let index = s
+            .images
+            .iter()
+            .position(|i| i.id == image)
+            .ok_or("Рисунок не найден")?;
+        s.images.remove(index);
+        Ok(())
+    }
     pub fn print_page_count(&self) -> usize {
         let mut keys = BTreeSet::new();
         for sheet in self.sheets.iter().filter(|s| !s.hidden) {
-            if sheet.cells.is_empty() {
-                keys.insert((sheet.id, 0, 0));
-            }
+            let mut visible = false;
             for key in sheet.cells.keys() {
-                if let Some((r, c)) = parse_address(key) {
+                if let Some((r, c)) = parse_address(key)
+                    && !sheet.hidden_rows.contains(&r)
+                    && !sheet.hidden_cols.contains(&c)
+                {
+                    visible = true;
                     keys.insert((sheet.id, r / 38, c / 8));
                 }
+            }
+            if !visible {
+                keys.insert((sheet.id, 0, 0));
             }
         }
         keys.len()
@@ -956,9 +1362,16 @@ impl Book {
                         color: cell.fmt.color,
                         bold: cell.fmt.bold,
                         italic: cell.fmt.italic,
+                        font: cell.fmt.font.clone(),
                     });
-                    if cell.fmt.underline || cell.fmt.strike {
-                        let yy = y + if cell.fmt.strike { 8.0 } else { 15.0 };
+                    for offset in [
+                        cell.fmt.underline.then_some(15.0),
+                        cell.fmt.strike.then_some(8.0),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        let yy = y + offset;
                         items.push(Primitive::Line {
                             x1: x + 3.0,
                             y1: yy,

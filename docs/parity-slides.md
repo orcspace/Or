@@ -23,12 +23,13 @@
 | Указка/перо, очистка | P0 | Реализовано | Рисунки во время показа, не сохраняются в deck |
 | Докладчик: следующий слайд, заметки, таймер | P0 | Частично: на текущем экране | Второй монитор не реализован и подписан в UI |
 | Переходы fade/push/wipe, автопереход | P1 | Реализовано | Временная интерполяция в UI, реальные PPTX transitions и advTm без эффекта; 60 fps не измерены |
-| Входные анимации fade/fly-in/zoom, click/with/after, delay/duration | P1 | Реализовано в локальном показе | Нативный JSON сохраняет; PPTX timing пока не экспортируется, PowerPoint эффекты не воспроизводятся |
-| Выходные/акцентные/motion/repeat/object-trigger/Morph/timeline | P1 | Нет | Внешний PPTX содержит предупреждение о потерях |
+| Входные анимации fade/fly-in/zoom, click/with/after, delay/duration | P1 | Реализовано в локальном показе | Нативный JSON сохраняет; PPTX `p:timing` пишется и читается (Fade, Fly In справа, Zoom; порядок шагов `order`). Не проверено в PowerPoint |
+| Цепочки эффектов входа/выделения/выхода и прямой путь | P1 | Исходный код: до 33 шагов на объект, порядок и click/with/after | Fade/Fly In/Zoom, Pulse/Spin, Move dx/dy, Fade/Fly Out/Zoom Out; PPTX timing. Новые тесты добавлены, локально не запускались |
+| Кривые пути, repeat/object-trigger/Morph/timeline | P1 | Нет/приближение импорта | Не считаются паритетом; предупреждения о потерях |
 | PPTX/PPSX/POTX/PPTM открытие | P0 | Частично | Текст, геометрия, картинки, таблицы, диаграммы, заметки и переходы; макросы/внешние relationships не выполняются |
 | PPTX сохранение и нативный ZIP(JSON) | P0 | Реализовано поддерживаемое подмножество | Нативный и PPTX round-trip unit-тесты; собственная модель добавляется customXml JSON, используется только при совпадении manifest остальных частей |
 | PDF | P0 | Реализован через общий render | Display list: текст, таблицы, диаграммы, линии/контуры, прямоугольники/эллипсы, изображения; PDF не сохраняет rotation |
-| PNG | P0 | CPU экспорт первого слайда, 2× | Shared Page/egui tessellation; texture/font/alpha/clipping; 8192/32MP и resource budgets. Rotation отсутствует как в PDF; не экспорт текущего слайда |
+| PNG | P0 | CPU экспорт 2× всех показываемых слайдов: меню — основной и нумерованные PNG рядом; MCP `export` — новая папка | Shared Page/egui tessellation; texture/font/alpha/clipping; 8192/32MP и resource budgets. Rotation отсутствует как в PDF; не экспорт текущего слайда |
 | Handouts/notes-print | P0 | Нет | Раздаточные и notes-print отсутствуют; не считаются готовыми |
 | Медиа аудио/видео/trim/recording/video-export | P1/P2 | Нет | Нет отключённых команд, выдающих это за готовое |
 | Comments, accessibility, spelling, custom shows, rehearsal, live captions, collaboration | P1/P2 | Нет в Slides | Не считается Office-паритетом |
@@ -55,3 +56,5 @@
 Корпус 50 внешних PPTX, ручная проверка чистой Windows 10/11, DPI/IME/второй монитор и валидатор Microsoft Open XML ещё не выполнены. Unit-тесты не заменяют эти проверки.
 
 PNG added after second review: по сообщению root после source fixes 126 total unit tests и fmt/clippy PASS. Final dist/installer + внешнее PNG visual QA ещё ожидаются; screenshots UI smoke не подменяют slide export.
+
+Уточнение 2026-10-16: любой MCP-клиент получает `slides_design_guide` до создания/редизайна; `slides_search_images` → `slides_add_image_url`, либо `slides_paste_image` из буфера. Нейрогенерация не добавляется. Новые цепочки эффектов и экспорт ожидают выполнения Rust/GUI-проверок; прежние результаты ревью ниже не подтверждают эти изменения.

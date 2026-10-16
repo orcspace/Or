@@ -40,7 +40,7 @@ pub fn run(root: &Path) -> Result<(), String> {
         ("sheets", Document::Sheets(book)),
         ("slides", Document::Slides(deck)),
     ] {
-        let p = root.join(format!("{name}.{}", document.extension()));
+        let p = root.join(format!("{name}.{}", document.native_extension()));
         crate::util::atomic_write(&p, &native::encode(&document)?, false)?;
         if native::open(&p)? != document {
             return Err(format!("native roundtrip {name}"));

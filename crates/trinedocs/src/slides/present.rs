@@ -15,6 +15,9 @@ pub struct Presentation {
     pointer: bool,
     notes: bool,
     blank: u8,
+    blank_since: Option<f64>,
+    /// The black "end of slide show" screen after the last slide.
+    ended: bool,
     strokes: Vec<Vec<Pos2>>,
 }
 impl Presentation {
@@ -33,6 +36,8 @@ impl Presentation {
                 .map(|(i, _)| i)
             {
                 self.index = index;
+            } else if let Some(index) = deck.slides.iter().rposition(|slide| !slide.hidden) {
+                self.index = index;
             } else {
                 return;
             }
@@ -46,6 +51,8 @@ impl Presentation {
         self.click_times.clear();
         self.strokes.clear();
         self.blank = 0;
+        self.blank_since = None;
+        self.ended = false;
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
         ctx.request_repaint();
     }
@@ -58,18 +65,40 @@ impl Presentation {
         self.click_times.clear();
         self.strokes.clear();
         self.blank = 0;
+        self.blank_since = None;
+        self.ended = false;
+    }
+    fn set_blank(&mut self, blank: u8, time: f64) {
+        if blank == 0 {
+            if let Some(started) = self.blank_since.take() {
+                self.slide_started += (time - started).max(0.0);
+            }
+        } else if self.blank == 0 {
+            self.blank_since = Some(time);
+        }
+        self.blank = blank;
+    }
+    fn click_steps(deck: &Deck, index: usize) -> usize {
+        deck.slides
+            .get(index)
+            .map(super::model::Slide::click_steps)
+            .unwrap_or(0)
+    }
+    fn finish(&mut self) {
+        self.ended = true;
+        self.blank = 1;
     }
     fn next(&mut self, deck: &Deck, time: f64) {
-        let count = deck
-            .slides
-            .get(self.index)
-            .map(|s| {
-                s.elements
-                    .iter()
-                    .filter(|e| e.animation.effect != "none" && e.animation.trigger == "on_click")
-                    .count()
-            })
-            .unwrap_or(0);
+        if self.ended {
+            self.active = false;
+            return;
+        }
+        if self.blank != 0 {
+            // B / W blanking: the first advance only brings the slide back.
+            self.set_blank(0, time);
+            return;
+        }
+        let count = Self::click_steps(deck, self.index);
         if self.clicks < count {
             self.clicks += 1;
             self.click_times.push((time - self.slide_started) as f32);
@@ -85,10 +114,26 @@ impl Presentation {
         {
             self.move_to(deck, index, time);
         } else {
-            self.blank = 1;
+            self.finish();
         }
     }
     fn previous(&mut self, deck: &Deck, time: f64) {
+        if self.ended || self.blank != 0 {
+            // Back from the end screen (or a blanked screen) shows the slide again.
+            if self.ended {
+                self.slide_started = time;
+                self.click_times.fill(-1.0e6);
+            }
+            self.ended = false;
+            self.set_blank(0, time);
+            return;
+        }
+        if self.clicks > 0 {
+            // Like PowerPoint, "back" first undoes the last on-click animation step.
+            self.clicks -= 1;
+            self.click_times.pop();
+            return;
+        }
         if let Some(index) = deck
             .slides
             .iter()
@@ -99,23 +144,86 @@ impl Presentation {
             .map(|(i, _)| i)
         {
             self.move_to(deck, index, time);
+            // The previous slide comes back fully built, with its animations already shown.
+            self.clicks = Self::click_steps(deck, index);
+            self.click_times = vec![-1.0e6; self.clicks];
         }
+    }
+    fn advance_timed(&mut self, deck: &Deck, time: f64) -> bool {
+        if self.ended
+            || self.blank != 0
+            || !deck.slides.get(self.index).is_some_and(|slide| {
+                slide.transition.advance_after.is_some_and(|seconds| {
+                    let transition = if slide.transition.effect == "none" {
+                        0.0
+                    } else {
+                        slide.transition.duration
+                    };
+                    let effects =
+                        super::editor::animation_end(slide, &self.click_times).max(transition);
+                    time - self.slide_started >= f64::from(effects + seconds)
+                })
+            })
+        {
+            return false;
+        }
+        if let Some(index) = deck
+            .slides
+            .iter()
+            .enumerate()
+            .skip(self.index + 1)
+            .find(|(_, slide)| !slide.hidden)
+            .map(|(index, _)| index)
+        {
+            self.move_to(deck, index, time);
+        } else {
+            self.finish();
+        }
+        true
+    }
+    fn sync_slide(&mut self, deck: &Deck, time: f64) -> bool {
+        if let Some(id) = self.slide_id {
+            let Some(index) = deck.slides.iter().position(|slide| slide.id == id) else {
+                self.active = false;
+                return false;
+            };
+            self.index = index;
+        }
+        let Some(slide) = deck.slides.get(self.index) else {
+            self.active = false;
+            return false;
+        };
+        if slide.hidden {
+            let visible = deck
+                .slides
+                .iter()
+                .enumerate()
+                .skip(self.index + 1)
+                .find(|(_, slide)| !slide.hidden)
+                .map(|(index, _)| index)
+                .or_else(|| {
+                    deck.slides
+                        .iter()
+                        .enumerate()
+                        .take(self.index)
+                        .rev()
+                        .find(|(_, slide)| !slide.hidden)
+                        .map(|(index, _)| index)
+                });
+            let Some(index) = visible else {
+                self.active = false;
+                return false;
+            };
+            self.move_to(deck, index, time);
+            self.previous = None;
+        }
+        true
     }
 }
 pub fn show(ui: &mut egui::Ui, deck: &Deck, state: &mut Presentation) {
     let ctx = ui.ctx().clone();
     let time = ctx.input(|i| i.time);
-    if let Some(id) = state.slide_id {
-        if let Some(index) = deck.slides.iter().position(|slide| slide.id == id) {
-            state.index = index;
-        } else {
-            state.active = false;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
-            return;
-        }
-    }
-    if deck.slides.get(state.index).is_none() {
-        state.active = false;
+    if !state.sync_slide(deck, time) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
         return;
     }
@@ -150,10 +258,10 @@ pub fn show(ui: &mut egui::Ui, deck: &Deck, state: &mut Presentation) {
         state.move_to(deck, index, time);
     }
     if ctx.input(|i| i.key_pressed(egui::Key::B)) {
-        state.blank = if state.blank == 1 { 0 } else { 1 };
+        state.set_blank(if state.blank == 1 { 0 } else { 1 }, time);
     }
     if ctx.input(|i| i.key_pressed(egui::Key::W)) {
-        state.blank = if state.blank == 2 { 0 } else { 2 };
+        state.set_blank(if state.blank == 2 { 0 } else { 2 }, time);
     }
     if ctx.input(|i| i.key_pressed(egui::Key::P)) {
         state.notes = !state.notes;
@@ -171,9 +279,11 @@ pub fn show(ui: &mut egui::Ui, deck: &Deck, state: &mut Presentation) {
             let ratio = (outer.width() / deck.width).min(outer.height() / deck.height);
             let size = Vec2::new(deck.width * ratio, deck.height * ratio);
             let rect = Rect::from_center_size(outer.center(), size);
+            let mut advanced_automatically = false;
             if let Some(slide) = deck.slides.get(state.index) {
                 let elapsed = (time - state.slide_started) as f32;
-                let progress = (elapsed / slide.transition.duration.max(0.05)).clamp(0.0, 1.0);
+                let progress =
+                    super::editor::motion_progress(elapsed, 0.0, slide.transition.duration);
                 if state.blank != 0 {
                     painter.rect_filled(
                         outer,
@@ -184,6 +294,15 @@ pub fn show(ui: &mut egui::Ui, deck: &Deck, state: &mut Presentation) {
                             Color32::BLACK
                         },
                     );
+                    if state.ended {
+                        painter.text(
+                            outer.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "Конец показа слайдов. Щёлкните, чтобы выйти.",
+                            egui::FontId::proportional(22.0),
+                            Color32::from_gray(200),
+                        );
+                    }
                 } else {
                     if progress < 1.0
                         && let Some(previous) = state.previous.and_then(|id| deck.slide(id))
@@ -239,22 +358,7 @@ pub fn show(ui: &mut egui::Ui, deck: &Deck, state: &mut Presentation) {
                             Some((animation_time, &state.click_times)),
                         ),
                     }
-                    if let Some(seconds) = slide.transition.advance_after
-                        && elapsed >= seconds
-                    {
-                        if let Some(index) = deck
-                            .slides
-                            .iter()
-                            .enumerate()
-                            .skip(state.index + 1)
-                            .find(|(_, s)| !s.hidden)
-                            .map(|(i, _)| i)
-                        {
-                            state.move_to(deck, index, time);
-                        } else {
-                            state.blank = 1;
-                        }
-                    }
+                    advanced_automatically = state.advance_timed(deck, time);
                     for points in &state.strokes {
                         if points.len() > 1 {
                             painter.add(egui::Shape::line(
@@ -270,7 +374,7 @@ pub fn show(ui: &mut egui::Ui, deck: &Deck, state: &mut Presentation) {
                     }
                 }
             }
-            if response.clicked() && !state.ink {
+            if response.clicked() && !state.ink && !advanced_automatically {
                 state.next(deck, time);
             }
             if state.ink && response.drag_started() {
@@ -283,8 +387,10 @@ pub fn show(ui: &mut egui::Ui, deck: &Deck, state: &mut Presentation) {
             {
                 points.push(pos);
             }
-            let controls =
-                Rect::from_min_size(outer.min + Vec2::new(12.0, 10.0), Vec2::new(660.0, 36.0));
+            let controls = Rect::from_min_size(
+                outer.min + Vec2::new(12.0, 10.0),
+                Vec2::new((outer.width() - 24.0).clamp(1.0, 660.0), 36.0),
+            );
             let mut controls_ui = ui.new_child(
                 egui::UiBuilder::new()
                     .max_rect(controls)
@@ -295,23 +401,42 @@ pub fn show(ui: &mut egui::Ui, deck: &Deck, state: &mut Presentation) {
                 .inner_margin(6.0)
                 .corner_radius(5.0)
                 .show(&mut controls_ui, |ui| {
-                    if ui.button("←").clicked() {
-                        state.previous(deck, time);
-                    }
-                    ui.label(format!("{} / {}", state.index + 1, deck.slides.len()));
-                    if ui.button("→").clicked() {
-                        state.next(deck, time);
-                    }
-                    ui.checkbox(&mut state.pointer, "Указка");
-                    ui.checkbox(&mut state.ink, "Перо");
-                    if ui.button("Очистить").clicked() {
-                        state.strokes.clear();
-                    }
-                    ui.checkbox(&mut state.notes, "Заметки (P)");
-                    if ui.button("Завершить Esc").clicked() {
-                        state.active = false;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
-                    }
+                    ui.horizontal_wrapped(|ui| {
+                        if ui
+                            .button("←")
+                            .on_hover_text("Предыдущий слайд · ←")
+                            .clicked()
+                        {
+                            state.previous(deck, time);
+                        }
+                        let visible_count =
+                            deck.slides.iter().filter(|slide| !slide.hidden).count();
+                        let visible_index = deck
+                            .slides
+                            .iter()
+                            .take(state.index + 1)
+                            .filter(|slide| !slide.hidden)
+                            .count();
+                        ui.label(format!("{visible_index} / {visible_count}"));
+                        if ui
+                            .button("→")
+                            .on_hover_text("Следующий слайд · →")
+                            .clicked()
+                            && !advanced_automatically
+                        {
+                            state.next(deck, time);
+                        }
+                        ui.checkbox(&mut state.pointer, "Указка");
+                        ui.checkbox(&mut state.ink, "Перо");
+                        if ui.button("Очистить").clicked() {
+                            state.strokes.clear();
+                        }
+                        ui.checkbox(&mut state.notes, "Заметки (P)");
+                        if ui.button("Завершить Esc").clicked() {
+                            state.active = false;
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                        }
+                    });
                 });
         });
     if state.notes {
@@ -341,11 +466,159 @@ pub fn show(ui: &mut egui::Ui, deck: &Deck, state: &mut Presentation) {
                 ui.small("Второй монитор: пока не поддерживается");
             });
     }
+    if !state.active {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        return;
+    }
     ctx.request_repaint();
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn review5_automatic_advance_waits_for_the_last_effect_and_untriggered_clicks()
+    -> Result<(), String> {
+        let mut deck = Deck::default();
+        deck.add_slide("blank");
+        let slide = &mut deck.slides[0];
+        slide.transition.advance_after = Some(2.0);
+        slide.elements[0].animation.effect = "fade".into();
+        slide.elements[0].animation.trigger = "with_previous".into();
+        slide.elements[0].animation.duration = 5.0;
+        slide.elements[1].animation.effect = "fade".into();
+        slide.elements[1].animation.trigger = "with_previous".into();
+        slide.elements[1].animation.duration = 1.0;
+        let mut state = Presentation {
+            active: true,
+            ..Default::default()
+        };
+        assert!(!state.advance_timed(&deck, 6.0));
+        assert!(state.advance_timed(&deck, 7.0));
+        state.move_to(&deck, 0, 10.0);
+        deck.slides[0].elements[0].animation.trigger = "on_click".into();
+        assert!(!state.advance_timed(&deck, 100.0));
+        state.next(&deck, 100.0);
+        assert!(!state.advance_timed(&deck, 106.0));
+        assert!(state.advance_timed(&deck, 107.0));
+        Ok(())
+    }
+    #[test]
+    fn review5_blanking_pauses_the_slide_clock_and_returning_from_the_end_restarts_it() {
+        let mut deck = Deck::default();
+        deck.add_slide("blank");
+        deck.slides[0].transition.advance_after = Some(2.0);
+        deck.slides[1].transition.advance_after = Some(2.0);
+        let mut state = Presentation {
+            active: true,
+            ..Default::default()
+        };
+        state.set_blank(1, 1.0);
+        assert!(!state.advance_timed(&deck, 10.0));
+        state.next(&deck, 11.0);
+        assert_eq!(state.index, 0);
+        assert!(!state.advance_timed(&deck, 11.0));
+        assert!(state.advance_timed(&deck, 12.0));
+        assert!(state.advance_timed(&deck, 14.0));
+        assert!(state.ended);
+        state.previous(&deck, 20.0);
+        assert!(!state.ended);
+        assert!(!state.advance_timed(&deck, 21.0));
+        assert!(state.advance_timed(&deck, 22.0));
+    }
+
+    #[test]
+    fn starting_on_a_trailing_hidden_slide_uses_the_last_visible_slide() -> Result<(), String> {
+        let mut deck = Deck::empty();
+        let visible = deck.add_slide("blank");
+        let hidden = deck.add_slide("blank");
+        deck.slide_mut(hidden).ok_or("slide")?.hidden = true;
+        let ctx = egui::Context::default();
+        let mut state = Presentation::default();
+        state.start(&ctx, &deck, 1);
+        assert!(state.active);
+        assert_eq!(state.slide_id, Some(visible));
+        Ok(())
+    }
+
     use super::*;
+    #[test]
+    fn live_hide_reorder_and_delete_keep_presentation_identity_safe() -> Result<(), String> {
+        let mut deck = Deck::empty();
+        let first = deck.add_slide("blank");
+        let second = deck.add_slide("blank");
+        let third = deck.add_slide("blank");
+        let mut state = Presentation {
+            active: true,
+            ..Presentation::default()
+        };
+        state.move_to(&deck, 1, 0.0);
+        deck.move_slide(second, 0)?;
+        assert!(state.sync_slide(&deck, 1.0));
+        assert_eq!((state.index, state.slide_id), (0, Some(second)));
+        deck.slide_mut(second).ok_or("second")?.hidden = true;
+        assert!(state.sync_slide(&deck, 2.0));
+        assert_eq!(
+            (state.slide_id, state.slide_started, state.previous),
+            (Some(first), 2.0, None)
+        );
+        deck.slide_mut(first).ok_or("first")?.hidden = true;
+        assert!(state.sync_slide(&deck, 3.0));
+        assert_eq!(state.slide_id, Some(third));
+        deck.delete_slide(third)?;
+        assert!(!state.sync_slide(&deck, 4.0));
+        assert!(!state.active);
+        Ok(())
+    }
+    #[test]
+    fn hiding_last_slide_falls_back_to_visible_previous_and_all_hidden_exits() -> Result<(), String>
+    {
+        let mut deck = Deck::empty();
+        let first = deck.add_slide("blank");
+        let last = deck.add_slide("blank");
+        let mut state = Presentation {
+            active: true,
+            ..Presentation::default()
+        };
+        state.move_to(&deck, 1, 0.0);
+        deck.slide_mut(last).ok_or("last")?.hidden = true;
+        assert!(state.sync_slide(&deck, 1.0));
+        assert_eq!(state.slide_id, Some(first));
+        deck.slide_mut(first).ok_or("first")?.hidden = true;
+        assert!(!state.sync_slide(&deck, 2.0));
+        assert!(!state.active);
+        Ok(())
+    }
+    #[test]
+    fn automatic_advance_skips_hidden_and_resets_slide_clock() -> Result<(), String> {
+        let mut deck = Deck::default();
+        deck.slides
+            .first_mut()
+            .ok_or("slide")?
+            .transition
+            .advance_after = Some(2.0);
+        let hidden = deck.add_slide("blank");
+        deck.slide_mut(hidden).ok_or("hidden")?.hidden = true;
+        deck.add_slide("blank");
+        deck.slides
+            .get_mut(2)
+            .ok_or("last")?
+            .transition
+            .advance_after = Some(2.0);
+        let mut state = Presentation {
+            active: true,
+            ..Presentation::default()
+        };
+        assert!(!state.advance_timed(&deck, 1.0));
+        assert!(state.advance_timed(&deck, 2.0));
+        assert_eq!((state.index, state.slide_started), (2, 2.0));
+        assert!(!state.advance_timed(&deck, 2.0));
+        state.blank = 1;
+        assert!(!state.advance_timed(&deck, 4.0));
+        state.blank = 0;
+        assert!(state.advance_timed(&deck, 4.0));
+        assert!(state.ended && state.active);
+        assert!(!state.advance_timed(&deck, 5.0));
+        Ok(())
+    }
     #[test]
     fn navigation_skips_hidden() {
         let mut deck = Deck::default();
@@ -377,6 +650,38 @@ mod tests {
         assert_eq!(state.clicks, 1);
         state.next(&deck, 2.0);
         assert_eq!(state.index, 1);
+        // Back returns to the first slide fully built; a second back undoes the click step.
+        state.previous(&deck, 3.0);
+        assert_eq!((state.index, state.clicks), (0, 1));
+        state.previous(&deck, 4.0);
+        assert_eq!((state.index, state.clicks), (0, 0));
+    }
+    #[test]
+    fn end_screen_then_exit_and_back() {
+        let deck = Deck::default();
+        let mut state = Presentation {
+            active: true,
+            ..Presentation::default()
+        };
+        state.next(&deck, 1.0);
+        assert!(state.ended && state.active && state.blank == 1);
+        state.previous(&deck, 2.0);
+        assert!(!state.ended && state.blank == 0 && state.index == 0);
+        state.next(&deck, 3.0);
+        state.next(&deck, 4.0);
+        assert!(!state.active);
+    }
+    #[test]
+    fn blanked_screen_advance_only_unblanks() {
+        let mut deck = Deck::default();
+        deck.add_slide("blank");
+        let mut state = Presentation {
+            active: true,
+            blank: 2,
+            ..Presentation::default()
+        };
+        state.next(&deck, 1.0);
+        assert_eq!((state.index, state.blank), (0, 0));
     }
     #[test]
     fn empty_hidden_presentations_do_not_start() {

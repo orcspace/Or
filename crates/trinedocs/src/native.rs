@@ -23,18 +23,47 @@ impl Document {
             Self::Slides(_) => "slides",
         }
     }
-    pub fn extension(&self) -> &'static str {
+    /// Legacy TrineDocs package; still opened and used for recovery, no longer offered for saving.
+    pub fn native_extension(&self) -> &'static str {
         match self {
             Self::Docs(_) => "trinedoc",
             Self::Sheets(_) => "trinesheet",
             Self::Slides(_) => "trineslide",
         }
     }
+    /// Default save format: the matching Microsoft Office format.
+    pub fn extension(&self) -> &'static str {
+        self.office_extension()
+    }
     pub fn office_extension(&self) -> &'static str {
         match self {
             Self::Docs(_) => "docx",
             Self::Sheets(_) => "xlsx",
             Self::Slides(_) => "pptx",
+        }
+    }
+    /// Formats offered by "Save as", default first, with dialog labels.
+    pub fn save_formats(&self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Self::Docs(_) => &[
+                ("docx", "Документ Word"),
+                ("pdf", "PDF"),
+                ("txt", "Обычный текст"),
+                ("md", "Markdown"),
+                ("html", "Веб-страница"),
+            ],
+            Self::Sheets(_) => &[
+                ("xlsx", "Книга Excel"),
+                ("pdf", "PDF"),
+                ("csv", "CSV (разделители — запятые)"),
+                ("tsv", "TSV (разделители — табуляция)"),
+                ("html", "Веб-страница"),
+            ],
+            Self::Slides(_) => &[
+                ("pptx", "Презентация PowerPoint"),
+                ("pdf", "PDF"),
+                ("png", "Рисунки PNG (все показываемые слайды)"),
+            ],
         }
     }
     pub fn pages(&self) -> Vec<crate::render::Page> {
@@ -157,13 +186,16 @@ pub fn open(path: &Path) -> Result<Document, String> {
     let bytes = crate::util::read_file(path)?;
     let doc = match ext.as_str() {
         "trinedoc" | "trinesheet" | "trineslide" => decode(&bytes)?,
+        "lock" => Document::Docs(crate::docs::io::read(&bytes, "txt")?),
         "docx" | "dotx" | "docm" | "txt" | "md" | "html" | "htm" => {
             Document::Docs(crate::docs::io::read(&bytes, &ext)?)
         }
         "xlsx" | "xlsm" | "xltx" | "xls" | "xlsb" | "ods" | "csv" | "tsv" => {
             Document::Sheets(crate::sheets::io::read(&bytes, &ext)?)
         }
-        "pptx" | "ppsx" | "potx" => Document::Slides(crate::slides::io::read(&bytes, &ext)?),
+        "pptx" | "ppsx" | "potx" | "pptm" => {
+            Document::Slides(crate::slides::io::read(&bytes, &ext)?)
+        }
         _ => return Err(format!("Формат .{ext} пока не поддерживается")),
     };
     doc.validate()?;
@@ -171,7 +203,9 @@ pub fn open(path: &Path) -> Result<Document, String> {
 }
 pub fn export(doc: &Document, ext: &str) -> Result<Vec<u8>, String> {
     doc.validate()?;
-    if ext == doc.extension() {
+    let normalized = ext.trim_start_matches('.').to_ascii_lowercase();
+    let ext = normalized.as_str();
+    if ext == doc.native_extension() {
         return encode(doc);
     }
     match (doc, ext) {
@@ -185,13 +219,71 @@ pub fn export(doc: &Document, ext: &str) -> Result<Vec<u8>, String> {
             crate::pdf::write(&doc.pages())
         }
         (Document::Slides(deck), "png") => {
-            let slide = deck.slides.first().ok_or("Презентация пуста")?;
+            let slide = deck
+                .slides
+                .iter()
+                .find(|slide| !slide.hidden)
+                .ok_or("В презентации нет показываемых слайдов")?;
             crate::png::write(&deck.page(slide), 2.0)
         }
+        (Document::Docs(d), "lock") => crate::docs::io::write(d, "txt"),
         (Document::Docs(d), _) => crate::docs::io::write(d, ext),
         (Document::Sheets(b), _) => crate::sheets::io::write(b, ext),
         (Document::Slides(d), _) => crate::slides::io::write(d, ext),
     }
+}
+/// Every slide that is not hidden as PNG, with its 1-based slide number.
+pub fn slide_pictures(deck: &crate::slides::model::Deck) -> Result<Vec<(usize, Vec<u8>)>, String> {
+    deck.validate()?;
+    let pictures = deck
+        .slides
+        .iter()
+        .enumerate()
+        .filter(|(_, slide)| !slide.hidden)
+        .map(|(index, slide)| Ok((index + 1, crate::png::write(&deck.page(slide), 2.0)?)))
+        .collect::<Result<Vec<_>, String>>()?;
+    if pictures.is_empty() {
+        return Err("В презентации нет показываемых слайдов".into());
+    }
+    Ok(pictures)
+}
+/// Sibling file for slide `number` of a multi-slide PNG export to `path` (`Имя (слайд 2).png`).
+pub fn slide_picture_path(path: &Path, number: usize) -> std::path::PathBuf {
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    path.with_file_name(format!("{stem} (слайд {number}).png"))
+}
+/// Extra PNGs are new files; only the main file was confirmed in the Save dialog.
+pub fn write_slide_picture(
+    path: &Path,
+    number: usize,
+    bytes: &[u8],
+) -> Result<std::path::PathBuf, String> {
+    let preferred = slide_picture_path(path, number);
+    let stem = preferred
+        .file_stem()
+        .ok_or("Нет имени PNG")?
+        .to_string_lossy();
+    for index in 1..1000 {
+        let target = if index == 1 {
+            preferred.clone()
+        } else {
+            preferred.with_file_name(format!("{stem} ({index}).png"))
+        };
+        match crate::util::atomic_write_new(&target, bytes) {
+            Ok(()) => return Ok(target),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "Не удалось сохранить {}: {error}",
+                    target.display()
+                ));
+            }
+        }
+    }
+    Err("Слишком много PNG с таким именем".into())
 }
 pub fn extension(path: &Path) -> String {
     path.extension()
@@ -217,6 +309,56 @@ mod tests {
             br#"{"version":999,"document":{"kind":"docs","data":{}}}"#.to_vec(),
         )])?;
         assert!(decode(&b).is_err());
+        Ok(())
+    }
+    #[test]
+    fn export_normalizes_native_and_rendered_extensions() -> Result<(), String> {
+        let doc = Document::create("slides")?;
+        assert_eq!(decode(&export(&doc, ".TRINESLIDE")?)?, doc);
+        assert!(export(&doc, ".PDF")?.starts_with(b"%PDF"));
+        assert!(export(&doc, ".PNG")?.starts_with(b"\x89PNG"));
+        Ok(())
+    }
+    #[test]
+    fn slide_pictures_cover_every_shown_slide() -> Result<(), String> {
+        let mut deck = crate::slides::model::Deck::default();
+        for _ in 0..2 {
+            deck.add_slide("title");
+        }
+        deck.slides[1].hidden = true;
+        let numbers: Vec<usize> = slide_pictures(&deck)?.into_iter().map(|(n, _)| n).collect();
+        assert_eq!(numbers, vec![1, 3]);
+        assert_eq!(
+            slide_picture_path(Path::new("dir/Отчёт.png"), 3),
+            Path::new("dir/Отчёт (слайд 3).png")
+        );
+        Ok(())
+    }
+    #[test]
+    fn macro_enabled_presentations_open_as_slides() -> Result<(), String> {
+        let path = std::env::temp_dir().join(format!("trinedocs-pptm-{}.PPTM", std::process::id()));
+        let doc = Document::create("slides")?;
+        crate::util::atomic_write(&path, &export(&doc, "pptx")?, false)?;
+        let result = open(&path);
+        std::fs::remove_file(path).map_err(|error| error.to_string())?;
+        assert_eq!(result?, doc);
+        Ok(())
+    }
+    #[test]
+    fn text_lock_files_can_be_opened_edited_and_saved() -> Result<(), String> {
+        let path = std::env::temp_dir().join(format!("trinedocs-text-{}.lock", std::process::id()));
+        crate::util::atomic_write(&path, b"version = 4\nname = example", false)?;
+        let mut doc = open(&path)?;
+        if let Document::Docs(d) = &mut doc {
+            let pid = d.paragraphs.first().ok_or("Нет абзаца")?.id;
+            d.insert_text(pid, 0, "# editable\n")?;
+        }
+        crate::util::atomic_write(&path, &export(&doc, "lock")?, false)?;
+        let roundtrip = open(&path)?;
+        assert!(
+            matches!(roundtrip, Document::Docs(d) if d.plain_text().contains("# editable") && d.plain_text().contains("version = 4"))
+        );
+        std::fs::remove_file(path).map_err(|e| e.to_string())?;
         Ok(())
     }
 }

@@ -12,9 +12,9 @@ Unicode true
 !define OUTFILE "TrineDocs-Setup.exe"
 !endif
 !ifndef VERSION
-!define VERSION "0.1.0-preview.1"
+!define VERSION "0.0.4"
 !endif
-Name "TrineDocs ${VERSION} (unsigned preview)"
+Name "TrineDocs ${VERSION}"
 OutFile "${OUTFILE}"
 InstallDir "$LOCALAPPDATA\Programs\TrineDocs"
 RequestExecutionLevel user
@@ -22,9 +22,9 @@ SetCompressor /SOLID lzma
 SetCompressorDictSize 32
 SetDatablockOptimize on
 ManifestDPIAware true
-VIProductVersion "0.1.0.0"
+VIProductVersion "0.0.4.0"
 VIAddVersionKey /LANG=1033 "ProductName" "TrineDocs"
-VIAddVersionKey /LANG=1033 "FileDescription" "TrineDocs unsigned preview installer"
+VIAddVersionKey /LANG=1033 "FileDescription" "TrineDocs installer"
 VIAddVersionKey /LANG=1033 "FileVersion" "${VERSION}"
 VIAddVersionKey /LANG=1033 "ProductVersion" "${VERSION}"
 VIAddVersionKey /LANG=1033 "LegalCopyright" "TrineDocs contributors"
@@ -167,7 +167,7 @@ Section "TrineDocs" Main
     MessageBox MB_OK|MB_ICONSTOP "Could not write the uninstaller." /SD IDOK
     Abort
   ${EndIf}
-  WriteRegStr SHCTX "${UNKEY}" "DisplayName" "TrineDocs ${VERSION} (unsigned preview)"
+  WriteRegStr SHCTX "${UNKEY}" "DisplayName" "TrineDocs ${VERSION}"
   WriteRegStr SHCTX "${UNKEY}" "DisplayVersion" "${VERSION}"
   WriteRegStr SHCTX "${UNKEY}" "Publisher" "TrineDocs contributors"
   WriteRegStr SHCTX "${UNKEY}" "InstallLocation" "$INSTDIR"

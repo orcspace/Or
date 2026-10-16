@@ -19,7 +19,7 @@
 - После закрепления aged lock все 123 теста и clippy прошли повторно. 444 exact registry версии проверены по crates.io; все ≥14 дней, SHA-256 совпадают. Windows graph: 259 normal/build/proc-macro crates, полные notices воспроизводимы offline. Mac-only dispatch не имеет исходного текста лицензии и явно исключён из Windows payload, а не признан проверенным.
 - Внешний MuPDF parser открыл DOCS/SHEETS/SLIDES PDF без xref repair; русский/числовой/латинский текст извлекается, первые страницы отрендерены и просмотрены. Poppler не найден на данном стенде, использован доступный MuPDF.
 
-Статическая policy допускает Windows 10/11 x64 build10240+; совместимость реальной Win10 ещё не проверена. Стенд текущего GUI smoke: Windows 11 Pro 10.0.26300 x64, Intel Core i5-13400F (16 logical cores), NVIDIA RTX 3070 driver32.0.16.1088. Итог installer/CI замеров будет дописан после выполнения, а не предсказан.
+Статическая policy допускает Windows 10/11 x64 build10240+; совместимость реальной Win10 ещё не проверена. Стенд текущего GUI smoke: Windows 11 Pro 10.0.26300 x64, Intel Core i5-13400F (16 logical cores), NVIDIA RTX 3070 driver32.0.16.1088. Ниже зафиксированы выполненные локальные проверки и ограничения стенда.
 
 ## Что есть
 Docs: собственный paginated canvas, rich runs, заголовки, списки, paragraph/page controls, таблицы/картинки, поиск, DOCX/text/HTML, PDF.
@@ -36,9 +36,9 @@ Slides: stable IDs, холст, resize/rotate/groups/layers, текст/фигу
 - MCP работает с существующей моделью через UI queue; полноценные live agent cursors/30ms streaming, resources notifications/Stop unfinished rollback/logs ещё не реализованы. MCP open/export пока требуют File UI; откат AI после последующей правки пользователя возвращает conflict.
 - PDF общий display list, но полное совпадение с экраном для kerning/font fallback/rotation/wrap не подтверждено. Unsupported CJK glyphs — ошибка, не silent corrupt text. «Печать» открывает PDF системным просмотрщиком.
 - Unknown OOXML пропускается с предупреждениями, не opaque roundtrip. Полный корпус ≥50 реальных файлов каждого Office типа, cargo-fuzz и внешняя Microsoft Office/LibreOffice приёмка не выполнены.
-- Stale lock после аварии может открыть файл read-only; native file picker может задерживать выход до закрытия диалога.
+- Lock-маркер защищает сохранение оригинала, но не отключает правку и сохранение копии. Снятие оставшегося marker требует явного подтверждения; живой Windows handle блокирует takeover. Во время file picker закрытие окна отменяется до завершения диалога.
 - Нет Authenticode и выбранной лицензии проекта. Системные Windows fonts не включены в payload. Notices зависимостей включаются отдельно.
-- Цели ≤10 MiB exe/≤5 MiB installer являются целями, не подтверждённым результатом.
+- Размеры прежнего проверенного payload приведены ниже. Новые исправления требуют новой сборки и измерения.
 
 Нельзя помечать v0.1.0 стабильным или удалять ограничения только потому, что установщик успешно собран.
 
@@ -47,7 +47,7 @@ Slides: stable IDs, холст, resize/rotate/groups/layers, текст/фигу
 - Final dist --smoke-test: native/DOCX/XLSX/PPTX/PDF/PNG PASS; реальный HTTP+stdio MCP smoke и native Home/Docs/Sheets/Slides screenshots PASS. Новые output directories, прежний success не переиспользовался.
 - Внешние проверки: ZIP CRC и все XML parts smoke DOCX/XLSX/PPTX корректны; MuPDF все 3 PDF открыл без repair, Unicode/42/TrineDocs извлекаются. PNG 1920×1080 прочитан независимым Pillow, текст и фон просмотрены. Это не external Office fidelity acceptance.
 - Визуальная проверка final UI: Sheets chart теперь полностью виден в отдельной прокручиваемой панели; Slides UI sample без пересечения шаблонных placeholders. PNG использует ту же Page, первый слайд 2×; поворот явно обозначен как потеря.
-- PE imports обоих exe — только системные DLL Windows; поставляемых DLL нет. TrineDocs.exe 10 459 136 bytes (9.975 MiB), shim 2 423 808 bytes. Decimal цель 10 МБ превышена на459136 bytes; binary 10 MiB не превышена. Installer размер пока не измерен.
+- PE imports обоих exe — только системные DLL Windows; поставляемых DLL нет. TrineDocs.exe 10 459 136 bytes (9.975 MiB), shim 2 423 808 bytes. Decimal цель 10 МБ превышена на459136 bytes; binary 10 MiB не превышена. Размеры двух последующих установщиков приведены ниже.
 - PNG preflight проверяет отсутствие глифов, целостность/aggregate32MP изображений и geometry budget до context/tessellation; обе high находки второй волны закрыты повторным независимым чтением.
 
 ## Установщик: первая фактическая проверка
@@ -61,3 +61,25 @@ Slides: stable IDs, холст, resize/rotate/groups/layers, текст/фигу
 TrineDocs.exe SHA-256 `281d8da4a6eacfae56c5a2dc6854552e124b48c4833c034ee8b6429a40647391`; shim `b9d99663c196362f888595c12c4cf18da5e3bbd6e3336d9b265228ac308ec495`.
 Local preview version0.1.0-preview.1; binary VERSIONINFO0.1.0.0. CI использует свой unique preview installer/tag version; binary resource version остаётся0.1.0.0. Local hashes не выдаются за hashes будущего CI артефакта. Remote CI/Release статус определяется GitHub workflow, до его выполнения это pending.
 All-users/elevation, чистая Windows10, внешние Office corpus, full functional/performance acceptance не выполнены. Все эти ограничения сохраняются после успешного install smoke.
+
+## Дополнительная проверка после первой публикации
+CI исходного commit `8cd07c26c7d2050b1d2c5a79be7c3fb8c826730f` прошёл: core/spec run38351587457 и release run38351587504, включая Windows install/files/MCP/uninstall. Опубликован preview.1.1, но затем обнаружены дополнительные defects; он не считается итоговой сборкой этой проверки.
+
+- Undo/Redo/AI rollback сохраняют монотонный next_id во всех трёх редакторах; тип документа нельзя менять через Replace. Новые regressions проверяют реальные IDs, branching, overflow и атомарность.
+- Explicit Reload отделён от обычного Open, completion связан с исходной вкладкой/path/version. Новые User/AI правки отменяют reload; успешная перезагрузка создаёт новую document namespace и очищает старую историю/AI/recovery state. Close во время записи не освобождает FileLock раньше worker completion.
+- replace_document_model требует base_version; newly appearing retired IDs и смена структурной роли старого ID отклоняются. get_document_info сообщает allocator next_id. Undo/Redo намеренно могут восстанавливать прежние живые объекты из истории.
+- Docs текстовые MCP операции передают точные позиционные deltas для курсора/выделения; inverse deltas используются в Undo/AI rollback. Full-model/неизвестная правка по-прежнему имеет ограниченный fallback, не полноценный CRDT.
+
+Эти строки описывают source fixes, не заменяют повторный запуск fmt/clippy/tests, dist smoke и install/uninstall. Итоговые результаты добавляются после выполнения. Обе предыдущие локальные установки выполнялись из обычной, не административной Windows учётной записи; они не доказывают приёмку чистой Windows10/11 VM.
+
+## Повторная проверка исправлений идентичности и курсора
+- cargo test --workspace --locked:131 app +14 shell =145 passed,0 failed. Первый запуск обнаружил только headless test harness: egui0.36 требует обработать или явно clear TexturesDelta; три тестовых outputs исправлены, production rendering не менялся. Повторный полный запуск прошёл.
+- cargo clippy --workspace --all-targets --locked -- -D warnings и cargo fmt --all -- --check повторно PASS после последнего изменения source.
+- Spec registry442 REQ/350 PAR,4 Python tests и historic assets checker PASS. Acceptance Office остаётся incomplete.
+- Последние source fixes взаимно проверены тремя агентами; закрыты дополнительные HIGH findings ID reuse/reload/cursor/raw-model/typed-group. После SaveAs путь canonicalize для хранения; Explorer печати получает исходный путь до canonicalization.
+- Final dist и новое install/uninstall выполняются после этих результатов. Ранее опубликованный preview.1.1 не выбран для итоговой ссылки.
+
+## Новый dist после дополнительных исправлений
+cargo build --locked --profile dist -p trinedocs --bins PASS. Новый target/qa-final3: files(native/DOCX/XLSX/PPTX/PDF/PNG), реальный HTTP+stdio MCP и native UI smoke PASS. Документы/таблицы/слайды визуально просмотрены. Независимые MuPDF/Pillow и XML/ZIP проверки повторены:3 PDF без xref repair, ожидаемый Unicode/42/TrineDocs извлекаются,4 Type0 font resources; Office parts9/9/16 корректны; PNG1920×1080.
+TrineDocs.exe10 488 320 bytes: превышает decimal10МБ на488320 bytes и binary10MiB на2560 bytes. Цель размера main exe не выполнена; shim2 423 808 bytes. PE imports обоих exe только системные DLL Windows, DLL в payload не добавлены.
+SHA-256 main `56ee11c8ebc4fa7328a2b6f4c70c8fb8f7540dbb64c493605a266a8693453557`, shim `91bf83388c71e8f89aac4ffbdfdfac970ea33bc4bd1bc59490a68155000f9757`. Новые install/CI hashes будут другими и не выводятся из этих локальных результатов.

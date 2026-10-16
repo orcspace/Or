@@ -1,5 +1,5 @@
 use crate::{
-    file_io::{Event, FileLock, Job, Worker},
+    file_io::{Event, FileLock, Job, ReloadTarget, Worker},
     native::Document,
     ops::{Author, Op, Tab},
     settings::Settings,
@@ -10,11 +10,22 @@ use std::{
     path::PathBuf,
     time::{Instant, SystemTime},
 };
+/// An MCP request whose slow part runs on a worker thread; the UI thread commits its result.
+struct MediaJob {
+    request: crate::mcp::BridgeRequest,
+    result: std::sync::mpsc::Receiver<Result<crate::mcp::media::Output, String>>,
+}
+const MAX_MEDIA_JOBS: usize = 4;
 #[derive(Clone)]
 enum Pending {
     Register(crate::mcp::register::Preview),
     Close(u64),
     Exit,
+    Unlock {
+        id: u64,
+        path: PathBuf,
+        marker: Option<Vec<u8>>,
+    },
     SaveFormat {
         id: u64,
         path: PathBuf,
@@ -22,7 +33,120 @@ enum Pending {
         export: bool,
     },
 }
+fn palette_commands(has_document: bool, query: &str) -> Vec<(&'static str, &'static str)> {
+    let query = query.trim().to_lowercase();
+    [
+        ("docs", "Создать документ"),
+        ("sheets", "Создать таблицу"),
+        ("slides", "Создать презентацию"),
+        ("open", "Открыть файл · Ctrl+O"),
+        ("settings", "Настройки"),
+        ("inspect", "Проверить документ"),
+        ("save", "Сохранить · Ctrl+S"),
+        ("saveas", "Сохранить как…"),
+        ("copy", "Сохранить копию…"),
+        ("pdf", "Экспорт в PDF"),
+        ("close", "Закрыть документ · Ctrl+W"),
+    ]
+    .into_iter()
+    .filter(|(key, label)| {
+        (has_document || matches!(*key, "docs" | "sheets" | "slides" | "open" | "settings"))
+            && label.to_lowercase().contains(&query)
+    })
+    .collect()
+}
+fn fresh_tab_id(tabs: &[Tab], next_id: u64) -> Result<(u64, u64), String> {
+    let following = next_id.checked_add(1).ok_or("Исчерпаны ID документов")?;
+    if next_id == 0 || tabs.iter().any(|t| t.id == next_id) {
+        return Err("Конфликт ID документов".into());
+    }
+    Ok((next_id, following))
+}
+fn prepare_reload(
+    tabs: &[Tab],
+    next_id: u64,
+    target: &ReloadTarget,
+    path: &std::path::Path,
+    document: Document,
+) -> Result<(usize, Tab, u64), String> {
+    let index = tabs
+        .iter()
+        .position(|t| t.id == target.tab_id)
+        .ok_or("conflict: документ уже закрыт")?;
+    let old = &tabs[index];
+    if old.version != target.base_version
+        || old.path.as_deref() != Some(target.path.as_path())
+        || path != target.path.as_path()
+    {
+        return Err("conflict: во время загрузки документ изменился; новые правки сохранены. Повторите перезагрузку.".into());
+    }
+    let (id, following) = fresh_tab_id(tabs, next_id)?;
+    document.validate()?;
+    let tab = Tab::new(id, document, old.title.clone(), Some(path.to_path_buf()));
+    Ok((index, tab, following))
+}
+enum PreparedOpen {
+    Activate(u64),
+    Install {
+        tab: Box<Tab>,
+        following: u64,
+        replace: Option<(usize, u64)>,
+    },
+}
+fn prepare_open(
+    tabs: &[Tab],
+    next_id: u64,
+    reload: Option<&ReloadTarget>,
+    path: &std::path::Path,
+    document: Document,
+) -> Result<PreparedOpen, String> {
+    if let Some(target) = reload {
+        let (index, tab, following) = prepare_reload(tabs, next_id, target, path, document)?;
+        return Ok(PreparedOpen::Install {
+            tab: Box::new(tab),
+            following,
+            replace: Some((index, target.tab_id)),
+        });
+    }
+    if let Some(t) = tabs.iter().find(|t| t.path.as_deref() == Some(path)) {
+        return Ok(PreparedOpen::Activate(t.id));
+    }
+    let (id, following) = fresh_tab_id(tabs, next_id)?;
+    document.validate()?;
+    let title = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Без названия".into());
+    Ok(PreparedOpen::Install {
+        tab: Box::new(Tab::new(id, document, title, Some(path.to_path_buf()))),
+        following,
+        replace: None,
+    })
+}
+fn commit_open(tabs: &mut Vec<Tab>, next_id: &mut u64, prepared: PreparedOpen) -> u64 {
+    match prepared {
+        PreparedOpen::Activate(id) => id,
+        PreparedOpen::Install {
+            tab,
+            following,
+            replace,
+        } => {
+            let id = tab.id;
+            *next_id = following;
+            if let Some((index, _)) = replace {
+                tabs[index] = *tab;
+            } else {
+                tabs.push(*tab);
+            }
+            id
+        }
+    }
+}
 pub struct App {
+    #[cfg(test)]
+    shell_rects: BTreeMap<(u64, &'static str), egui::Rect>,
+    editor_ctx: egui::Context,
+    deferred: Vec<(u64, &'static str)>,
     smoke: Option<crate::ui_smoke::State>,
     tabs: Vec<Tab>,
     active: Option<u64>,
@@ -32,20 +156,38 @@ pub struct App {
     recovery: crate::recovery::Recovery,
     locks: BTreeMap<u64, FileLock>,
     stamps: BTreeMap<u64, Option<SystemTime>>,
+    observed_stamps: BTreeMap<u64, Option<SystemTime>>,
     recoveries: Vec<crate::recovery::Snapshot>,
     mcp: Option<crate::mcp::Handle>,
     bridge: Option<std::sync::mpsc::Receiver<crate::mcp::BridgeRequest>>,
     allowed: BTreeSet<String>,
     clients: BTreeSet<String>,
+    client_access: crate::mcp::access::Registry,
     mcp_saves: BTreeMap<u64, tokio::sync::oneshot::Sender<Result<Value, String>>>,
+    pending_mcp_closes: Vec<crate::mcp::BridgeRequest>,
+    /// Network, pixel and export work for the Slides design tools (ADR-0027).
+    media_jobs: Vec<MediaJob>,
     pending: Option<Pending>,
     close_after_save: Option<u64>,
     status: String,
     error: String,
     show_settings: bool,
+    show_inspector: bool,
+    inspector_query: String,
+    inspector_category: crate::inspector::Category,
+    inspection: Option<crate::inspector::Task>,
+    inspection_result: Option<crate::inspector::Inspection>,
+    workspace_jobs: Vec<crate::mcp::workspace::Task>,
     show_ai: bool,
+    /// 0 = chat, 1 = AI change review.
+    ai_tab: usize,
+    chat: crate::chat::Chat,
     palette: bool,
     query: String,
+    palette_query: String,
+    palette_focus: bool,
+    palette_selected: usize,
+    palette_tail: Option<Vec<egui::Event>>,
     last_snapshot: Instant,
     last_watch: Instant,
     snapshot_versions: BTreeMap<u64, u64>,
@@ -54,6 +196,9 @@ pub struct App {
     allow_exit: bool,
     exit_after_save: bool,
     saving: BTreeSet<u64>,
+    picking: BTreeSet<u64>,
+    opening: bool,
+    reloading: BTreeMap<u64, ReloadTarget>,
 }
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -61,11 +206,18 @@ impl App {
         let settings = if smoke.is_some() {
             Settings {
                 mcp: false,
+                theme: if std::env::args().any(|a| a == "--ui-smoke-dark") {
+                    "dark"
+                } else {
+                    "light"
+                }
+                .into(),
                 ..Default::default()
             }
         } else {
             Settings::load()
         };
+        let chat = crate::chat::Chat::with_prefs(&settings.chat_models, &settings.chat_efforts);
         let ctx = &cc.egui_ctx;
         if std::env::args().any(|a| a == "--background") {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
@@ -83,6 +235,10 @@ impl App {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(1);
         let app = Self {
+            #[cfg(test)]
+            shell_rects: BTreeMap::new(),
+            editor_ctx: ctx.clone(),
+            deferred: Vec::new(),
             smoke,
             tabs: Vec::new(),
             active: None,
@@ -92,6 +248,7 @@ impl App {
             recovery: crate::recovery::Recovery::start(),
             locks: BTreeMap::new(),
             stamps: BTreeMap::new(),
+            observed_stamps: BTreeMap::new(),
             recoveries: if std::env::args().any(|a| a == "--ui-smoke-test") {
                 Vec::new()
             } else {
@@ -101,15 +258,30 @@ impl App {
             bridge,
             allowed: BTreeSet::new(),
             clients: BTreeSet::new(),
+            client_access: Default::default(),
             mcp_saves: BTreeMap::new(),
+            pending_mcp_closes: Vec::new(),
+            media_jobs: Vec::new(),
             pending: None,
             close_after_save: None,
             status: "Готово".into(),
             error: font_error,
             show_settings: false,
-            show_ai: false,
+            show_inspector: false,
+            inspector_query: String::new(),
+            inspector_category: Default::default(),
+            inspection: None,
+            inspection_result: None,
+            workspace_jobs: Vec::new(),
+            show_ai: std::env::args().any(|a| a == "--ui-smoke-compact"),
+            ai_tab: 0,
+            chat,
             palette: false,
             query: String::new(),
+            palette_query: String::new(),
+            palette_focus: false,
+            palette_selected: 0,
+            palette_tail: None,
             last_snapshot: Instant::now(),
             last_watch: Instant::now(),
             snapshot_versions: BTreeMap::new(),
@@ -118,6 +290,9 @@ impl App {
             allow_exit: false,
             exit_after_save: false,
             saving: BTreeSet::new(),
+            picking: BTreeSet::new(),
+            opening: false,
+            reloading: BTreeMap::new(),
         };
         for arg in std::env::args().skip(1).filter(|s| !s.starts_with('-')) {
             if app.smoke.is_none() {
@@ -126,14 +301,238 @@ impl App {
         }
         app
     }
+    fn queue_palette(&mut self, ctx: &egui::Context, boundary: Option<usize>) {
+        let tail = ctx.input_mut(|i| {
+            let split = boundary
+                .map_or(i.events.len(), |index| index + 1)
+                .min(i.events.len());
+            let tail = i.events.split_off(split);
+            if let Some(index) = boundary
+                && index < i.events.len()
+            {
+                i.events.remove(index);
+            }
+            tail
+        });
+        self.palette_tail = Some(tail);
+    }
+    fn queue_palette_click(&mut self, ctx: &egui::Context) {
+        let boundary = ctx.input(|i| {
+            i.events.iter().position(|e| {
+                matches!(
+                    e,
+                    egui::Event::PointerButton {
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        ..
+                    }
+                )
+            })
+        });
+        self.queue_palette(ctx, boundary);
+    }
+    fn open_palette(&mut self, ctx: &egui::Context) {
+        let id = egui::Id::new("command-palette-query");
+        if egui::text_edit::TextEditState::load(ctx, id).is_none() {
+            egui::text_edit::TextEditState::default().store(ctx, id);
+        }
+        ctx.memory_mut(|m| m.request_focus(id));
+        self.palette = true;
+        self.palette_focus = true;
+        self.palette_selected = 0;
+    }
+    fn inspect_current(&mut self) {
+        if self.inspection.is_some() || self.pending.is_some() {
+            return;
+        }
+        let Some(id) = self.active else {
+            return;
+        };
+        if let Err(error) = self.flush_pending(id) {
+            self.error = error;
+            return;
+        }
+        let Some(tab) = self.current() else {
+            return;
+        };
+        match crate::inspector::Task::start(
+            tab.id,
+            tab.version,
+            tab.title.clone(),
+            tab.document.clone(),
+            self.editor_ctx.clone(),
+        ) {
+            Ok(task) => {
+                self.inspection = Some(task);
+                self.inspection_result = None;
+                self.show_inspector = true;
+            }
+            Err(error) => self.error = error,
+        }
+    }
+    fn inspection_request(&mut self, args: &Value, ctx: &egui::Context) -> Result<Value, String> {
+        let object = args.as_object().ok_or("invalid_args: требуется объект")?;
+        if object.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "document_id" | "query" | "kind" | "index" | "count" | "refresh"
+            )
+        }) {
+            return Err("invalid_args: неизвестный аргумент проверки".into());
+        }
+        let id = args
+            .get("document_id")
+            .and_then(Value::as_u64)
+            .filter(|id| *id > 0)
+            .ok_or("invalid_args: требуется document_id")?;
+        let tab = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == id)
+            .ok_or("not_found: документ не открыт")?;
+        let query = match args.get("query") {
+            None => "",
+            Some(value) => value
+                .as_str()
+                .filter(|query| query.chars().count() <= 160)
+                .ok_or("invalid_args: query до 160 символов")?,
+        };
+        let category = crate::inspector::Category::parse(match args.get("kind") {
+            None => "all",
+            Some(value) => value.as_str().ok_or("invalid_args: kind")?,
+        })
+        .ok_or("invalid_args: неизвестный kind")?;
+        let integer = |key: &str, default: usize| -> Result<usize, String> {
+            args.get(key).map_or(Ok(default), |value| {
+                value
+                    .as_u64()
+                    .and_then(|n| usize::try_from(n).ok())
+                    .ok_or_else(|| format!("invalid_args: {key}"))
+            })
+        };
+        let index = integer("index", 0)?;
+        let count = integer("count", 100)?;
+        if !(1..=100).contains(&count) {
+            return Err("invalid_args: count от 1 до 100".into());
+        }
+        let refresh = args.get("refresh").map_or(Ok(false), |value| {
+            value.as_bool().ok_or("invalid_args: refresh")
+        })?;
+        if let Some(task) = &self.inspection {
+            if task.id != id {
+                return Err("busy: выполняется проверка другого документа".into());
+            }
+            return Ok(
+                serde_json::json!({"status":"preparing","document_id":id,"version":task.version}),
+            );
+        }
+        if !refresh
+            && let Some(result) = &self.inspection_result
+            && result.id == id
+        {
+            return Ok(result.page(query, category, index, count, tab.version));
+        }
+        let task = crate::inspector::Task::start(
+            id,
+            tab.version,
+            tab.title.clone(),
+            tab.document.clone(),
+            ctx.clone(),
+        )?;
+        let version = task.version;
+        self.inspection = Some(task);
+        Ok(serde_json::json!({"status":"preparing","document_id":id,"version":version}))
+    }
+
+    fn restore_snapshot(&mut self, snapshot: &crate::recovery::Snapshot) -> Result<(), String> {
+        if self.pending.is_some() {
+            return Err("Сначала завершите подтверждение".into());
+        }
+        if let Some(id) = self.active {
+            self.flush_pending(id)?;
+        }
+        let (id, following) = fresh_tab_id(&self.tabs, self.next_id)?;
+        let tab = Tab::new(id, snapshot.document.clone(), snapshot.title.clone(), None);
+        if !self.recovery.restore(
+            snapshot.id,
+            crate::recovery::Snapshot {
+                id,
+                title: tab.title.clone(),
+                path: None,
+                version: tab.version,
+                document: tab.document.clone(),
+            },
+        ) {
+            return Err(
+                "Не удалось поставить восстановление в очередь; исходный снимок сохранён.".into(),
+            );
+        }
+        self.next_id = following;
+        self.snapshot_versions.insert(id, tab.version);
+        self.tabs.push(tab);
+        self.active = Some(id);
+        crate::slides::editor::stop_presentation(&self.editor_ctx);
+        self.recoveries.retain(|s| s.id != snapshot.id);
+        Ok(())
+    }
+    fn navigate_inspection(
+        &mut self,
+        ctx: &egui::Context,
+        id: u64,
+        version: u64,
+        target: crate::inspector::Target,
+    ) -> Result<(), String> {
+        if self.pending.is_some() || self.palette {
+            return Err("Сначала завершите текущее действие".into());
+        }
+        if let Some(active) = self.active {
+            self.flush_pending(active)?;
+        }
+        let tab = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == id)
+            .ok_or("Документ проверки закрыт")?;
+        if tab.version != version || !target.available(&tab.document) {
+            return Err("Замечание устарело или объект скрыт. Повторите проверку.".into());
+        }
+        self.active = Some(id);
+        crate::slides::editor::stop_presentation(ctx);
+        match target {
+            crate::inspector::Target::Paragraph(paragraph) => {
+                crate::docs::editor::request_focus(ctx, id, paragraph)
+            }
+            crate::inspector::Target::Cell { sheet, row, col } => {
+                crate::sheets::editor::request_focus(ctx, id, sheet, row, col)
+            }
+            crate::inspector::Target::Element { slide, element } => {
+                crate::slides::editor::request_focus(ctx, id, slide, Some(element))
+            }
+        }
+        self.show_inspector = false;
+        ctx.request_repaint();
+        Ok(())
+    }
     fn tr<'a>(&self, s: &'a str) -> &'a str {
         crate::i18n::tr(s, &self.settings.language)
     }
     fn create(&mut self, kind: &str) {
+        if let Some(id) = self.active
+            && let Err(e) = self.flush_pending(id)
+        {
+            self.error = e;
+            return;
+        }
         match Document::create(kind) {
             Ok(d) => {
-                let id = self.next_id;
-                self.next_id = self.next_id.saturating_add(1);
+                let (id, following) = match fresh_tab_id(&self.tabs, self.next_id) {
+                    Ok(ids) => ids,
+                    Err(e) => {
+                        self.error = e;
+                        return;
+                    }
+                };
+                self.next_id = following;
                 let mut t = Tab::new(
                     id,
                     d,
@@ -153,14 +552,53 @@ impl App {
         }
     }
     fn send(&mut self, job: Job) {
-        if let Err(e) = self.worker.send(job) {
-            self.error = e
+        let picker = matches!(&job, Job::PickOpen);
+        if picker && self.opening {
+            self.error = "Диалог открытия уже открыт".into();
+            return;
+        }
+        match self.worker.send(job) {
+            Ok(()) => {
+                if picker {
+                    self.opening = true;
+                }
+            }
+            Err(e) => self.error = e,
         }
     }
     fn current(&self) -> Option<&Tab> {
         self.tabs.iter().find(|t| Some(t.id) == self.active)
     }
+    fn flush_pending(&mut self, id: u64) -> Result<(), String> {
+        let Some(t) = self.tabs.iter_mut().find(|t| t.id == id) else {
+            return Ok(());
+        };
+        if let Document::Sheets(book) = &t.document {
+            let mut book = book.clone();
+            if crate::sheets::editor::commit_pending(&self.editor_ctx, id, &mut book)? {
+                t.apply(Op::Replace {
+                    document: Document::Sheets(book),
+                    label: "Редактирование".into(),
+                    author: Author::User,
+                    base_version: None,
+                })?;
+            }
+        }
+        Ok(())
+    }
     fn save(&mut self, id: u64, copy: bool, export: bool, choose: bool, extension: Option<&str>) {
+        if self.picking.contains(&id) {
+            self.error = "Дождитесь выбора файла".into();
+            return;
+        }
+        if let Err(e) = self.flush_pending(id) {
+            self.fail_save(id, e);
+            return;
+        }
+        if self.reloading.contains_key(&id) {
+            self.fail_save(id, "busy: дождитесь завершения перезагрузки".into());
+            return;
+        }
         if self.saving.contains(&id) {
             self.error = "Сохранение уже выполняется".into();
             return;
@@ -168,14 +606,45 @@ impl App {
         let Some(t) = self.tabs.iter().find(|t| t.id == id) else {
             return;
         };
-        if choose || t.path.is_none() || copy || export {
-            let ext = extension.unwrap_or(t.document.extension()).to_string();
-            self.send(Job::PickSave {
+        // Files in the legacy TrineDocs format are re-saved through "Save as" in Office format.
+        let legacy = t
+            .path
+            .as_ref()
+            .is_some_and(|p| crate::native::extension(p) == t.document.native_extension());
+        if choose || t.path.is_none() || copy || export || legacy {
+            let ext = extension.unwrap_or(t.document.extension());
+            let mut formats: Vec<(String, String)> = t
+                .document
+                .save_formats()
+                .iter()
+                .map(|(e, l)| (e.to_string(), l.to_string()))
+                .collect();
+            // The requested format goes first so the dialog preselects it.
+            if let Some(i) = formats.iter().position(|(e, _)| e == ext) {
+                let chosen = formats.remove(i);
+                formats.insert(0, chosen);
+            } else {
+                formats.insert(0, (ext.to_string(), ext.to_uppercase()));
+            }
+            let name = t
+                .path
+                .as_ref()
+                .and_then(|p| p.file_stem())
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| "Без названия".into());
+            match self.worker.send(Job::PickSave {
                 id,
-                extension: ext,
+                name,
+                formats,
                 copy,
                 export,
-            });
+            }) {
+                Ok(()) => {
+                    self.picking.insert(id);
+                }
+                Err(e) => self.fail_save(id, e),
+            }
         } else if let Some(path) = t.path.clone() {
             if crate::native::extension(&path) != t.document.extension() {
                 self.pending = Some(Pending::SaveFormat {
@@ -189,18 +658,102 @@ impl App {
             }
         }
     }
+    fn fail_save(&mut self, id: u64, message: String) {
+        self.error = message.clone();
+        if self.close_after_save == Some(id) {
+            self.close_after_save = None;
+            self.exit_after_save = false;
+        }
+        if let Some(reply) = self.mcp_saves.remove(&id) {
+            let _ = reply.send(Err(message));
+        }
+    }
+    fn reload(&mut self, id: u64) {
+        if let Err(e) = self.flush_pending(id) {
+            self.error = e;
+            return;
+        }
+        if self.picking.contains(&id) {
+            self.error = "Дождитесь выбора файла".into();
+            return;
+        }
+        if self.saving.contains(&id) || self.reloading.contains_key(&id) || self.pending.is_some() {
+            self.error =
+                "Завершите сохранение, загрузку или подтверждение перед перезагрузкой".into();
+            return;
+        }
+        let Some(t) = self.tabs.iter().find(|t| t.id == id) else {
+            self.disk_changed = None;
+            return;
+        };
+        let Some(path) = t.path.clone() else {
+            return;
+        };
+        let target = ReloadTarget {
+            tab_id: id,
+            base_version: t.version,
+            path,
+        };
+        match self.worker.send(Job::Reload(target.clone())) {
+            Ok(()) => {
+                self.reloading.insert(id, target);
+                self.disk_changed = None;
+                self.status = "Перезагрузка…".into();
+            }
+            Err(e) => self.error = e,
+        }
+    }
+    fn request_unlock(&mut self, id: u64) {
+        if self.pending.is_some() {
+            self.error = "Сначала завершите подтверждение".into();
+            return;
+        }
+        if self.picking.contains(&id)
+            || self.saving.contains(&id)
+            || self.reloading.contains_key(&id)
+        {
+            self.error = "Дождитесь файловой операции".into();
+            return;
+        }
+        if let Some(path) = self
+            .tabs
+            .iter()
+            .find(|t| t.id == id)
+            .and_then(|t| t.path.clone())
+        {
+            self.send(Job::PreviewUnlock { id, path });
+        }
+    }
     fn write(&mut self, id: u64, path: PathBuf, copy: bool, export: bool, print: bool) {
+        if let Err(e) = self.flush_pending(id) {
+            self.fail_save(id, e);
+            return;
+        }
+        if self.reloading.contains_key(&id) || self.saving.contains(&id) {
+            self.fail_save(id, "busy: файловая операция уже выполняется".into());
+            return;
+        }
         let Some(t) = self.tabs.iter().find(|t| t.id == id) else {
             return;
         };
+        if copy && t.path.as_ref() == Some(&path) {
+            self.fail_save(
+                id,
+                "Для копии выберите другое имя или папку; исходный файл сохранён.".into(),
+            );
+            return;
+        }
         let expected = if t.path.as_ref() == Some(&path) {
             self.stamps.get(&id).copied().flatten()
         } else {
             None
         };
-        if t.read_only && t.path.as_ref() == Some(&path) && !export {
-            self.error =
-                "Исходный файл открыт только для чтения; сохраните под другим именем".into();
+        if t.save_locked && t.path.as_ref() == Some(&path) {
+            self.fail_save(
+                id,
+                "Файл занят: правки доступны, сохраните копию или снимите оставшуюся блокировку."
+                    .into(),
+            );
             return;
         }
         let owns_lock = t.path.as_ref() == Some(&path) && self.locks.contains_key(&id);
@@ -208,43 +761,88 @@ impl App {
             id,
             version: t.version,
             path,
-            document: t.document.clone(),
+            document: Box::new(t.document.clone()),
             backup: self.settings.backup,
             copy,
             export,
             expected,
             print,
             owns_lock,
+            source_path: t.path.clone(),
         };
         match self.worker.send(job) {
             Ok(()) => {
+                if !copy
+                    && !export
+                    && let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id)
+                {
+                    tab.last_edit = Instant::now()
+                        .checked_sub(std::time::Duration::from_secs(2))
+                        .unwrap_or_else(Instant::now);
+                }
                 self.saving.insert(id);
                 self.status = "Сохранение…".into();
             }
-            Err(e) => {
-                self.error = e;
-                self.close_after_save = None;
-                self.exit_after_save = false;
-                if let Some(reply) = self.mcp_saves.remove(&id) {
-                    let _ = reply.send(Err(self.error.clone()));
-                }
-            }
+            Err(e) => self.fail_save(id, e),
         }
     }
-    fn remove(&mut self, id: u64) {
+    fn discard_session(&mut self) {
+        for tab in &self.tabs {
+            self.recovery.clear(tab.id);
+        }
+        self.snapshot_versions.clear();
+    }
+    fn retire_state(&mut self, id: u64) {
         if let Some(reply) = self.mcp_saves.remove(&id) {
             let _ = reply.send(Err("Документ закрыт".into()));
         }
-        self.tabs.retain(|t| t.id != id);
         self.locks.remove(&id);
         self.stamps.remove(&id);
+        self.observed_stamps.remove(&id);
         self.snapshot_versions.remove(&id);
+        self.saving.remove(&id);
+        self.reloading.remove(&id);
+        self.recoveries.retain(|s| s.id != id);
+        if matches!(&self.pending, Some(Pending::Close(old) | Pending::SaveFormat { id: old, .. } | Pending::Unlock { id: old, .. }) if *old == id)
+        {
+            self.pending = None;
+        }
+        if self.close_after_save == Some(id) {
+            self.close_after_save = None;
+            self.exit_after_save = false;
+        }
+        if self.disk_changed == Some(id) {
+            self.disk_changed = None;
+        }
+        if self
+            .last_agent
+            .as_ref()
+            .is_some_and(|(old, _, _)| *old == id)
+        {
+            self.last_agent = None;
+        }
         self.recovery.clear(id);
+    }
+    fn remove(&mut self, id: u64) {
+        if self.saving.contains(&id) || self.picking.contains(&id) {
+            self.error = "busy: дождитесь завершения сохранения перед закрытием".into();
+            return;
+        }
+        self.retire_state(id);
+        self.tabs.retain(|t| t.id != id);
         if self.active == Some(id) {
             self.active = self.tabs.last().map(|t| t.id);
         }
     }
     fn close(&mut self, id: u64) {
+        if let Err(e) = self.flush_pending(id) {
+            self.error = e;
+            return;
+        }
+        if self.saving.contains(&id) || self.picking.contains(&id) {
+            self.error = "busy: дождитесь завершения сохранения перед закрытием".into();
+            return;
+        }
         if self.tabs.iter().any(|t| t.id == id && t.dirty()) {
             self.pending = Some(Pending::Close(id));
         } else {
@@ -254,20 +852,66 @@ impl App {
     fn events(&mut self) {
         while let Ok(event) = self.worker.rx.try_recv() {
             match event {
-                Event::RegistrationPreview(p) => self.pending = Some(Pending::Register(p)),
+                Event::UnlockPreview { id, path, marker } => {
+                    if self.pending.is_none()
+                        && self
+                            .tabs
+                            .iter()
+                            .any(|t| t.id == id && t.path.as_ref() == Some(&path) && t.save_locked)
+                    {
+                        self.pending = Some(Pending::Unlock { id, path, marker });
+                    }
+                }
+                Event::Unlocked { id, path, lock } => {
+                    if let Some(t) = self
+                        .tabs
+                        .iter_mut()
+                        .find(|t| t.id == id && t.path.as_ref() == Some(&path))
+                    {
+                        t.save_locked = false;
+                        self.locks.insert(id, lock);
+                        self.status = "Блокировка снята · можно сохранить файл".into();
+                    }
+                }
+                Event::RegistrationPreview(p) => {
+                    if self.pending.is_none() {
+                        self.pending = Some(Pending::Register(p));
+                    } else {
+                        self.error =
+                            "Сначала завершите текущее подтверждение, затем повторите регистрацию."
+                                .into();
+                    }
+                }
                 Event::Registered => {
                     self.status = "Клиент MCP зарегистрирован. Перезапустите клиент.".into()
                 }
-                Event::PickedOpen(path) => self.send(Job::Open(path)),
+                Event::PickedOpen(path) => {
+                    self.opening = false;
+                    self.send(Job::Open(path));
+                }
                 Event::PickedSave {
                     id,
                     path,
                     copy,
                     export,
                 } => {
+                    self.picking.remove(&id);
+                    // A non-Office format (PDF, TXT, PNG…) is an export: the tab keeps its file.
+                    let export = export
+                        || self.tabs.iter().find(|t| t.id == id).is_some_and(|t| {
+                            crate::native::extension(&path) != t.document.office_extension()
+                        });
+                    if self.pending.is_some() {
+                        self.fail_save(
+                            id,
+                            "Другое подтверждение уже открыто; повторите сохранение.".into(),
+                        );
+                        continue;
+                    }
                     if self.tabs.iter().find(|t| t.id == id).is_some_and(|t| {
                         crate::native::extension(&path) != t.document.extension()
-                            && crate::native::extension(&path) != "pdf"
+                            && (crate::native::extension(&path) != "pdf"
+                                || matches!(&t.document, Document::Slides(deck) if deck.slides.iter().any(|s| s.elements.iter().any(|e| e.rotation != 0.0))))
                     }) {
                         self.pending = Some(Pending::SaveFormat {
                             id,
@@ -280,46 +924,71 @@ impl App {
                     }
                 }
                 Event::Opened {
+                    reload,
                     path,
                     document,
-                    lock,
+                    mut lock,
                     stamp,
                 } => {
-                    if let Some(t) = self
-                        .tabs
-                        .iter_mut()
-                        .find(|t| t.path.as_ref() == Some(&path))
-                    {
-                        if self.disk_changed != Some(t.id) {
-                            self.active = Some(t.id);
+                    if let Some(target) = &reload {
+                        if self.reloading.get(&target.tab_id) != Some(target) {
                             continue;
                         }
-                        t.document = document;
-                        t.version = t.version.saturating_add(1);
-                        t.saved_version = t.version;
-                        t.undo.clear();
-                        t.redo.clear();
-                        self.stamps.insert(t.id, stamp);
-                        self.active = Some(t.id);
-                        self.disk_changed = None;
-                    } else {
-                        let id = self.next_id;
-                        self.next_id = self.next_id.saturating_add(1);
-                        let title = path
-                            .file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_else(|| "Без названия".into());
-                        let mut t = Tab::new(id, document, title, Some(path.clone()));
-                        t.read_only = lock.is_none();
-                        if let Some(l) = lock {
-                            self.locks.insert(id, l);
-                        }
-                        self.stamps.insert(id, stamp);
-                        self.tabs.push(t);
-                        self.active = Some(id);
+                        self.reloading.remove(&target.tab_id);
                     }
+                    let mut prepared = match prepare_open(
+                        &self.tabs,
+                        self.next_id,
+                        reload.as_ref(),
+                        &path,
+                        document,
+                    ) {
+                        Ok(prepared) => prepared,
+                        Err(e) => {
+                            self.error = e;
+                            if let Some(target) = &reload
+                                && self.tabs.iter().any(|t| t.id == target.tab_id)
+                            {
+                                self.disk_changed = Some(target.tab_id);
+                            }
+                            continue;
+                        }
+                    };
+                    if let PreparedOpen::Install { tab, replace, .. } = &mut prepared {
+                        if let Some((_, old_id)) = replace {
+                            // Transfer the existing lock only after every completion guard passed.
+                            lock = self.locks.remove(old_id).or(lock);
+                            self.retire_state(*old_id);
+                        }
+                        tab.save_locked = lock.is_none();
+                        if let Some(lock) = lock {
+                            self.locks.insert(tab.id, lock);
+                        }
+                        self.stamps.insert(tab.id, stamp);
+                    } else {
+                        let id = commit_open(&mut self.tabs, &mut self.next_id, prepared);
+                        self.deferred.push((id, "activate_external"));
+                        continue;
+                    }
+                    let id = commit_open(&mut self.tabs, &mut self.next_id, prepared);
+                    self.deferred.push((id, "activate_external"));
                     self.settings.remember(path);
-                    self.status = "Файл открыт".into();
+                    if let Err(error) = self.worker.save_settings(self.settings.clone()) {
+                        self.error = error;
+                    }
+                    self.status = if reload.is_some() {
+                        "Файл перезагружен"
+                    } else {
+                        "Файл открыт"
+                    }
+                    .into();
+                }
+                Event::ReloadFailed { target, message } => {
+                    if self.reloading.get(&target.tab_id) == Some(&target) {
+                        self.reloading.remove(&target.tab_id);
+                        self.error = message;
+                        self.disk_changed = Some(target.tab_id);
+                    }
                 }
                 Event::Saved {
                     id,
@@ -344,14 +1013,26 @@ impl App {
                         self.stamps.insert(id, stamp);
                         if let Some(l) = lock {
                             self.locks.insert(id, l);
-                            t.read_only = false;
+                            t.save_locked = false;
                         }
                         if !t.dirty() {
                             self.recovery.clear(id);
                         }
                     }
-                    self.settings.remember(path);
-                    self.status = "Сохранено".into();
+                    if !export {
+                        self.settings.remember(path);
+                        if let Err(error) = self.worker.save_settings(self.settings.clone()) {
+                            self.error = error;
+                        }
+                    }
+                    self.status = if copy {
+                        "Копия сохранена"
+                    } else if export {
+                        "Экспорт завершён"
+                    } else {
+                        "Сохранено"
+                    }
+                    .into();
                     if let Some(reply) = self.mcp_saves.remove(&id) {
                         let _ = reply.send(Ok(json!({"applied":true,"version":version})));
                     }
@@ -373,17 +1054,27 @@ impl App {
                     }
                 }
                 Event::Canceled { id } => {
-                    self.close_after_save = None;
-                    self.exit_after_save = false;
+                    if id == 0 {
+                        self.opening = false;
+                        continue;
+                    }
+                    self.picking.remove(&id);
+                    if self.close_after_save == Some(id) {
+                        self.close_after_save = None;
+                        self.exit_after_save = false;
+                    }
                     self.saving.remove(&id);
                     if let Some(reply) = self.mcp_saves.remove(&id) {
                         let _ = reply.send(Err("Отменено".into()));
                     }
                 }
                 Event::Error { message, id } => {
-                    self.close_after_save = None;
-                    self.exit_after_save = false;
+                    if id.is_some() && self.close_after_save == id {
+                        self.close_after_save = None;
+                        self.exit_after_save = false;
+                    }
                     if let Some(id) = id {
+                        self.picking.remove(&id);
                         self.saving.remove(&id);
                     }
                     self.error = message.clone();
@@ -395,7 +1086,10 @@ impl App {
                 }
                 Event::Watched(stamps) => {
                     for (id, new) in stamps {
-                        if self.stamps.get(&id).is_some_and(|old| *old != new) {
+                        self.observed_stamps.insert(id, new);
+                        if !self.reloading.contains_key(&id)
+                            && self.stamps.get(&id).is_some_and(|old| *old != new)
+                        {
                             self.disk_changed = Some(id);
                         }
                     }
@@ -403,29 +1097,406 @@ impl App {
             }
         }
     }
-    fn mcp_requests(&mut self) {
-        for _ in 0..16 {
-            let Some(r) = self.bridge.as_ref().and_then(|b| b.try_recv().ok()) else {
+    /// Shows the black AI caret where an agent's Docs edit landed.
+    fn mark_ai_caret(&self, ctx: &egui::Context, target: u64, args: &Value) {
+        if !self
+            .tabs
+            .iter()
+            .any(|t| t.id == target && matches!(t.document, Document::Docs(_)))
+        {
+            return;
+        }
+        let int = |keys: &[&str]| {
+            keys.iter()
+                .find_map(|k| args.get(*k).and_then(Value::as_u64))
+        };
+        let Some(paragraph_id) = int(&["paragraph_id", "end_paragraph_id", "start_paragraph_id"])
+        else {
+            return;
+        };
+        let from = int(&["offset", "start_offset"]).unwrap_or_default() as usize;
+        let to = match (
+            args.get("text").and_then(Value::as_str),
+            int(&["end_offset"]),
+        ) {
+            (Some(text), _) => from.saturating_add(text.chars().count()),
+            (None, Some(end)) => end as usize,
+            _ => from,
+        };
+        let caret = crate::docs::editor::AiCaret {
+            tab: target,
+            paragraph_id,
+            from,
+            to,
+            time: ctx.input(|i| i.time),
+        };
+        ctx.data_mut(|d| d.insert_temp(crate::docs::editor::ai_caret_id(), caret));
+        ctx.request_repaint();
+    }
+    fn start_workspace(
+        &mut self,
+        args: &Value,
+        client: &str,
+        ctx: &egui::Context,
+    ) -> Result<Value, String> {
+        use crate::mcp::workspace::{MAX_JOBS, Snapshot, Task};
+        let plan = crate::mcp::workspace::parse(args)?;
+        if self
+            .workspace_jobs
+            .iter()
+            .filter(|job| job.running())
+            .count()
+            >= MAX_JOBS
+        {
+            return Err("busy: уже готовятся 4 пакета документов".into());
+        }
+        for (&id, (version, _)) in &plan.groups {
+            let tab = self
+                .tabs
+                .iter()
+                .find(|tab| tab.id == id)
+                .ok_or("not_found: документ пакета не открыт")?;
+            if tab.read_only {
+                return Err(format!("read_only: документ {id}"));
+            }
+            if tab.version != *version {
+                return Err(format!("conflict: документ {id} изменился"));
+            }
+            if self.reloading.contains_key(&id)
+                || self
+                    .workspace_jobs
+                    .iter()
+                    .any(|job| job.running() && job.targets.iter().any(|target| target.0 == id))
+            {
+                return Err(format!("busy: документ {id} уже обрабатывается"));
+            }
+        }
+        if !plan.dry_run {
+            for id in plan.groups.keys() {
+                self.flush_pending(*id)?;
+            }
+        }
+        let mut snapshots = Vec::new();
+        for (&id, (version, _)) in &plan.groups {
+            let tab = self
+                .tabs
+                .iter()
+                .find(|tab| tab.id == id)
+                .ok_or("not_found: документ закрыт")?;
+            if tab.version != *version {
+                return Err(format!(
+                    "conflict: документ {id} изменился при завершении ввода"
+                ));
+            }
+            snapshots.push(Snapshot {
+                id,
+                title: tab.title.clone(),
+                version: tab.version,
+                document: tab.document.clone(),
+            });
+        }
+        let task = Task::start(plan, snapshots, client.to_owned(), ctx.clone())?;
+        let result = task.status();
+        while self.workspace_jobs.len() >= 64 {
+            if let Some(index) = self.workspace_jobs.iter().position(|job| !job.running()) {
+                self.workspace_jobs.remove(index);
+            } else {
+                break;
+            }
+        }
+        self.workspace_jobs.push(task);
+        ctx.request_repaint();
+        Ok(result)
+    }
+    fn workspace_request(
+        &mut self,
+        tool: &str,
+        args: &Value,
+        client: &str,
+        ctx: &egui::Context,
+    ) -> Result<Value, String> {
+        crate::mcp::tools::validate_args(tool, args)?;
+        match tool {
+            "workspace_documents" => {
+                if args.as_object().is_none_or(|map| {
+                    map.keys()
+                        .any(|key| !matches!(key.as_str(), "index" | "count"))
+                }) {
+                    return Err("invalid_args: workspace_documents принимает index/count".into());
+                }
+                let start = args.get("index").and_then(Value::as_u64).unwrap_or(0);
+                let start = usize::try_from(start).map_err(|_| "invalid_args: index")?;
+                let count = args.get("count").and_then(Value::as_u64).unwrap_or(50);
+                if !(1..=50).contains(&count) {
+                    return Err("invalid_args: count от 1 до 50".into());
+                }
+                let count = count as usize;
+                Ok(json!({
+                    "documents":self.tabs.iter().skip(start).take(count).map(|tab| json!({
+                        "document_id":tab.id,"title":tab.title,"kind":tab.document.kind(),"version":tab.version,
+                        "read_only":tab.read_only,"dirty":tab.dirty(),
+                        "busy":self.reloading.contains_key(&tab.id) || self.workspace_jobs.iter().any(|job|job.running() && job.targets.iter().any(|target|target.0==tab.id)),
+                    })).collect::<Vec<_>>(),
+                    "offset":start,"total":self.tabs.len(),"active_document_id":self.active,
+                }))
+            }
+            "workspace_apply" => self.start_workspace(args, client, ctx),
+            "workspace_job_status" | "workspace_cancel" => {
+                if args
+                    .as_object()
+                    .is_none_or(|map| map.keys().any(|key| key != "job_id"))
+                {
+                    return Err("invalid_args: требуется только job_id".into());
+                }
+                let id = args
+                    .get("job_id")
+                    .and_then(Value::as_str)
+                    .filter(|id| {
+                        id.len() == 36
+                            && id.starts_with("job-")
+                            && id.as_bytes()[4..]
+                                .iter()
+                                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+                    })
+                    .ok_or("invalid_args: требуется job_id")?;
+                let task = self
+                    .workspace_jobs
+                    .iter_mut()
+                    .find(|task| {
+                        task.id == id
+                            && (task.client == client
+                                || (self.chat.was_ours(&task.client) && self.chat.owns(client)))
+                    })
+                    .ok_or("not_found: собственное задание не найдено")?;
+                if tool == "workspace_cancel" {
+                    task.cancel();
+                }
+                Ok(task.status())
+            }
+            _ => Err("unsupported_feature: workspace tool".into()),
+        }
+    }
+    fn finish_workspace(&mut self, ctx: &egui::Context) {
+        for task in &mut self.workspace_jobs {
+            if task.running()
+                && (!self.settings.mcp
+                    || (self.chat.was_ours(&task.client) && !self.chat.owns(&task.client))
+                    || (!self.allowed.contains(&task.client) && !self.chat.owns(&task.client))
+                    || task.started.elapsed() > crate::mcp::workspace::TIMEOUT)
+            {
+                task.cancel();
+            }
+        }
+        if self.pending.is_some() || self.palette || self.allow_exit {
+            return;
+        }
+        let ready: Vec<_> = self
+            .workspace_jobs
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(index, task)| task.poll().map(|result| (index, result)))
+            .collect();
+        for (index, result) in ready {
+            let client = self.workspace_jobs[index].client.clone();
+            let dry_run = self.workspace_jobs[index].dry_run;
+            let result = (|| -> Result<Value, String> {
+                if self.workspace_jobs[index].cancelled() {
+                    return Err("cancelled: пакет отменён или доступ отозван".into());
+                }
+                if self.workspace_jobs[index].started.elapsed() > crate::mcp::workspace::TIMEOUT {
+                    return Err("timeout: пакет устарел".into());
+                }
+                let updates = result?;
+                if !dry_run {
+                    for update in &updates {
+                        self.flush_pending(update.id)?;
+                    }
+                }
+                crate::ops::apply_workspace(
+                    &mut self.tabs,
+                    updates,
+                    Author::Agent {
+                        name: client.clone(),
+                    },
+                    dry_run,
+                )
+            })();
+            match result {
+                Ok(result) => {
+                    let applied = result.get("applied").and_then(Value::as_bool) == Some(true);
+                    if applied {
+                        let changed = result["documents"]
+                            .as_array()
+                            .map(|items| {
+                                items
+                                    .iter()
+                                    .filter(|item| item["applied"] == true)
+                                    .filter_map(|item| item["document_id"].as_u64())
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
+                        let target = self
+                            .active
+                            .filter(|id| changed.contains(id))
+                            .or_else(|| changed.first().copied());
+                        if let Some(target) = target {
+                            self.last_agent = Some((target, client.clone(), Instant::now()));
+                            if let Some(arguments) = self.workspace_jobs[index].cues.get(&target) {
+                                self.mark_ai_caret(ctx, target, arguments);
+                            }
+                        }
+                        self.status = format!("ИИ: пакет применён · документов {}", changed.len());
+                    }
+                    self.workspace_jobs[index].complete(result);
+                }
+                Err(error) => {
+                    self.status = format!("ИИ: пакет не применён · {error}");
+                    self.workspace_jobs[index].fail(error);
+                }
+            }
+        }
+    }
+    fn workspace_strip(&mut self, ui: &mut egui::Ui) {
+        if !self.workspace_jobs.iter().any(|task| task.running()) {
+            return;
+        }
+        egui::Panel::top("workspace-jobs")
+            .frame(
+                egui::Frame::new()
+                    .fill(ui.visuals().panel_fill)
+                    .inner_margin(egui::Margin::symmetric(12, 6)),
+            )
+            .show(ui, |ui| {
+                for task in self.workspace_jobs.iter_mut().filter(|task| task.running()) {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spinner();
+                        ui.label(format!(
+                            "ИИ · {} документа · {}",
+                            task.targets.len(),
+                            if task.cancelled() {
+                                "Отмена…"
+                            } else {
+                                "Подготовка правок"
+                            }
+                        ));
+                        let titles = task
+                            .targets
+                            .iter()
+                            .map(|target| target.2.chars().take(40).collect::<String>())
+                            .collect::<Vec<_>>()
+                            .join(" · ");
+                        ui.weak(titles);
+                        if ui
+                            .add_enabled(!task.cancelled(), egui::Button::new("Отменить"))
+                            .clicked()
+                        {
+                            task.cancel();
+                        }
+                    });
+                }
+            });
+    }
+    fn mcp_requests(&mut self, ctx: &egui::Context) {
+        for key in self.client_access.reap() {
+            self.allowed.remove(&key);
+            self.clients.remove(&key);
+        }
+        // Agents often send bursts of small edits; drain them in one frame.
+        let started = Instant::now();
+        for _ in 0..64 {
+            if started.elapsed() >= std::time::Duration::from_millis(4) {
+                ctx.request_repaint();
+                break;
+            }
+            let Some(mut r) = self.bridge.as_ref().and_then(|b| b.try_recv().ok()) else {
                 break;
             };
             if r.reply.is_closed() || Instant::now() > r.deadline {
-                continue;
-            }
-            if !self.allowed.contains(&r.client) {
-                self.clients.insert(r.client);
-                let _ = r.reply.send(Err(
-                    "needs_confirmation: разрешите клиент в окне TrineDocs".into()
-                ));
                 continue;
             }
             if !self.settings.mcp {
                 let _ = r.reply.send(Err("permission_denied: MCP отключён".into()));
                 continue;
             }
-            if !crate::mcp::tools::read_only(&r.tool) && self.pending.is_some() {
+            if self.chat.was_ours(&r.client) && !self.chat.owns(&r.client) {
+                let _ = r.reply.send(Err("cancelled: ход чата остановлен".into()));
+                continue;
+            }
+            if r.tool == "request_access" {
+                let result = (|| -> Result<Value, String> {
+                    let args = r
+                        .args
+                        .as_object()
+                        .filter(|args| args.keys().all(|key| key == "client_access"))
+                        .ok_or("invalid_args: request_access принимает только client_access")?;
+                    let token = args
+                        .get("client_access")
+                        .map(|v| {
+                            v.as_str()
+                                .ok_or("invalid_args: client_access должен быть строкой")
+                        })
+                        .transpose()?;
+                    if self.chat.owns(&r.client) {
+                        return Ok(
+                            json!({"client_access":null,"status":"allowed","expires_in_seconds":0}),
+                        );
+                    }
+                    let access = self.client_access.request(&r.client, token)?;
+                    let status = if access.denied {
+                        "denied"
+                    } else if self.allowed.contains(&access.key) {
+                        "allowed"
+                    } else {
+                        self.clients.insert(access.key);
+                        "pending"
+                    };
+                    Ok(
+                        json!({"client_access":access.token,"status":status,"expires_in_seconds":access.expires_in_seconds}),
+                    )
+                })();
+                let _ = r.reply.send(result);
+                continue;
+            }
+            if let Some(value) = r.args.get("client_access") {
+                let result = if self.chat.owns(&r.client) {
+                    Err("invalid_args: встроенному чату client_access не требуется".into())
+                } else {
+                    value
+                        .as_str()
+                        .ok_or("invalid_args: client_access должен быть строкой".to_string())
+                        .and_then(|token| self.client_access.resolve(&r.client, token))
+                };
+                match result {
+                    Ok(client) => {
+                        r.client = client;
+                        if let Some(args) = r.args.as_object_mut() {
+                            args.remove("client_access");
+                        }
+                    }
+                    Err(error) => {
+                        let _ = r.reply.send(Err(error));
+                        continue;
+                    }
+                }
+            }
+            if !self.allowed.contains(&r.client) && !self.chat.owns(&r.client) {
+                self.clients.insert(r.client);
+                let _ = r.reply.send(Err(
+                    "needs_confirmation: разрешите клиент в окне TrineDocs".into()
+                ));
+                continue;
+            }
+            if !crate::mcp::tools::read_only(&r.tool)
+                && r.tool != "workspace_cancel"
+                && self.pending.is_some()
+            {
                 let _ = r
                     .reply
                     .send(Err("busy: подтвердите действие в интерфейсе".into()));
+                continue;
+            }
+            if let Err(error) = crate::mcp::tools::validate_args(&r.tool, &r.args) {
+                let _ = r.reply.send(Err(error));
                 continue;
             }
             if r.args
@@ -438,7 +1509,42 @@ impl App {
                 let _ = r.reply.send(Err("invalid_args: mode/base_version".into()));
                 continue;
             }
+            if !crate::mcp::tools::names().contains(&r.tool.as_str()) {
+                let _ = r
+                    .reply
+                    .send(Err("unsupported_feature: неизвестный инструмент MCP".into()));
+                continue;
+            }
+            if matches!(
+                r.tool.as_str(),
+                "workspace_documents"
+                    | "workspace_apply"
+                    | "workspace_job_status"
+                    | "workspace_cancel"
+            ) {
+                let result = self.workspace_request(&r.tool, &r.args, &r.client, ctx);
+                let _ = r.reply.send(result);
+                continue;
+            }
+            if r.tool == "inspect_document" {
+                let result = self.inspection_request(&r.args, ctx);
+                let _ = r.reply.send(result);
+                continue;
+            }
+            let dry_run = r.args.get("mode").and_then(Value::as_str) == Some("dry_run");
             let id = r.args.get("document_id").and_then(Value::as_u64);
+            if id.is_some_and(|id| !self.tabs.iter().any(|t| t.id == id)) {
+                let _ = r.reply.send(Err("not_found: документ не открыт".into()));
+                continue;
+            }
+            if !crate::mcp::tools::read_only(&r.tool)
+                && !dry_run
+                && let Some(target) = id.or(self.active)
+                && let Err(e) = self.flush_pending(target)
+            {
+                let _ = r.reply.send(Err(e));
+                continue;
+            }
             if id
                 .and_then(|id| self.tabs.iter().find(|t| t.id == id))
                 .is_some_and(|t| {
@@ -456,42 +1562,66 @@ impl App {
             if matches!(
                 r.tool.as_str(),
                 "save_document" | "close_document" | "open_document" | "export"
-            ) && r.args.get("mode").and_then(Value::as_str) == Some("dry_run")
+            ) && dry_run
             {
                 let _ = r.reply.send(Ok(json!({"applied":false})));
                 continue;
             }
+            if crate::mcp::media::is_background(&r.tool) {
+                self.start_media_job(r, ctx);
+                continue;
+            }
             if r.tool == "save_document" {
+                if id.is_some_and(|id| self.reloading.contains_key(&id)) {
+                    let _ = r
+                        .reply
+                        .send(Err("busy: дождитесь завершения перезагрузки".into()));
+                    continue;
+                }
                 if let Some(id) = id
                     && self
                         .tabs
                         .iter()
-                        .any(|t| t.id == id && t.path.is_some() && !t.read_only)
+                        .any(|t| t.id == id && t.path.is_some() && !t.read_only && !t.save_locked)
+                    && !self.picking.contains(&id)
                     && !self.saving.contains(&id)
+                    && !self.reloading.contains_key(&id)
                     && !self.mcp_saves.contains_key(&id)
                 {
                     self.mcp_saves.insert(id, r.reply);
                     self.save(id, false, false, false, None);
                 } else {
-                    let _ = r.reply.send(Err(
-                        "Для первого сохранения выберите путь через интерфейс".into(),
-                    ));
+                    let message = match id.and_then(|id| self.tabs.iter().find(|t| t.id == id)) {
+                        Some(t) if t.save_locked => {
+                            "file_locked: правки доступны; сохраните копию или снимите блокировку в интерфейсе"
+                        }
+                        Some(t) if t.read_only => "read_only: документ защищён от правки",
+                        Some(t)
+                            if self.picking.contains(&t.id)
+                                || self.saving.contains(&t.id)
+                                || self.reloading.contains_key(&t.id)
+                                || self.mcp_saves.contains_key(&t.id) =>
+                        {
+                            "busy: дождитесь файловой операции"
+                        }
+                        Some(_) => {
+                            "needs_path: для первого сохранения выберите путь через интерфейс"
+                        }
+                        None => "not_found: требуется document_id",
+                    };
+                    let _ = r.reply.send(Err(message.into()));
                 }
                 continue;
             }
-            if r.tool == "open_document" || r.tool == "export" {
+            if r.tool == "open_document" {
                 let _ = r.reply.send(Err(
-                    "needs_confirmation: открытие пути и экспорт выполняются через меню Файл"
-                        .into(),
+                    "needs_confirmation: открытие пути выполняется через меню Файл".into(),
                 ));
                 continue;
             }
             if r.tool == "close_document" {
-                if let Some(id) = id {
-                    self.close(id);
-                    let _ = r
-                        .reply
-                        .send(Ok(json!({"applied":!self.tabs.iter().any(|t|t.id==id)})));
+                if id.is_some() {
+                    self.pending_mcp_closes.push(r);
                 } else {
                     let _ = r.reply.send(Err("Требуется document_id".into()));
                 }
@@ -504,19 +1634,273 @@ impl App {
                 &r.args,
                 &r.client,
             );
-            if result.is_ok() && !crate::mcp::tools::read_only(&r.tool) {
-                self.active = id.or_else(|| self.tabs.last().map(|t| t.id));
-                if let Some(id) = self.active {
-                    self.last_agent = Some((id, r.client.clone(), Instant::now()));
+            let applied_target = result
+                .as_ref()
+                .ok()
+                .filter(|value| value.get("applied").and_then(Value::as_bool) == Some(true))
+                .and_then(|value| id.or_else(|| value.get("document_id").and_then(Value::as_u64)));
+            if let Some(target) = applied_target {
+                self.last_agent = Some((target, r.client.clone(), Instant::now()));
+                self.mark_ai_caret(ctx, target, &r.args);
+                if r.tool == "create_document" {
+                    self.deferred.push((target, "activate_external"));
                 }
             }
+            let busy_docs_target = result.as_ref().err().is_some_and(|e| {
+                e.starts_with("conflict: дождитесь отображения")
+                    || e.starts_with("too_large: очередь позиционных")
+            });
+            if busy_docs_target && let Some(id) = id {
+                self.deferred.push((id, "activate_external"));
+            }
+            let needs_docs_reconcile = busy_docs_target
+                || (result.is_ok()
+                    && id.is_some_and(|target| {
+                        self.tabs.iter().any(|t| {
+                            t.id == target
+                                && matches!(&t.document, Document::Docs(_))
+                                && t.pending_docs_edits.is_none()
+                        })
+                    }));
             let _ = r.reply.send(result);
+            if needs_docs_reconcile {
+                ctx.request_repaint();
+                break;
+            }
+        }
+    }
+    /// Starts a design-guide, image or export tool on a worker thread (ADR-0027).
+    fn start_media_job(&mut self, r: crate::mcp::BridgeRequest, ctx: &egui::Context) {
+        use crate::mcp::media::Snapshot;
+        if self.media_jobs.len() >= MAX_MEDIA_JOBS {
+            let _ = r.reply.send(Err(
+                "busy: дождитесь завершения загрузки или экспорта".into()
+            ));
+            return;
+        }
+        let tab = r
+            .args
+            .get("document_id")
+            .and_then(Value::as_u64)
+            .and_then(|id| self.tabs.iter().find(|t| t.id == id));
+        let snapshot = match r.tool.as_str() {
+            "export" => match tab {
+                Some(t) => Snapshot::Export {
+                    document: Box::new(t.document.clone()),
+                    title: t.title.clone(),
+                },
+                None => {
+                    let _ = r.reply.send(Err("not_found: требуется document_id".into()));
+                    return;
+                }
+            },
+            "slides_add_image_url" | "slides_paste_image" | "slides_generate_image" => {
+                let checked = (|| -> Result<Snapshot, String> {
+                    let t = tab.ok_or("not_found: требуется document_id")?;
+                    let Document::Slides(deck) = &t.document else {
+                        return Err("unsupported_feature: инструмент только для презентаций".into());
+                    };
+                    if t.read_only {
+                        return Err("read_only: документ защищён от правки".into());
+                    }
+                    let slide = r
+                        .args
+                        .get("slide_id")
+                        .and_then(Value::as_u64)
+                        .ok_or("invalid_range: требуется slide_id")?;
+                    deck.slide(slide).ok_or("not_found: слайд не найден")?;
+                    if r.tool == "slides_add_image_url" {
+                        let url = r
+                            .args
+                            .get("url")
+                            .and_then(Value::as_str)
+                            .ok_or("invalid_args: требуется url")?;
+                        crate::mcp::media::check_url(url)?;
+                    }
+                    Ok(Snapshot::Slide {
+                        width: deck.width,
+                        height: deck.height,
+                    })
+                })();
+                match checked {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        let _ = r.reply.send(Err(error));
+                        return;
+                    }
+                }
+            }
+            _ => Snapshot::None,
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (tool, args, repaint) = (r.tool.clone(), r.args.clone(), ctx.clone());
+        let spawned = std::thread::Builder::new()
+            .name("mcp-media".into())
+            .spawn(move || {
+                let _ = tx.send(crate::mcp::media::run(&tool, &args, snapshot));
+                repaint.request_repaint();
+            });
+        match spawned {
+            Ok(_) => self.media_jobs.push(MediaJob {
+                request: r,
+                result: rx,
+            }),
+            Err(error) => {
+                let _ = r.reply.send(Err(format!("unavailable: {error}")));
+            }
+        }
+    }
+    /// Commits finished media jobs: replies directly or inserts the picture as the agent.
+    fn finish_media_jobs(&mut self, ctx: &egui::Context) {
+        use crate::mcp::media::Output;
+        for job in std::mem::take(&mut self.media_jobs) {
+            // Keep cancelled but still-running workers in the concurrency budget.
+            let output = match job.result.try_recv() {
+                Ok(output) => output,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    self.media_jobs.push(job);
+                    continue;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Err("unavailable: фоновая задача прервана".into())
+                }
+            };
+            let request = job.request;
+            if request.reply.is_closed() {
+                continue;
+            }
+            let result = match output {
+                Err(error) => Err(error),
+                Ok(Output::Reply(value)) => Ok(value),
+                Ok(Output::Insert { bytes, info }) => self.insert_media(ctx, &request, bytes, info),
+            };
+            let _ = request.reply.send(result);
+        }
+    }
+    fn insert_media(
+        &mut self,
+        ctx: &egui::Context,
+        request: &crate::mcp::BridgeRequest,
+        bytes: Vec<u8>,
+        info: Value,
+    ) -> Result<Value, String> {
+        // Access may have been revoked while the download was running.
+        if !self.settings.mcp
+            || (self.chat.was_ours(&request.client) && !self.chat.owns(&request.client))
+            || (!self.allowed.contains(&request.client) && !self.chat.owns(&request.client))
+        {
+            return Err("permission_denied: доступ MCP отозван".into());
+        }
+        if self.pending.is_some() {
+            return Err("busy: подтвердите действие в интерфейсе".into());
+        }
+        let target = request
+            .args
+            .get("document_id")
+            .and_then(Value::as_u64)
+            .ok_or("not_found: требуется document_id")?;
+        let dry_run = request.args.get("mode").and_then(Value::as_str) == Some("dry_run");
+        if !dry_run {
+            self.flush_pending(target)?;
+        }
+        let mut args = request.args.clone();
+        if let Some(map) = args.as_object_mut() {
+            for key in ["url", "style", "colors", "seed"] {
+                map.remove(key);
+            }
+            let background = map
+                .get("as_background")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if request.tool == "slides_generate_image"
+                && !background
+                && !map.contains_key("width")
+                && !map.contains_key("height")
+            {
+                map.insert("width".into(), json!(480));
+            }
+            map.insert("bytes".into(), json!(bytes));
+        }
+        let mut result = crate::mcp::tools::dispatch(
+            &mut self.tabs,
+            &mut self.next_id,
+            "slides_add_image",
+            &args,
+            &request.client,
+        )?;
+        if let (Some(target), Some(source)) = (result.as_object_mut(), info.as_object()) {
+            target.extend(source.clone());
+        }
+        if result.get("applied").and_then(Value::as_bool) == Some(true) {
+            self.last_agent = Some((target, request.client.clone(), Instant::now()));
+            self.mark_ai_caret(ctx, target, &request.args);
+        }
+        Ok(result)
+    }
+    fn finish_mcp_closes(&mut self) {
+        for request in std::mem::take(&mut self.pending_mcp_closes) {
+            if request.reply.is_closed() || Instant::now() > request.deadline {
+                continue;
+            }
+            let result = (|| -> Result<Value, String> {
+                if !self.settings.mcp
+                    || (self.chat.was_ours(&request.client) && !self.chat.owns(&request.client))
+                    || (!self.allowed.contains(&request.client) && !self.chat.owns(&request.client))
+                {
+                    return Err("permission_denied: доступ MCP отозван".into());
+                }
+                let id = request
+                    .args
+                    .get("document_id")
+                    .and_then(Value::as_u64)
+                    .ok_or("Требуется document_id")?;
+                if self.pending.is_some() {
+                    return Err("busy: подтвердите действие в интерфейсе".into());
+                }
+                self.flush_pending(id)?;
+                let tab = self
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.id == id)
+                    .ok_or("not_found: документ не открыт")?;
+                if request
+                    .args
+                    .get("base_version")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|version| version != tab.version)
+                {
+                    return Err("conflict: версия документа изменилась".into());
+                }
+                if self.picking.contains(&id)
+                    || self.saving.contains(&id)
+                    || self.reloading.contains_key(&id)
+                {
+                    return Err("busy: дождитесь файловой операции".into());
+                }
+                self.close(id);
+                Ok(json!({
+                    "applied": !self.tabs.iter().any(|tab| tab.id == id),
+                    "needs_confirmation": matches!(self.pending, Some(Pending::Close(target)) if target == id)
+                }))
+            })();
+            let _ = request.reply.send(result);
         }
     }
     fn tick(&mut self, ctx: &egui::Context) {
+        self.chat.poll();
+        if let Some(result) = self
+            .inspection
+            .as_ref()
+            .and_then(crate::inspector::Task::poll)
+        {
+            self.inspection = None;
+            match result {
+                Ok(result) => self.inspection_result = Some(result),
+                Err(error) => self.error = error,
+            }
+        }
         let previous_active = self.active;
         self.mcp_saves.retain(|_, reply| !reply.is_closed());
-        self.events();
         if self.exit_after_save && self.close_after_save.is_none() && self.pending.is_none() {
             if let Some(id) = self.tabs.iter().find(|t| t.dirty()).map(|t| t.id) {
                 self.close_after_save = Some(id);
@@ -527,14 +1911,14 @@ impl App {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
-        self.mcp_requests();
+        self.mcp_requests(ctx);
         if self.active != previous_active {
             crate::slides::editor::stop_presentation(ctx);
         }
         if let Some(e) = self.recovery.error() {
             self.status = format!("Ошибка восстановления: {e}");
         }
-        if self.last_snapshot.elapsed() >= crate::recovery::INTERVAL {
+        if !self.allow_exit && self.last_snapshot.elapsed() >= crate::recovery::INTERVAL {
             for t in &self.tabs {
                 if t.dirty()
                     && self.snapshot_versions.get(&t.id) != Some(&t.version)
@@ -563,37 +1947,52 @@ impl App {
         ctx.request_repaint_after(std::time::Duration::from_millis(250));
     }
     fn shortcuts(&mut self, ctx: &egui::Context) {
+        if self.pending.is_some() {
+            return;
+        }
         if crate::slides::editor::is_presenting(ctx) {
             return;
         }
         let cmd = egui::Modifiers::COMMAND;
+        if ctx.input_mut(|i| i.consume_key(cmd | egui::Modifiers::SHIFT, egui::Key::A)) {
+            self.show_ai = !self.show_ai;
+        }
         if ctx.input_mut(|i| i.consume_key(cmd, egui::Key::O)) {
             self.send(Job::PickOpen);
         }
         if ctx.input_mut(|i| i.consume_key(cmd, egui::Key::S))
             && let Some(id) = self.active
         {
-            self.save(id, false, false, false, None);
+            self.deferred.push((id, "save"));
         }
         if ctx.input_mut(|i| i.consume_key(cmd, egui::Key::W))
             && let Some(id) = self.active
         {
-            self.close(id);
+            self.deferred.push((id, "close"));
         }
-        if ctx.input_mut(|i| i.consume_key(cmd, egui::Key::K)) {
-            self.palette = !self.palette;
+        let palette_boundary = ctx.input(|i| i.events.iter().position(|e| matches!(e, egui::Event::Key { key: egui::Key::K, pressed: true, modifiers, .. } if modifiers.command || modifiers.ctrl)));
+        if let Some(boundary) = palette_boundary {
+            if self.palette {
+                ctx.input_mut(|i| i.consume_key(cmd, egui::Key::K));
+                self.palette = false;
+                ctx.memory_mut(|m| m.surrender_focus(egui::Id::new("command-palette-query")));
+            } else {
+                self.queue_palette(ctx, Some(boundary));
+            }
         }
-        if ctx.input_mut(|i| i.consume_key(cmd, egui::Key::Z))
-            && let Some(t) = self.tabs.iter_mut().find(|t| Some(t.id) == self.active)
-            && let Err(e) = t.apply(Op::Undo)
+        if self.palette
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
         {
-            self.error = e
+            self.palette = false;
         }
-        if ctx.input_mut(|i| i.consume_key(cmd, egui::Key::Y))
-            && let Some(t) = self.tabs.iter_mut().find(|t| Some(t.id) == self.active)
-            && let Err(e) = t.apply(Op::Redo)
-        {
-            self.error = e
+        if !ctx.text_edit_focused() {
+            for (key, action) in [(egui::Key::Z, "undo"), (egui::Key::Y, "redo")] {
+                if ctx.input_mut(|i| i.consume_key(cmd, key))
+                    && let Some(id) = self.active
+                {
+                    self.deferred.push((id, action));
+                }
+            }
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Tab))
             && !self.tabs.is_empty()
@@ -603,87 +2002,289 @@ impl App {
                 .iter()
                 .position(|t| Some(t.id) == self.active)
                 .unwrap_or(self.tabs.len() - 1);
-            self.active = self.tabs.get((index + 1) % self.tabs.len()).map(|t| t.id);
+            if let Some(id) = self.tabs.get((index + 1) % self.tabs.len()).map(|t| t.id) {
+                self.deferred.push((id, "activate"));
+            }
         }
         for f in ctx.input(|i| i.raw.dropped_files.clone()) {
             self.send(Job::Open(f.path().to_path_buf()));
         }
     }
     fn home(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(32.0);
-        ui.heading("TrineDocs");
-        ui.label("Docs · Sheets · Slides");
-        ui.add_space(24.0);
-        ui.horizontal(|ui| {
-            for (kind, label, c) in [
-                ("docs", "Document", [62, 123, 224]),
-                ("sheets", "Spreadsheet", [49, 153, 103]),
-                ("slides", "Presentation", [225, 120, 56]),
-            ] {
-                if ui
-                    .add_sized(
-                        [210.0, 92.0],
-                        egui::Button::new(egui::RichText::new(self.tr(label)).size(21.0))
-                            .fill(egui::Color32::from_rgb(c[0], c[1], c[2])),
-                    )
-                    .clicked()
-                {
-                    self.create(kind);
-                }
-            }
-        });
-        ui.add_space(24.0);
-        ui.heading(self.tr("Recent files"));
-        ui.text_edit_singleline(&mut self.query);
-        let recent = self.settings.recent.clone();
-        let q = self.query.to_lowercase();
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for p in recent
-                .iter()
-                .filter(|p| p.to_string_lossy().to_lowercase().contains(&q))
-            {
-                ui.horizontal(|ui| {
-                    let pin = self.settings.pinned.contains(p);
-                    if ui.button(if pin { "★" } else { "☆" }).clicked() {
-                        if pin {
-                            self.settings.pinned.retain(|v| v != p)
-                        } else {
-                            self.settings.pinned.push(p.clone())
+        let filter_id = egui::Id::new("home-filter");
+        let mut filter: usize = ui.data(|d| d.get_temp(filter_id)).unwrap_or_default();
+        let kind_id = egui::Id::new("home-kind");
+        let mut kind_filter: usize = ui.data(|d| d.get_temp(kind_id)).unwrap_or_default();
+        egui::ScrollArea::vertical().id_salt("home").show(ui, |ui| {
+            let width = (ui.available_width() - 32.0).clamp(0.0, 960.0);
+            let inset = ((ui.available_width() - width) * 0.5 - ui.spacing().item_spacing.x).max(0.0);
+            ui.horizontal(|ui| {
+                ui.add_space(inset);
+                ui.vertical(|ui| {
+                    ui.set_width(width);
+                    ui.add_space(28.0);
+                    ui.label(egui::RichText::new("Ваше рабочее пространство").size(26.0).strong());
+                    ui.weak("Документы, таблицы и презентации в одном месте.");
+                    ui.add_space(20.0);
+                    let cards = [
+                        ("docs", "Документ", crate::chrome::accent_for("docs", ui.visuals().dark_mode)),
+                        ("sheets", "Таблица", crate::chrome::accent_for("sheets", ui.visuals().dark_mode)),
+                        ("slides", "Презентация", crate::chrome::accent_for("slides", ui.visuals().dark_mode)),
+                    ];
+                    let gap = 12.0;
+                    let card_width = ((width - gap * 2.0) / 3.0).clamp(132.0, 312.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
+                        for (kind, label, color) in cards {
+                            if new_card(ui, kind, label, color, card_width).clicked() {
+                                self.create(kind);
+                            }
                         }
-                        if let Err(e) = self.settings.save() {
-                            self.error = e;
+                    });
+                    ui.add_space(32.0);
+                    ui.horizontal_wrapped(|ui| {
+                        for (index, label) in ["Недавние", "Закреплённые"].into_iter().enumerate() {
+                            let selected = filter % 2 == index;
+                            let text = egui::RichText::new(label).size(15.0);
+                            let response = ui.add(
+                                egui::Button::new(if selected { text.strong() } else { text.color(crate::chrome::muted(ui)) })
+                                    .frame_when_inactive(false)
+                                    .min_size(egui::vec2(0.0, 30.0)),
+                            );
+                            if selected {
+                                ui.painter().line_segment(
+                                    [response.rect.left_bottom() + egui::vec2(8.0, -1.0), response.rect.right_bottom() - egui::vec2(8.0, 1.0)],
+                                    egui::Stroke::new(2.0, crate::chrome::accent(ui)),
+                                );
+                            }
+                            if response.clicked() {
+                                filter = index;
+                            }
+                        }
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.query)
+                                .hint_text("Поиск файлов")
+                                .desired_width((width - 380.0).clamp(120.0, 220.0))
+                                .margin(egui::Margin::symmetric(10, 6)),
+                        );
+                        if crate::chrome::icon_button(ui, crate::chrome::Icon::Open, "Открыть файл · Ctrl+O", true).clicked() {
+                            self.send(Job::PickOpen);
+                        }
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        for (index, label) in ["Все файлы", "Docs", "Sheets", "Slides"].into_iter().enumerate() {
+                            ui.selectable_value(&mut kind_filter, index, label);
+                        }
+                        if !self.query.is_empty() && crate::chrome::tool(ui, "×", "Очистить поиск", false).clicked() {
+                            self.query.clear();
+                        }
+                    });
+                    ui.add_space(6.0);
+                    let list: Vec<PathBuf> = if filter % 2 == 1 { self.settings.pinned.clone() } else { self.settings.recent.clone() };
+                    let q = self.query.trim().to_lowercase();
+                    let shown: Vec<&PathBuf> = list.iter().filter(|p| {
+                        p.to_string_lossy().to_lowercase().contains(&q)
+                            && (kind_filter == 0 || file_kind(p) == Some(kind_filter))
+                    }).collect();
+                    if shown.is_empty() {
+                        ui.add_space(24.0);
+                        ui.vertical_centered(|ui| {
+                            ui.label(egui::RichText::new(if !q.is_empty() || kind_filter != 0 { "Ничего не найдено" } else if filter % 2 == 1 { "Нет закреплённых файлов" } else { "Здесь появятся ваши файлы" }).strong());
+                            ui.label(egui::RichText::new(if !q.is_empty() || kind_filter != 0 { "Измените имя, путь или тип файла." } else if filter % 2 == 1 { "Откройте ··· рядом с файлом и выберите «Закрепить»." } else { "Создайте файл или перетащите его в окно." }).color(crate::chrome::muted(ui)));
+                        });
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.add_space(52.0);
+                            ui.label(egui::RichText::new("Имя").size(11.5).color(crate::chrome::muted(ui)));
+                        });
+                        ui.add_space(2.0);
+                    }
+                    for p in shown {
+                        let pin = self.settings.pinned.contains(p);
+                        let row = ui.allocate_ui(egui::vec2(width, 60.0), |ui| {
+                            let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 60.0), egui::Sense::click());
+                            response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), p.display().to_string()));
+                            let hovered = ui.rect_contains_pointer(rect);
+                            if hovered || response.has_focus() {
+                                ui.painter().rect_filled(rect, 6.0, crate::chrome::hover_fill(ui));
+                            }
+                            let (glyph, _) = file_badge(p);
+                            let color = crate::chrome::accent_for(match file_kind(p) { Some(2) => "sheets", Some(3) => "slides", _ => "docs" }, ui.visuals().dark_mode);
+                            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(egui::vec2(12.0, 8.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+                            crate::chrome::badge(&mut child, glyph, color, 28.0);
+                            child.add_space(10.0);
+                            child.vertical(|ui| {
+                                ui.set_width((width - 122.0).max(40.0));
+                                ui.spacing_mut().item_spacing.y = 0.0;
+                                ui.add(egui::Label::new(egui::RichText::new(p.file_name().map(|s| s.to_string_lossy()).unwrap_or_default()).size(13.5)).truncate());
+                                ui.add(egui::Label::new(egui::RichText::new(p.parent().map(|d| d.display().to_string()).unwrap_or_default()).color(crate::chrome::muted(ui)).size(11.0)).truncate());
+                            });
+                            let mut action = None;
+                            child.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.menu_button("···", |ui| {
+                                    if ui.button(if pin { "Открепить" } else { "Закрепить" }).clicked() { action = Some("pin"); ui.close(); }
+                                    if ui.button("Убрать из списка").clicked() { action = Some("remove"); ui.close(); }
+                                }).response.on_hover_text("Действия с файлом");
+                                if pin { ui.weak("★"); }
+                            });
+                            (response, action)
+                        });
+                        let (response, action) = row.inner;
+                        match action {
+                            Some("pin") => {
+                                if let Err(error) = self.settings.toggle_pin(p.clone()) { self.error = error; }
+                                if let Err(e) = self.worker.save_settings(self.settings.clone()) { self.error = e; }
+                            }
+                            Some(_) => {
+                                self.settings.recent.retain(|v| v != p);
+                                self.settings.pinned.retain(|v| v != p);
+                                if let Err(e) = self.worker.save_settings(self.settings.clone()) { self.error = e; }
+                            }
+                            None => {
+                                if response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(p.display().to_string()).clicked() {
+                                    self.send(Job::Open(p.clone()));
+                                }
+                            }
                         }
                     }
-                    if ui
-                        .button(
-                            p.file_name()
-                                .map(|s| s.to_string_lossy())
-                                .unwrap_or_default(),
-                        )
-                        .clicked()
-                    {
-                        self.send(Job::Open(p.clone()));
-                    }
-                    ui.label(egui::RichText::new(p.display().to_string()).weak().small());
-                    if ui.small_button("×").clicked() {
-                        self.settings.recent.retain(|v| v != p);
-                        if let Err(e) = self.settings.save() {
-                            self.error = e;
-                        }
-                    }
+                    ui.add_space(28.0);
+                    ui.label(egui::RichText::new(format!("TrineDocs {} · поддержка всех возможностей Microsoft Office пока неполная.", env!("CARGO_PKG_VERSION"))).color(crate::chrome::muted(ui)).size(11.0));
                 });
-                ui.separator();
-            }
+            });
         });
-        ui.add_space(20.0);
-        ui.label(
-            egui::RichText::new(
-                "Предварительная сборка. Полный паритет с Microsoft Office ещё не достигнут.",
-            )
-            .weak(),
-        );
+        ui.data_mut(|d| {
+            d.insert_temp(filter_id, filter);
+            d.insert_temp(kind_id, kind_filter);
+        });
     }
     fn dialogs(&mut self, ctx: &egui::Context) {
+        if self.show_inspector {
+            let mut open = true;
+            let mut refresh = false;
+            let mut navigate = None;
+            egui::Window::new("Проверка документа")
+                .open(&mut open)
+                .default_width(520.0)
+                .show(ctx, |ui| {
+                    if self.inspection.is_some() {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Проверяем документ…");
+                        });
+                    }
+                    if let Some(result) = &self.inspection_result {
+                        ui.label(egui::RichText::new(&result.title).strong());
+                        ui.weak(result.report.scope);
+                        let unchanged = self
+                            .tabs
+                            .iter()
+                            .any(|tab| tab.id == result.id && tab.version == result.version);
+                        if !unchanged {
+                            ui.label("Документ изменён или закрыт после проверки.");
+                        }
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.inspector_query)
+                                    .hint_text("Поиск по месту и описанию")
+                                    .char_limit(160)
+                                    .desired_width(260.0),
+                            );
+                            if ui.button("Сбросить").clicked() {
+                                self.inspector_query.clear();
+                                self.inspector_category = Default::default();
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            egui::ComboBox::from_id_salt("inspector-category")
+                                .selected_text(self.inspector_category.label())
+                                .show_ui(ui, |ui| {
+                                    for category in crate::inspector::Category::ALL {
+                                        ui.selectable_value(
+                                            &mut self.inspector_category,
+                                            category,
+                                            category.label(),
+                                        );
+                                    }
+                                });
+                            if ui.button("Копировать отчёт").clicked() {
+                                ctx.copy_text(result.copy_report(
+                                    &self.inspector_query,
+                                    self.inspector_category,
+                                    unchanged,
+                                ));
+                                self.status = "Отчёт проверки скопирован".into();
+                            }
+                        });
+                        let findings = result
+                            .report
+                            .filtered(&self.inspector_query, self.inspector_category);
+                        if !result.report.findings.is_empty() {
+                            ui.weak(format!(
+                                "Показано {} из {} сохранённых замечаний.",
+                                findings.len(),
+                                result.report.findings.len()
+                            ));
+                            if findings.is_empty() {
+                                ui.label("По этому фильтру замечаний нет.");
+                            }
+                        }
+                        if result.report.findings.is_empty() {
+                            ui.label("По поддерживаемым проверкам замечаний нет.");
+                        }
+                        egui::ScrollArea::vertical()
+                            .max_height(420.0)
+                            .show(ui, |ui| {
+                                for finding in findings {
+                                    if ui
+                                        .add_enabled(
+                                            unchanged
+                                                && self.pending.is_none()
+                                                && self
+                                                    .tabs
+                                                    .iter()
+                                                    .find(|tab| tab.id == result.id)
+                                                    .is_some_and(|tab| {
+                                                        finding.target.available(&tab.document)
+                                                    }),
+                                            egui::Button::new(&finding.location)
+                                                .frame_when_inactive(false),
+                                        )
+                                        .clicked()
+                                    {
+                                        navigate =
+                                            Some((result.id, result.version, finding.target));
+                                    }
+                                    ui.label(&finding.message);
+                                    ui.add_space(8.0);
+                                }
+                            });
+                        if result.report.omitted > 0 {
+                            ui.weak(format!(
+                                "Ещё замечаний: {}. Фильтр применяется к первым 200.",
+                                result.report.omitted
+                            ));
+                        }
+                    }
+                    refresh = ui
+                        .add_enabled(
+                            self.active.is_some()
+                                && self.inspection.is_none()
+                                && self.pending.is_none(),
+                            egui::Button::new("Проверить текущий документ"),
+                        )
+                        .clicked();
+                });
+            self.show_inspector = open;
+            if let Some((id, version, target)) = navigate
+                && let Err(error) = self.navigate_inspection(ctx, id, version, target)
+            {
+                self.error = error;
+            }
+            if refresh {
+                self.inspect_current();
+            }
+        }
         if !self.error.is_empty() {
             let error = self.error.clone();
             egui::Window::new("Сообщение")
@@ -711,6 +2312,7 @@ impl App {
                         }
                         if ui.button("Запретить").clicked() {
                             self.clients.remove(&client);
+                            self.client_access.deny(&client);
                         }
                     });
                 });
@@ -722,15 +2324,10 @@ impl App {
                     for s in self.recoveries.clone() {
                         ui.horizontal(|ui| {
                             ui.label(&s.title);
-                            if ui.button("Восстановить").clicked() {
-                                let id = self.next_id;
-                                self.next_id = self.next_id.saturating_add(1);
-                                let mut t = Tab::new(id, s.document.clone(), s.title.clone(), None);
-                                t.saved_version = u64::MAX;
-                                self.tabs.push(t);
-                                self.active = Some(id);
-                                self.recovery.clear(s.id);
-                                self.recoveries.retain(|r| r.id != s.id);
+                            if ui.button("Восстановить").clicked()
+                                && let Err(error) = self.restore_snapshot(&s)
+                            {
+                                self.error = error;
                             }
                         });
                     }
@@ -745,16 +2342,24 @@ impl App {
         if let Some(id) = self.disk_changed {
             egui::Window::new("Файл изменён на диске").collapsible(false).show(ctx,|ui|{
             ui.label("Перезагрузка заменит текущие правки. Для их сохранения используйте «Сохранить копию».");ui.horizontal(|ui|{
-                if ui.button("Перезагрузить").clicked()&& let Some(p)=self.tabs.iter().find(|t|t.id==id).and_then(|t|t.path.clone()){self.send(Job::Open(p));}
-                if ui.button("Оставить правки").clicked(){self.stamps.insert(id, self.tabs.iter().find(|t|t.id==id).and_then(|t|t.path.as_ref()).and_then(|p|crate::file_io::stamp(p)));self.disk_changed=None;}
+                if ui.button("Перезагрузить").clicked() { self.reload(id); }
+                if ui.button("Оставить правки").clicked(){if let Some(observed) = self.observed_stamps.get(&id).copied() { self.stamps.insert(id, observed); self.disk_changed=None; } else { self.status="Дождитесь повторной проверки файла".into(); }}
             });
         });
         }
         if self.pending.is_some() {
             let mut action = 0;
-            egui::Window::new("Подтверждение").collapsible(false).show(ctx,|ui|{
-            match self.pending.as_ref(){Some(Pending::Register(p))=>{ui.label(format!("Добавить сервер trinedocs в {}",p.path.display()));ui.label("Остальные записи сохранятся. Существующая запись trinedocs не заменяется.");ui.monospace(&p.change);ui.horizontal(|ui|{if ui.button("Добавить").clicked(){action=1}
-if ui.button("Отмена").clicked(){action=3}});},Some(Pending::SaveFormat{id,..})=>{if let Some(t)=self.tabs.iter().find(|t|t.id==*id){match &t.document{Document::Docs(d)=>{for loss in &d.losses{ui.colored_label(egui::Color32::YELLOW,loss);}},Document::Slides(d)=>{for loss in d.export_warnings(){ui.colored_label(egui::Color32::YELLOW,loss);}},_=>{}}}ui.label("Office/текстовый экспорт сохраняет поддерживаемые функции. Неподдерживаемые части могут быть потеряны; полная модель сохраняется в нативном формате.");ui.horizontal(|ui|{if ui.button("Продолжить").clicked(){action=1}
+            egui::Modal::new(egui::Id::new("confirmation")).show(ctx,|ui|{
+            ui.set_max_width(520.0);
+            ui.heading("Подтверждение");
+            ui.add_space(8.0);
+            match self.pending.as_ref(){Some(Pending::Unlock{path,marker,..})=>{
+                ui.label(format!("Файл: {}", path.file_name().map(|v| v.to_string_lossy()).unwrap_or_default()));
+                ui.label(if marker.is_some() { "Удалить оставшийся lock-маркер? Закройте этот файл в других программах. Активная блокировка TrineDocs остаётся защищённой." } else { "Lock-маркер уже отсутствует. Получить блокировку для сохранения?" });
+                ui.horizontal(|ui| { if ui.button("Разблокировать сохранение").clicked(){action=1}
+                if ui.button("Отмена").clicked(){action=3} });
+            },Some(Pending::Register(p))=>{ui.label(format!("Добавить сервер trinedocs в {}",p.path.display()));ui.label("Остальные записи сохранятся. Существующая запись trinedocs не заменяется.");ui.monospace(&p.change);ui.horizontal(|ui|{if ui.button("Добавить").clicked(){action=1}
+if ui.button("Отмена").clicked(){action=3}});},Some(Pending::SaveFormat{id,..})=>{if let Some(t)=self.tabs.iter().find(|t|t.id==*id){match &t.document{Document::Docs(d)=>{for loss in &d.losses{ui.label(loss);}},Document::Slides(d)=>{for loss in d.export_warnings(){ui.label(loss);}},_=>{}}}ui.label("Экспорт сохраняет только возможности выбранного формата. Форматирование и объекты могут измениться или исчезнуть. Для редактируемой копии выберите .docx, .xlsx или .pptx; ограничения Office-экспорта также остаются.");ui.horizontal(|ui|{if ui.button("Продолжить").clicked(){action=1}
 if ui.button("Отмена").clicked(){action=3}});}
             _=>{ui.label("Сохранить изменения?");ui.horizontal(|ui|{if ui.button("Сохранить").clicked(){action=1}
 if ui.button("Не сохранять").clicked(){action=2}
@@ -764,6 +2369,24 @@ if ui.button("Отмена").clicked(){action=3}});}}
                 && let Some(p) = self.pending.take()
             {
                 match (p.clone(), action) {
+                    (Pending::Unlock { id, path, marker }, 1) => {
+                        if !self.saving.contains(&id)
+                            && !self.reloading.contains_key(&id)
+                            && self
+                                .tabs
+                                .iter()
+                                .any(|t| t.id == id && t.path.as_ref() == Some(&path))
+                        {
+                            self.send(Job::Unlock {
+                                id,
+                                path,
+                                marker,
+                                expected: self.stamps.get(&id).copied().flatten(),
+                            });
+                        } else {
+                            self.error = "Документ изменился или занят файловой операцией".into();
+                        }
+                    }
                     (Pending::Register(p), 1) => self.send(Job::ApplyRegistration(p)),
                     (
                         Pending::SaveFormat {
@@ -787,12 +2410,15 @@ if ui.button("Отмена").clicked(){action=3}});}}
                         }
                     }
                     (Pending::Exit, 2) => {
+                        self.discard_session();
                         self.allow_exit = true;
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                     _ => {
                         let id = match &p {
-                            Pending::SaveFormat { id, .. } | Pending::Close(id) => Some(*id),
+                            Pending::SaveFormat { id, .. }
+                            | Pending::Unlock { id, .. }
+                            | Pending::Close(id) => Some(*id),
                             _ => self.close_after_save,
                         };
                         if let Some(id) = id
@@ -850,6 +2476,8 @@ if ui.button("Отмена").clicked(){action=3}});}}
                     {
                         changed = true;
                         self.allowed.clear();
+                        self.clients.clear();
+                        self.client_access.clear();
                         if self.settings.mcp && self.mcp.is_none() {
                             let (m, b) = crate::mcp::Handle::start(ctx.clone());
                             self.mcp = Some(m);
@@ -893,35 +2521,100 @@ if ui.button("Отмена").clicked(){action=3}});}}
             self.show_settings = open;
             if changed {
                 ctx.set_zoom_factor(self.settings.scale);
-                if let Err(e) = self.settings.save() {
+                if let Err(e) = self.worker.save_settings(self.settings.clone()) {
                     self.error = e
                 }
             }
         }
         if self.palette {
             let mut open = true;
-            egui::Window::new("Команды · Ctrl+K")
+            egui::Window::new("Команды")
                 .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .default_width(440.0)
+                .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 96.0))
                 .show(ctx, |ui| {
-                    ui.text_edit_singleline(&mut self.query);
-                    let q = self.query.to_lowercase();
-                    for (k, l) in [
-                        ("docs", "Создать документ"),
-                        ("sheets", "Создать таблицу"),
-                        ("slides", "Создать презентацию"),
-                    ] {
-                        if l.to_lowercase().contains(&q) && ui.button(l).clicked() {
-                            self.create(k);
-                            self.palette = false;
+                    let query_id = egui::Id::new("command-palette-query");
+                    let focused = ctx.memory(|m| m.focused() == Some(query_id));
+                    let down = focused
+                        && ctx.input_mut(|input| {
+                            input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)
+                        });
+                    let up = focused
+                        && ctx.input_mut(|input| {
+                            input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)
+                        });
+                    let enter = focused
+                        && ctx
+                            .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut self.palette_query)
+                            .id(query_id)
+                            .hint_text("Найти действие…")
+                            .desired_width(400.0),
+                    );
+                    if self.palette_focus {
+                        response.request_focus();
+                        self.palette_focus = false;
+                    }
+                    if response.changed() {
+                        self.palette_selected = 0;
+                    }
+                    let commands = palette_commands(self.current().is_some(), &self.palette_query);
+                    if !commands.is_empty() {
+                        self.palette_selected = self.palette_selected.min(commands.len() - 1);
+                        if down {
+                            self.palette_selected = (self.palette_selected + 1) % commands.len();
+                        }
+                        if up {
+                            self.palette_selected =
+                                (self.palette_selected + commands.len() - 1) % commands.len();
                         }
                     }
-                    if ui.button("Открыть файл").clicked() {
-                        self.send(Job::PickOpen);
-                        self.palette = false;
+                    let mut picked = None;
+                    for (index, &(key, label)) in commands.iter().enumerate() {
+                        if ui
+                            .add_sized(
+                                [ui.available_width(), 28.0],
+                                egui::Button::new(label)
+                                    .selected(index == self.palette_selected)
+                                    .frame_when_inactive(false),
+                            )
+                            .clicked()
+                            || (enter && index == self.palette_selected)
+                        {
+                            picked = Some(key);
+                        }
                     }
-                    if ui.button("Настройки").clicked() {
-                        self.show_settings = true;
+                    if commands.is_empty() {
+                        ui.weak("Команды не найдены");
+                    }
+                    if let Some(key) = picked {
+                        match key {
+                            "docs" | "sheets" | "slides" => self.create(key),
+                            "open" => self.send(Job::PickOpen),
+                            "settings" => self.show_settings = true,
+                            "inspect" => self.inspect_current(),
+                            "close" => {
+                                if let Some(id) = self.active {
+                                    self.close(id);
+                                }
+                            }
+                            _ => {
+                                if let Some(id) = self.active {
+                                    self.save(
+                                        id,
+                                        key == "copy",
+                                        key == "pdf",
+                                        key == "saveas",
+                                        if key == "pdf" { Some("pdf") } else { None },
+                                    );
+                                }
+                            }
+                        }
                         self.palette = false;
+                        ctx.memory_mut(|m| m.surrender_focus(response.id));
                     }
                 });
             self.palette &= open;
@@ -931,6 +2624,15 @@ if ui.button("Отмена").clicked(){action=3}});}}
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.tick(ctx);
+        crate::clipboard::set_target(
+            ctx,
+            if self.pending.is_none() && !self.palette {
+                self.active
+            } else {
+                None
+            },
+        );
+        crate::clipboard::observe(ctx);
     }
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
@@ -964,123 +2666,599 @@ impl eframe::App for App {
             "light" => egui::ThemePreference::Light,
             _ => egui::ThemePreference::System,
         });
-        if ctx.input(|i| i.viewport().close_requested())
-            && !self.allow_exit
-            && self.tabs.iter().any(Tab::dirty)
-        {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.pending = Some(Pending::Exit);
-        }
+        let kind = self.current().map(|t| t.document.kind()).unwrap_or("docs");
+        crate::chrome::style(&ctx, kind, self.settings.reduced_motion);
+        ui.set_style(ctx.global_style());
         let mut command = None;
-        egui::Panel::top("shell").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.strong("TrineDocs");
-                ui.separator();
-                ui.menu_button(self.tr("File"), |ui| {
-                    for (c, l) in [
-                        ("docs", "Document"),
-                        ("sheets", "Spreadsheet"),
-                        ("slides", "Presentation"),
-                        ("open", "Open"),
-                        ("save", "Save"),
-                        ("saveas", "Save as"),
-                        ("copy", "Save copy"),
-                        ("pdf", "Export PDF"),
-                        ("print", "Print via PDF viewer"),
-                        ("close", "Close"),
-                    ] {
-                        if ui
-                            .add_enabled(
-                                matches!(c, "docs" | "sheets" | "slides" | "open")
-                                    || self.active.is_some(),
-                                egui::Button::new(self.tr(l)),
-                            )
-                            .clicked()
-                        {
-                            command = Some(c);
-                            ui.close();
-                        }
+        let mut reject_ai = None;
+        let mut external_activation = None;
+        let mut user_activation = false;
+        if self.pending.is_some() || self.palette {
+            ui.disable();
+        }
+        let compact_header = ui.available_width() < 900.0;
+        egui::Panel::top("shell")
+            .frame(
+                egui::Frame::new()
+                    .fill(ui.visuals().panel_fill)
+                    .inner_margin(egui::Margin::symmetric(12, 6)),
+            )
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if !compact_header {
+                        ui.label(egui::RichText::new("TrineDocs").size(14.0).strong());
                     }
-                    if let Some(t) = self.current() {
-                        ui.separator();
-                        ui.menu_button(
-                            "Сохранить / экспортировать…",
-                            |ui| {
-                                let formats: &[&str] = match &t.document {
-                                    Document::Docs(_) => &["trinedoc", "docx", "txt", "md", "html"],
-                                    Document::Sheets(_) => {
-                                        &["trinesheet", "xlsx", "csv", "tsv", "html"]
-                                    }
-                                    Document::Slides(_) => &["trineslide", "pptx", "png"],
-                                };
-                                for ext in formats {
-                                    if ui
-                                        .button(if *ext == "png" {
-                                            "PNG · первый слайд".into()
-                                        } else {
-                                            ext.to_uppercase()
-                                        })
-                                        .clicked()
-                                    {
-                                        command = Some(*ext);
-                                        ui.close();
-                                    }
-                                }
-                            },
-                        );
-                    }
-                });
-                if ui.button(self.tr("Open")).clicked() {
-                    command = Some("open")
-                }
-                if ui
-                    .add_enabled(self.active.is_some(), egui::Button::new(self.tr("Save")))
-                    .clicked()
-                {
-                    command = Some("save")
-                }
-                if ui.button(self.tr("Settings")).clicked() {
-                    self.show_settings = true
-                }
-                if ui.button(self.tr("AI changes")).clicked() {
-                    self.show_ai = !self.show_ai
-                }
-                if ui.button("Ctrl+K").clicked() {
-                    self.palette = true
-                }
-            });
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .selectable_label(self.active.is_none(), self.tr("Home"))
-                    .clicked()
-                {
-                    self.active = None;
-                }
-                let mut closed = None;
-                for t in &self.tabs {
-                    ui.horizontal(|ui| {
-                        if ui
-                            .selectable_label(
-                                self.active == Some(t.id),
-                                format!("{}{}", t.title, if t.dirty() { " •" } else { "" }),
-                            )
-                            .clicked()
-                        {
-                            self.active = Some(t.id)
+                    ui.add_space(8.0);
+                    ui.menu_button(self.tr("File"), |ui| {
+                        for (c, l) in [
+                            ("docs", "Document"),
+                            ("sheets", "Spreadsheet"),
+                            ("slides", "Presentation"),
+                            ("open", "Open"),
+                            ("save", "Save"),
+                            ("saveas", "Save as"),
+                            ("copy", "Save copy"),
+                            ("pdf", "Export PDF"),
+                            ("print", "Print via PDF viewer"),
+                            ("close", "Close"),
+                        ] {
+                            if ui
+                                .add_enabled(
+                                    matches!(c, "docs" | "sheets" | "slides" | "open")
+                                        || self.active.is_some(),
+                                    egui::Button::new(self.tr(l)),
+                                )
+                                .clicked()
+                            {
+                                command = Some(c);
+                                ui.close();
+                            }
                         }
-                        if ui.small_button("×").clicked() {
-                            closed = Some(t.id)
+                        if let Some(t) = self.current() {
+                            ui.separator();
+                            ui.menu_button(
+                                "Сохранить / экспортировать…",
+                                |ui| {
+                                    let formats: &[&str] = match &t.document {
+                                        Document::Docs(_) => &["docx", "pdf", "txt", "md", "html"],
+                                        Document::Sheets(_) => {
+                                            &["xlsx", "pdf", "csv", "tsv", "html"]
+                                        }
+                                        Document::Slides(_) => &["pptx", "pdf", "png"],
+                                    };
+                                    for ext in formats {
+                                        let label = t
+                                            .document
+                                            .save_formats()
+                                            .iter()
+                                            .find(|(e, _)| e == ext)
+                                            .map(|(_, l)| *l)
+                                            .unwrap_or(ext);
+                                        if ui.button(format!("{label}  ·  .{ext}")).clicked() {
+                                            command = Some(*ext);
+                                            ui.close();
+                                        }
+                                    }
+                                },
+                            );
                         }
                     });
-                }
-                if let Some(id) = closed {
-                    self.close(id);
+                    if crate::chrome::icon_button(
+                        ui,
+                        crate::chrome::Icon::Open,
+                        "Открыть · Ctrl+O",
+                        true,
+                    )
+                    .clicked()
+                    {
+                        command = Some("open")
+                    }
+                    if crate::chrome::icon_button(
+                        ui,
+                        crate::chrome::Icon::Save,
+                        "Сохранить · Ctrl+S",
+                        self.active.is_some(),
+                    )
+                    .clicked()
+                    {
+                        command = Some("save")
+                    }
+                    let can_undo = self.current().is_some_and(|t| !t.undo.is_empty());
+                    let can_redo = self.current().is_some_and(|t| !t.redo.is_empty());
+                    if crate::chrome::icon_button(
+                        ui,
+                        crate::chrome::Icon::Undo,
+                        "Отменить · Ctrl+Z",
+                        can_undo,
+                    )
+                    .clicked()
+                    {
+                        command = Some("undo");
+                    }
+                    if crate::chrome::icon_button(
+                        ui,
+                        crate::chrome::Icon::Redo,
+                        "Повторить · Ctrl+Y",
+                        can_redo,
+                    )
+                    .clicked()
+                    {
+                        command = Some("redo");
+                    }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.menu_button("···", |ui| {
+                            if ui.button(self.tr("Settings")).clicked() {
+                                self.show_settings = true;
+                                ui.close();
+                            }
+                            if ui
+                                .add_enabled(
+                                    self.current().is_some() && self.inspection.is_none(),
+                                    egui::Button::new("Проверить документ"),
+                                )
+                                .clicked()
+                            {
+                                command = Some("inspect");
+                                ui.close();
+                            }
+                            if ui.button("Поиск команд · Ctrl+K").clicked() {
+                                self.queue_palette_click(&ctx);
+                                ui.close();
+                            }
+                            ui.separator();
+                            let dark = ui.visuals().dark_mode;
+                            if ui
+                                .button(if dark {
+                                    "Светлая тема"
+                                } else {
+                                    "Тёмная тема"
+                                })
+                                .clicked()
+                            {
+                                self.settings.theme = if dark { "light" } else { "dark" }.into();
+                                if let Err(error) = self.worker.save_settings(self.settings.clone())
+                                {
+                                    self.error = error;
+                                }
+                                ui.close();
+                            }
+                        })
+                        .response
+                        .on_hover_text("Настройки и команды");
+                        if ui
+                            .add(
+                                egui::Button::new("Ассистент")
+                                    .selected(self.show_ai)
+                                    .frame_when_inactive(false),
+                            )
+                            .on_hover_text("AI-чат и изменения · Ctrl+Shift+A")
+                            .clicked()
+                        {
+                            self.show_ai = !self.show_ai;
+                        }
+                        if compact_header {
+                            if crate::chrome::icon_button(
+                                ui,
+                                crate::chrome::Icon::Search,
+                                "Поиск команд · Ctrl+K",
+                                true,
+                            )
+                            .clicked()
+                            {
+                                self.queue_palette_click(&ctx);
+                            }
+                        } else if ui
+                            .add_sized(
+                                [210.0, 28.0],
+                                egui::Button::new(
+                                    egui::RichText::new("Поиск команд    Ctrl+K")
+                                        .color(crate::chrome::muted(ui)),
+                                )
+                                .fill(ui.visuals().panel_fill),
+                            )
+                            .clicked()
+                        {
+                            self.queue_palette_click(&ctx);
+                        }
+                    });
+                });
+                ui.add_space(6.0);
+                egui::ScrollArea::horizontal()
+                    .id_salt("document-tabs")
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            let home = doc_tab(
+                                ui,
+                                "Главная",
+                                self.active.is_none(),
+                                egui::Color32::TRANSPARENT,
+                                false,
+                            );
+                            #[cfg(test)]
+                            self.shell_rects.insert((0, "home"), home.rect);
+                            if home.clicked() {
+                                self.deferred.push((0, "home"));
+                            }
+                            let mut closed = None;
+                            for t in &self.tabs {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 0.0;
+                                    let tab = doc_tab(
+                                        ui,
+                                        &t.title,
+                                        self.active == Some(t.id),
+                                        crate::chrome::accent_for(
+                                            t.document.kind(),
+                                            ui.visuals().dark_mode,
+                                        ),
+                                        t.dirty(),
+                                    );
+                                    let tab = tab.on_hover_text(
+                                        t.path
+                                            .as_ref()
+                                            .map(|path| path.display().to_string())
+                                            .unwrap_or_else(|| t.title.clone()),
+                                    );
+                                    #[cfg(test)]
+                                    self.shell_rects.insert((t.id, "activate"), tab.rect);
+                                    if tab.clicked() {
+                                        self.deferred.push((t.id, "activate"));
+                                    }
+                                    let close = crate::chrome::icon_button(
+                                        ui,
+                                        crate::chrome::Icon::Close,
+                                        "Закрыть документ",
+                                        true,
+                                    );
+                                    ui.add_space(6.0);
+                                    #[cfg(test)]
+                                    self.shell_rects.insert((t.id, "close"), close.rect);
+                                    if close.clicked() {
+                                        closed = Some(t.id)
+                                    }
+                                });
+                            }
+                            if let Some(id) = closed {
+                                self.deferred.push((id, "close"));
+                            }
+                        });
+                    });
+            });
+        egui::Panel::bottom("status")
+            .frame(
+                egui::Frame::new()
+                    .fill(ui.visuals().panel_fill)
+                    .inner_margin(egui::Margin::symmetric(12, 5)),
+            )
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let Some(tab) = self.current() {
+                            if tab.read_only {
+                                ui.weak("Только чтение");
+                            }
+                            if tab.save_locked {
+                                ui.weak("Файл занят")
+                                    .on_hover_text("Правки можно сохранить в отдельную копию.");
+                            }
+                            ui.label(
+                                egui::RichText::new(if self.saving.contains(&tab.id) {
+                                    "Сохранение…"
+                                } else if tab.dirty() {
+                                    "Не сохранено"
+                                } else if tab.path.is_none() {
+                                    "Новый файл"
+                                } else {
+                                    "Сохранено"
+                                })
+                                .small()
+                                .color(crate::chrome::muted(ui)),
+                            );
+                        }
+                        if let Some((id, name, time)) = &self.last_agent
+                            && Some(*id) == self.active
+                            && time.elapsed().as_secs_f32() < 1.5
+                        {
+                            ui.label(
+                                egui::RichText::new("AI")
+                                    .small()
+                                    .color(crate::chrome::accent(ui)),
+                            )
+                            .on_hover_text(name);
+                            ctx.request_repaint();
+                        }
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(&self.status)
+                                        .small()
+                                        .color(crate::chrome::muted(ui)),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text(&self.status);
+                        });
+                    });
+                });
+            });
+        if let Some(id) = self.current().filter(|t| t.save_locked).map(|t| t.id) {
+            egui::Panel::top("file-lock").frame(egui::Frame::new().fill(ui.visuals().window_fill).inner_margin(egui::Margin::symmetric(12, 7))).show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Файл занят. Редактирование доступно; исходный файл защищён от перезаписи.");
+                    if ui.button("Сохранить копию…").clicked() { command = Some("copy"); }
+                    if ui.button("Блокировка…").clicked() { self.deferred.push((id, "unlock")); }
+                });
+            });
+        }
+        if self.show_ai {
+            let pending_changes = self
+                .tabs
+                .iter()
+                .find(|t| Some(t.id) == self.active)
+                .map_or(0, |t| t.ai.iter().filter(|c| !c.accepted).count());
+            let document = self
+                .tabs
+                .iter()
+                .find(|t| Some(t.id) == self.active)
+                .map(|t| crate::chat::Context {
+                    id: t.id,
+                    title: t.title.clone(),
+                    kind: t.document.kind(),
+                    selection: ctx
+                        .data(|d| {
+                            d.get_temp::<(Option<u64>, String)>(crate::docs::editor::selection_id())
+                        })
+                        .filter(|(tab, _)| *tab == Some(t.id))
+                        .map(|(_, text)| text)
+                        .unwrap_or_default(),
+                });
+            egui::Panel::right("ai-review")
+                .default_size(320.0)
+                .min_size(260.0)
+                .max_size(480.0)
+                .frame(crate::chrome::sidebar_frame(ui))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Ассистент").strong());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if crate::chrome::icon_button(
+                                ui,
+                                crate::chrome::Icon::Close,
+                                "Закрыть панель ассистента · Ctrl+Shift+A",
+                                true,
+                            )
+                            .clicked()
+                            {
+                                self.show_ai = false;
+                            }
+                        });
+                    });
+                    ui.add_space(4.0);
+                    let changes = if pending_changes > 0 {
+                        format!("Изменения · {pending_changes}")
+                    } else {
+                        "Изменения".into()
+                    };
+                    crate::chrome::tabs(ui, &mut self.ai_tab, &["Чат", &changes]);
+                    ui.add_space(6.0);
+                    if !self.workspace_jobs.is_empty() {
+                        egui::CollapsingHeader::new(format!(
+                            "Задания · {}",
+                            self.workspace_jobs.len()
+                        ))
+                        .id_salt("workspace-job-history")
+                        .show(ui, |ui| {
+                            egui::ScrollArea::vertical()
+                                .id_salt("workspace-history")
+                                .max_height(140.0)
+                                .show(ui, |ui| {
+                                    for task in self.workspace_jobs.iter().rev().take(12) {
+                                        let status = task.status();
+                                        let label = match task.state() {
+                                            "preparing" => "Подготовка",
+                                            "completed" => "Применено",
+                                            "preview" => "Предпросмотр",
+                                            "cancelled" => "Отменено",
+                                            _ => "Не применено",
+                                        };
+                                        ui.label(format!(
+                                            "{label} · документов {}",
+                                            task.targets.len()
+                                        ));
+                                        ui.weak(
+                                            task.targets
+                                                .iter()
+                                                .map(|target| target.2.as_str())
+                                                .collect::<Vec<_>>()
+                                                .join(" · "),
+                                        );
+                                        if let Some(error) = status["error"].as_str() {
+                                            ui.weak(error);
+                                        }
+                                        ui.separator();
+                                    }
+                                });
+                        });
+                    }
+                    if self.ai_tab == 0 {
+                        if self.chat.show(ui, document, self.settings.mcp) {
+                            (self.settings.chat_models, self.settings.chat_efforts) =
+                                self.chat.prefs();
+                            if let Err(e) = self.worker.save_settings(self.settings.clone()) {
+                                self.error = e;
+                            }
+                        }
+                        return;
+                    }
+                    if let Some(t) = self.tabs.iter_mut().find(|t| Some(t.id) == self.active) {
+                        let mut reject = None;
+                        if pending_changes == 0 {
+                            ui.add_space(16.0);
+                            ui.label(
+                                egui::RichText::new("Нет непринятых правок AI.")
+                                    .color(crate::chrome::muted(ui)),
+                            );
+                        }
+                        let mut accept_all = false;
+                        if pending_changes > 1 && ui.button("Принять все").clicked() {
+                            accept_all = true;
+                        }
+                        egui::ScrollArea::vertical()
+                            .id_salt("ai-changes")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                for c in t.ai.clone().iter().rev() {
+                                    if !c.accepted {
+                                        ui.add(egui::Label::new(&c.label).wrap());
+                                        ui.horizontal(|ui| {
+                                            if ui.button("Принять").clicked()
+                                                && let Some(v) =
+                                                    t.ai.iter_mut().find(|v| v.id == c.id)
+                                            {
+                                                v.accepted = true;
+                                            }
+                                            if ui.button("Откатить").clicked() {
+                                                reject = Some(c.id)
+                                            }
+                                        });
+                                        ui.separator();
+                                    }
+                                }
+                            });
+                        if accept_all {
+                            for v in &mut t.ai {
+                                v.accepted = true;
+                            }
+                        }
+                        if let Some(id) = reject {
+                            reject_ai = Some((t.id, id));
+                        }
+                    }
+                });
+        }
+        self.workspace_strip(ui);
+        crate::clipboard::set_target(&ctx, if ui.is_enabled() { self.active } else { None });
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(crate::chrome::workspace(ui))
+                    .inner_margin(12),
+            )
+            .show(ui, |ui| {
+                if let Some(t) = self.tabs.iter_mut().find(|t| Some(t.id) == self.active) {
+                    let mut d = t.document.clone();
+                    ui.ctx().data_mut(|data| {
+                        data.insert_temp(crate::docs::editor::active_tab_id(), t.id)
+                    });
+                    let docs_edits = t.pending_docs_edits.take();
+                    t.pending_docs_edits = Some(Vec::new());
+                    let changed = ui
+                        .push_id(t.id, |ui| {
+                            ui.add_enabled_ui(!t.read_only, |ui| match &mut d {
+                                Document::Docs(d) => crate::docs::editor::show_with_edits(
+                                    ui,
+                                    d,
+                                    docs_edits.as_deref(),
+                                ),
+                                Document::Sheets(b) => {
+                                    crate::sheets::editor::show_for_tab(ui, b, t.id)
+                                }
+                                Document::Slides(d) => crate::slides::editor::show(ui, d),
+                            })
+                            .inner
+                        })
+                        .inner;
+                    if changed {
+                        if let Err(e) = t.apply(Op::Replace {
+                            document: d,
+                            label: "Редактирование".into(),
+                            author: Author::User,
+                            base_version: None,
+                        }) {
+                            self.error = e
+                        } else if matches!(&t.document, Document::Docs(_)) {
+                            // The editor already reconciled this user edit in its existing baseline.
+                            t.pending_docs_edits = Some(Vec::new());
+                        }
+                    } else if let (Document::Sheets(old), Document::Sheets(new)) =
+                        (&mut t.document, d)
+                    {
+                        old.selection = new.selection;
+                        old.active = new.active;
+                    }
+                } else {
+                    self.home(ui);
                 }
             });
-        });
+        if let Some(tail) = self.palette_tail.take() {
+            self.open_palette(&ctx);
+            ctx.input_mut(|i| i.events = tail);
+        }
+        if let Some((id, change)) = reject_ai {
+            if let Err(e) = self.flush_pending(id) {
+                self.error = e;
+            } else if let Some(t) = self.tabs.iter_mut().find(|t| t.id == id)
+                && let Err(e) = t.reject_ai(change)
+            {
+                self.error = e;
+            }
+        }
+        for (id, action) in std::mem::take(&mut self.deferred) {
+            match action {
+                "activate_external" => external_activation = Some(id),
+                "save" => self.save(id, false, false, false, None),
+                "close" => self.close(id),
+                "unlock" => self.request_unlock(id),
+                "activate" | "home" => {
+                    if let Some(old) = self.active
+                        && let Err(e) = self.flush_pending(old)
+                    {
+                        self.error = e;
+                        continue;
+                    }
+                    if action == "home" {
+                        self.active = None;
+                        user_activation = true;
+                    } else if self.tabs.iter().any(|t| t.id == id) {
+                        self.active = Some(id);
+                        user_activation = true;
+                    }
+                }
+                _ => {
+                    if let Err(e) = self.flush_pending(id) {
+                        self.error = e;
+                        continue;
+                    }
+                    if let Some(t) = self.tabs.iter_mut().find(|t| t.id == id)
+                        && let Err(e) = t.apply(if action == "undo" { Op::Undo } else { Op::Redo })
+                    {
+                        self.error = e;
+                    }
+                }
+            }
+        }
         match command {
-            Some(c @ ("docs" | "sheets" | "slides")) => self.create(c),
+            Some(c @ ("docs" | "sheets" | "slides")) => {
+                let before = self.active;
+                self.create(c);
+                user_activation |= self.active != before;
+            }
             Some("open") => self.send(Job::PickOpen),
+            Some("inspect") => self.inspect_current(),
+            Some(action @ ("undo" | "redo")) => {
+                if let Some(id) = self.active
+                    && let Err(e) = self.flush_pending(id)
+                {
+                    self.error = e;
+                } else if let Some(t) = self.tabs.iter_mut().find(|t| Some(t.id) == self.active)
+                    && let Err(e) = t.apply(if action == "undo" { Op::Undo } else { Op::Redo })
+                {
+                    self.error = e;
+                }
+            }
             Some("save" | "saveas" | "copy" | "pdf") => {
                 if let Some(id) = self.active {
                     self.save(
@@ -1097,8 +3275,7 @@ impl eframe::App for App {
                 }
             }
             Some(
-                ext @ ("trinedoc" | "trinesheet" | "trineslide" | "docx" | "xlsx" | "pptx" | "txt"
-                | "md" | "html" | "csv" | "tsv" | "png"),
+                ext @ ("docx" | "xlsx" | "pptx" | "txt" | "md" | "html" | "csv" | "tsv" | "png"),
             ) => {
                 if let Some(id) = self.active {
                     self.save(
@@ -1130,96 +3307,1622 @@ impl eframe::App for App {
             }
             _ => {}
         }
-        egui::Panel::bottom("status").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.small(&self.status);
-                if let Some(t) = self.current() {
-                    ui.separator();
-                    ui.small(format!("{} · v{}", t.document.kind(), t.version));
-                    if t.read_only {
-                        ui.colored_label(egui::Color32::YELLOW, "Только чтение: lock-файл");
-                    }
-                }
-                if let Some((id, name, time)) = &self.last_agent
-                    && Some(*id) == self.active
-                    && time.elapsed().as_secs_f32() < 1.5
-                {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(156, 116, 237),
-                        format!("AI · {name}"),
-                    );
-                    ctx.request_repaint();
-                }
-            });
-        });
-        if self.show_ai {
-            egui::Panel::right("ai-review")
-                .default_size(270.0)
-                .show(ui, |ui| {
-                    ui.heading("Изменения AI");
-                    if let Some(t) = self.tabs.iter_mut().find(|t| Some(t.id) == self.active) {
-                        let mut reject = None;
-                        for c in t.ai.clone().iter().rev() {
-                            if !c.accepted {
-                                ui.label(&c.label);
-                                ui.horizontal(|ui| {
-                                    if ui.button("Принять").clicked()
-                                        && let Some(v) = t.ai.iter_mut().find(|v| v.id == c.id)
-                                    {
-                                        v.accepted = true;
-                                    }
-                                    if ui.button("Откатить").clicked() {
-                                        reject = Some(c.id)
-                                    }
-                                });
-                                ui.separator();
-                            }
-                        }
-                        if let Some(id) = reject
-                            && let Err(e) = t.reject_ai(id)
-                        {
-                            self.error = e
-                        }
-                    }
-                });
-        }
-        egui::CentralPanel::default().show(ui, |ui| {
-            if let Some(t) = self.tabs.iter_mut().find(|t| Some(t.id) == self.active) {
-                let mut d = t.document.clone();
-                let changed = ui
-                    .push_id(t.id, |ui| {
-                        ui.add_enabled_ui(!t.read_only, |ui| match &mut d {
-                            Document::Docs(d) => crate::docs::editor::show(ui, d),
-                            Document::Sheets(b) => crate::sheets::editor::show(ui, b),
-                            Document::Slides(d) => crate::slides::editor::show(ui, d),
-                        })
-                        .inner
-                    })
-                    .inner;
-                if changed {
-                    if let Err(e) = t.apply(Op::Replace {
-                        document: d,
-                        label: "Редактирование".into(),
-                        author: Author::User,
-                        base_version: None,
-                    }) {
-                        self.error = e
-                    }
-                } else if let (Document::Sheets(old), Document::Sheets(new)) = (&mut t.document, d)
-                {
-                    old.selection = new.selection;
-                    old.active = new.active;
-                }
+        self.finish_mcp_closes();
+        self.finish_media_jobs(&ctx);
+        self.events();
+        self.finish_workspace(&ctx);
+        for (id, action) in std::mem::take(&mut self.deferred) {
+            if action == "activate_external" {
+                external_activation = Some(id);
             } else {
-                self.home(ui);
+                self.deferred.push((id, action));
             }
-        });
+        }
+        if !user_activation
+            && let Some(id) = external_activation
+            && self.tabs.iter().any(|tab| tab.id == id)
+        {
+            if let Some(old) = self.active
+                && let Err(error) = self.flush_pending(old)
+            {
+                self.error = error;
+            } else {
+                self.active = Some(id);
+            }
+        }
+        let close_busy = self.workspace_jobs.iter().any(|task| task.running())
+            || self.opening
+            || self.pending.is_some()
+            || !self.picking.is_empty()
+            || !self.saving.is_empty()
+            || !self.reloading.is_empty();
+        if ctx.input(|i| i.viewport().close_requested()) && close_busy && !self.allow_exit {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.status = "Завершите диалог или файловую операцию перед закрытием".into();
+        }
+        if ctx.input(|i| i.viewport().close_requested()) && !close_busy {
+            let ids: Vec<_> = self.tabs.iter().map(|t| t.id).collect();
+            for id in ids {
+                if let Err(e) = self.flush_pending(id) {
+                    self.error = e;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                }
+            }
+        }
+        if ctx.input(|i| i.viewport().close_requested())
+            && !close_busy
+            && !self.allow_exit
+            && self.tabs.iter().any(Tab::dirty)
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.pending = Some(Pending::Exit);
+        }
         if self.active != previous_active {
             crate::slides::editor::stop_presentation(&ctx);
         }
         self.dialogs(&ctx);
     }
     fn on_exit(&mut self, _: Option<&eframe::glow::Context>) {
-        let _ = self.settings.save();
+        let _ = self.worker.save_settings(self.settings.clone());
+    }
+}
+
+/// "New file" card of the start screen: a miniature of an empty file and a caption.
+fn new_card(
+    ui: &mut egui::Ui,
+    kind: &str,
+    label: &str,
+    color: egui::Color32,
+    width: f32,
+) -> egui::Response {
+    let response = ui.add_sized(
+        [width, 104.0],
+        egui::Button::new("")
+            .fill(crate::chrome::surface(ui))
+            .corner_radius(10)
+            .stroke(egui::Stroke::new(1.0, crate::chrome::border(ui))),
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            ui.is_enabled(),
+            format!("Создать: {label}"),
+        )
+    });
+    let rect = response.rect;
+    let color = if ui.is_enabled() {
+        color
+    } else {
+        crate::chrome::muted(ui)
+    };
+    let icon = egui::Rect::from_min_size(rect.min + egui::vec2(16.0, 14.0), egui::vec2(24.0, 28.0));
+    let painter = ui.painter();
+    painter.rect_stroke(
+        icon,
+        3.0,
+        egui::Stroke::new(1.5, color),
+        egui::StrokeKind::Inside,
+    );
+    for row in 0..3 {
+        let y = icon.top() + 8.0 + row as f32 * 5.0;
+        painter.hline(
+            icon.left() + 5.0..=icon.right() - 5.0,
+            y,
+            egui::Stroke::new(1.0, color),
+        );
+    }
+    if kind == "sheets" {
+        painter.vline(
+            icon.center().x,
+            icon.top() + 4.0..=icon.bottom() - 4.0,
+            egui::Stroke::new(1.0, color),
+        );
+    }
+    painter.text(
+        rect.min + egui::vec2(16.0, 62.0),
+        egui::Align2::LEFT_TOP,
+        label,
+        egui::FontId::proportional(14.0),
+        ui.visuals().text_color(),
+    );
+    painter.text(
+        rect.min + egui::vec2(16.0, 81.0),
+        egui::Align2::LEFT_TOP,
+        "Создать",
+        egui::FontId::proportional(11.0),
+        crate::chrome::muted(ui),
+    );
+    if response.hovered() || response.has_focus() {
+        painter.rect_stroke(
+            rect,
+            10.0,
+            egui::Stroke::new(1.0, color),
+            egui::StrokeKind::Inside,
+        );
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Coloured letter badge of a recent file, by extension.
+fn file_badge(path: &std::path::Path) -> (&'static str, egui::Color32) {
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "xlsx" | "xlsm" | "xltx" | "xls" | "ods" | "csv" | "tsv" | "trinesheet" => {
+            ("S", egui::Color32::from_rgb(33, 115, 70))
+        }
+        "pptx" | "pptm" | "potx" | "ppsx" | "odp" | "trineslide" => {
+            ("P", egui::Color32::from_rgb(196, 62, 28))
+        }
+        _ => ("D", egui::Color32::from_rgb(43, 87, 154)),
+    }
+}
+/// Document tab of the shell: a rounded pill with a coloured kind marker.
+fn file_kind(path: &std::path::Path) -> Option<usize> {
+    match crate::native::extension(path).as_str() {
+        "docx" | "dotx" | "docm" | "trinedoc" | "txt" | "md" | "html" | "htm" | "lock" => Some(1),
+        "xlsx" | "xltx" | "xlsm" | "trinesheet" | "csv" | "tsv" | "xls" | "xlsb" | "ods" => Some(2),
+        "pptx" | "potx" | "ppsx" | "pptm" | "trineslide" => Some(3),
+        _ => None,
+    }
+}
+fn doc_tab(
+    ui: &mut egui::Ui,
+    label: &str,
+    selected: bool,
+    color: egui::Color32,
+    dirty: bool,
+) -> egui::Response {
+    let mut short: String = label.chars().take(32).collect();
+    if label.chars().nth(32).is_some() {
+        short.push('…');
+    }
+    let text = egui::RichText::new(&short).size(13.0);
+    let width = (ui
+        .painter()
+        .layout_no_wrap(
+            short.clone(),
+            egui::FontId::proportional(13.0),
+            ui.visuals().text_color(),
+        )
+        .size()
+        .x
+        + 20.0)
+        .clamp(64.0, 200.0);
+    let response = ui.add_sized(
+        [width, 30.0],
+        egui::Button::new(if selected {
+            text.strong()
+        } else {
+            text.color(crate::chrome::muted(ui))
+        })
+        .fill(if selected {
+            crate::chrome::surface(ui)
+        } else {
+            egui::Color32::TRANSPARENT
+        })
+        .frame_when_inactive(selected)
+        .corner_radius(6)
+        .truncate()
+        .min_size(egui::vec2(64.0, 30.0)),
+    );
+    if dirty {
+        ui.painter().circle_filled(
+            egui::pos2(response.rect.right() - 5.0, response.rect.center().y),
+            2.0,
+            crate::chrome::accent(ui),
+        );
+    }
+    if selected {
+        let color = if color == egui::Color32::TRANSPARENT {
+            crate::chrome::accent(ui)
+        } else {
+            color
+        };
+        ui.painter().line_segment(
+            [
+                response.rect.left_bottom() + egui::vec2(8.0, -1.0),
+                response.rect.right_bottom() - egui::vec2(8.0, 1.0),
+            ],
+            egui::Stroke::new(2.0, color),
+        );
+    }
+    response
+}
+
+#[cfg(test)]
+mod reload_tests {
+    use super::*;
+    fn fixture() -> Result<(Vec<Tab>, ReloadTarget), String> {
+        let path = PathBuf::from("book.docx");
+        let tab = Tab::new(
+            10,
+            Document::create("docs")?,
+            "book".into(),
+            Some(path.clone()),
+        );
+        Ok((
+            vec![tab],
+            ReloadTarget {
+                tab_id: 10,
+                base_version: 0,
+                path,
+            },
+        ))
+    }
+    fn edit(tab: &mut Tab, author: Author) -> Result<(), String> {
+        let mut document = tab.document.clone();
+        if let Document::Docs(d) = &mut document {
+            let id = d.paragraphs.first().ok_or("Нет абзаца")?.id;
+            d.insert_text(id, 0, "new edit")?;
+        }
+        tab.apply(Op::Replace {
+            document,
+            label: "new edit".into(),
+            author,
+            base_version: None,
+        })
+    }
+    #[test]
+    fn ordinary_open_preserves_changed_tab_and_only_activates_it() -> Result<(), String> {
+        let (mut tabs, target) = fixture()?;
+        edit(
+            &mut tabs[0],
+            Author::Agent {
+                name: "test".into(),
+            },
+        )?;
+        let before = tabs[0].clone();
+        let mut next_id = 11;
+        // The watch notification does not turn an ordinary Open into a Reload.
+        let disk_changed = Some(10);
+        let prepared = prepare_open(
+            &tabs,
+            next_id,
+            None,
+            &target.path,
+            Document::create("docs")?,
+        )?;
+        assert!(matches!(prepared, PreparedOpen::Activate(10)));
+        assert_eq!(commit_open(&mut tabs, &mut next_id, prepared), 10);
+        assert_eq!(disk_changed, Some(10));
+        assert_eq!(next_id, 11);
+        assert_eq!(tabs[0].document, before.document);
+        assert_eq!(tabs[0].version, before.version);
+        assert_eq!(tabs[0].undo.len(), before.undo.len());
+        assert_eq!(tabs[0].ai.len(), before.ai.len());
+        Ok(())
+    }
+    #[test]
+    fn reload_completion_rejects_later_user_and_agent_edits() -> Result<(), String> {
+        for author in [
+            Author::User,
+            Author::Agent {
+                name: "test".into(),
+            },
+        ] {
+            let (mut tabs, target) = fixture()?;
+            edit(&mut tabs[0], author)?;
+            let before = tabs[0].clone();
+            assert!(
+                prepare_open(
+                    &tabs,
+                    11,
+                    Some(&target),
+                    &target.path,
+                    Document::create("docs")?
+                )
+                .is_err()
+            );
+            assert_eq!(tabs[0].document, before.document);
+            assert_eq!(tabs[0].version, before.version);
+            assert_eq!(tabs[0].undo.len(), before.undo.len());
+            assert_eq!(tabs[0].ai.len(), before.ai.len());
+        }
+        Ok(())
+    }
+    #[test]
+    fn successful_reload_has_new_namespace_and_clean_history() -> Result<(), String> {
+        let (mut tabs, mut target) = fixture()?;
+        edit(
+            &mut tabs[0],
+            Author::Agent {
+                name: "test".into(),
+            },
+        )?;
+        target.base_version = tabs[0].version;
+        tabs.insert(
+            0,
+            Tab::new(9, Document::create("sheets")?, "left".into(), None),
+        );
+        tabs.push(Tab::new(
+            11,
+            Document::create("slides")?,
+            "right".into(),
+            None,
+        ));
+        let mut next_id = 12;
+        let prepared = prepare_open(
+            &tabs,
+            next_id,
+            Some(&target),
+            &target.path,
+            Document::create("docs")?,
+        )?;
+        assert_eq!(commit_open(&mut tabs, &mut next_id, prepared), 12);
+        assert_eq!(next_id, 13);
+        assert_eq!(
+            tabs.iter().map(|t| t.id).collect::<Vec<_>>(),
+            vec![9, 12, 11]
+        );
+        assert!(tabs[1].undo.is_empty());
+        assert!(tabs[1].redo.is_empty());
+        assert!(tabs[1].ai.is_empty());
+        assert!(!tabs[1].dirty());
+        let stale = crate::mcp::tools::dispatch(
+            &mut tabs,
+            &mut next_id,
+            "get_document_info",
+            &json!({"document_id":10}),
+            "test",
+        );
+        assert!(stale.is_err_and(|e| e.starts_with("not_found")));
+        let fresh = crate::mcp::tools::dispatch(
+            &mut tabs,
+            &mut next_id,
+            "get_document_info",
+            &json!({"document_id":12}),
+            "test",
+        )?;
+        assert_eq!(fresh["id"], 12);
+        Ok(())
+    }
+    #[test]
+    fn reload_checks_closed_document_changed_path_and_counter_before_commit() -> Result<(), String>
+    {
+        let (tabs, target) = fixture()?;
+        for next_id in [0, 10, u64::MAX] {
+            assert!(
+                prepare_open(
+                    &tabs,
+                    next_id,
+                    Some(&target),
+                    &target.path,
+                    Document::create("docs")?
+                )
+                .is_err()
+            );
+        }
+        let mut other_path = tabs.clone();
+        other_path[0].path = Some(PathBuf::from("other.docx"));
+        assert!(
+            prepare_open(
+                &other_path,
+                11,
+                Some(&target),
+                &target.path,
+                Document::create("docs")?
+            )
+            .is_err()
+        );
+        assert!(
+            prepare_open(
+                &tabs,
+                11,
+                Some(&target),
+                std::path::Path::new("other.docx"),
+                Document::create("docs")?
+            )
+            .is_err()
+        );
+        assert!(
+            prepare_open(
+                &[],
+                11,
+                Some(&target),
+                &target.path,
+                Document::create("docs")?
+            )
+            .is_err()
+        );
+        assert_eq!(tabs[0].id, 10);
+        assert_eq!(tabs[0].version, 0);
+        assert_eq!(tabs[0].path.as_ref(), Some(&target.path));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod shell_input_tests {
+    use super::*;
+    use eframe::App as _;
+    #[test]
+    fn disabled_mcp_rejects_unknown_clients_without_approval_prompt() -> Result<(), String> {
+        let mut app = fixture()?;
+        let mut response = mcp_request(&mut app, "list_documents", json!({}))?;
+        app.settings.mcp = false;
+        app.allowed.clear();
+        let ctx = app.editor_ctx.clone();
+        app.mcp_requests(&ctx);
+        assert!(
+            response
+                .try_recv()
+                .map_err(|e| e.to_string())?
+                .is_err_and(|e| e.starts_with("permission_denied:"))
+        );
+        assert!(app.clients.is_empty());
+        Ok(())
+    }
+    #[test]
+    fn rotated_slides_pdf_export_requires_confirmation() -> Result<(), String> {
+        let mut app = fixture()?;
+        let mut deck = crate::slides::model::Deck::default();
+        let slide = deck.slides.first().ok_or("slide")?.id;
+        let element = deck.add_element(slide, crate::slides::model::ElementKind::Rect)?;
+        deck.slide_mut(slide)
+            .and_then(|s| s.elements.iter_mut().find(|e| e.id == element))
+            .ok_or("element")?
+            .rotation = 45.0;
+        app.tabs[0].document = Document::Slides(deck);
+        worker_event(
+            &mut app,
+            Event::PickedSave {
+                id: 10,
+                path: std::env::temp_dir().join("rotated-slides.pdf"),
+                copy: false,
+                export: true,
+            },
+        )?;
+        app.events();
+        assert!(matches!(
+            app.pending,
+            Some(Pending::SaveFormat { id: 10, .. })
+        ));
+        assert!(!app.saving.contains(&10));
+        Ok(())
+    }
+    #[test]
+    fn palette_enter_runs_filtered_command_without_editing_document() -> Result<(), String> {
+        let mut app = fixture()?;
+        focus_page(&mut app)?;
+        let before = text(&app);
+        app.palette = true;
+        app.palette_focus = true;
+        app.palette_query = "  НАСТРОЙКИ  ".into();
+        frame(&mut app, vec![]);
+        frame(&mut app, vec![]);
+        frame(
+            &mut app,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(app.show_settings);
+        assert!(!app.palette);
+        assert_eq!(text(&app), before);
+        assert!(palette_commands(false, "сохранить").is_empty());
+        assert!(palette_commands(true, "несуществующая команда").is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn home_long_paths_leave_file_actions_within_viewport() -> Result<(), String> {
+        for width in [480.0, 780.0, 1250.0] {
+            let mut app = fixture()?;
+            app.active = None;
+            app.settings.recent = vec![PathBuf::from(format!(
+                "C:/{}{}.docx",
+                "long-directory/".repeat(30),
+                "name".repeat(60)
+            ))];
+            let ctx = app.editor_ctx.clone();
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, 820.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    app.home(ui);
+                    assert!(
+                        ui.min_rect().right() <= width + 1.0,
+                        "home overflow at {width}: {:?}",
+                        ui.min_rect()
+                    );
+                },
+            );
+            output.textures_delta.clear();
+        }
+        Ok(())
+    }
+    fn fixture() -> Result<App, String> {
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx)?;
+        let smoke = None;
+        let settings = Settings {
+            mcp: false,
+            theme: "light".into(),
+            ..Default::default()
+        };
+        let (mcp, bridge) = (None, None);
+        let next_id = 12;
+        let font_error = String::new();
+        let mut app = App {
+            shell_rects: BTreeMap::new(),
+            editor_ctx: ctx.clone(),
+            deferred: Vec::new(),
+            smoke,
+            tabs: Vec::new(),
+            active: None,
+            next_id,
+            settings,
+            worker: Worker::start_for_test(ctx.clone()),
+            recovery: crate::recovery::Recovery::start_for_test(std::env::temp_dir().join(
+                format!(
+                    "TrineDocs-shell-{}",
+                    SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .map(|v| v.as_nanos())
+                        .unwrap_or_default()
+                ),
+            )),
+            locks: BTreeMap::new(),
+            stamps: BTreeMap::new(),
+            observed_stamps: BTreeMap::new(),
+            recoveries: Vec::new(),
+            mcp,
+            bridge,
+            allowed: BTreeSet::new(),
+            clients: BTreeSet::new(),
+            client_access: Default::default(),
+            mcp_saves: BTreeMap::new(),
+            pending_mcp_closes: Vec::new(),
+            media_jobs: Vec::new(),
+            pending: None,
+            close_after_save: None,
+            status: "Готово".into(),
+            error: font_error,
+            show_settings: false,
+            show_inspector: false,
+            inspector_query: String::new(),
+            inspector_category: Default::default(),
+            inspection: None,
+            inspection_result: None,
+            workspace_jobs: Vec::new(),
+            show_ai: false,
+            ai_tab: 0,
+            chat: crate::chat::Chat::new(),
+            palette: false,
+            query: String::new(),
+            palette_query: String::new(),
+            palette_focus: false,
+            palette_selected: 0,
+            palette_tail: None,
+            last_snapshot: Instant::now(),
+            last_watch: Instant::now(),
+            snapshot_versions: BTreeMap::new(),
+            disk_changed: None,
+            last_agent: None,
+            allow_exit: false,
+            exit_after_save: false,
+            saving: BTreeSet::new(),
+            picking: BTreeSet::new(),
+            opening: false,
+            reloading: BTreeMap::new(),
+        };
+        app.tabs = vec![
+            Tab::new(
+                10,
+                Document::Docs(crate::docs::model::Doc::from_text("original")),
+                "First".into(),
+                None,
+            ),
+            Tab::new(11, Document::create("sheets")?, "Second".into(), None),
+        ];
+        app.active = Some(10);
+        Ok(app)
+    }
+    fn frame(app: &mut App, events: Vec<egui::Event>) {
+        let ctx = app.editor_ctx.clone();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1250.0, 820.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| app.ui(ui, &mut eframe::Frame::_new_kittest()));
+        output.textures_delta.clear();
+    }
+    fn pointer(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+    fn focus_page(app: &mut App) -> Result<(), String> {
+        frame(app, vec![]);
+        frame(app, vec![]);
+        let (rect, id) = app
+            .editor_ctx
+            .data(|data| data.get_temp::<(egui::Rect, egui::Id)>(egui::Id::new("docs-test-canvas")))
+            .ok_or("canvas geometry")?;
+        assert!(rect.is_positive(), "canvas must be visible: {rect:?}");
+        let pos = rect.center();
+        frame(
+            app,
+            vec![egui::Event::PointerMoved(pos), pointer(pos, true)],
+        );
+        frame(app, vec![pointer(pos, false)]);
+        assert_eq!(
+            app.editor_ctx.memory(|memory| memory.focused()),
+            Some(id),
+            "canvas focus"
+        );
+        Ok(())
+    }
+    fn text(app: &App) -> String {
+        app.tabs
+            .iter()
+            .find(|t| t.id == 10)
+            .and_then(|t| {
+                if let Document::Docs(d) = &t.document {
+                    Some(d.plain_text())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default()
+    }
+    fn frame_with_logic(app: &mut App, events: Vec<egui::Event>) {
+        let ctx = app.editor_ctx.clone();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1250.0, 820.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            let mut frame = eframe::Frame::_new_kittest();
+            app.logic(ui.ctx(), &mut frame);
+            app.ui(ui, &mut frame);
+        });
+        output.textures_delta.clear();
+    }
+    type McpReply = tokio::sync::oneshot::Receiver<Result<Value, String>>;
+    fn mcp_request(app: &mut App, tool: &str, args: Value) -> Result<McpReply, String> {
+        app.allowed.insert("test-agent".into());
+        mcp_request_as(app, "test-agent", tool, args)
+    }
+    fn mcp_request_as(
+        app: &mut App,
+        client: &str,
+        tool: &str,
+        args: Value,
+    ) -> Result<McpReply, String> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let (reply, response) = tokio::sync::oneshot::channel();
+        app.settings.mcp = true;
+        app.bridge = Some(receiver);
+        sender
+            .send(crate::mcp::BridgeRequest {
+                tool: tool.into(),
+                args,
+                client: client.into(),
+                reply,
+                deadline: Instant::now() + std::time::Duration::from_secs(10),
+            })
+            .map_err(|e| e.to_string())?;
+        Ok(response)
+    }
+    fn mcp_roundtrip_as(
+        app: &mut App,
+        client: &str,
+        tool: &str,
+        args: Value,
+    ) -> Result<Value, String> {
+        let mut response = mcp_request_as(app, client, tool, args)?;
+        app.mcp_requests(&app.editor_ctx.clone());
+        response.try_recv().map_err(|e| e.to_string())?
+    }
+    fn worker_event(app: &mut App, event: Event) -> Result<(), String> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        app.worker.rx = receiver;
+        sender.send(event).map_err(|error| error.to_string())
+    }
+    fn ready_workspace(app: &mut App) -> Result<(), String> {
+        let updates = app
+            .tabs
+            .iter()
+            .map(|tab| {
+                let mut document = tab.document.clone();
+                match &mut document {
+                    Document::Docs(doc) => {
+                        doc.insert_text(doc.paragraphs[0].id, 0, "AI ")?;
+                    }
+                    Document::Sheets(book) => {
+                        book.set_cell(book.active_id(), 0, 0, "AI")?;
+                    }
+                    Document::Slides(deck) => {
+                        deck.slides[0].notes = "AI".into();
+                    }
+                }
+                Ok(crate::ops::WorkspaceUpdate {
+                    id: tab.id,
+                    base_version: tab.version,
+                    document,
+                    changed_ids: Vec::new(),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        app.settings.mcp = true;
+        app.allowed.insert("test-agent".into());
+        app.workspace_jobs
+            .push(crate::mcp::workspace::Task::ready_for_test(
+                "test-agent",
+                updates,
+            ));
+        Ok(())
+    }
+    #[test]
+    fn stopping_or_clearing_chat_cancels_ready_jobs_and_stale_queued_requests() -> Result<(), String>
+    {
+        for clear in [false, true] {
+            let mut app = fixture()?;
+            ready_workspace(&mut app)?;
+            let old_client = format!("{} · сессия 1", app.chat.client_name());
+            app.workspace_jobs[0].client = old_client.clone();
+            let before: Vec<_> = app.tabs.iter().map(|t| t.document.clone()).collect();
+            if clear {
+                app.chat.clear();
+            } else {
+                app.chat.stop();
+            }
+            app.finish_workspace(&app.editor_ctx.clone());
+            assert_eq!(app.workspace_jobs[0].state(), "cancelled");
+            assert_eq!(
+                before,
+                app.tabs
+                    .iter()
+                    .map(|t| t.document.clone())
+                    .collect::<Vec<_>>()
+            );
+            let result = mcp_roundtrip_as(&mut app, &old_client, "workspace_documents", json!({}));
+            assert!(result.is_err_and(|e| e.starts_with("cancelled:")));
+            assert!(app.clients.is_empty());
+        }
+        Ok(())
+    }
+    #[test]
+    fn stateless_access_keeps_authorization_and_job_owner_without_leaking_the_handle()
+    -> Result<(), String> {
+        let mut app = fixture()?;
+        let pending = mcp_roundtrip_as(&mut app, "Client · сессия 1", "request_access", json!({}))?;
+        assert_eq!(pending["status"], "pending");
+        let token = pending["client_access"]
+            .as_str()
+            .ok_or("handle")?
+            .to_string();
+        let key = app.clients.first().cloned().ok_or("approval")?;
+        assert!(!key.contains(&token));
+        assert!(
+            mcp_roundtrip_as(
+                &mut app,
+                "Client · сессия 2",
+                "workspace_documents",
+                json!({"client_access":token})
+            )
+            .is_err()
+        );
+        app.allowed.insert(key.clone());
+        app.clients.clear();
+        let documents = mcp_roundtrip_as(
+            &mut app,
+            "Client · сессия 3",
+            "workspace_documents",
+            json!({"client_access":token}),
+        )?;
+        assert_eq!(documents["total"], 2);
+        assert!(
+            mcp_roundtrip_as(
+                &mut app,
+                "Other · сессия 4",
+                "workspace_documents",
+                json!({"client_access":token})
+            )
+            .is_err()
+        );
+        ready_workspace(&mut app)?;
+        app.workspace_jobs[0].client = key;
+        let id = app.workspace_jobs[0].id.clone();
+        let cancelled = mcp_roundtrip_as(
+            &mut app,
+            "Client · сессия 5",
+            "workspace_cancel",
+            json!({"client_access":token,"job_id":id}),
+        )?;
+        assert_eq!(cancelled["status"], "cancelled");
+        app.finish_workspace(&app.editor_ctx.clone());
+        assert!(app.tabs.iter().all(|t| t.undo.is_empty()));
+        app.client_access.clear();
+        app.allowed.clear();
+        assert!(
+            mcp_roundtrip_as(
+                &mut app,
+                "Client · сессия 6",
+                "workspace_documents",
+                json!({"client_access":token})
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+    #[test]
+    fn prepared_workspace_conflicts_with_same_frame_input_without_changing_other_documents()
+    -> Result<(), String> {
+        let mut app = fixture()?;
+        focus_page(&mut app)?;
+        ready_workspace(&mut app)?;
+        let sheets = app.tabs[1].document.clone();
+        frame_with_logic(&mut app, vec![egui::Event::Text("USER".into())]);
+        assert!(text(&app).contains("USER"));
+        assert!(!text(&app).contains("AI "));
+        assert_eq!(app.tabs[1].document, sheets);
+        assert_eq!(app.workspace_jobs[0].state(), "failed");
+        assert_eq!(app.active, Some(10));
+        Ok(())
+    }
+    #[test]
+    fn prepared_workspace_cancel_and_revoked_access_leave_both_models_unchanged()
+    -> Result<(), String> {
+        for revoke in [false, true] {
+            let mut app = fixture()?;
+            ready_workspace(&mut app)?;
+            let before: Vec<_> = app.tabs.iter().map(|tab| tab.document.clone()).collect();
+            if revoke {
+                app.allowed.clear();
+            } else {
+                app.workspace_jobs[0].cancel();
+            }
+            app.finish_workspace(&app.editor_ctx.clone());
+            assert_eq!(app.workspace_jobs[0].state(), "cancelled");
+            assert_eq!(
+                app.tabs
+                    .iter()
+                    .map(|tab| tab.document.clone())
+                    .collect::<Vec<_>>(),
+                before
+            );
+            assert!(app.tabs.iter().all(|tab| tab.undo.is_empty()));
+        }
+        Ok(())
+    }
+    #[test]
+    fn prepared_workspace_commits_without_switching_tabs_and_checks_owner() -> Result<(), String> {
+        let mut app = fixture()?;
+        ready_workspace(&mut app)?;
+        let ctx = app.editor_ctx.clone();
+        let id = app.workspace_jobs[0].id.clone();
+        assert!(
+            app.workspace_request("workspace_job_status", &json!({"job_id":id}), "other", &ctx)
+                .is_err()
+        );
+        app.finish_workspace(&ctx);
+        assert_eq!(app.active, Some(10));
+        assert_eq!(app.workspace_jobs[0].state(), "completed");
+        assert!(
+            app.tabs
+                .iter()
+                .all(|tab| tab.version == 1 && tab.undo.len() == 1 && tab.ai.len() == 1)
+        );
+        assert!(
+            app.workspace_request(
+                "workspace_documents",
+                &json!({"count":0}),
+                "test-agent",
+                &ctx
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+    #[test]
+    fn mcp_dry_run_and_unknown_tools_preserve_pending_sheet_input() -> Result<(), String> {
+        for tool in ["sheets_write_range", "unknown_tool"] {
+            let mut app = fixture()?;
+            app.active = Some(11);
+            frame(&mut app, vec![]);
+            let canvas_id = egui::Id::new(("sheets-editor", 11_u64)).with("canvas");
+            app.editor_ctx
+                .memory_mut(|memory| memory.request_focus(canvas_id));
+            frame(&mut app, vec![egui::Event::Text("draft".into())]);
+            let tab = app
+                .tabs
+                .iter()
+                .find(|tab| tab.id == 11)
+                .ok_or("sheet tab")?;
+            let before = tab.document.clone();
+            let version = tab.version;
+            let undo = tab.undo.len();
+            let sheet_id = match &before {
+                Document::Sheets(book) => book.active_id(),
+                _ => return Err("sheet kind".into()),
+            };
+            let mut response = mcp_request(
+                &mut app,
+                tool,
+                json!({
+                    "document_id":11, "sheet_id":sheet_id, "row":0, "col":1,
+                    "values":[["agent"]],
+                    "mode":if tool == "sheets_write_range" { "dry_run" } else { "apply" }
+                }),
+            )?;
+            let ctx = app.editor_ctx.clone();
+            app.mcp_requests(&ctx);
+            let result = response.try_recv().map_err(|error| error.to_string())?;
+            if tool == "sheets_write_range" {
+                assert_eq!(result?["applied"], false);
+            } else {
+                assert!(result.is_err_and(|error| error.starts_with("unsupported_feature")));
+            }
+            let tab = app
+                .tabs
+                .iter()
+                .find(|tab| tab.id == 11)
+                .ok_or("sheet tab")?;
+            assert_eq!(tab.document, before);
+            assert_eq!(tab.version, version);
+            assert_eq!(tab.undo.len(), undo);
+            app.flush_pending(11)?;
+            let tab = app
+                .tabs
+                .iter()
+                .find(|tab| tab.id == 11)
+                .ok_or("sheet tab")?;
+            let Document::Sheets(book) = &tab.document else {
+                return Err("sheet kind".into());
+            };
+            assert_eq!(
+                book.active_sheet()
+                    .and_then(|sheet| sheet.cell(0, 0))
+                    .map(|cell| cell.input.as_str()),
+                Some("draft")
+            );
+            assert_eq!(tab.version, version + 1);
+        }
+        Ok(())
+    }
+    #[test]
+    fn queued_mcp_close_rechecks_revoked_permission() -> Result<(), String> {
+        for disable_mcp in [false, true] {
+            let mut app = fixture()?;
+            let mut response = mcp_request(&mut app, "close_document", json!({"document_id":10}))?;
+            let ctx = app.editor_ctx.clone();
+            app.mcp_requests(&ctx);
+            assert_eq!(app.pending_mcp_closes.len(), 1);
+            if disable_mcp {
+                app.settings.mcp = false;
+            } else {
+                app.allowed.clear();
+            }
+            app.finish_mcp_closes();
+            assert!(
+                response
+                    .try_recv()
+                    .map_err(|error| error.to_string())?
+                    .is_err_and(|error| error.starts_with("permission_denied"))
+            );
+            assert!(app.tabs.iter().any(|tab| tab.id == 10));
+            assert!(app.pending.is_none());
+        }
+        Ok(())
+    }
+    fn second_doc(app: &mut App) -> Result<(), String> {
+        let tab = app
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id == 11)
+            .ok_or("second tab")?;
+        tab.document = Document::Docs(crate::docs::model::Doc::from_text("second"));
+        Ok(())
+    }
+    fn second_paragraph(app: &App) -> Result<u64, String> {
+        match app
+            .tabs
+            .iter()
+            .find(|tab| tab.id == 11)
+            .map(|tab| &tab.document)
+        {
+            Some(Document::Docs(doc)) => doc
+                .paragraphs
+                .first()
+                .map(|p| p.id)
+                .ok_or_else(|| "paragraph".to_string()),
+            _ => Err("second doc".into()),
+        }
+    }
+    #[test]
+    fn mcp_edit_in_another_document_preserves_active_document_input() -> Result<(), String> {
+        let mut app = fixture()?;
+        second_doc(&mut app)?;
+        focus_page(&mut app)?;
+        let paragraph = second_paragraph(&app)?;
+        let mut response = mcp_request(
+            &mut app,
+            "docs_insert_text",
+            json!({
+                "document_id":11, "paragraph_id":paragraph, "offset":0, "text":"agent "
+            }),
+        )?;
+        frame_with_logic(&mut app, vec![egui::Event::Text("local".into())]);
+        let result = response.try_recv().map_err(|error| error.to_string())??;
+        assert_eq!(result["applied"], true);
+        assert_eq!(app.active, Some(10));
+        assert!(text(&app).contains("local"));
+        let target = app.tabs.iter().find(|tab| tab.id == 11).ok_or("target")?;
+        let Document::Docs(doc) = &target.document else {
+            return Err("target kind".into());
+        };
+        assert_eq!(doc.plain_text(), "agent second");
+        assert_eq!(target.ai.len(), 1);
+        assert!(
+            app.last_agent
+                .as_ref()
+                .is_some_and(|(id, name, _)| *id == 11 && name == "test-agent")
+        );
+        Ok(())
+    }
+    #[test]
+    fn mcp_creation_activates_after_current_document_input() -> Result<(), String> {
+        let mut app = fixture()?;
+        focus_page(&mut app)?;
+        let mut response = mcp_request(
+            &mut app,
+            "create_document",
+            json!({
+                "kind":"docs", "title":"Agent document"
+            }),
+        )?;
+        frame_with_logic(&mut app, vec![egui::Event::Text("prefix".into())]);
+        let result = response.try_recv().map_err(|error| error.to_string())??;
+        assert_eq!(result["applied"], true);
+        assert_eq!(app.active, result["document_id"].as_u64());
+        assert_ne!(app.active, Some(10));
+        assert!(text(&app).contains("prefix"));
+        let target = app.current().ok_or("created tab")?;
+        let Document::Docs(doc) = &target.document else {
+            return Err("created kind".into());
+        };
+        assert!(
+            doc.plain_text().is_empty(),
+            "old document input must not enter the created document"
+        );
+        Ok(())
+    }
+    #[test]
+    fn busy_mcp_reconciliation_activates_after_current_document_input() -> Result<(), String> {
+        let mut app = fixture()?;
+        second_doc(&mut app)?;
+        focus_page(&mut app)?;
+        app.tabs
+            .iter_mut()
+            .find(|tab| tab.id == 11)
+            .ok_or("second tab")?
+            .pending_docs_edits = None;
+        let paragraph = second_paragraph(&app)?;
+        let mut response = mcp_request(
+            &mut app,
+            "docs_insert_text",
+            json!({
+                "document_id":11, "paragraph_id":paragraph, "offset":0, "text":"agent "
+            }),
+        )?;
+        frame_with_logic(&mut app, vec![egui::Event::Text("prefix".into())]);
+        let result = response.try_recv().map_err(|error| error.to_string())?;
+        assert!(result.is_err_and(|error| error.starts_with("conflict: дождитесь отображения")));
+        assert!(text(&app).contains("prefix"));
+        assert_eq!(app.active, Some(11));
+        let target = app.current().ok_or("target")?;
+        let Document::Docs(doc) = &target.document else {
+            return Err("target kind".into());
+        };
+        assert_eq!(doc.plain_text(), "second");
+        Ok(())
+    }
+    #[test]
+    fn asynchronous_open_activates_after_current_document_input() -> Result<(), String> {
+        let mut app = fixture()?;
+        focus_page(&mut app)?;
+        worker_event(
+            &mut app,
+            Event::Opened {
+                reload: None,
+                path: PathBuf::from("external.docx"),
+                document: Document::Docs(crate::docs::model::Doc::from_text("loaded")),
+                lock: None,
+                stamp: None,
+            },
+        )?;
+        frame(&mut app, vec![egui::Event::Text("prefix".into())]);
+        assert!(text(&app).contains("prefix"));
+        assert_eq!(app.active, Some(12));
+        let target = app.current().ok_or("opened tab")?;
+        let Document::Docs(doc) = &target.document else {
+            return Err("opened kind".into());
+        };
+        assert_eq!(doc.plain_text(), "loaded");
+        Ok(())
+    }
+    #[test]
+    fn asynchronous_reload_rejects_current_frame_edits() -> Result<(), String> {
+        let mut app = fixture()?;
+        focus_page(&mut app)?;
+        let path = PathBuf::from("current.docx");
+        let tab = app.tabs.iter_mut().find(|tab| tab.id == 10).ok_or("tab")?;
+        tab.path = Some(path.clone());
+        let target = ReloadTarget {
+            tab_id: 10,
+            base_version: tab.version,
+            path: path.clone(),
+        };
+        app.reloading.insert(10, target.clone());
+        worker_event(
+            &mut app,
+            Event::Opened {
+                reload: Some(target),
+                path,
+                document: Document::Docs(crate::docs::model::Doc::from_text("disk contents")),
+                lock: None,
+                stamp: None,
+            },
+        )?;
+        frame(&mut app, vec![egui::Event::Text("prefix".into())]);
+        assert!(text(&app).contains("prefix"));
+        assert!(!text(&app).contains("disk contents"));
+        assert_eq!(app.active, Some(10));
+        assert!(app.error.starts_with("conflict:"));
+        assert_eq!(app.disk_changed, Some(10));
+        Ok(())
+    }
+    #[test]
+    fn save_completion_does_not_close_over_current_frame_edits() -> Result<(), String> {
+        let mut app = fixture()?;
+        focus_page(&mut app)?;
+        let tab = app.tabs.iter_mut().find(|tab| tab.id == 10).ok_or("tab")?;
+        tab.saved_version = tab.version;
+        let version = tab.version;
+        app.close_after_save = Some(10);
+        app.saving.insert(10);
+        worker_event(
+            &mut app,
+            Event::Saved {
+                id: 10,
+                version,
+                path: PathBuf::from("current.docx"),
+                copy: false,
+                export: false,
+                stamp: None,
+                lock: None,
+            },
+        )?;
+        frame(&mut app, vec![egui::Event::Text("prefix".into())]);
+        assert!(text(&app).contains("prefix"));
+        assert!(app.tabs.iter().any(|tab| tab.id == 10 && tab.dirty()));
+        assert!(matches!(app.pending, Some(Pending::Close(10))));
+        Ok(())
+    }
+    #[test]
+    fn mcp_close_preserves_current_frame_input_before_confirmation() -> Result<(), String> {
+        let mut app = fixture()?;
+        focus_page(&mut app)?;
+        let tab = app.tabs.iter_mut().find(|tab| tab.id == 10).ok_or("tab")?;
+        tab.saved_version = tab.version;
+        let mut response = mcp_request(&mut app, "close_document", json!({"document_id":10}))?;
+        frame_with_logic(&mut app, vec![egui::Event::Text("prefix".into())]);
+        let result = response.try_recv().map_err(|error| error.to_string())??;
+        assert_eq!(result["applied"], false);
+        assert_eq!(result["needs_confirmation"], true);
+        assert!(text(&app).contains("prefix"));
+        assert!(app.tabs.iter().any(|tab| tab.id == 10 && tab.dirty()));
+        assert!(matches!(app.pending, Some(Pending::Close(10))));
+        Ok(())
+    }
+    #[test]
+    fn mcp_close_rechecks_base_version_after_current_frame_input() -> Result<(), String> {
+        let mut app = fixture()?;
+        focus_page(&mut app)?;
+        let tab = app.tabs.iter_mut().find(|tab| tab.id == 10).ok_or("tab")?;
+        tab.saved_version = tab.version;
+        let version = tab.version;
+        let mut response = mcp_request(
+            &mut app,
+            "close_document",
+            json!({
+                "document_id":10, "base_version":version
+            }),
+        )?;
+        frame_with_logic(&mut app, vec![egui::Event::Text("prefix".into())]);
+        let result = response.try_recv().map_err(|error| error.to_string())?;
+        assert!(result.is_err_and(|error| error.starts_with("conflict:")));
+        assert!(text(&app).contains("prefix"));
+        assert_eq!(app.active, Some(10));
+        assert!(app.pending.is_none());
+        Ok(())
+    }
+    #[test]
+    fn palette_shortcut_routes_text_to_search_without_changing_document() -> Result<(), String> {
+        let mut app = fixture()?;
+        focus_page(&mut app)?;
+        let before = text(&app);
+        let cmd = egui::Modifiers {
+            ctrl: true,
+            command: true,
+            ..Default::default()
+        };
+        frame(
+            &mut app,
+            vec![
+                egui::Event::ModifiersChanged(cmd),
+                egui::Event::Key {
+                    key: egui::Key::K,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: cmd,
+                },
+                egui::Event::Text("needle".into()),
+            ],
+        );
+        assert!(app.palette);
+        assert_eq!(app.palette_query, "needle");
+        assert_eq!(text(&app), before);
+        assert!(app.query.is_empty());
+        frame(&mut app, vec![egui::Event::Text("2".into())]);
+        assert_eq!(app.palette_query, "needle2");
+        assert_eq!(text(&app), before);
+        Ok(())
+    }
+    #[test]
+    fn palette_preserves_text_before_shortcut_and_routes_only_later_text() -> Result<(), String> {
+        let mut app = fixture()?;
+        focus_page(&mut app)?;
+        let cmd = egui::Modifiers {
+            ctrl: true,
+            command: true,
+            ..Default::default()
+        };
+        frame(
+            &mut app,
+            vec![
+                egui::Event::Text("prefix".into()),
+                egui::Event::Key {
+                    key: egui::Key::K,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: cmd,
+                },
+                egui::Event::Text("needle".into()),
+            ],
+        );
+        assert!(text(&app).contains("prefix"));
+        assert!(!text(&app).contains("needle"));
+        assert_eq!(app.palette_query, "needle");
+        Ok(())
+    }
+    #[test]
+    fn shell_actions_keep_last_frame_text_before_switch_or_close() -> Result<(), String> {
+        for (id, action) in [(0, "home"), (11, "activate"), (10, "close")] {
+            let mut app = fixture()?;
+            focus_page(&mut app)?;
+            frame(&mut app, vec![egui::Event::Text("ready".into())]);
+            let before = text(&app);
+            assert!(before.contains("ready"), "page must have focus");
+            let t = app.tabs.iter_mut().find(|t| t.id == 10).ok_or("tab")?;
+            t.saved_version = t.version;
+            let pos = app
+                .shell_rects
+                .get(&(id, action))
+                .ok_or("shell control")?
+                .center();
+            frame(
+                &mut app,
+                vec![egui::Event::PointerMoved(pos), pointer(pos, true)],
+            );
+            frame(
+                &mut app,
+                vec![egui::Event::Text("late".into()), pointer(pos, false)],
+            );
+            assert!(text(&app).contains("late"), "{action} lost final input");
+            if action == "close" {
+                assert!(matches!(app.pending, Some(Pending::Close(10))));
+                let protected = text(&app);
+                frame(
+                    &mut app,
+                    vec![
+                        egui::Event::Text("blocked".into()),
+                        egui::Event::Paste("blocked paste".into()),
+                        egui::Event::Key {
+                            key: egui::Key::Delete,
+                            physical_key: None,
+                            pressed: true,
+                            repeat: false,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+                assert_eq!(
+                    text(&app),
+                    protected,
+                    "confirmation must block editor events"
+                );
+            } else {
+                assert_eq!(app.active, if id == 0 { None } else { Some(id) });
+            }
+        }
+        Ok(())
+    }
+    #[test]
+    fn cancelling_another_picker_does_not_cancel_save_and_exit() -> Result<(), String> {
+        let mut app = fixture()?;
+        app.close_after_save = Some(10);
+        app.exit_after_save = true;
+        app.saving.insert(10);
+        app.picking.insert(11);
+        for id in [0, 11] {
+            worker_event(&mut app, Event::Canceled { id })?;
+            app.events();
+            assert_eq!(app.close_after_save, Some(10));
+            assert!(app.exit_after_save);
+            assert!(app.saving.contains(&10));
+        }
+        for id in [None, Some(11)] {
+            worker_event(
+                &mut app,
+                Event::Error {
+                    message: "Unrelated operation".into(),
+                    id,
+                },
+            )?;
+            app.events();
+            assert_eq!(app.close_after_save, Some(10));
+            assert!(app.exit_after_save);
+            assert!(app.saving.contains(&10));
+        }
+        app.fail_save(11, "Another save failed".into());
+        assert_eq!(app.close_after_save, Some(10));
+        assert!(app.exit_after_save);
+        Ok(())
+    }
+
+    #[test]
+    fn saving_a_copy_cannot_overwrite_the_active_source() -> Result<(), String> {
+        let mut app = fixture()?;
+        let path = std::env::temp_dir().join("TrineDocs-must-not-overwrite-source.docx");
+        app.tabs[0].path = Some(path.clone());
+        let original = app.tabs[0].document.clone();
+        app.write(10, path, true, false, false);
+        assert!(!app.error.is_empty());
+        assert!(!app.saving.contains(&10));
+        assert_eq!(app.tabs[0].document, original);
+        Ok(())
+    }
+
+    #[test]
+    fn discard_clears_durable_snapshots_of_open_tabs() -> Result<(), String> {
+        let mut app = fixture()?;
+        let root = std::env::temp_dir().join(format!(
+            "TrineDocs-discard-{}-{}",
+            std::process::id(),
+            app.next_id
+        ));
+        app.recovery = crate::recovery::Recovery::start_for_test(root.clone());
+        let tab = &app.tabs[0];
+        assert!(app.recovery.snapshot(crate::recovery::Snapshot {
+            id: tab.id,
+            title: tab.title.clone(),
+            path: None,
+            version: tab.version,
+            document: tab.document.clone(),
+        }));
+        app.discard_session();
+        drop(app);
+        assert!(!root.join("10.trinezip").exists());
+        if root.exists() {
+            std::fs::remove_dir_all(root).map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_mcp_args_do_not_commit_a_pending_user_cell() -> Result<(), String> {
+        let mut app = fixture()?;
+        app.active = Some(11);
+        frame(&mut app, vec![]);
+        let canvas = egui::Id::new(("sheets-editor", 11_u64)).with("canvas");
+        app.editor_ctx.memory_mut(|m| m.request_focus(canvas));
+        frame(&mut app, vec![egui::Event::Text("draft".into())]);
+        let before = app.tabs[1].document.clone();
+        let version = app.tabs[1].version;
+        let mut reply = mcp_request(
+            &mut app,
+            "sheets_write_range",
+            json!({"document_id":11,"values":[["x"]],"col":"wrong"}),
+        )?;
+        let ctx = app.editor_ctx.clone();
+        app.mcp_requests(&ctx);
+        assert!(reply.try_recv().map_err(|e| e.to_string())?.is_err());
+        assert_eq!(app.tabs[1].document, before);
+        assert_eq!(app.tabs[1].version, version);
+        app.flush_pending(11)?;
+        let Document::Sheets(book) = &app.tabs[1].document else {
+            return Err("book".into());
+        };
+        assert_eq!(
+            book.active_sheet()
+                .and_then(|s| s.cell(0, 0))
+                .map(|c| c.input.as_str()),
+            Some("draft")
+        );
+        Ok(())
+    }
+    #[test]
+    fn restoring_another_document_commits_the_current_cell_draft() -> Result<(), String> {
+        let mut app = fixture()?;
+        app.active = Some(11);
+        frame(&mut app, vec![]);
+        let canvas = egui::Id::new(("sheets-editor", 11_u64)).with("canvas");
+        app.editor_ctx.memory_mut(|m| m.request_focus(canvas));
+        frame(&mut app, vec![egui::Event::Text("draft".into())]);
+        let snapshot = crate::recovery::Snapshot {
+            id: 100,
+            title: "Recovery".into(),
+            path: None,
+            version: 0,
+            document: Document::create("docs")?,
+        };
+        app.restore_snapshot(&snapshot)?;
+        let Document::Sheets(book) = &app.tabs[1].document else {
+            return Err("book".into());
+        };
+        assert_eq!(
+            book.active_sheet()
+                .and_then(|s| s.cell(0, 0))
+                .map(|c| c.input.as_str()),
+            Some("draft")
+        );
+        assert_ne!(app.active, Some(11));
+        assert!(app.current().is_some_and(Tab::dirty));
+        Ok(())
+    }
+    #[test]
+    fn exports_do_not_add_unopenable_paths_to_recent_documents() -> Result<(), String> {
+        let mut app = fixture()?;
+        let recent = app.settings.recent.clone();
+        worker_event(
+            &mut app,
+            Event::Saved {
+                id: 10,
+                version: 0,
+                path: "C:/report.pdf".into(),
+                copy: false,
+                export: true,
+                stamp: None,
+                lock: None,
+            },
+        )?;
+        app.events();
+        assert_eq!(app.settings.recent, recent);
+        assert!(app.tabs[0].path.is_none());
+        Ok(())
+    }
+    #[test]
+    fn inspector_rejects_stale_targets_and_preserves_history() -> Result<(), String> {
+        let mut app = fixture()?;
+        let Document::Docs(doc) = &app.tabs[0].document else {
+            return Err("doc".into());
+        };
+        let target = crate::inspector::Target::Paragraph(doc.paragraphs[0].id);
+        let before = app.tabs[0].document.clone();
+        let version = app.tabs[0].version;
+        let ctx = app.editor_ctx.clone();
+        assert!(
+            app.navigate_inspection(&ctx, 10, version + 1, target)
+                .is_err()
+        );
+        assert!(
+            app.navigate_inspection(
+                &ctx,
+                10,
+                version,
+                crate::inspector::Target::Paragraph(u64::MAX)
+            )
+            .is_err()
+        );
+        app.navigate_inspection(&ctx, 10, version, target)?;
+        assert_eq!(app.tabs[0].document, before);
+        assert_eq!(app.tabs[0].version, version);
+        assert!(app.tabs[0].undo.is_empty());
+        assert_eq!(app.active, Some(10));
+        Ok(())
+    }
+
+    #[test]
+    fn inspection_mcp_pages_a_read_only_snapshot_and_reports_staleness() -> Result<(), String> {
+        let mut app = fixture()?;
+        let ctx = app.editor_ctx.clone();
+        let tab = app.tabs.iter_mut().find(|tab| tab.id == 11).ok_or("tab")?;
+        let Document::Sheets(book) = &mut tab.document else {
+            return Err("book".into());
+        };
+        book.set_cell(book.active_id(), 0, 0, "=1/0")?;
+        app.inspection_result = Some(crate::inspector::Inspection {
+            id: tab.id,
+            version: tab.version,
+            title: tab.title.clone(),
+            report: crate::inspector::inspect(&tab.document),
+        });
+        let document = tab.document.clone();
+        let history = (tab.version, tab.undo.len(), tab.redo.len(), tab.ai.len());
+        let active = app.active;
+        let mut reply = mcp_request(
+            &mut app,
+            "inspect_document",
+            json!({"document_id":11,"kind":"formulas","query":"A1","count":1}),
+        )?;
+        app.mcp_requests(&ctx);
+        let result = reply.try_recv().map_err(|error| error.to_string())??;
+        assert_eq!(result["status"], "completed");
+        assert_eq!(result["stale"], false);
+        assert_eq!(result["findings"][0]["target"]["kind"], "cell");
+        assert_eq!(result["filtered_total"], 1);
+        let tab = app.tabs.iter_mut().find(|tab| tab.id == 11).ok_or("tab")?;
+        assert_eq!(tab.document, document);
+        assert_eq!(
+            (tab.version, tab.undo.len(), tab.redo.len(), tab.ai.len()),
+            history
+        );
+        assert_eq!(app.active, active);
+        tab.version += 1;
+        let stale = app.inspection_request(&json!({"document_id":11,"index":1}), &ctx)?;
+        assert_eq!(stale["stale"], true);
+        assert_eq!(stale["findings"].as_array().map(Vec::len), Some(0));
+        assert!(
+            app.inspection_request(&json!({"document_id":11,"kind":"typo"}), &ctx)
+                .is_err()
+        );
+        assert!(
+            app.inspection_request(&json!({"document_id":11,"count":101}), &ctx)
+                .is_err()
+        );
+        assert!(
+            app.inspection_request(&json!({"document_id":11,"refresh":"true"}), &ctx)
+                .is_err()
+        );
+        let pending = app.inspection_request(&json!({"document_id":11,"refresh":true}), &ctx)?;
+        assert_eq!(pending["status"], "preparing");
+        assert!(
+            app.inspection_request(&json!({"document_id":10}), &ctx)
+                .is_err()
+        );
+        assert_eq!(app.active, active);
+        let poll = app.inspection_request(&json!({"document_id":11}), &ctx)?;
+        assert_eq!(poll["status"], "preparing");
+        assert!(crate::mcp::tools::read_only("inspect_document"));
+        assert!(!crate::mcp::workspace::batchable("inspect_document"));
+        Ok(())
     }
 }

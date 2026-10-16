@@ -5,6 +5,8 @@
 
 Приложение: Главная/вкладки, paginated Docs canvas, формулы и виртуальная Sheets сетка, Slides canvas и показ. Нативные ZIP/JSON, DOCX/XLSX/PPTX, текстовые форматы, PDF и PNG первого слайда. Сохранение атомарно с .bak, recovery snapshots, авторские undo-группы. MCP через официальный rmcp и stdio-шим; новым клиентам требуется разрешение в UI.
 
+Интерфейс: светлая компактная лента, основные действия в одной строке, расширенные команды в меню. Таблицы доступны в каждом редакторе; свойства объектов и заметки Slides открываются по запросу. Текстовые `.lock` можно править как TXT. Занятые документы доступны для правки в памяти и сохранения копии; перезапись занятого оригинала защищена.
+
 ```powershell
 cargo test --locked --workspace
 cargo fmt --all -- --check
@@ -13,7 +15,7 @@ cargo run --locked -p trinedocs --bin TrineDocs
 cargo build --locked --profile dist -p trinedocs
 target/dist/TrineDocs.exe --smoke-test target/smoke
 target/dist/TrineDocs.exe --mcp-smoke-test target/mcp-smoke
-target/dist/TrineDocs.exe --ui-smoke-test target/ui-smoke
+tools/test_preview.ps1 -Executable target/dist/TrineDocs.exe -Output target/qa-preview
 tools/build_release.ps1
 tools/test_installer.ps1
 ```

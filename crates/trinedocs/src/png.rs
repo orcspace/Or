@@ -50,11 +50,11 @@ fn preflight(page: &Page, scale: f32) -> Result<(), String> {
     let mut image_bytes = 0_usize;
     let mut image_pixels = 0_u64;
     let mut glyphs =
-        std::collections::BTreeMap::<(bool, bool), std::collections::BTreeSet<char>>::new();
+        std::collections::BTreeMap::<(String, bool, bool), std::collections::BTreeSet<char>>::new();
     for item in &page.items {
         let estimate = match item {
             Primitive::Text { text, .. } | Primitive::TextStyled { text, .. } => {
-                (text.chars().count() as u64).saturating_mul(16)
+                (crate::render::normalized_text(text).chars().count() as u64).saturating_mul(16)
             }
             Primitive::Ellipse { w, h, .. } => ((w.max(*h) * scale).max(0.0).ceil() as u64)
                 .saturating_mul(16)
@@ -72,13 +72,17 @@ fn preflight(page: &Page, scale: f32) -> Result<(), String> {
             | Primitive::TextStyled {
                 x, y, text, size, ..
             } => {
-                characters = characters.saturating_add(text.chars().count());
+                let normalized = crate::render::normalized_text(text);
+                characters = characters.saturating_add(normalized.chars().count());
                 let style = match item {
-                    Primitive::TextStyled { bold, italic, .. } => (*bold, *italic),
-                    _ => (false, false),
+                    Primitive::TextStyled {
+                        font, bold, italic, ..
+                    } => (font.clone(), *bold, *italic),
+                    _ => (String::new(), false, false),
                 };
                 glyphs.entry(style).or_default().extend(
-                    text.chars()
+                    normalized
+                        .chars()
                         .filter(|c| !c.is_whitespace() && !c.is_control()),
                 );
                 [*x, *y, *size]
@@ -132,11 +136,23 @@ fn preflight(page: &Page, scale: f32) -> Result<(), String> {
             return Err("Текст PNG превышает безопасный предел глифов".into());
         }
     }
-    for ((bold, italic), characters) in glyphs {
-        let bytes = crate::fonts::font_bytes(bold, italic)?;
-        let face = ttf_parser::Face::parse(&bytes, 0).map_err(|e| e.to_string())?;
+    for ((family, bold, italic), characters) in glyphs {
+        let requested = if family.is_empty() {
+            crate::fonts::DEFAULT_FAMILY
+        } else {
+            &family
+        };
+        let (bytes, index) = crate::fonts::face(requested, bold, italic)?;
+        let face = ttf_parser::Face::parse(&bytes, index).map_err(|e| e.to_string())?;
+        let fallback_bytes = crate::fonts::font_bytes(bold, italic)?;
+        let fallback = ttf_parser::Face::parse(&fallback_bytes, 0).map_err(|e| e.to_string())?;
+        let regular_bytes = crate::fonts::font_bytes(false, false)?;
+        let regular = ttf_parser::Face::parse(&regular_bytes, 0).map_err(|e| e.to_string())?;
         for c in characters {
-            if face.glyph_index(c).is_none() {
+            if face.glyph_index(c).is_none()
+                && fallback.glyph_index(c).is_none()
+                && regular.glyph_index(c).is_none()
+            {
                 return Err(format!(
                     "Системный шрифт не содержит символ U+{:04X}; PNG не сохранён",
                     u32::from(c)
@@ -152,6 +168,17 @@ pub fn raster(page: &Page, scale: f32) -> Result<image::RgbaImage, String> {
     preflight(page, scale)?;
     let ctx = egui::Context::default();
     crate::fonts::install(&ctx)?;
+    let faces: std::collections::BTreeSet<(String, bool, bool)> = page
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Primitive::TextStyled {
+                font, bold, italic, ..
+            } if !font.is_empty() => Some((font.clone(), *bold, *italic)),
+            _ => None,
+        })
+        .collect();
+    crate::fonts::preload(&ctx, &faces.into_iter().collect::<Vec<_>>());
     let mut input = egui::RawInput {
         screen_rect: Some(Rect::from_min_size(
             Pos2::ZERO,
@@ -424,6 +451,45 @@ fn sample(texture: &ColorImage, uv: Pos2) -> Result<[f32; 4], String> {
 mod tests {
     use super::*;
     #[test]
+    fn chosen_font_glyphs_are_not_rejected_by_default_font_preflight() -> Result<(), String> {
+        let default = crate::fonts::font_bytes(false, false)?;
+        let default_face =
+            ttf_parser::Face::parse(&default, 0).map_err(|error| error.to_string())?;
+        for family in ["Segoe UI Symbol", "Cambria Math", "DejaVu Sans"] {
+            if !crate::fonts::is_installed(family) {
+                continue;
+            }
+            let (bytes, index) = crate::fonts::face(family, false, false)?;
+            let face = ttf_parser::Face::parse(&bytes, index).map_err(|error| error.to_string())?;
+            if let Some(glyph) = (0x2200..0x2bff)
+                .filter_map(char::from_u32)
+                .find(|character| {
+                    default_face.glyph_index(*character).is_none()
+                        && face.glyph_index(*character).is_some()
+                })
+            {
+                let page = Page {
+                    width: 100.0,
+                    height: 50.0,
+                    items: vec![Primitive::TextStyled {
+                        x: 0.0,
+                        y: 0.0,
+                        text: glyph.to_string(),
+                        size: 20.0,
+                        color: [0, 0, 0],
+                        bold: false,
+                        italic: false,
+                        font: family.into(),
+                    }],
+                };
+                preflight(&page, 1.0)?;
+                return Ok(());
+            }
+        }
+        // Font availability varies across development and CI machines.
+        Ok(())
+    }
+    #[test]
     fn png_dimensions_shapes_and_glyphs_are_real() -> Result<(), String> {
         let page = Page {
             width: 160.0,
@@ -444,6 +510,7 @@ mod tests {
                     color: [0, 0, 0],
                     bold: true,
                     italic: false,
+                    font: String::new(),
                 },
             ],
         };

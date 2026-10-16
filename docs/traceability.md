@@ -72,11 +72,11 @@ ID закреплены в HTML-комментариях источников. I
 | REQ-04-010 | AGENTS.md §4 | - Никаких потерь данных: автосохранение, восстановление после падения. | 1 | T-01-CRDT, T-01-LAYOUT, T-01-INPUT, T-01-RECOVERY | planned |
 | REQ-04-011 | AGENTS.md §4 | - Цели не считаются доказанными до измерений по `docs/testing/acceptance.md`. | 1 | T-01-CRDT, T-01-LAYOUT, T-01-INPUT, T-01-RECOVERY | planned |
 | REQ-05-001 | AGENTS.md §5 | - Контент в центре, интерфейс отступает. Сетка 4 px, радиусы 6/10 px, тонкие разделители вместо рамок, минимум теней. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
-| REQ-05-002 | AGENTS.md §5 | - Компактная верхняя панель + плавающая контекстная панель у выделения + палитра команд. Классическая «лента» Office — опция в настройках. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
+| REQ-05-002 | AGENTS.md §5 | - По образцу владельца: светлая оболочка, вкладки команд и сгруппированная лента Office, белые страницы в центре; палитра команд сохраняется. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
 | REQ-05-003 | AGENTS.md §5 | UI использует системные шрифты Windows, загружаемые во время выполнения; встроенные шрифты не входят в exe (ADR-0025). | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
 | REQ-05-004 | AGENTS.md §5 | - Lucide: сетка 24, stroke 1.75, скругления. Свои иконки — в том же стиле. Цвет только через `currentColor` + токены. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
 | REQ-05-005 | AGENTS.md §5 | - Docs — синий, Sheets — зелёный, Slides — оранжевый. Точечные акценты. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
-| REQ-05-006 | AGENTS.md §5 | - Светлая, тёмная, системная (по умолчанию). Системная тема — `QStyleHints::colorScheme`. Переключение на лету, кросс-фейд 150–200 мс. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI, T-00-POLICY | partial |
+| REQ-05-006 | AGENTS.md §5 | - Светлая (по умолчанию), тёмная, системная. Системная тема — egui/eframe. Переключение на лету, кросс-фейд 150–200 мс. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI, T-00-POLICY | partial |
 | REQ-05-007 | AGENTS.md §5 | - Цвета — только токены singleton `Theme.qml`: background, surface, surface-raised, border, text-primary/secondary/disabled, accent, accent-docs/sheets/slides, danger, warning, success, selection, ai-cursor, remote-cursor-1…8. Хардкод цветов в других QML запрещён (CI). | 0 | T-00-SPEC, T-00-BUILD, T-00-UI, T-00-POLICY | partial |
 | REQ-05-008 | AGENTS.md §5 | - «Тёмная бумага» — только отображение; печать/экспорт как в документе. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI | planned |
 | REQ-05-009 | AGENTS.md §5 | - Контраст ≥ WCAG AA; высокий контраст Windows. | 0 | T-00-SPEC, T-00-BUILD, T-00-UI, T-00-POLICY | partial |

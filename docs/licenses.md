@@ -1,7 +1,7 @@
 # Зависимости и лицензии
 
 Полный production Cargo.lock: 444 registry packages. Проверка exact versions на 2026-10-13T00:00:00+00:00.
-Cargo.lock SHA-256: 867b0bbe1c0e2a3e0e144f2f175b7f4ea7f03fc5074297b7f227bf1c29f156eb.
+Cargo.lock SHA-256: a799a9c9cfebd0d3df604b765563b896565a43d512a5335174779b1ce809ed80.
 
 Реестр консервативно включает все target-specific и build-time зависимости lock; это не заявление, что каждый crate связан с Windows exe. Qt/CRDT spike не входят в этот граф.
 Декларации лицензий взяты из checksum-verified crates, даты/yank/checksum — из crates.io API. Отсутствующие в package LICENSE/NOTICE дополнены только с exact upstream commit из .cargo_vcs_info.json.
@@ -467,3 +467,7 @@ Online refresh: python -B tools/audit_dependencies.py --refresh
 - Loro CRDT spike изолирован: docs/dependencies/crdt-spike.{md,json}. Он не включён в production Cargo.lock, и его notices не подменяют этот граф.
 - Rust 1.98.1, Microsoft Windows SDK/MSVC CRT и NSIS — build/platform components. Для static CRT installer применяются отдельно подтверждённые redistribution terms; этот Cargo реестр не является их аудитом.
 - CI actions и NSIS script проверяются отдельным release review. AGPL запрещён. Age/yank/prerelease/checksum gate применяется ко всему lock; license/source-text gate — к Windows target graph. Non-Windows source gaps сохраняются честно в audit report.
+
+## Системный curl для изображений (ADR-0027)
+
+Приложение вызывает уже установленный Windows curl.exe, не включает его в установщик и не добавляет Rust-зависимости. curl: [лицензия curl/MIT-style](https://curl.se/docs/copyright.html), [параметр connect-to](https://curl.se/docs/manpage.html#--connect-to). Состав TLS/лицензий системной сборки принадлежит Windows; отдельная поставка curl требует собственной проверки и notices.

@@ -1,4 +1,4 @@
-param([string]$Version='0.1.0-preview.1',[string]$Makensis='',[switch]$SkipBuild)
+param([string]$Version='0.0.4',[string]$Makensis='',[switch]$SkipBuild)
 $ErrorActionPreference='Stop'
 if($Version -notmatch '^\d+\.\d+\.\d+(-[a-zA-Z0-9.-]+)?$'){throw 'Invalid semantic version'}
 $taskRoot=Split-Path -Parent $PSScriptRoot
