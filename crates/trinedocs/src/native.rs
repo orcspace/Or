@@ -62,7 +62,7 @@ impl Document {
             Self::Slides(_) => &[
                 ("pptx", "Презентация PowerPoint"),
                 ("pdf", "PDF"),
-                ("png", "Рисунок PNG (первый слайд)"),
+                ("png", "Рисунки PNG (все показываемые слайды)"),
             ],
         }
     }
@@ -219,7 +219,11 @@ pub fn export(doc: &Document, ext: &str) -> Result<Vec<u8>, String> {
             crate::pdf::write(&doc.pages())
         }
         (Document::Slides(deck), "png") => {
-            let slide = deck.slides.first().ok_or("Презентация пуста")?;
+            let slide = deck
+                .slides
+                .iter()
+                .find(|slide| !slide.hidden)
+                .ok_or("В презентации нет показываемых слайдов")?;
             crate::png::write(&deck.page(slide), 2.0)
         }
         (Document::Docs(d), "lock") => crate::docs::io::write(d, "txt"),
@@ -227,6 +231,59 @@ pub fn export(doc: &Document, ext: &str) -> Result<Vec<u8>, String> {
         (Document::Sheets(b), _) => crate::sheets::io::write(b, ext),
         (Document::Slides(d), _) => crate::slides::io::write(d, ext),
     }
+}
+/// Every slide that is not hidden as PNG, with its 1-based slide number.
+pub fn slide_pictures(deck: &crate::slides::model::Deck) -> Result<Vec<(usize, Vec<u8>)>, String> {
+    deck.validate()?;
+    let pictures = deck
+        .slides
+        .iter()
+        .enumerate()
+        .filter(|(_, slide)| !slide.hidden)
+        .map(|(index, slide)| Ok((index + 1, crate::png::write(&deck.page(slide), 2.0)?)))
+        .collect::<Result<Vec<_>, String>>()?;
+    if pictures.is_empty() {
+        return Err("В презентации нет показываемых слайдов".into());
+    }
+    Ok(pictures)
+}
+/// Sibling file for slide `number` of a multi-slide PNG export to `path` (`Имя (слайд 2).png`).
+pub fn slide_picture_path(path: &Path, number: usize) -> std::path::PathBuf {
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    path.with_file_name(format!("{stem} (слайд {number}).png"))
+}
+/// Extra PNGs are new files; only the main file was confirmed in the Save dialog.
+pub fn write_slide_picture(
+    path: &Path,
+    number: usize,
+    bytes: &[u8],
+) -> Result<std::path::PathBuf, String> {
+    let preferred = slide_picture_path(path, number);
+    let stem = preferred
+        .file_stem()
+        .ok_or("Нет имени PNG")?
+        .to_string_lossy();
+    for index in 1..1000 {
+        let target = if index == 1 {
+            preferred.clone()
+        } else {
+            preferred.with_file_name(format!("{stem} ({index}).png"))
+        };
+        match crate::util::atomic_write_new(&target, bytes) {
+            Ok(()) => return Ok(target),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "Не удалось сохранить {}: {error}",
+                    target.display()
+                ));
+            }
+        }
+    }
+    Err("Слишком много PNG с таким именем".into())
 }
 pub fn extension(path: &Path) -> String {
     path.extension()
@@ -260,6 +317,21 @@ mod tests {
         assert_eq!(decode(&export(&doc, ".TRINESLIDE")?)?, doc);
         assert!(export(&doc, ".PDF")?.starts_with(b"%PDF"));
         assert!(export(&doc, ".PNG")?.starts_with(b"\x89PNG"));
+        Ok(())
+    }
+    #[test]
+    fn slide_pictures_cover_every_shown_slide() -> Result<(), String> {
+        let mut deck = crate::slides::model::Deck::default();
+        for _ in 0..2 {
+            deck.add_slide("title");
+        }
+        deck.slides[1].hidden = true;
+        let numbers: Vec<usize> = slide_pictures(&deck)?.into_iter().map(|(n, _)| n).collect();
+        assert_eq!(numbers, vec![1, 3]);
+        assert_eq!(
+            slide_picture_path(Path::new("dir/Отчёт.png"), 3),
+            Path::new("dir/Отчёт (слайд 3).png")
+        );
         Ok(())
     }
     #[test]

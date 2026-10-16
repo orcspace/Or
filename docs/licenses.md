@@ -467,3 +467,7 @@ Online refresh: python -B tools/audit_dependencies.py --refresh
 - Loro CRDT spike изолирован: docs/dependencies/crdt-spike.{md,json}. Он не включён в production Cargo.lock, и его notices не подменяют этот граф.
 - Rust 1.98.1, Microsoft Windows SDK/MSVC CRT и NSIS — build/platform components. Для static CRT installer применяются отдельно подтверждённые redistribution terms; этот Cargo реестр не является их аудитом.
 - CI actions и NSIS script проверяются отдельным release review. AGPL запрещён. Age/yank/prerelease/checksum gate применяется ко всему lock; license/source-text gate — к Windows target graph. Non-Windows source gaps сохраняются честно в audit report.
+
+## Системный curl для изображений (ADR-0027)
+
+Приложение вызывает уже установленный Windows curl.exe, не включает его в установщик и не добавляет Rust-зависимости. curl: [лицензия curl/MIT-style](https://curl.se/docs/copyright.html), [параметр connect-to](https://curl.se/docs/manpage.html#--connect-to). Состав TLS/лицензий системной сборки принадлежит Windows; отдельная поставка curl требует собственной проверки и notices.

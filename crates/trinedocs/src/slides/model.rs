@@ -52,6 +52,9 @@ pub struct Animation {
     /// Position in the slide's animation sequence; 0 keeps the layer order and plays before
     /// numbered steps. Equal numbers fall back to the layer order.
     pub order: u32,
+    /// Offset in points for the `move` motion path.
+    pub dx: f32,
+    pub dy: f32,
 }
 impl Default for Animation {
     fn default() -> Self {
@@ -61,7 +64,44 @@ impl Default for Animation {
             delay: 0.0,
             duration: 0.5,
             order: 0,
+            dx: 0.0,
+            dy: 0.0,
         }
+    }
+}
+/// Entrance effects: the object is hidden until the step starts.
+pub const ENTRANCE_EFFECTS: [&str; 3] = ["fade", "fly_in", "zoom"];
+/// Emphasis and motion effects: the object stays visible.
+pub const EMPHASIS_EFFECTS: [&str; 3] = ["pulse", "spin", "move"];
+/// Exit effects: the object is hidden after the step ends.
+pub const EXIT_EFFECTS: [&str; 3] = ["fade_out", "fly_out", "zoom_out"];
+pub fn is_animation_effect(effect: &str) -> bool {
+    effect == "none"
+        || ENTRANCE_EFFECTS.contains(&effect)
+        || EMPHASIS_EFFECTS.contains(&effect)
+        || EXIT_EFFECTS.contains(&effect)
+}
+impl Animation {
+    pub fn is_entrance(&self) -> bool {
+        ENTRANCE_EFFECTS.contains(&self.effect.as_str())
+    }
+    pub fn is_exit(&self) -> bool {
+        EXIT_EFFECTS.contains(&self.effect.as_str())
+    }
+    fn is_valid(&self) -> bool {
+        is_animation_effect(&self.effect)
+            && matches!(
+                self.trigger.as_str(),
+                "with_previous" | "after_previous" | "on_click"
+            )
+            && self.duration.is_finite()
+            && (0.001..=3600.0).contains(&self.duration)
+            && self.delay.is_finite()
+            && (0.0..=86400.0).contains(&self.delay)
+            && self.dx.is_finite()
+            && self.dy.is_finite()
+            && self.dx.abs() <= 100000.0
+            && self.dy.abs() <= 100000.0
     }
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -101,7 +141,40 @@ pub struct Element {
     pub italic: bool,
     pub font: String,
     pub group: Option<u64>,
+    /// The first animation step of the object (usually its entrance).
     pub animation: Animation,
+    /// Further steps of the same object: emphasis, motion, exit, a second entrance.
+    pub more_animations: Vec<Animation>,
+}
+impl Element {
+    /// Every animation of the object with its slot: 0 = `animation`, k = `more_animations[k-1]`.
+    pub fn animations(&self) -> impl Iterator<Item = (usize, &Animation)> {
+        std::iter::once(&self.animation)
+            .chain(&self.more_animations)
+            .enumerate()
+            .filter(|(_, a)| a.effect != "none")
+    }
+    pub fn animation_slot(&self, slot: usize) -> Option<&Animation> {
+        if slot == 0 {
+            Some(&self.animation)
+        } else {
+            self.more_animations.get(slot - 1)
+        }
+    }
+    pub fn is_animated(&self) -> bool {
+        self.animations().next().is_some()
+    }
+    /// Replaces all animations of the object with `list` (empty = none).
+    pub fn set_animations(&mut self, mut list: Vec<Animation>) {
+        list.retain(|a| a.effect != "none");
+        if list.is_empty() {
+            self.animation = Animation::default();
+            self.more_animations.clear();
+        } else {
+            self.animation = list.remove(0);
+            self.more_animations = list;
+        }
+    }
 }
 impl Default for Element {
     fn default() -> Self {
@@ -124,6 +197,7 @@ impl Default for Element {
             font: "Calibri".into(),
             group: None,
             animation: Animation::default(),
+            more_animations: Vec::new(),
         }
     }
 }
@@ -162,27 +236,44 @@ impl Slide {
     pub fn element_mut(&mut self, id: u64) -> Option<&mut Element> {
         self.elements.iter_mut().find(|e| e.id == id)
     }
-    /// Indices of animated elements in playback order: by `animation.order`, then by layer.
-    pub fn animation_sequence(&self) -> Vec<usize> {
-        let mut sequence: Vec<usize> = self
+    /// Animation steps in playback order as (element index, slot): by `order`, then by layer,
+    /// then by slot.
+    pub fn animation_steps(&self) -> Vec<(usize, usize)> {
+        let mut steps: Vec<(u32, usize, usize)> = self
             .elements
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.animation.effect != "none")
-            .map(|(index, _)| index)
+            .flat_map(|(index, e)| e.animations().map(move |(slot, a)| (a.order, index, slot)))
             .collect();
-        sequence.sort_by_key(|index| self.elements[*index].animation.order);
-        sequence
+        steps.sort();
+        steps
+            .into_iter()
+            .map(|(_, index, slot)| (index, slot))
+            .collect()
+    }
+    /// Element index of every animation step in playback order.
+    pub fn animation_sequence(&self) -> Vec<usize> {
+        self.animation_steps()
+            .into_iter()
+            .map(|(index, _)| index)
+            .collect()
     }
     /// The order number that places a new animation after every existing one.
     pub fn next_animation_order(&self) -> u32 {
         self.elements
             .iter()
-            .filter(|e| e.animation.effect != "none")
-            .map(|e| e.animation.order)
+            .flat_map(|e| e.animations().map(|(_, a)| a.order))
             .max()
             .unwrap_or(0)
             .saturating_add(1)
+    }
+    /// Number of steps that wait for a click.
+    pub fn click_steps(&self) -> usize {
+        self.elements
+            .iter()
+            .flat_map(Element::animations)
+            .filter(|(_, a)| a.trigger == "on_click")
+            .count()
     }
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -426,10 +517,10 @@ impl Deck {
         if self
             .slides
             .iter()
-            .any(|s| s.elements.iter().any(|e| e.animation.effect != "none"))
+            .any(|s| s.elements.iter().any(Element::is_animated))
         {
             warnings.push(
-                "Анимации объектов попадают в PPTX как эффекты входа PowerPoint (выцветание, вылет, масштаб); PDF и PNG статичны".into(),
+                "Анимации объектов попадают в PPTX как эффекты PowerPoint (вход, выделение, путь, выход); PDF и PNG статичны".into(),
             );
         }
         if self
@@ -711,16 +802,9 @@ impl Deck {
                 {
                     return Err("Некорректная геометрия объекта".into());
                 }
-                if !matches!(
-                    element.animation.effect.as_str(),
-                    "none" | "fade" | "fly_in" | "zoom"
-                ) || !matches!(
-                    element.animation.trigger.as_str(),
-                    "with_previous" | "after_previous" | "on_click"
-                ) || !element.animation.duration.is_finite()
-                    || !(0.001..=3600.0).contains(&element.animation.duration)
-                    || !element.animation.delay.is_finite()
-                    || !(0.0..=86400.0).contains(&element.animation.delay)
+                if element.more_animations.len() > 32
+                    || !element.animation.is_valid()
+                    || element.more_animations.iter().any(|a| !a.is_valid())
                 {
                     return Err("Некорректная анимация".into());
                 }

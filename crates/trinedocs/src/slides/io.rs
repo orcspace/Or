@@ -1,4 +1,4 @@
-use super::model::{Deck, Element, ElementKind, Slide};
+use super::model::{Animation, Deck, Element, ElementKind, Slide};
 use crate::package::{read_zip, write_zip, xml_escape};
 use quick_xml::{Reader, events::Event};
 use std::collections::BTreeMap;
@@ -1033,10 +1033,10 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
             }
         }
         if let Some(timing) = xml.child("timing") {
-            let skipped = read_timing(timing, &shape_ids, &mut slide);
+            let skipped = read_timing(timing, &shape_ids, &mut slide, (deck.width, deck.height));
             if skipped > 0 {
                 deck.warnings.push(format!(
-                    "Слайд {}: анимации PowerPoint без точного аналога (выделение, выход, пути, прочие эффекты входа) заменены появлением или пропущены: {skipped}",
+                    "Слайд {}: анимации PowerPoint без точного аналога (прочие эффекты, кривые пути, триггеры объектов) заменены ближайшими или пропущены: {skipped}",
                     index + 1
                 ));
             }
@@ -1052,71 +1052,192 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
     deck.validate()?;
     Ok(deck)
 }
-/// Entrance effects of a slide's `p:timing` mapped onto its elements in sequence order.
-/// Returns the number of effects that have no TrineDocs equivalent and were approximated or
-/// skipped (emphasis, exit, motion paths, other entrance presets, second effects on one shape).
-fn read_timing(timing: &Node, shape_ids: &BTreeMap<String, usize>, slide: &mut Slide) -> usize {
-    let mut effects = Vec::new();
-    timing.all("cTn", &mut effects);
-    let (mut order, mut inexact) = (0_u32, 0_usize);
-    for effect in effects
-        .into_iter()
-        .filter(|n| !n.attr("presetClass").is_empty())
-    {
-        let index = effect
-            .descend("spTgt")
-            .and_then(|n| shape_ids.get(n.attr("spid")))
-            .copied();
-        let Some(element) = index.and_then(|i| slide.elements.get_mut(i)) else {
-            inexact += 1;
+/// Start delay of a time node in ms (`indefinite` and missing = 0).
+fn node_delay(node: &Node) -> f32 {
+    node.child("stCondLst")
+        .and_then(|n| n.child("cond"))
+        .map_or(0.0, |n| n.number("delay", 0.0).max(0.0))
+}
+/// Effect nodes under a time node with their start in ms from the start of the click group.
+fn timed_effects<'a>(node: &'a Node, offset: f32, out: &mut Vec<(f32, &'a Node)>) {
+    let Some(children) = node.child("childTnLst") else {
+        return;
+    };
+    for child in &children.children {
+        let Some(ctn) = child.child("cTn") else {
             continue;
         };
-        if effect.attr("presetClass") != "entr" || element.animation.effect != "none" {
-            inexact += 1;
-            continue;
+        let start = offset + node_delay(ctn);
+        if ctn.attr("presetClass").is_empty() {
+            timed_effects(ctn, start, out);
+        } else {
+            out.push((start, ctn));
         }
-        let kind = match effect.attr("presetID") {
-            "10" => "fade",
-            "2" => "fly_in",
-            "23" | "53" => "zoom",
-            _ => {
-                inexact += 1;
-                "fade"
-            }
-        };
-        let delay = effect
-            .child("stCondLst")
-            .and_then(|n| n.child("cond"))
-            .map_or(0.0, |n| n.number("delay", 0.0));
-        let mut behaviours = Vec::new();
-        if let Some(children) = effect.child("childTnLst") {
-            children.all("cTn", &mut behaviours);
-        }
-        let duration = behaviours
-            .iter()
-            .map(|n| n.number("dur", 0.0))
-            .filter(|ms| *ms > 1.0)
-            .fold(0.0_f32, f32::max);
-        order += 1;
-        element.animation = super::model::Animation {
-            effect: kind.into(),
-            trigger: match effect.attr("nodeType") {
-                "clickEffect" => "on_click",
-                "afterEffect" => "after_previous",
-                _ => "with_previous",
-            }
-            .into(),
-            delay: (delay / 1000.0).clamp(0.0, 86400.0),
-            duration: if duration > 0.0 {
-                (duration / 1000.0).clamp(0.01, 3600.0)
-            } else {
-                // "Appear" and other instant effects.
-                0.01
-            },
-            order,
-        };
     }
-    inexact
+}
+/// TrineDocs effect for a PowerPoint preset; `None` = no equivalent. The flag marks presets
+/// replaced by the closest TrineDocs effect.
+fn preset_effect(effect: &Node, size: (f32, f32)) -> Option<(&'static str, f32, f32, bool)> {
+    let id = effect.attr("presetID");
+    Some(match effect.attr("presetClass") {
+        "entr" => match id {
+            "10" => ("fade", 0.0, 0.0, false),
+            "2" => ("fly_in", 0.0, 0.0, false),
+            "23" | "53" => ("zoom", 0.0, 0.0, false),
+            _ => ("fade", 0.0, 0.0, true),
+        },
+        "exit" => match id {
+            "10" => ("fade_out", 0.0, 0.0, false),
+            "2" => ("fly_out", 0.0, 0.0, false),
+            "23" | "53" => ("zoom_out", 0.0, 0.0, false),
+            _ => ("fade_out", 0.0, 0.0, true),
+        },
+        "emph" => match id {
+            "26" => ("pulse", 0.0, 0.0, false),
+            "8" => ("spin", 0.0, 0.0, false),
+            _ => ("pulse", 0.0, 0.0, true),
+        },
+        "path" => {
+            let path = effect.descend("animMotion")?.attr("path");
+            let numbers: Vec<f32> = path
+                .split(|c: char| c.is_whitespace() || c == ',')
+                .filter_map(|t| t.parse::<f32>().ok())
+                .filter(|v| v.is_finite())
+                .collect();
+            let [.., x, y] = numbers.as_slice() else {
+                return None;
+            };
+            // Only straight paths are exact; curves keep their end point.
+            let straight = !path.contains('C') && numbers.len() <= 4;
+            (
+                "move",
+                (x * size.0).clamp(-100000.0, 100000.0),
+                (y * size.1).clamp(-100000.0, 100000.0),
+                !straight,
+            )
+        }
+        _ => return None,
+    })
+}
+/// Object animations of a slide's `p:timing` main sequence mapped onto its elements. Start
+/// times are rebuilt from the group/sub-group/effect delays, so with/after-previous chains keep
+/// their timing. Returns the number of effects that were approximated or skipped.
+fn read_timing(
+    timing: &Node,
+    shape_ids: &BTreeMap<String, usize>,
+    slide: &mut Slide,
+    size: (f32, f32),
+) -> usize {
+    let mut all = Vec::new();
+    timing.all("cTn", &mut all);
+    let total = all
+        .iter()
+        .filter(|n| !n.attr("presetClass").is_empty())
+        .count();
+    let Some(main) = all.into_iter().find(|n| n.attr("nodeType") == "mainSeq") else {
+        return total;
+    };
+    let mut inexact = 0_usize;
+    let mut used = 0_usize;
+    let mut order = 0_u32;
+    let (mut previous_start, mut previous_end) = (0.0_f32, 0.0_f32);
+    let groups = main
+        .child("childTnLst")
+        .map_or(&[][..], |n| &n.children[..]);
+    for (group_index, group) in groups.iter().enumerate() {
+        let Some(group) = group.child("cTn") else {
+            continue;
+        };
+        let auto = group_index == 0
+            && group
+                .child("stCondLst")
+                .is_some_and(|n| n.children.iter().any(|c| c.attr("evt") == "onBegin"));
+        let mut effects = Vec::new();
+        timed_effects(group, 0.0, &mut effects);
+        // Times are in seconds from the click (or slide start) that began this group.
+        for (position, (start_ms, effect)) in effects.into_iter().enumerate() {
+            used += 1;
+            let start = start_ms / 1000.0;
+            let index = effect
+                .descend("spTgt")
+                .and_then(|n| shape_ids.get(n.attr("spid")))
+                .copied();
+            let Some(element) = index.and_then(|i| slide.elements.get_mut(i)) else {
+                inexact += 1;
+                continue;
+            };
+            let Some((kind, dx, dy, approximate)) = preset_effect(effect, size) else {
+                inexact += 1;
+                continue;
+            };
+            if element.more_animations.len() >= 32 {
+                inexact += 1;
+                continue;
+            }
+            inexact += usize::from(approximate);
+            let mut behaviours = Vec::new();
+            if let Some(children) = effect.child("childTnLst") {
+                children.all("cTn", &mut behaviours);
+            }
+            let longest = behaviours
+                .iter()
+                .map(|n| {
+                    let duration = n.number("dur", 0.0);
+                    // Auto-reversed behaviours (pulse) run twice.
+                    if n.attr("autoRev") == "1" {
+                        duration * 2.0
+                    } else {
+                        duration
+                    }
+                })
+                .filter(|ms| *ms > 1.0)
+                .fold(0.0_f32, f32::max);
+            // "Appear" and other instant effects.
+            let duration = if longest > 0.0 {
+                (longest / 1000.0).clamp(0.01, 3600.0)
+            } else {
+                0.01
+            };
+            let (trigger, delay) = if position == 0 && !auto {
+                ("on_click", start)
+            } else if position == 0 {
+                ("with_previous", start)
+            } else if effect.attr("nodeType") == "afterEffect" && start + 0.0005 >= previous_end {
+                ("after_previous", start - previous_end)
+            } else {
+                if start + 0.0005 < previous_start {
+                    // Starts before the previous step: TrineDocs steps cannot run backwards.
+                    inexact += 1;
+                }
+                ("with_previous", start - previous_start)
+            };
+            let delay = delay.clamp(0.0, 86400.0);
+            let start = match trigger {
+                "after_previous" => previous_end + delay,
+                _ if position == 0 => delay,
+                _ => previous_start + delay,
+            };
+            previous_start = start;
+            previous_end = start + duration;
+            order += 1;
+            let animation = super::model::Animation {
+                effect: kind.into(),
+                trigger: trigger.into(),
+                delay,
+                duration,
+                order,
+                dx,
+                dy,
+            };
+            if element.is_animated() {
+                element.more_animations.push(animation);
+            } else {
+                element.animation = animation;
+            }
+        }
+    }
+    // Interactive sequences (object triggers) and other effects outside the main sequence.
+    inexact + total.saturating_sub(used)
 }
 fn part_hash(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf29ce484222325_u64, |hash, b| {
@@ -1337,18 +1458,31 @@ fn theme_xml(deck: &Deck) -> String {
 fn milliseconds(seconds: f32) -> u64 {
     (f64::from(seconds.max(0.0)) * 1000.0).round() as u64
 }
-/// PowerPoint entrance effect for one animated object (shape ID `spid`).
-fn effect_xml(next: &mut u32, e: &Element, spid: usize, node_type: &str, delay: u64) -> String {
+/// PowerPoint effect for one animation step of an object (shape ID `spid`); `size` is the
+/// slide size in points for motion paths.
+fn effect_xml(
+    next: &mut u32,
+    a: &Animation,
+    spid: usize,
+    node_type: &str,
+    delay: u64,
+    size: (f32, f32),
+) -> String {
     let mut id = || {
         *next += 1;
         *next
     };
-    let (outer, set) = (id(), id());
-    let duration = milliseconds(e.animation.duration).max(1);
+    let outer = id();
+    let duration = milliseconds(a.duration).max(1);
     let target = format!("<p:tgtEl><p:spTgt spid=\"{spid}\"/></p:tgtEl>");
-    let fade = |id: u32| {
+    let visibility = |id: u32, at: u64, value: &str| {
         format!(
-            "<p:animEffect transition=\"in\" filter=\"fade\"><p:cBhvr><p:cTn id=\"{id}\" dur=\"{duration}\"/>{target}</p:cBhvr></p:animEffect>"
+            "<p:set><p:cBhvr><p:cTn id=\"{id}\" dur=\"1\" fill=\"hold\"><p:stCondLst><p:cond delay=\"{at}\"/></p:stCondLst></p:cTn>{target}<p:attrNameLst><p:attrName>style.visibility</p:attrName></p:attrNameLst></p:cBhvr><p:to><p:strVal val=\"{value}\"/></p:to></p:set>"
+        )
+    };
+    let fade = |id: u32, direction: &str| {
+        format!(
+            "<p:animEffect transition=\"{direction}\" filter=\"fade\"><p:cBhvr><p:cTn id=\"{id}\" dur=\"{duration}\"/>{target}</p:cBhvr></p:animEffect>"
         )
     };
     let anim = |id: u32, attribute: &str, from: &str, to: &str| {
@@ -1356,29 +1490,101 @@ fn effect_xml(next: &mut u32, e: &Element, spid: usize, node_type: &str, delay: 
             "<p:anim calcmode=\"lin\" valueType=\"num\"><p:cBhvr additive=\"base\"><p:cTn id=\"{id}\" dur=\"{duration}\" fill=\"hold\"/>{target}<p:attrNameLst><p:attrName>{attribute}</p:attrName></p:attrNameLst></p:cBhvr><p:tavLst><p:tav tm=\"0\"><p:val><p:strVal val=\"{from}\"/></p:val></p:tav><p:tav tm=\"100000\"><p:val><p:strVal val=\"{to}\"/></p:val></p:tav></p:tavLst></p:anim>"
         )
     };
-    let (preset, subtype, behaviours) = match e.animation.effect.as_str() {
+    let hide_at = duration.saturating_sub(1);
+    let (class, preset, subtype, behaviours) = match a.effect.as_str() {
         "fly_in" => (
+            "entr",
             2,
             2,
-            anim(id(), "ppt_x", "1+#ppt_w/2", "#ppt_x") + &anim(id(), "ppt_y", "#ppt_y", "#ppt_y"),
+            visibility(id(), 0, "visible")
+                + &anim(id(), "ppt_x", "1+#ppt_w/2", "#ppt_x")
+                + &anim(id(), "ppt_y", "#ppt_y", "#ppt_y"),
         ),
         "zoom" => (
+            "entr",
             53,
             16,
-            anim(id(), "ppt_w", "0", "#ppt_w") + &anim(id(), "ppt_h", "0", "#ppt_h") + &fade(id()),
+            visibility(id(), 0, "visible")
+                + &anim(id(), "ppt_w", "0", "#ppt_w")
+                + &anim(id(), "ppt_h", "0", "#ppt_h")
+                + &fade(id(), "in"),
         ),
-        _ => (10, 0, fade(id())),
+        "fade_out" => (
+            "exit",
+            10,
+            0,
+            fade(id(), "out") + &visibility(id(), hide_at, "hidden"),
+        ),
+        "fly_out" => (
+            "exit",
+            2,
+            2,
+            anim(id(), "ppt_x", "#ppt_x", "1+#ppt_w/2")
+                + &anim(id(), "ppt_y", "#ppt_y", "#ppt_y")
+                + &visibility(id(), hide_at, "hidden"),
+        ),
+        "zoom_out" => (
+            "exit",
+            53,
+            16,
+            anim(id(), "ppt_w", "#ppt_w", "0")
+                + &anim(id(), "ppt_h", "#ppt_h", "0")
+                + &fade(id(), "out")
+                + &visibility(id(), hide_at, "hidden"),
+        ),
+        "pulse" => {
+            let half = (duration / 2).max(1);
+            let scale = id();
+            (
+                "emph",
+                26,
+                0,
+                format!(
+                    "<p:animScale><p:cBhvr><p:cTn id=\"{scale}\" dur=\"{half}\" autoRev=\"1\" fill=\"hold\"/>{target}</p:cBhvr><p:by x=\"115000\" y=\"115000\"/></p:animScale>"
+                ),
+            )
+        }
+        "spin" => {
+            let rotate = id();
+            (
+                "emph",
+                8,
+                0,
+                format!(
+                    "<p:animRot by=\"21600000\"><p:cBhvr><p:cTn id=\"{rotate}\" dur=\"{duration}\" fill=\"hold\"/>{target}<p:attrNameLst><p:attrName>r</p:attrName></p:attrNameLst></p:cBhvr></p:animRot>"
+                ),
+            )
+        }
+        "move" => {
+            let motion = id();
+            let x = a.dx / size.0.max(1.0);
+            let y = a.dy / size.1.max(1.0);
+            (
+                "path",
+                0,
+                0,
+                format!(
+                    "<p:animMotion origin=\"layout\" path=\"M 0 0 L {x:.5} {y:.5} E\" pathEditMode=\"relative\" ptsTypes=\"\"><p:cBhvr><p:cTn id=\"{motion}\" dur=\"{duration}\" fill=\"hold\"/>{target}<p:attrNameLst><p:attrName>ppt_x</p:attrName><p:attrName>ppt_y</p:attrName></p:attrNameLst></p:cBhvr></p:animMotion>"
+                ),
+            )
+        }
+        _ => (
+            "entr",
+            10,
+            0,
+            visibility(id(), 0, "visible") + &fade(id(), "in"),
+        ),
     };
     format!(
-        "<p:par><p:cTn id=\"{outer}\" presetID=\"{preset}\" presetClass=\"entr\" presetSubtype=\"{subtype}\" fill=\"hold\" grpId=\"0\" nodeType=\"{node_type}\"><p:stCondLst><p:cond delay=\"{delay}\"/></p:stCondLst><p:childTnLst><p:set><p:cBhvr><p:cTn id=\"{set}\" dur=\"1\" fill=\"hold\"><p:stCondLst><p:cond delay=\"0\"/></p:stCondLst></p:cTn>{target}<p:attrNameLst><p:attrName>style.visibility</p:attrName></p:attrNameLst></p:cBhvr><p:to><p:strVal val=\"visible\"/></p:to></p:set>{behaviours}</p:childTnLst></p:cTn></p:par>"
+        "<p:par><p:cTn id=\"{outer}\" presetID=\"{preset}\" presetClass=\"{class}\" presetSubtype=\"{subtype}\" fill=\"hold\" grpId=\"0\" nodeType=\"{node_type}\"><p:stCondLst><p:cond delay=\"{delay}\"/></p:stCondLst><p:childTnLst>{behaviours}</p:childTnLst></p:cTn></p:par>"
     )
 }
 /// `p:timing` main sequence for the slide's object animations, or an empty string. Shape IDs
 /// follow `write_pptx` (element index + 2); timing mirrors the TrineDocs show: a click group per
-/// on-click step, an after-previous step opens a sub-group at the previous object's end.
-fn timing_xml(slide: &Slide) -> String {
+/// on-click step, an after-previous step opens a sub-group at the previous step's end.
+fn timing_xml(slide: &Slide, size: (f32, f32)) -> String {
     struct Step<'a> {
-        element: &'a Element,
+        animation: &'a Animation,
         spid: usize,
         node_type: &'static str,
         delay: u64,
@@ -1386,13 +1592,17 @@ fn timing_xml(slide: &Slide) -> String {
     // Click groups → sub-groups (start offset in ms) → effects.
     let mut groups: Vec<(bool, Vec<(u64, Vec<Step<'_>>)>)> = Vec::new();
     let (mut previous_start, mut previous_end) = (0.0_f32, 0.0_f32);
-    for index in slide.animation_sequence() {
-        let Some(element) = slide.elements.get(index) else {
+    for (index, slot) in slide.animation_steps() {
+        let Some(animation) = slide
+            .elements
+            .get(index)
+            .and_then(|e| e.animation_slot(slot))
+        else {
             continue;
         };
-        let delay = element.animation.delay.max(0.0);
+        let delay = animation.delay.max(0.0);
         let spid = index + 2;
-        let trigger = element.animation.trigger.as_str();
+        let trigger = animation.trigger.as_str();
         // Times are relative to the start of the current click group, as in the show.
         let start = if trigger == "on_click" || groups.is_empty() {
             let node_type = match trigger {
@@ -1401,7 +1611,7 @@ fn timing_xml(slide: &Slide) -> String {
                 _ => "withEffect",
             };
             let step = Step {
-                element,
+                animation,
                 spid,
                 node_type,
                 delay: milliseconds(delay),
@@ -1410,7 +1620,7 @@ fn timing_xml(slide: &Slide) -> String {
             delay
         } else if trigger == "after_previous" {
             let step = Step {
-                element,
+                animation,
                 spid,
                 node_type: "afterEffect",
                 delay: milliseconds(delay),
@@ -1425,7 +1635,7 @@ fn timing_xml(slide: &Slide) -> String {
                 && let Some((offset, steps)) = subs.last_mut()
             {
                 steps.push(Step {
-                    element,
+                    animation,
                     spid,
                     node_type: "withEffect",
                     delay: milliseconds(start).saturating_sub(*offset),
@@ -1434,7 +1644,7 @@ fn timing_xml(slide: &Slide) -> String {
             start
         };
         previous_start = start;
-        previous_end = start + element.animation.duration;
+        previous_end = start + animation.duration;
     }
     if groups.is_empty() {
         return String::new();
@@ -1455,7 +1665,7 @@ fn timing_xml(slide: &Slide) -> String {
             let sub_id = next;
             let effects: String = steps
                 .iter()
-                .map(|s| effect_xml(&mut next, s.element, s.spid, s.node_type, s.delay))
+                .map(|s| effect_xml(&mut next, s.animation, s.spid, s.node_type, s.delay, size))
                 .collect();
             inner.push_str(&format!("<p:par><p:cTn id=\"{sub_id}\" fill=\"hold\"><p:stCondLst><p:cond delay=\"{offset}\"/></p:stCondLst><p:childTnLst>{effects}</p:childTnLst></p:cTn></p:par>"));
         }
@@ -1574,7 +1784,7 @@ fn write_pptx(deck: &Deck) -> Result<Vec<u8>, String> {
                 "<p:cSld name=\"{}\"><p:bg><p:bgPr><a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill><a:effectLst/></p:bgPr></p:bg><p:spTree>{GROUP}{shapes}</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>{transition}{}",
                 xml_escape(&slide.title),
                 hex(slide.background),
-                timing_xml(slide)
+                timing_xml(slide, (deck.width, deck.height))
             ),
         );
         parts.push((format!("ppt/slides/slide{number}.xml"), xml.into_bytes()));
@@ -1754,45 +1964,165 @@ mod tests {
                 .slide_mut(slide)
                 .and_then(|s| s.element_mut(id))
                 .ok_or("element")?;
-            e.animation = super::super::model::Animation {
+            e.animation = Animation {
                 effect: effect.into(),
                 trigger: trigger.into(),
                 delay: 0.25,
                 duration: 0.75,
                 order,
+                ..Animation::default()
             };
         }
+        // Emphasis, motion and exit steps after the entrances, on the same objects.
+        let step = |effect: &str, trigger: &str, order: u32| Animation {
+            effect: effect.into(),
+            trigger: trigger.into(),
+            delay: 0.25,
+            duration: 0.75,
+            order,
+            ..Animation::default()
+        };
+        let first = deck
+            .slide_mut(slide)
+            .and_then(|s| s.element_mut(ids[0]))
+            .ok_or("element")?;
+        first.more_animations = vec![
+            step("spin", "after_previous", 4),
+            Animation {
+                dx: 100.0,
+                dy: -50.0,
+                ..step("move", "with_previous", 5)
+            },
+            step("fade_out", "on_click", 6),
+        ];
+        deck.slide_mut(slide)
+            .and_then(|s| s.element_mut(ids[1]))
+            .ok_or("element")?
+            .more_animations = vec![step("pulse", "after_previous", 7)];
         let parts = read_zip(&write(&deck, "pptx")?)?;
         let xml = String::from_utf8(parts.get("ppt/slides/slide1.xml").cloned().ok_or("slide")?)
             .map_err(|e| e.to_string())?;
         assert!(xml.contains("<p:timing>") && xml.contains("nodeType=\"mainSeq\""));
         assert!(xml.contains("presetID=\"2\"") && xml.contains("presetID=\"53\""));
+        for class in ["entr", "emph", "path", "exit"] {
+            assert!(xml.contains(&format!("presetClass=\"{class}\"")), "{class}");
+        }
+        assert!(xml.contains("<p:animRot by=\"21600000\">") && xml.contains("<p:animScale>"));
         assert!(xml.find("<p:spTgt spid=\"4\"/>") < xml.find("<p:spTgt spid=\"2\"/>"));
         parse(xml.as_bytes())?;
         let again = without_native(&deck)?;
         let slide = &again.slides[0];
-        assert_eq!(slide.animation_sequence(), vec![2, 0, 1]);
-        let animations: Vec<(&str, &str)> = slide
-            .elements
-            .iter()
-            .map(|e| (e.animation.effect.as_str(), e.animation.trigger.as_str()))
+        assert_eq!(slide.animation_sequence(), vec![2, 0, 1, 0, 0, 0, 1]);
+        let steps: Vec<(&str, &str)> = slide
+            .animation_steps()
+            .into_iter()
+            .filter_map(|(index, step)| slide.elements.get(index)?.animation_slot(step))
+            .map(|a| (a.effect.as_str(), a.trigger.as_str()))
             .collect();
         assert_eq!(
-            animations,
+            steps,
             vec![
+                ("fade", "with_previous"),
                 ("fly_in", "on_click"),
                 ("zoom", "after_previous"),
-                ("fade", "with_previous")
+                ("spin", "after_previous"),
+                ("move", "with_previous"),
+                ("fade_out", "on_click"),
+                ("pulse", "after_previous"),
             ]
         );
         assert!(
             slide
                 .elements
                 .iter()
-                .all(|e| (e.animation.duration - 0.75).abs() < 0.001
-                    && (e.animation.delay - 0.25).abs() < 0.001)
+                .flat_map(Element::animations)
+                .all(|(_, a)| (a.duration - 0.75).abs() < 0.001 && (a.delay - 0.25).abs() < 0.001)
         );
+        let motion = slide
+            .elements
+            .first()
+            .and_then(|e| e.animation_slot(2))
+            .ok_or("move")?;
+        assert!((motion.dx - 100.0).abs() < 0.05 && (motion.dy + 50.0).abs() < 0.05);
+        assert_eq!(slide.click_steps(), 2);
         assert!(!again.warnings.iter().any(|w| w.contains("анимации")));
+        Ok(())
+    }
+    #[test]
+    fn external_timing_rebuilds_delays_and_counts_unsupported_effects() -> Result<(), String> {
+        // A PowerPoint-style main sequence: one auto group with an effect inside a nested
+        // sub-group at 500 ms, then a click group with an unsupported "Wheel" entrance (21) and
+        // a curved motion path, plus an object-triggered interactive sequence.
+        let effect = |id: u32, class: &str, preset: u32, node: &str, delay: u32, inner: &str| {
+            format!(
+                "<p:par><p:cTn id=\"{id}\" presetID=\"{preset}\" presetClass=\"{class}\" nodeType=\"{node}\"><p:stCondLst><p:cond delay=\"{delay}\"/></p:stCondLst><p:childTnLst>{inner}</p:childTnLst></p:cTn></p:par>"
+            )
+        };
+        let target = |spid: u32| format!("<p:tgtEl><p:spTgt spid=\"{spid}\"/></p:tgtEl>");
+        let fade = format!(
+            "<p:animEffect transition=\"in\" filter=\"fade\"><p:cBhvr><p:cTn id=\"90\" dur=\"400\"/>{}</p:cBhvr></p:animEffect>",
+            target(2)
+        );
+        let wheel = format!(
+            "<p:animEffect transition=\"in\" filter=\"wheel(1)\"><p:cBhvr><p:cTn id=\"91\" dur=\"1000\"/>{}</p:cBhvr></p:animEffect>",
+            target(3)
+        );
+        let curve = format!(
+            "<p:animMotion path=\"M 0 0 C 0.1 0.1 0.2 0.1 0.25 0.5 E\"><p:cBhvr><p:cTn id=\"92\" dur=\"2000\"/>{}</p:cBhvr></p:animMotion>",
+            target(2)
+        );
+        let sub = |delay: u32, inner: String| {
+            format!(
+                "<p:par><p:cTn id=\"80\"><p:stCondLst><p:cond delay=\"{delay}\"/></p:stCondLst><p:childTnLst>{inner}</p:childTnLst></p:cTn></p:par>"
+            )
+        };
+        let auto = format!(
+            "<p:par><p:cTn id=\"3\"><p:stCondLst><p:cond delay=\"indefinite\"/><p:cond evt=\"onBegin\" delay=\"0\"><p:tn val=\"2\"/></p:cond></p:stCondLst><p:childTnLst>{}</p:childTnLst></p:cTn></p:par>",
+            sub(500, effect(4, "entr", 10, "afterEffect", 100, &fade))
+        );
+        let click = format!(
+            "<p:par><p:cTn id=\"5\"><p:stCondLst><p:cond delay=\"indefinite\"/></p:stCondLst><p:childTnLst>{}</p:childTnLst></p:cTn></p:par>",
+            sub(
+                0,
+                effect(6, "entr", 21, "clickEffect", 0, &wheel)
+                    + &effect(7, "path", 0, "withEffect", 300, &curve)
+            )
+        );
+        let interactive = format!(
+            "<p:seq><p:cTn id=\"8\" nodeType=\"interactiveSeq\"><p:childTnLst>{}</p:childTnLst></p:cTn></p:seq>",
+            effect(9, "emph", 26, "clickEffect", 0, "")
+        );
+        let xml = format!(
+            "<p:timing><p:tnLst><p:par><p:cTn id=\"1\" nodeType=\"tmRoot\"><p:childTnLst><p:seq><p:cTn id=\"2\" nodeType=\"mainSeq\"><p:childTnLst>{auto}{click}</p:childTnLst></p:cTn></p:seq>{interactive}</p:childTnLst></p:cTn></p:par></p:tnLst></p:timing>"
+        );
+        let timing = parse(xml.as_bytes())?;
+        let mut slide = Slide {
+            elements: vec![Element::default(), Element::default()],
+            ..Slide::default()
+        };
+        let shape_ids = BTreeMap::from([("2".to_string(), 0), ("3".to_string(), 1)]);
+        let inexact = read_timing(&timing, &shape_ids, &mut slide, (960.0, 540.0));
+        // Wheel → fade, curved path → straight move, interactive pulse skipped.
+        assert_eq!(inexact, 3);
+        let fade = &slide.elements[0].animation;
+        assert_eq!(
+            (fade.effect.as_str(), fade.trigger.as_str()),
+            ("fade", "with_previous")
+        );
+        assert!((fade.delay - 0.6).abs() < 0.001 && (fade.duration - 0.4).abs() < 0.001);
+        let wheel = &slide.elements[1].animation;
+        assert_eq!(
+            (wheel.effect.as_str(), wheel.trigger.as_str()),
+            ("fade", "on_click")
+        );
+        let motion = slide.elements[0].more_animations.first().ok_or("move")?;
+        assert_eq!(
+            (motion.effect.as_str(), motion.trigger.as_str()),
+            ("move", "with_previous")
+        );
+        assert!((motion.delay - 0.3).abs() < 0.001 && (motion.duration - 2.0).abs() < 0.001);
+        assert!((motion.dx - 240.0).abs() < 0.01 && (motion.dy - 270.0).abs() < 0.01);
+        assert_eq!(slide.animation_sequence(), vec![0, 1, 0]);
         Ok(())
     }
     #[test]

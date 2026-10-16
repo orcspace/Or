@@ -38,6 +38,7 @@ pub fn is_background(name: &str) -> bool {
         "slides_design_guide"
             | "slides_search_images"
             | "slides_add_image_url"
+            | "slides_paste_image"
             | "slides_generate_image"
             | "export"
     )
@@ -101,6 +102,16 @@ pub fn run(tool: &str, args: &Value, snapshot: Snapshot) -> Result<Output, Strin
                     "reminder": "Укажите автора и лицензию изображения на слайде или в заметках."}),
             })
         }
+        ("slides_paste_image", Snapshot::Slide { width, height }) => {
+            let bytes = crate::clipboard::read_image()
+                .ok_or("not_found: в буфере нет изображения; скопируйте картинку в браузере")?;
+            let aspect = background(args).then_some(width / height);
+            let (bytes, w, h) = fit_for_slide(&bytes, aspect)?;
+            Ok(Output::Insert {
+                bytes,
+                info: json!({"source": "clipboard", "pixel_width": w, "pixel_height": h}),
+            })
+        }
         ("slides_generate_image", Snapshot::Slide { width, height }) => {
             let (target_w, target_h) = if background(args) {
                 (width, height)
@@ -161,12 +172,17 @@ pub fn design_guide() -> Value {
             {"name":"Mono","background":[250,250,250],"foreground":[23,23,23],"accent":[220,38,38]},
             {"name":"Sand","background":[245,240,230],"foreground":[60,50,40],"accent":[180,120,60]}
         ],
-        "animation_effects": ["fade", "fly_in", "zoom"],
+        "animation_effects": {
+            "entrance": ["fade", "fly_in", "zoom"],
+            "emphasis": ["pulse", "spin"],
+            "motion": ["move"],
+            "exit": ["fade_out", "fly_out", "zoom_out"]
+        },
         "animation_triggers": ["on_click", "with_previous", "after_previous"],
         "transition_effects": ["fade", "push", "wipe"],
         "image_styles": ["gradient", "radial", "blobs", "waves", "grid", "noise"],
         "limitations": [
-            "Анимации объектов и переходы сохраняются в PPTX: эффекты входа Fade, Fly In (справа), Zoom; выделение, выход и пути движения не поддерживаются.",
+            "Анимации объектов и переходы сохраняются в PPTX: вход Fade, Fly In (справа), Zoom; выделение Pulse, Spin; прямой путь движения; выход Fade, Fly Out, Zoom. Прочие эффекты PowerPoint при импорте заменяются ближайшими.",
             "Экспорт PNG через инструмент export выгружает все показываемые слайды в отдельную папку.",
             "PDF статичен; PDF и PNG не сохраняют поворот объектов.",
             "Поиск и загрузка изображений требуют интернет и curl.exe Windows; поддерживаются PNG и JPEG по HTTPS."
@@ -184,7 +200,7 @@ fn curl_exe() -> std::path::PathBuf {
 
 /// Fetches an HTTPS resource with hard size/time/redirect limits. No shell is involved.
 /// Every hop is resolved here, all of its addresses must be public, and curl is pinned to the
-/// checked address (`--resolve`), so a DNS name or a redirect cannot reach the local network.
+/// checked address (`--connect-to`), so a DNS name or a redirect cannot reach the local network.
 fn fetch(url: &str, limit: usize, seconds: u32) -> Result<Vec<u8>, String> {
     let started = std::time::Instant::now();
     let mut current = url.to_string();
@@ -199,7 +215,9 @@ fn fetch(url: &str, limit: usize, seconds: u32) -> Result<Vec<u8>, String> {
         if elapsed >= seconds {
             return Err("unavailable: время загрузки истекло".into());
         }
-        let (status, location, body) = curl_once(&current, &target, pin, limit, seconds - elapsed)?;
+        let request_url = canonical_url(&current, &target);
+        let (status, location, body) =
+            curl_once(&request_url, &target, pin, limit, seconds - elapsed)?;
         if (300..400).contains(&status) && !location.is_empty() {
             current = location;
             continue;
@@ -220,12 +238,6 @@ fn curl_once(
     limit: usize,
     seconds: u32,
 ) -> Result<(u16, String, Vec<u8>), String> {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let part = std::env::temp_dir().join(format!(
-        "trinedocs-fetch-{}-{}.part",
-        std::process::id(),
-        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
     let mut command = std::process::Command::new(curl_exe());
     #[cfg(windows)]
     {
@@ -233,6 +245,12 @@ fn curl_once(
         command.creation_flags(0x0800_0000);
     }
     command.args([
+        "--disable",
+        "--globoff",
+        "--noproxy",
+        "*",
+        "--proxy",
+        "",
         "--silent",
         "--show-error",
         "--fail",
@@ -247,46 +265,87 @@ fn curl_once(
         "--user-agent",
         concat!("TrineDocs/", env!("CARGO_PKG_VERSION")),
         "--write-out",
-        "%{http_code}\n%{redirect_url}",
+        "\nTRINEDOCS_HTTP %{http_code}\n%{redirect_url}\n",
     ]);
     if let Some(ip) = pin {
-        let address = match ip {
-            std::net::IpAddr::V4(v4) => v4.to_string(),
-            std::net::IpAddr::V6(v6) => format!("[{v6}]"),
-        };
-        command
-            .arg("--resolve")
-            .arg(format!("{}:{}:{address}", target.host, target.port));
+        command.arg("--connect-to").arg(connection_pin(target, ip));
     }
-    let output = command
-        .arg("--output")
-        .arg(&part)
+    use std::io::Read;
+    let mut child = command
         .arg("--url")
         .arg(url)
         .stdin(std::process::Stdio::null())
-        .output();
-    let body = std::fs::read(&part);
-    let _ = std::fs::remove_file(&part);
-    let output = output.map_err(|e| format!("unavailable: не удалось запустить curl.exe: {e}"))?;
-    if !output.status.success() {
-        let message = String::from_utf8_lossy(&output.stderr);
-        let message: String = message.trim().chars().take(300).collect();
-        return Err(format!("unavailable: загрузка не удалась: {message}"));
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("unavailable: не удалось запустить curl.exe: {e}"))?;
+    // Old curl only checks Content-Length. Bound the pipe as well, including chunked bodies.
+    let cap = limit.saturating_add(4096);
+    let mut body = Vec::new();
+    let read = child
+        .stdout
+        .take()
+        .ok_or_else(|| "unavailable: нет канала загрузки".to_string())
+        .and_then(|out| {
+            out.take(cap as u64)
+                .read_to_end(&mut body)
+                .map_err(|e| e.to_string())
+        });
+    if read.is_err() || body.len() >= cap {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(if body.len() >= cap {
+            "too_large: ответ превышает лимит".into()
+        } else {
+            "unavailable: ответ не прочитан".into()
+        });
     }
-    let report = String::from_utf8_lossy(&output.stdout);
+    let status = child.wait().map_err(|e| format!("unavailable: {e}"))?;
+    if !status.success() {
+        return Err(format!(
+            "unavailable: загрузка curl завершилась с кодом {:?}",
+            status.code()
+        ));
+    }
+    parse_download(body, limit)
+}
+fn canonical_url(url: &str, target: &Target) -> String {
+    let rest = url.strip_prefix("https://").unwrap_or_default();
+    let tail = rest.find(['/', '?', '#']).map_or("", |at| &rest[at..]);
+    let host = if target.host.contains(':') {
+        format!("[{}]", target.host)
+    } else {
+        target.host.clone()
+    };
+    format!("https://{host}:{}{tail}", target.port)
+}
+fn connection_pin(target: &Target, ip: std::net::IpAddr) -> String {
+    let address = match ip {
+        std::net::IpAddr::V4(v4) => v4.to_string(),
+        std::net::IpAddr::V6(v6) => format!("[{v6}]"),
+    };
+    format!("{}:{}:{address}:{}", target.host, target.port, target.port)
+}
+fn parse_download(mut body: Vec<u8>, limit: usize) -> Result<(u16, String, Vec<u8>), String> {
+    const MARKER: &[u8] = b"\nTRINEDOCS_HTTP ";
+    let at = body
+        .windows(MARKER.len())
+        .rposition(|w| w == MARKER)
+        .ok_or("unavailable: curl не вернул код ответа")?;
+    let report = std::str::from_utf8(&body[at + MARKER.len()..])
+        .map_err(|_| "unavailable: некорректный ответ curl")?;
     let mut lines = report.lines();
     let status = lines
         .next()
-        .and_then(|code| code.trim().parse::<u16>().ok())
-        .ok_or("unavailable: curl не вернул код ответа")?;
-    let location = lines.next().unwrap_or_default().trim().to_string();
-    let body = if (300..400).contains(&status) {
-        Vec::new()
-    } else {
-        body.map_err(|e| format!("unavailable: ответ не прочитан: {e}"))?
-    };
-    if body.len() > limit {
+        .and_then(|code| code.parse::<u16>().ok())
+        .ok_or("unavailable: некорректный код ответа")?;
+    let location = lines.next().unwrap_or_default().trim().to_owned();
+    if location.len() > 2048 || at > limit {
         return Err("too_large: ответ превышает лимит".into());
+    }
+    body.truncate(at);
+    if (300..400).contains(&status) {
+        body.clear();
     }
     Ok((status, location, body))
 }
@@ -346,7 +405,10 @@ fn is_public(ip: std::net::IpAddr) -> bool {
                 || first & 0xfe00 == 0xfc00
                 || first & 0xffc0 == 0xfe80
                 || (first == 0x2001 && ip.segments()[1] == 0x0db8)
-                || (first == 0x0064 && ip.segments()[1] == 0xff9b))
+                || first & 0xe000 != 0x2000
+                || (first == 0x2001 && ip.segments()[1] < 0x0200)
+                || first == 0x2002
+                || (first == 0x3fff && ip.segments()[1] < 0x1000))
         }
     }
 }
@@ -372,7 +434,15 @@ fn target(url: &str) -> Result<Target, String> {
             let (host, tail) = bracketed
                 .split_once(']')
                 .ok_or("invalid_args: недопустимый url")?;
-            (host, tail.strip_prefix(':'))
+            let port = if tail.is_empty() {
+                None
+            } else {
+                Some(
+                    tail.strip_prefix(':')
+                        .ok_or("invalid_args: недопустимый url")?,
+                )
+            };
+            (host, port)
         }
         None => match authority.split_once(':') {
             Some((host, port)) => (host, Some(port)),
@@ -389,6 +459,13 @@ fn target(url: &str) -> Result<Target, String> {
         None => 443,
     };
     let ip = host.parse::<std::net::IpAddr>().ok();
+    if ip.is_none()
+        && !host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+    {
+        return Err("invalid_args: некорректное имя хоста; используйте ASCII/punycode".into());
+    }
     let private = host.is_empty()
         || host == "localhost"
         || host.ends_with(".localhost")
@@ -433,7 +510,7 @@ pub fn search_images(query: &str, count: u64) -> Result<Value, String> {
         return Err("invalid_args: query от 1 до 200 символов".into());
     }
     let url = format!(
-        "https://api.openverse.org/v1/images/?q={}&page_size={count}&extension=jpg,png&mature=false",
+        "https://api.openverse.org/v1/images/?q={}&page_size={count}&extension=jpg,png&mature=false&license=by,by-sa,cc0,pdm",
         encode_query(query)
     );
     let body = fetch(&url, MAX_SEARCH_RESPONSE, 25)?;
@@ -864,7 +941,8 @@ pub fn export(document: &Document, title: &str, format: &str) -> Result<Value, S
         return export_slide_pictures(deck, &path);
     }
     let bytes = crate::native::export(document, &format)?;
-    crate::util::atomic_write(&path, &bytes, false)?;
+    crate::util::atomic_write_new(&path, &bytes)
+        .map_err(|e| format!("Не удалось создать экспорт без перезаписи: {e}"))?;
     let mut warnings = match document {
         Document::Slides(deck) => deck.export_warnings(),
         _ => Vec::new(),
@@ -886,22 +964,12 @@ fn export_slide_pictures(
     deck: &crate::slides::model::Deck,
     dir: &std::path::Path,
 ) -> Result<Value, String> {
-    deck.validate()?;
-    let shown: Vec<(usize, &crate::slides::model::Slide)> = deck
-        .slides
-        .iter()
-        .enumerate()
-        .filter(|(_, slide)| !slide.hidden)
-        .collect();
-    if shown.is_empty() {
-        return Err("invalid_args: в презентации нет показываемых слайдов".into());
-    }
+    let pictures = crate::native::slide_pictures(deck).map_err(|e| format!("invalid_args: {e}"))?;
     std::fs::create_dir(dir).map_err(|e| format!("Не удалось создать папку экспорта: {e}"))?;
     let mut files = Vec::new();
     let mut total = 0_usize;
-    for (index, slide) in shown {
-        let bytes = crate::png::write(&deck.page(slide), 2.0)?;
-        let path = dir.join(format!("Слайд {:02}.png", index + 1));
+    for (number, bytes) in pictures {
+        let path = dir.join(format!("Слайд {number:02}.png"));
         crate::util::atomic_write(&path, &bytes, false)?;
         total += bytes.len();
         files.push(path.to_string_lossy().into_owned());
@@ -927,6 +995,44 @@ fn export_slide_pictures(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn downloads_parse_binary_and_reject_oversized_bodies() -> Result<(), String> {
+        let payload = b"\0\xff\nTRINEDOCS_HTTP 404\nembedded";
+        let mut wire = payload.to_vec();
+        wire.extend_from_slice(b"\nTRINEDOCS_HTTP 200\n\n");
+        let (status, location, body) = parse_download(wire.clone(), payload.len())?;
+        assert_eq!(status, 200);
+        assert!(location.is_empty());
+        assert_eq!(body, payload);
+        assert!(parse_download(wire, payload.len() - 1).is_err());
+        let (status, location, body) = parse_download(
+            b"redirect\nTRINEDOCS_HTTP 302\nhttps://example.com/a.png\n".to_vec(),
+            1024,
+        )?;
+        assert_eq!(status, 302);
+        assert_eq!(location, "https://example.com/a.png");
+        assert!(body.is_empty());
+        Ok(())
+    }
+    #[test]
+    fn checked_host_is_the_host_pinned_in_curl() -> Result<(), String> {
+        let target = target("https://Example.com.:8443/a.png?q=1")?;
+        assert_eq!(
+            canonical_url("https://Example.com.:8443/a.png?q=1", &target),
+            "https://example.com:8443/a.png?q=1"
+        );
+        let ipv6 = "2606:4700::1111".parse().map_err(|e| format!("{e}"))?;
+        assert_eq!(
+            connection_pin(&target, ipv6),
+            "example.com:8443:[2606:4700::1111]:8443"
+        );
+        assert!(check_url("https://[2606:4700::1111]unexpected/a.png").is_err());
+        assert!(check_url("https://example.com%2f.local/a.png").is_err());
+        assert!(is_background("slides_paste_image"));
+        assert!(!super::super::workspace::batchable("slides_paste_image"));
+        Ok(())
+    }
 
     #[test]
     fn generated_images_are_deterministic_and_fit_the_insert_limit() -> Result<(), String> {

@@ -81,12 +81,7 @@ impl Presentation {
     fn click_steps(deck: &Deck, index: usize) -> usize {
         deck.slides
             .get(index)
-            .map(|s| {
-                s.elements
-                    .iter()
-                    .filter(|e| e.animation.effect != "none" && e.animation.trigger == "on_click")
-                    .count()
-            })
+            .map(super::model::Slide::click_steps)
             .unwrap_or(0)
     }
     fn finish(&mut self) {

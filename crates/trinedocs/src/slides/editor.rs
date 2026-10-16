@@ -1,4 +1,4 @@
-use super::model::{Deck, Element, ElementKind, Slide, Theme};
+use super::model::{Animation, Deck, Element, ElementKind, Slide, Theme};
 use super::present::Presentation;
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 
@@ -1562,6 +1562,12 @@ fn effect_label(effect: &str) -> &str {
         "wipe" => "Открывание",
         "fly_in" => "Вылет",
         "zoom" => "Масштаб",
+        "pulse" => "Пульсация",
+        "spin" => "Вращение",
+        "move" => "Перемещение",
+        "fade_out" => "Исчезновение",
+        "fly_out" => "Вылет за край",
+        "zoom_out" => "Уменьшение",
         _ => effect,
     }
 }
@@ -1841,57 +1847,128 @@ fn properties(ui: &mut egui::Ui, e: &mut Element) -> bool {
         .id_salt(("object-animation", e.id))
         .default_open(false)
         .show(ui, |ui| {
-            egui::ComboBox::from_id_salt("animation_effect")
-                .selected_text(effect_label(&e.animation.effect))
-                .show_ui(ui, |ui| {
-                    for effect in ["none", "fade", "fly_in", "zoom"] {
-                        changed |= ui
-                            .selectable_value(
-                                &mut e.animation.effect,
-                                effect.into(),
-                                effect_label(effect),
-                            )
-                            .changed();
-                    }
+            let (step_changed, _) = animation_controls(ui, &mut e.animation, 0);
+            changed |= step_changed;
+            let mut remove = None;
+            for (index, animation) in e.more_animations.iter_mut().enumerate() {
+                ui.separator();
+                let (step_changed, removed) = animation_controls(ui, animation, index + 1);
+                changed |= step_changed;
+                if removed {
+                    remove = Some(index);
+                }
+            }
+            if let Some(index) = remove {
+                e.more_animations.remove(index);
+                changed = true;
+            }
+            if e.is_animated()
+                && e.more_animations.len() < 32
+                && ui
+                    .button("+ шаг")
+                    .on_hover_text("Ещё один эффект объекта: выделение, путь или выход")
+                    .clicked()
+            {
+                let order = e
+                    .animations()
+                    .map(|(_, a)| a.order)
+                    .max()
+                    .unwrap_or(0)
+                    .saturating_add(1);
+                e.more_animations.push(Animation {
+                    effect: "fade_out".into(),
+                    trigger: "on_click".into(),
+                    order,
+                    ..Animation::default()
                 });
-            egui::ComboBox::from_id_salt("animation_trigger")
-                .selected_text(trigger_label(&e.animation.trigger))
-                .show_ui(ui, |ui| {
-                    for trigger in ["with_previous", "after_previous", "on_click"] {
-                        changed |= ui
-                            .selectable_value(
-                                &mut e.animation.trigger,
-                                trigger.into(),
-                                trigger_label(trigger),
-                            )
-                            .changed();
-                    }
-                });
-            changed |= ui
-                .add(
-                    egui::DragValue::new(&mut e.animation.duration)
-                        .range(0.05..=30.0)
-                        .prefix("Длительность "),
-                )
-                .changed();
-            changed |= ui
-                .add(
-                    egui::DragValue::new(&mut e.animation.delay)
-                        .range(0.0..=60.0)
-                        .prefix("Задержка "),
-                )
-                .changed();
-            changed |= ui
-                .add(
-                    egui::DragValue::new(&mut e.animation.order)
-                        .range(0..=999)
-                        .prefix("Порядок "),
-                )
-                .on_hover_text("0 — по порядку слоёв, раньше пронумерованных шагов")
-                .changed();
+                changed = true;
+            }
         });
 
     changed
+}
+/// Controls of one animation step; returns (changed, remove requested).
+fn animation_controls(ui: &mut egui::Ui, a: &mut Animation, slot: usize) -> (bool, bool) {
+    let mut changed = false;
+    let mut remove = false;
+    ui.push_id(("animation-step", slot), |ui| {
+        ui.horizontal(|ui| {
+            ui.label(format!("Шаг {}", slot + 1));
+            if slot > 0 && ui.small_button("Удалить").clicked() {
+                remove = true;
+            }
+        });
+        egui::ComboBox::from_id_salt("animation_effect")
+            .selected_text(effect_label(&a.effect))
+            .show_ui(ui, |ui| {
+                let groups: [(&str, &[&str]); 4] = [
+                    ("", &["none"]),
+                    ("Вход", &super::model::ENTRANCE_EFFECTS),
+                    ("Выделение и путь", &super::model::EMPHASIS_EFFECTS),
+                    ("Выход", &super::model::EXIT_EFFECTS),
+                ];
+                for (title, effects) in groups {
+                    if !title.is_empty() {
+                        ui.label(egui::RichText::new(title).weak());
+                    }
+                    for effect in effects {
+                        changed |= ui
+                            .selectable_value(&mut a.effect, (*effect).into(), effect_label(effect))
+                            .changed();
+                    }
+                }
+            });
+        egui::ComboBox::from_id_salt("animation_trigger")
+            .selected_text(trigger_label(&a.trigger))
+            .show_ui(ui, |ui| {
+                for trigger in ["with_previous", "after_previous", "on_click"] {
+                    changed |= ui
+                        .selectable_value(&mut a.trigger, trigger.into(), trigger_label(trigger))
+                        .changed();
+                }
+            });
+        changed |= ui
+            .add(
+                egui::DragValue::new(&mut a.duration)
+                    .range(0.05..=30.0)
+                    .prefix("Длительность "),
+            )
+            .changed();
+        changed |= ui
+            .add(
+                egui::DragValue::new(&mut a.delay)
+                    .range(0.0..=60.0)
+                    .prefix("Задержка "),
+            )
+            .changed();
+        changed |= ui
+            .add(
+                egui::DragValue::new(&mut a.order)
+                    .range(0..=999)
+                    .prefix("Порядок "),
+            )
+            .on_hover_text("0 — по порядку слоёв, раньше пронумерованных шагов")
+            .changed();
+        if a.effect == "move" {
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut a.dx)
+                            .range(-4000.0..=4000.0)
+                            .prefix("Δx "),
+                    )
+                    .changed();
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut a.dy)
+                            .range(-4000.0..=4000.0)
+                            .prefix("Δy "),
+                    )
+                    .changed();
+            });
+        }
+    });
+    (changed, remove)
 }
 fn begin_edit(state: &mut State, id: u64, cell: Option<(usize, usize)>) {
     state.edit_text = Some(id);
@@ -2526,42 +2603,45 @@ pub fn rgb(c: [u8; 3]) -> Color32 {
     Color32::from_rgb(c[0], c[1], c[2])
 }
 fn animation_start(
-    element: &Element,
+    animation: &Animation,
     click_times: &[f32],
     click: &mut usize,
     previous_start: f32,
     previous_end: f32,
 ) -> f32 {
-    match element.animation.trigger.as_str() {
+    match animation.trigger.as_str() {
         "on_click" => {
-            let start =
-                click_times.get(*click).copied().unwrap_or(f32::INFINITY) + element.animation.delay;
+            let start = click_times.get(*click).copied().unwrap_or(f32::INFINITY) + animation.delay;
             *click += 1;
             start
         }
-        "after_previous" => previous_end + element.animation.delay,
-        _ => previous_start + element.animation.delay,
+        "after_previous" => previous_end + animation.delay,
+        _ => previous_start + animation.delay,
     }
 }
-/// Start time of every animated element, indexed like `slide.elements`; steps run in
-/// `Slide::animation_sequence` order, not in layer order.
-fn animation_schedule(slide: &Slide, click_times: &[f32]) -> Vec<Option<f32>> {
-    let mut starts = vec![None; slide.elements.len()];
+/// Steps of every element as (slot, start), indexed like `slide.elements` and listed in
+/// `Slide::animation_steps` order, not in layer order.
+fn animation_schedule(slide: &Slide, click_times: &[f32]) -> Vec<Vec<(usize, f32)>> {
+    let mut starts = vec![Vec::new(); slide.elements.len()];
     let (mut previous_start, mut previous_end, mut click) = (0.0, 0.0, 0);
-    for index in slide.animation_sequence() {
-        let Some(element) = slide.elements.get(index) else {
+    for (index, slot) in slide.animation_steps() {
+        let Some(animation) = slide
+            .elements
+            .get(index)
+            .and_then(|e| e.animation_slot(slot))
+        else {
             continue;
         };
         previous_start = animation_start(
-            element,
+            animation,
             click_times,
             &mut click,
             previous_start,
             previous_end,
         );
-        previous_end = previous_start + element.animation.duration;
-        if let Some(slot) = starts.get_mut(index) {
-            *slot = Some(previous_start);
+        previous_end = previous_start + animation.duration;
+        if let Some(steps) = starts.get_mut(index) {
+            steps.push((slot, previous_start));
         }
     }
     starts
@@ -2570,8 +2650,81 @@ pub(crate) fn animation_end(slide: &Slide, click_times: &[f32]) -> f32 {
     animation_schedule(slide, click_times)
         .iter()
         .zip(&slide.elements)
-        .filter_map(|(start, e)| start.map(|start| start + e.animation.duration))
+        .flat_map(|(steps, e)| {
+            steps
+                .iter()
+                .filter_map(|(slot, start)| e.animation_slot(*slot).map(|a| start + a.duration))
+        })
         .fold(0.0_f32, f32::max)
+}
+/// The element as it looks at `time` after its animation steps; `None` while it is hidden.
+fn animated_state(
+    element: &Element,
+    steps: &[(usize, f32)],
+    time: f32,
+    slide_width: f32,
+) -> Option<(Element, f32)> {
+    let mut visible = !steps
+        .first()
+        .and_then(|(slot, _)| element.animation_slot(*slot))
+        .is_some_and(Animation::is_entrance);
+    let mut ordered: Vec<(usize, f32)> = steps.to_vec();
+    ordered.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let mut out = element.clone();
+    let (mut opacity, mut scale, mut shift) = (1.0_f32, 1.0_f32, 0.0_f32);
+    for (slot, start) in ordered {
+        let Some(animation) = element.animation_slot(slot) else {
+            continue;
+        };
+        if time < start {
+            continue;
+        }
+        let progress = motion_progress(time, start, animation.duration);
+        let ease = 1.0 - (1.0 - progress).powi(3);
+        let running = progress < 1.0;
+        match animation.effect.as_str() {
+            "fade" | "fly_in" | "zoom" => {
+                visible = true;
+                if running {
+                    opacity *= ease;
+                    match animation.effect.as_str() {
+                        "fly_in" => shift += (1.0 - ease) * slide_width,
+                        "zoom" => scale *= 0.05 + 0.95 * ease,
+                        _ => {}
+                    }
+                }
+            }
+            "fade_out" | "fly_out" | "zoom_out" => {
+                if !running {
+                    visible = false;
+                } else {
+                    opacity *= 1.0 - ease;
+                    match animation.effect.as_str() {
+                        "fly_out" => shift += ease * slide_width,
+                        "zoom_out" => scale *= 1.0 - 0.95 * ease,
+                        _ => {}
+                    }
+                }
+            }
+            "move" => {
+                out.x += animation.dx * ease;
+                out.y += animation.dy * ease;
+            }
+            "spin" if running => out.rotation += 360.0 * ease,
+            "pulse" if running => scale *= 1.0 + 0.15 * (std::f32::consts::PI * progress).sin(),
+            _ => {}
+        }
+    }
+    if !visible {
+        return None;
+    }
+    out.x += shift + out.w * (1.0 - scale) / 2.0;
+    out.y += out.h * (1.0 - scale) / 2.0;
+    out.w = (out.w * scale).max(0.001);
+    out.h = (out.h * scale).max(0.001);
+    out.font_size *= scale;
+    out.stroke_width *= scale;
+    Some((out, opacity))
 }
 pub(crate) fn motion_progress(elapsed: f32, start: f32, duration: f32) -> f32 {
     ((elapsed - start) / duration.max(0.001)).clamp(0.0, 1.0)
@@ -2590,34 +2743,16 @@ pub fn paint_slide(
     let schedule =
         animation.map(|(time, click_times)| (time, animation_schedule(slide, click_times)));
     for (index, element) in slide.elements.iter().enumerate() {
-        let mut animated;
-        let mut rendered = element;
-        let mut opacity = 1.0;
         if let Some((time, starts)) = &schedule
-            && let Some(Some(start)) = starts.get(index)
+            && let Some(steps) = starts.get(index)
+            && !steps.is_empty()
         {
-            let progress = motion_progress(*time, *start, element.animation.duration);
-            let ease = 1.0 - (1.0 - progress).powi(3);
-            match element.animation.effect.as_str() {
-                "fade" => opacity = ease,
-                "fly_in" | "zoom" => {
-                    animated = element.clone();
-                    if element.animation.effect == "fly_in" {
-                        animated.x += (1.0 - ease) * deck.width;
-                    } else {
-                        let factor = 0.05 + 0.95 * ease;
-                        animated.x += element.w * (1.0 - factor) / 2.0;
-                        animated.y += element.h * (1.0 - factor) / 2.0;
-                        animated.w *= factor;
-                        animated.h *= factor;
-                    }
-                    rendered = &animated;
-                    opacity = ease;
-                }
-                _ => {}
+            if let Some((animated, opacity)) = animated_state(element, steps, *time, deck.width) {
+                paint_element(ctx, &painter, rect.min, scale, &animated, opacity);
             }
+            continue;
         }
-        paint_element(ctx, &painter, rect.min, scale, rendered, opacity);
+        paint_element(ctx, &painter, rect.min, scale, element, 1.0);
     }
 }
 fn paint_element(
@@ -2831,6 +2966,54 @@ fn paint_element(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn entrance_move_and_exit_have_independent_click_steps() -> Result<(), String> {
+        let element = Element {
+            animation: Animation {
+                effect: "zoom".into(),
+                trigger: "on_click".into(),
+                duration: 1.0,
+                order: 1,
+                ..Animation::default()
+            },
+            more_animations: vec![
+                Animation {
+                    effect: "move".into(),
+                    trigger: "after_previous".into(),
+                    duration: 1.0,
+                    dx: 100.0,
+                    dy: -40.0,
+                    order: 2,
+                    ..Animation::default()
+                },
+                Animation {
+                    effect: "fade_out".into(),
+                    trigger: "on_click".into(),
+                    duration: 0.5,
+                    order: 3,
+                    ..Animation::default()
+                },
+            ],
+            ..Element::default()
+        };
+        let slide = Slide {
+            elements: vec![element.clone()],
+            ..Slide::default()
+        };
+        let pending = animation_schedule(&slide, &[]);
+        assert!(animated_state(&element, &pending[0], 10.0, 960.0).is_none());
+        let starts = animation_schedule(&slide, &[2.0, 5.0]);
+        assert_eq!(starts[0], vec![(0, 2.0), (1, 3.0), (2, 5.0)]);
+        let (zoom, _) = animated_state(&element, &starts[0], 2.5, 960.0).ok_or("zoom")?;
+        assert!((zoom.w / element.w - zoom.font_size / element.font_size).abs() < 0.0001);
+        let (moved, opacity) = animated_state(&element, &starts[0], 4.5, 960.0).ok_or("move")?;
+        assert_eq!((moved.x, moved.y), (element.x + 100.0, element.y - 40.0));
+        assert_eq!(opacity, 1.0);
+        assert!(animated_state(&element, &starts[0], 5.5, 960.0).is_none());
+        assert_eq!(animation_end(&slide, &[2.0, 5.0]), 5.5);
+        assert_eq!(slide.click_steps(), 2);
+        Ok(())
+    }
     #[test]
     fn review5_short_supported_animations_finish_at_their_declared_duration() {
         assert_eq!(motion_progress(0.01, 0.0, 0.01), 1.0);

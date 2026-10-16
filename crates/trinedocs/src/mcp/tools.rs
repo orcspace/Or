@@ -79,6 +79,7 @@ const ARRAY_ARGS: &[&str] = &[
     "labels",
     "operations",
     "colors",
+    "animations",
 ];
 const BOOLEAN_ARGS: &[&str] = &[
     "contents",
@@ -87,6 +88,7 @@ const BOOLEAN_ARGS: &[&str] = &[
     "case_sensitive",
     "refresh",
     "as_background",
+    "append",
 ];
 
 pub fn names() -> Vec<&'static str> {
@@ -163,6 +165,7 @@ pub fn names() -> Vec<&'static str> {
         "slides_read",
         "slides_search_images",
         "slides_add_image_url",
+        "slides_paste_image",
         "slides_generate_image",
         "slides_format_text",
         "slides_animate",
@@ -322,6 +325,9 @@ fn hint(name: &str) -> Option<&'static str> {
         "slides_set_size" => {
             "Set the slide size in points: width and height (for example 960×540 for 16:9)."
         }
+        "slides_set_animation" => {
+            "Set animation steps of element_id on slide_id. animations (array) replaces every step of the object; animation (object) replaces its first step, or with append=true adds one more step. Step: {effect, trigger on_click|with_previous|after_previous, delay, duration, order, dx, dy}. effect: entrance fade|fly_in|zoom, emphasis pulse|spin, motion move (dx/dy offset in pt), exit fade_out|fly_out|zoom_out, none. order 0 = after existing steps. Saved to PPTX timing."
+        }
         "slides_replace_all" => {
             "Replace query with replacement in all slide text, table cells and speaker notes (case_sensitive optional)."
         }
@@ -460,6 +466,11 @@ fn slides_definition(name: &'static str) -> Option<rmcp::model::Tool> {
             ),
             true,
         ),
+        "slides_paste_image" => (
+            "Insert the IMAGE currently in the system clipboard on slide_id (e.g. Copy image in a browser or an image editor). Does not read clipboard text or change the clipboard. Optional x/y/width/height in points, or as_background=true. Runs in the background, returns changed_ids. For a known web URL prefer slides_add_image_url.",
+            edit(placement.clone(), &["document_id", "slide_id"]),
+            false,
+        ),
         "slides_generate_image" => (
             "Generate abstract artwork locally (no network) and insert it on slide_id: style gradient|radial|blobs|waves|grid|noise, colors 2-6 (\"#rrggbb\" or [r,g,b], use the deck palette), seed for a repeatable result. as_background=true covers the slide and sends it to back; otherwise width/height in points (default 480×270) and optional x/y.",
             edit(
@@ -492,17 +503,19 @@ fn slides_definition(name: &'static str) -> Option<rmcp::model::Tool> {
             false,
         ),
         "slides_animate" => (
-            "Animate several objects on slide_id at once. animation {effect fade|fly_in|zoom|none, trigger on_click|with_previous|after_previous, delay, duration} is applied to element_ids; the i-th object gets delay + i*stagger seconds. Steps play in element_ids order, after animations set earlier on the slide. Saved to PPTX timing (PowerPoint entrance effects Fade, Fly In, Zoom).",
+            "Animate several objects on slide_id at once. animation {effect, trigger on_click|with_previous|after_previous, delay, duration, dx, dy} is applied to element_ids; the i-th object gets delay + i*stagger seconds. Effects: entrance fade|fly_in|zoom; emphasis pulse|spin; motion move (dx/dy offset in pt, object stays there); exit fade_out|fly_out|zoom_out; none clears. By default the objects' previous steps are replaced; append=true adds this step after them (e.g. an exit after an entrance). Steps play in element_ids order, after animations set earlier on the slide. Saved to PPTX timing as PowerPoint effects (Fade, Fly In, Zoom, Pulse, Spin, custom path, Fade/Fly Out/Zoom exit).",
             edit(
                 json!({
                     "slide_id":{"type":"integer","minimum":1},
                     "element_ids":{"type":"array","minItems":1,"maxItems":200,"items":{"type":"integer","minimum":1}},
                     "animation":{"type":"object","properties":{
-                        "effect":{"type":"string","enum":["none","fade","fly_in","zoom"]},
+                        "effect":{"type":"string","enum":["none","fade","fly_in","zoom","pulse","spin","move","fade_out","fly_out","zoom_out"]},
                         "trigger":{"type":"string","enum":["on_click","with_previous","after_previous"]},
-                        "delay":{"type":"number","minimum":0},"duration":{"type":"number","exclusiveMinimum":0,"maximum":3600}
+                        "delay":{"type":"number","minimum":0},"duration":{"type":"number","exclusiveMinimum":0,"maximum":3600},
+                        "dx":{"type":"number","minimum":-100000,"maximum":100000},"dy":{"type":"number","minimum":-100000,"maximum":100000}
                     },"additionalProperties":false},
-                    "stagger":{"type":"number","minimum":0,"maximum":60}
+                    "stagger":{"type":"number","minimum":0,"maximum":60},
+                    "append":{"type":"boolean"}
                 }),
                 &["document_id", "slide_id", "element_ids", "animation"],
             ),
@@ -945,7 +958,7 @@ fn slide_metadata(slide: &crate::slides::model::Slide) -> Value {
                 "stroke_width": element.stroke_width, "text": element.text,
                 "font_size": element.font_size, "color": element.color, "bold": element.bold,
                 "italic": element.italic, "font": element.font, "group": element.group,
-                "animation": element.animation,
+                "animation": element.animation, "more_animations": element.more_animations,
             })
         })
         .collect();
@@ -2225,9 +2238,18 @@ fn dispatch_inner(
                 || base.delay < 0.0
                 || !base.duration.is_finite()
                 || base.duration <= 0.0
+                || !base.dx.is_finite()
+                || !base.dy.is_finite()
             {
                 return Err("invalid_range: delay ≥ 0, duration > 0".into());
             }
+            if !crate::slides::model::is_animation_effect(&base.effect) {
+                return Err(format!(
+                    "invalid_args: неизвестный effect {}; допустимы none, fade, fly_in, zoom, pulse, spin, move, fade_out, fly_out, zoom_out",
+                    base.effect
+                ));
+            }
+            let append = a.get("append").and_then(Value::as_bool).unwrap_or(false);
             let stagger = a.get("stagger").and_then(Value::as_f64).unwrap_or(0.0) as f32;
             if !(0.0..=60.0).contains(&stagger) {
                 return Err("invalid_range: stagger от 0 до 60 с".into());
@@ -2236,24 +2258,42 @@ fn dispatch_inner(
             if ids.iter().any(|eid| slide.element(*eid).is_none()) {
                 return Err("Фигура не найдена".into());
             }
-            // Re-animated objects move to the end of the sequence in element_ids order.
-            for eid in &ids {
-                if let Some(e) = slide.element_mut(*eid) {
-                    e.animation.effect = "none".into();
+            if append
+                && (base.effect == "none"
+                    || ids.iter().any(|eid| {
+                        slide
+                            .element(*eid)
+                            .is_some_and(|e| e.more_animations.len() >= 32)
+                    }))
+            {
+                return Err(
+                    "invalid_args: для append нужен effect, у объекта не больше 33 шагов".into(),
+                );
+            }
+            // Without append, re-animated objects lose their old steps and move to the end of the
+            // sequence in element_ids order.
+            if !append {
+                for eid in &ids {
+                    if let Some(e) = slide.element_mut(*eid) {
+                        e.set_animations(Vec::new());
+                    }
                 }
             }
             let first = slide.next_animation_order();
             for (index, eid) in ids.iter().enumerate() {
                 let e = slide.element_mut(*eid).ok_or("Фигура не найдена")?;
-                e.animation = crate::slides::model::Animation {
+                let step = crate::slides::model::Animation {
                     delay: base.delay + stagger * index as f32,
-                    order: if base.effect == "none" {
-                        0
-                    } else {
-                        first.saturating_add(index as u32)
-                    },
+                    order: first.saturating_add(index as u32),
                     ..base.clone()
                 };
+                if append {
+                    let mut steps: Vec<_> = e.animations().map(|(_, old)| old.clone()).collect();
+                    steps.push(step);
+                    e.set_animations(steps);
+                } else {
+                    e.set_animations(vec![step]);
+                }
                 changed_ids.push(*eid);
             }
         }
@@ -2384,25 +2424,77 @@ fn dispatch_inner(
                 .transition = parse(a, "transition")?;
         }
         (Document::Slides(d), "slides_set_animation") => {
+            use crate::slides::model::Animation;
             let eid = id(a, "element_id")?;
-            let mut animation: crate::slides::model::Animation = parse(a, "animation")?;
+            let append = a.get("append").and_then(Value::as_bool).unwrap_or(false);
             let slide = d.slide_mut(id(a, "slide_id")?).ok_or("Слайд не найден")?;
-            let current = slide
+            let current: Vec<Animation> = slide
                 .element(eid)
                 .ok_or("Фигура не найдена")?
-                .animation
-                .clone();
-            // Without an explicit order a newly animated object plays after the existing steps.
-            if animation.order == 0 && animation.effect != "none" {
-                animation.order = if current.effect != "none" && current.order > 0 {
-                    current.order
-                } else if current.effect == "none" {
-                    slide.next_animation_order()
-                } else {
-                    0
-                };
+                .animations()
+                .map(|(_, step)| step.clone())
+                .collect();
+            if a.get("animations").is_some() && (a.get("animation").is_some() || append) {
+                return Err(
+                    "invalid_args: задайте animations или animation с append, не вместе".into(),
+                );
             }
-            slide.element_mut(eid).ok_or("Фигура не найдена")?.animation = animation;
+            let steps: Vec<Animation> = if a.get("animations").is_some() {
+                let list: Vec<Animation> = parse(a, "animations")?;
+                if list.len() > 33 {
+                    return Err("invalid_args: не больше 33 шагов на объект".into());
+                }
+                // Steps without order follow the slide's other animations in array order.
+                let others = {
+                    let mut copy = slide.clone();
+                    if let Some(e) = copy.element_mut(eid) {
+                        e.set_animations(Vec::new());
+                    }
+                    copy.next_animation_order()
+                };
+                list.into_iter()
+                    .enumerate()
+                    .map(|(index, mut step)| {
+                        if step.order == 0 {
+                            step.order = others.saturating_add(index as u32);
+                        }
+                        step
+                    })
+                    .collect()
+            } else {
+                let mut animation: Animation = parse(a, "animation")?;
+                // Without an explicit order a step plays after the existing ones; a replaced
+                // first step keeps its place.
+                if animation.order == 0 && animation.effect != "none" {
+                    animation.order = match current.first() {
+                        Some(first) if !append && first.order > 0 => first.order,
+                        Some(_) if !append => 0,
+                        _ => slide.next_animation_order(),
+                    };
+                }
+                let mut steps = current;
+                if append {
+                    steps.push(animation);
+                } else if let Some(first) = steps.first_mut() {
+                    *first = animation;
+                } else {
+                    steps = vec![animation];
+                }
+                steps
+            };
+            if let Some(bad) = steps
+                .iter()
+                .find(|s| !crate::slides::model::is_animation_effect(&s.effect))
+            {
+                return Err(format!("invalid_args: неизвестный effect {}", bad.effect));
+            }
+            if steps.len() > 33 {
+                return Err("invalid_args: не больше 33 шагов на объект".into());
+            }
+            slide
+                .element_mut(eid)
+                .ok_or("Фигура не найдена")?
+                .set_animations(steps);
         }
         (_, "replace_document_model") => {
             doc = parse(a, "model")?;
@@ -4432,6 +4524,7 @@ mod review04_tests {
             "slides_design_guide",
             "slides_search_images",
             "slides_add_image_url",
+            "slides_paste_image",
             "slides_generate_image",
             "slides_format_text",
             "slides_animate",
@@ -4532,6 +4625,51 @@ mod review04_tests {
         };
         // Re-animated objects play after the untouched one, in element_ids order.
         assert_eq!(deck.slides[0].animation_sequence(), vec![1, 2, 0]);
+        // append adds an exit step after the object's entrance instead of replacing it.
+        dispatch(
+            &mut tabs,
+            &mut 2,
+            "slides_animate",
+            &json!({"document_id":1,"slide_id":sid,"element_ids":[ids[1]],"append":true,"animation":{"effect":"fade_out","trigger":"on_click","duration":0.5}}),
+            "agent",
+        )?;
+        // animations replaces every step of one object; move keeps its offset.
+        dispatch(
+            &mut tabs,
+            &mut 2,
+            "slides_set_animation",
+            &json!({"document_id":1,"slide_id":sid,"element_id":ids[0],"animations":[
+                {"effect":"pulse","trigger":"on_click","duration":0.6},
+                {"effect":"move","trigger":"after_previous","duration":1.0,"dx":120,"dy":-40}
+            ]}),
+            "agent",
+        )?;
+        let Document::Slides(deck) = &tabs[0].document else {
+            return Err("deck".into());
+        };
+        let slide = &deck.slides[0];
+        assert_eq!(slide.animation_sequence(), vec![1, 2, 1, 0, 0]);
+        let middle = slide.element(ids[1]).ok_or("middle")?;
+        assert_eq!(
+            middle
+                .animations()
+                .map(|(_, a)| a.effect.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fade", "fade_out"]
+        );
+        let first = slide.element(ids[0]).ok_or("first")?;
+        assert_eq!(first.animation.effect, "pulse");
+        assert_eq!(first.more_animations.len(), 1);
+        assert_eq!(
+            (first.more_animations[0].dx, first.more_animations[0].dy),
+            (120.0, -40.0)
+        );
+        for bad in [
+            json!({"document_id":1,"slide_id":sid,"element_ids":[ids[1]],"animation":{"effect":"wobble"}}),
+            json!({"document_id":1,"slide_id":sid,"element_ids":[ids[1]],"append":true,"animation":{"effect":"none"}}),
+        ] {
+            assert!(dispatch(&mut tabs, &mut 2, "slides_animate", &bad, "agent").is_err());
+        }
         Ok(())
     }
 }

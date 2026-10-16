@@ -65,6 +65,30 @@ pub fn atomic_write(path: &Path, bytes: &[u8], backup: bool) -> Result<(), Strin
     )
 }
 
+/// Publishes complete bytes at a new name. A hard link atomically refuses an existing target;
+/// both names are on the same volume. Filesystems without hard links return an explicit error.
+pub fn atomic_write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    fs::create_dir_all(parent)?;
+    let tmp = parent.join(format!(
+        ".trinedocs-export-{}-{}.tmp",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+    let result = (|| {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        fs::hard_link(&tmp, path)
+    })();
+    let _ = fs::remove_file(&tmp);
+    result
+}
+
 fn replace_file(
     path: &Path,
     write: impl FnOnce(&mut fs::File) -> std::io::Result<()>,
@@ -123,6 +147,22 @@ pub fn decode_image(bytes: &[u8]) -> Result<image::DynamicImage, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn new_exports_cannot_overwrite_an_existing_file() -> Result<(), String> {
+        let path = std::env::temp_dir().join(format!(
+            "trinedocs-new-export-{}-{}.png",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        atomic_write_new(&path, b"original").map_err(|e| e.to_string())?;
+        let error = atomic_write_new(&path, b"replacement")
+            .err()
+            .ok_or("overwritten")?;
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&path).map_err(|e| e.to_string())?, b"original");
+        fs::remove_file(path).map_err(|e| e.to_string())?;
+        Ok(())
+    }
     #[test]
     fn unicode_decoding() {
         assert_eq!(decode_text(&[0xff, 0xfe, 0x41, 0]), "A");

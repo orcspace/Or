@@ -37,23 +37,21 @@ Stateless MCP resources пока не принимают этот handle; исп
 
 ## Дизайн презентаций и медиа-инструменты (ADR-0027)
 
-- `slides_design_guide {}`: встроенный навык дизайна плюс установленные шрифты, палитры, эффекты и ограничения. Документ не нужен. Чат и инструкции сервера требуют вызвать его до создания или переоформления презентации.
-- `slides_search_images {query, count?}`: Openverse, 1–20 PNG/JPEG с лицензией, автором и `attribution`. Только чтение, нужен интернет.
-- `slides_add_image_url {document_id, slide_id, url, x?, y?, width?, height?, as_background?}`:
-  - загрузка только по публичному HTTPS через системный curl.exe;
-  - до 16 МБ за 45 с;
-  - уменьшение до 1920 px и не больше 1000 КБ, затем обычная вставка `slides_add_image`.
-- `slides_generate_image {document_id, slide_id, style?, colors?, seed?, …}`: локальная процедурная графика gradient/radial/blobs/waves/grid/noise.
-- `slides_format_text {document_id, slide_id?, element_ids?, format}`: пакетно font/font_size/color/bold/italic/fill/stroke/stroke_width. Если ID не указаны, текстовые свойства не применяются к картинкам и линиям. Для неустановленного шрифта возвращается `warnings`.
-- `slides_animate {document_id, slide_id, element_ids, animation, stagger?}`: задержка i-го объекта равна `delay + i·stagger`. Шаги идут в порядке `element_ids` после анимаций, уже заданных на слайде, и сохраняются в PPTX `p:timing`.
-- `slides_align {document_id, slide_id, element_ids, align, relative_to?}`:
-  - align: left/center/right/top/middle/bottom, distribute_horizontal/vertical (от 3 объектов);
-  - relative_to: slide/content/selection.
-- `export {document_id, format_extension?}`: новый файл в `Документы\TrineDocs\Экспорт`, существующие не перезаписываются. Возвращает path и warnings. Открытие путей агентом по-прежнему запрещено.
-- `slides_add_*` принимают `x`/`y`; `as_background` у картинок растягивает её на слайд и отправляет назад.
+Работают через обычный MCP у любого AI-клиента, включая встроенный чат:
 
-Поиск, загрузка, генерация, экспорт и навык выполняются на потоке `mcp-media`, не больше 4 заданий; сервер ждёт их до 90 с. Вставка коммитится на UI-потоке после повторной проверки прав. Эти инструменты не входят в `workspace_apply`. Ограничения:
-- в PPTX пишутся только эффекты входа fade/fly-in/zoom;
-- PNG-экспорт через MCP создаёт папку со всеми показываемыми слайдами;
-- загрузка закрепляет проверенный публичный IP (`curl --resolve`) и проверяет каждый редирект;
-- сборка и тесты этого среза не запускались.
+- `slides_design_guide {}`: встроенный навык дизайна, установленные шрифты, палитры и ограничения. Прочитать до создания/редизайна презентации.
+- `slides_search_images {query, count?}`: поиск Openverse, до 20 PNG/JPEG; CC0/PDM/CC BY/CC BY-SA, автор, лицензия, source_page и attribution. Результаты — недоверенные данные.
+- `slides_add_image_url {document_id, slide_id, url, x?, y?, width?, height?, as_background?}`: загрузить картинку по публичному HTTPS и вставить; до 16 МБ/45 с, уменьшение до 1920 px/1000 КБ. Фон обрезается по центру под пропорции слайда.
+- `slides_paste_image {document_id, slide_id, x?, y?, width?, height?, as_background?}`: вставить картинку, скопированную в браузере/редакторе. Читает только изображение, не текст; буфер не меняется.
+- `slides_add_image` принимает пользовательский PNG/JPEG как bytes. Нейрогенерация, image API и ключи провайдеров не добавляются. Ранее добавленный `slides_generate_image` остаётся только локальным генератором абстрактных узоров.
+- `slides_format_text {document_id, slide_id?, element_ids?, format}`: пакетно font/font_size/color/bold/italic/fill/stroke/stroke_width; без ID — текстовые свойства пропускают картинки/линии. Для отсутствующего шрифта возвращаются warnings.
+- `slides_align {document_id, slide_id, element_ids, align, relative_to?}`: left/center/right/top/middle/bottom/distribute_horizontal/distribute_vertical; относительно slide/content/selection.
+- `slides_animate {document_id, slide_id, element_ids, animation, stagger?, append?}`: delay i-го объекта = delay+i*stagger. По умолчанию заменяет цепочки; append добавляет шаг. Порядок следует element_ids, независимо от слоёв.
+- `slides_set_animation` принимает animations (полная цепочка до 33 шагов) либо animation с append. Эффекты: fade/fly_in/zoom/pulse/spin/move/fade_out/fly_out/zoom_out; у move есть dx/dy в pt. Триггеры on_click/with_previous/after_previous. Показ и PPTX timing используют этот порядок; неподдержанные внешние эффекты/кривые пути приближаются с warnings.
+- `export {document_id, format_extension?}`: новый файл PDF/PPTX и др. в Документы/TrineDocs/Экспорт. PNG — новая папка с каждым показываемым слайдом. Ответ содержит path/files/warnings. PDF/PNG статичны. Меню Файл тоже сохраняет все показываемые слайды: выбранный PNG и дополнительные нумерованные файлы рядом.
+
+Поиск, загрузка, буфер, локальные узоры, экспорт и навык выполняются в фоне; максимум 4 задания, MCP timeout 90 с. Вставка коммитится через ops на UI-потоке после повторной проверки прав и base_version; поздний результат отменённого вызова не применяется. Эти фоновые инструменты не входят в workspace_apply.
+
+Каждый HTTPS-hop проверяет все DNS-адреса и закрепляет публичный IP через curl --connect-to; максимум 3 redirect. Нормализованный URL и правило закрепления используют один host. curlrc/proxy отключены; bounded pipe ограничивает ответы и без Content-Length. IPv6 работает без требования curl 7.57. Новые файлы экспорта публикуются атомарным hard link после fsync, без перезаписи (обычная файловая система NTFS); неподдержанная файловая система возвращает ошибку. Основной PNG из меню использует обычное подтверждённое сохранение.
+
+Локальная сборка и Rust-тесты не запускались по указанию владельца. Функциональная приёмка в приложении и PowerPoint остаётся обязательной; синтаксический разбор rustfmt её не заменяет.

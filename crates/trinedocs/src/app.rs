@@ -1694,7 +1694,7 @@ impl App {
                     return;
                 }
             },
-            "slides_add_image_url" | "slides_generate_image" => {
+            "slides_add_image_url" | "slides_paste_image" | "slides_generate_image" => {
                 let checked = (|| -> Result<Snapshot, String> {
                     let t = tab.ok_or("not_found: требуется document_id")?;
                     let Document::Slides(deck) = &t.document else {
@@ -1754,9 +1754,7 @@ impl App {
     fn finish_media_jobs(&mut self, ctx: &egui::Context) {
         use crate::mcp::media::Output;
         for job in std::mem::take(&mut self.media_jobs) {
-            if job.request.reply.is_closed() {
-                continue;
-            }
+            // Keep cancelled but still-running workers in the concurrency budget.
             let output = match job.result.try_recv() {
                 Ok(output) => output,
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
@@ -1768,6 +1766,9 @@ impl App {
                 }
             };
             let request = job.request;
+            if request.reply.is_closed() {
+                continue;
+            }
             let result = match output {
                 Err(error) => Err(error),
                 Ok(Output::Reply(value)) => Ok(value),
