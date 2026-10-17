@@ -2188,9 +2188,10 @@ fn find_and_charts_see_spilled_cells() -> Result<(), String> {
     let mut book = Book::default();
     let id = book.active_id();
     book.set_cell(id, 0, 0, "=SEQUENCE(3)")?;
-    let hits = book.find(id, "3", false, 10)?;
+    // "2" is not in the formula text, only in the value spilled into A2.
+    let hits = book.find(id, "2", false, 10)?;
     assert_eq!(hits.len(), 1);
-    assert_eq!((hits[0].0, hits[0].1), (2, 0));
-    assert_eq!(hits[0].3, "3");
+    assert_eq!((hits[0].0, hits[0].1), (1, 0));
+    assert_eq!(hits[0].3, "2");
     Ok(())
 }

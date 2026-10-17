@@ -3393,7 +3393,8 @@ mod tests {
                 (action == "toolbar-new-sheet").then_some(1),
             )?;
             let original = book.clone();
-            let draft = "я".repeat(16384);
+            // One character over the 32 767-character cell limit.
+            let draft = "я".repeat(32768);
             let state = frame(
                 &ctx,
                 &mut book,
