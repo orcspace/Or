@@ -1944,7 +1944,9 @@ impl App {
             let _ = self.worker.send(Job::Watch(paths));
             self.last_watch = Instant::now();
         }
-        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        // Workers and the MCP server wake the UI themselves; this tick only drives the
+        // multi-second timers above, so an idle window redraws once a second, not four times.
+        ctx.request_repaint_after(std::time::Duration::from_secs(1));
     }
     fn shortcuts(&mut self, ctx: &egui::Context) {
         if self.pending.is_some() {

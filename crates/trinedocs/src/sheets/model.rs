@@ -227,6 +227,10 @@ pub struct Sheet {
     pub hidden: bool,
     pub tab_color: Option<[u8; 3]>,
     pub filter: Option<Range>,
+    /// Values that array formulas spill into neighbouring empty cells, keyed by (row, col).
+    /// Derived by recalculation, never saved.
+    #[serde(skip)]
+    pub spill: BTreeMap<(u32, u32), Value>,
 }
 impl Default for Sheet {
     fn default() -> Self {
@@ -247,6 +251,7 @@ impl Default for Sheet {
             hidden: false,
             tab_color: None,
             filter: None,
+            spill: BTreeMap::new(),
         }
     }
 }
@@ -323,9 +328,18 @@ impl Sheet {
             (row, target)
         }
     }
+    /// The computed value shown at a cell: its own, or one spilled into it by an array formula.
+    pub fn value(&self, row: u32, col: u32) -> Option<&Value> {
+        match self.cell(row, col) {
+            Some(cell) if !cell.input.is_empty() => Some(&cell.value),
+            _ => self.spill.get(&(row, col)),
+        }
+    }
     pub fn display(&self, row: u32, col: u32, locale_ru: bool) -> String {
-        self.cell(row, col)
-            .map(|c| super::format::display(&c.value, &c.fmt.number, locale_ru))
+        let cell = self.cell(row, col);
+        let format = cell.map(|c| c.fmt.number.as_str()).unwrap_or_default();
+        self.value(row, col)
+            .map(|v| super::format::display(v, format, locale_ru))
             .unwrap_or_default()
     }
 }

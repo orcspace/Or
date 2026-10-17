@@ -181,6 +181,10 @@ pub fn decode(bytes: &[u8]) -> Result<Document, String> {
         }
     }
     env.document.validate()?;
+    if let Document::Sheets(book) = &mut env.document {
+        // Spilled array results are not stored; rebuild them like an XLSX import does.
+        book.recalculate();
+    }
     Ok(env.document)
 }
 pub fn open(path: &Path) -> Result<Document, String> {

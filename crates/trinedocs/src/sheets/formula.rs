@@ -800,7 +800,14 @@ struct Engine<'a> {
     random: u64,
     work: usize,
     materialized: usize,
+    /// Values spilled into empty cells by the previous recalculation pass.
+    spilled: HashMap<CellKey, Value>,
+    /// Array formulas whose spill area was obstructed in the previous pass.
+    blocked: HashSet<CellKey>,
+    /// Multi-cell results of formula cells evaluated in this pass, by anchor cell.
+    arrays: HashMap<CellKey, Grid>,
 }
+type CellKey = (usize, u32, u32);
 impl<'a> Engine<'a> {
     fn new(book: &'a Book) -> Self {
         let elapsed = SystemTime::now()
@@ -815,6 +822,9 @@ impl<'a> Engine<'a> {
             random: elapsed.as_nanos() as u64 | 1,
             work: 0,
             materialized: 0,
+            spilled: HashMap::new(),
+            blocked: HashSet::new(),
+            arrays: HashMap::new(),
         }
     }
     fn cell(&mut self, sheet: usize, row: u32, col: u32) -> Value {
@@ -835,9 +845,20 @@ impl<'a> Engine<'a> {
             .unwrap_or_default();
         let value = if input.starts_with('=') {
             match parse(&input).and_then(|e| self.eval(&e, sheet, row, col)) {
+                Ok(grid) if grid.values.len() > 1 => {
+                    let first = if self.blocked.contains(&key) {
+                        Value::Error("#SPILL!".into())
+                    } else {
+                        formula_result(grid.first())
+                    };
+                    self.arrays.insert(key, grid);
+                    first
+                }
                 Ok(grid) => formula_result(grid.first()),
                 Err(e) => Value::Error(e),
             }
+        } else if input.is_empty() {
+            self.spilled.get(&key).cloned().unwrap_or_default()
         } else {
             literal(&input)
         };
@@ -3805,17 +3826,83 @@ pub fn recalculate(book: &mut Book) {
                 .filter_map(move |key| parse_address(key).map(|(r, c)| (i, r, c)))
         })
         .collect();
-    let values = {
+    // Array results spill into the empty cells below and to the right of their formula. Cells
+    // that read a spilled area need the spill from the pass before, so passes repeat until the
+    // spill layout stops changing; a book without array results needs exactly one pass.
+    let mut spilled = HashMap::new();
+    let mut blocked = HashSet::new();
+    let mut values = Vec::new();
+    for _ in 0..4 {
         let mut engine = Engine::new(book);
-        keys.iter()
-            .map(|&(s, r, c)| engine.cell(s, r, c))
-            .collect::<Vec<_>>()
-    };
+        engine.spilled = std::mem::take(&mut spilled);
+        engine.blocked = std::mem::take(&mut blocked);
+        values = keys.iter().map(|&(s, r, c)| engine.cell(s, r, c)).collect();
+        let (next_spilled, next_blocked) = spill_layout(book, &engine.arrays);
+        let stable = next_spilled == engine.spilled && next_blocked == engine.blocked;
+        spilled = next_spilled;
+        blocked = next_blocked;
+        if stable {
+            break;
+        }
+    }
+    for sheet in &mut book.sheets {
+        sheet.spill.clear();
+    }
+    for ((si, r, c), value) in spilled {
+        if let Some(sheet) = book.sheets.get_mut(si) {
+            sheet.spill.insert((r, c), value);
+        }
+    }
     for ((si, r, c), value) in keys.into_iter().zip(values) {
         if let Some(cell) = book.sheets.get_mut(si).and_then(|s| s.cell_mut(r, c)) {
             cell.value = value;
         }
     }
+}
+/// Places each array result: its spill area must lie on the sheet and be free of other input
+/// and of earlier spills, otherwise the formula shows #SPILL! (as in Excel).
+fn spill_layout(
+    book: &Book,
+    arrays: &HashMap<CellKey, Grid>,
+) -> (HashMap<CellKey, Value>, HashSet<CellKey>) {
+    let mut anchors: Vec<_> = arrays.keys().copied().collect();
+    anchors.sort_unstable();
+    let mut spilled = HashMap::new();
+    let mut blocked = HashSet::new();
+    let mut total = 0usize;
+    for key in anchors {
+        let (si, row, col) = key;
+        let (Some(grid), Some(sheet)) = (arrays.get(&key), book.sheets.get(si)) else {
+            continue;
+        };
+        total = total.saturating_add(grid.values.len());
+        let fits = u64::from(row) + grid.rows as u64 <= u64::from(MAX_ROWS)
+            && u64::from(col) + grid.cols as u64 <= u64::from(MAX_COLS)
+            && grid.values.len() == grid.rows * grid.cols
+            && total <= super::model::MAX_RANGE_CELLS;
+        if !fits {
+            blocked.insert(key);
+            continue;
+        }
+        let area: Vec<_> = (0..grid.rows)
+            .flat_map(|i| (0..grid.cols).map(move |j| (i, j)))
+            .skip(1)
+            .map(|(i, j)| ((si, row + i as u32, col + j as u32), i * grid.cols + j))
+            .collect();
+        let free = area.iter().all(|&(target @ (_, r, c), _)| {
+            !spilled.contains_key(&target)
+                && sheet.cell(r, c).is_none_or(|cell| cell.input.is_empty())
+        });
+        if free {
+            for (target, index) in area {
+                let value = grid.values.get(index).cloned().unwrap_or_default();
+                spilled.insert(target, formula_result(value));
+            }
+        } else {
+            blocked.insert(key);
+        }
+    }
+    (spilled, blocked)
 }
 pub fn dependencies(input: &str) -> Vec<(Option<String>, Range)> {
     fn visit(e: &Expr, out: &mut Vec<(Option<String>, Range)>) {
