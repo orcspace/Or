@@ -7,6 +7,8 @@ type PageCells<'a> = BTreeMap<(u32, u32), Vec<(u32, u32, &'a Cell)>>;
 pub const MAX_ROWS: u32 = 1_048_576;
 pub const MAX_COLS: u32 = 16_384;
 pub const MAX_RANGE_CELLS: usize = 100_000;
+/// Excel limits a cell to 32 767 characters, not bytes: Cyrillic text takes two bytes each.
+pub const MAX_CELL_CHARS: usize = 32767;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 pub enum Value {
@@ -422,9 +424,9 @@ impl Book {
                 take(c.id)?;
                 c.fmt.validate()?;
                 if parse_address(key).is_none_or(|(r, col)| address(r, col) != *key)
-                    || c.input.len() > 32767
+                    || c.input.chars().count() > MAX_CELL_CHARS
                     || matches!(&c.value,Value::Number(n)if !n.is_finite())
-                    || matches!(&c.value,Value::Text(t)|Value::Error(t)if t.len()>32767)
+                    || matches!(&c.value,Value::Text(t)|Value::Error(t)if t.chars().count()>MAX_CELL_CHARS)
                 {
                     return Err("Недопустимая ячейка или формат".into());
                 }
@@ -642,11 +644,11 @@ impl Book {
         col: u32,
         input: &str,
     ) -> Result<u64, String> {
-        if row >= MAX_ROWS || col >= MAX_COLS || input.len() > 32767 {
+        if row >= MAX_ROWS || col >= MAX_COLS || input.chars().count() > MAX_CELL_CHARS {
             return Err("Ячейка вне пределов Excel или слишком длинный текст".into());
         }
         let normalized = super::formula::canonicalize(input);
-        if normalized.len() > 32767 {
+        if normalized.chars().count() > MAX_CELL_CHARS {
             return Err("Нормализованная формула превышает предел длины ячейки".into());
         }
         let key = address(row, col);
@@ -680,8 +682,10 @@ impl Book {
             || u64::from(row) + values.len() as u64 > u64::from(MAX_ROWS)
             || values.iter().any(|v| {
                 u64::from(col) + v.len() as u64 > u64::from(MAX_COLS)
-                    || v.iter()
-                        .any(|x| x.len() > 32767 || super::formula::canonicalize(x).len() > 32767)
+                    || v.iter().any(|x| {
+                        x.chars().count() > MAX_CELL_CHARS
+                            || super::formula::canonicalize(x).chars().count() > MAX_CELL_CHARS
+                    })
             })
         {
             return Err("Недопустимый или слишком большой диапазон".into());
@@ -834,13 +838,26 @@ impl Book {
                 found.push((r, c));
             }
         }
+        for &(r, c) in s.spill.keys() {
+            let shown = s.display(r, c, self.locale_ru);
+            if fold(&shown).contains(&needle) {
+                found.push((r, c));
+            }
+        }
         found.sort_unstable();
         Ok(found
             .into_iter()
             .take(limit)
             .filter_map(|(r, c)| {
-                s.cell(r, c)
-                    .map(|cell| (r, c, cell.input.clone(), s.display(r, c, self.locale_ru)))
+                let input = s.cell(r, c).map(|cell| cell.input.clone());
+                (input.is_some() || s.spill.contains_key(&(r, c))).then(|| {
+                    (
+                        r,
+                        c,
+                        input.unwrap_or_default(),
+                        s.display(r, c, self.locale_ru),
+                    )
+                })
             })
             .collect())
     }
@@ -861,14 +878,17 @@ impl Book {
             }
             let matches = cell.input.matches(query).count();
             let length = matches
-                .checked_mul(replacement.len())
-                .and_then(|added| (cell.input.len() - matches * query.len()).checked_add(added));
-            if length.is_none_or(|length| length > 32767) {
+                .checked_mul(replacement.chars().count())
+                .and_then(|added| {
+                    (cell.input.chars().count() - matches * query.chars().count())
+                        .checked_add(added)
+                });
+            if length.is_none_or(|length| length > MAX_CELL_CHARS) {
                 return Err("Замена превышает предел длины ячейки".into());
             }
             let input = cell.input.replace(query, replacement);
             let input = super::formula::canonicalize(&input);
-            if input.len() > 32767 {
+            if input.chars().count() > MAX_CELL_CHARS {
                 return Err("Нормализованная формула превышает предел длины ячейки".into());
             }
             if input != cell.input {

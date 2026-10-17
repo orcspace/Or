@@ -2169,3 +2169,28 @@ fn obstructed_spill_shows_spill_error_and_recovers() -> Result<(), String> {
     assert_eq!(shown(&book, 2, 0), Some(Value::Number(3.0)));
     Ok(())
 }
+
+#[test]
+fn cell_length_limit_counts_characters_not_bytes() -> Result<(), String> {
+    let mut book = Book::default();
+    let id = book.active_id();
+    let long = "я".repeat(MAX_CELL_CHARS);
+    book.set_cell(id, 0, 0, &long)?;
+    book.validate()?;
+    assert!(book.set_cell(id, 0, 1, &format!("{long}я")).is_err());
+    book.set_range(id, 1, 0, &[vec![long.clone()]])?;
+    assert_eq!(book.replace_all(id, "я", "ю")?, 2);
+    Ok(())
+}
+
+#[test]
+fn find_and_charts_see_spilled_cells() -> Result<(), String> {
+    let mut book = Book::default();
+    let id = book.active_id();
+    book.set_cell(id, 0, 0, "=SEQUENCE(3)")?;
+    let hits = book.find(id, "3", false, 10)?;
+    assert_eq!(hits.len(), 1);
+    assert_eq!((hits[0].0, hits[0].1), (2, 0));
+    assert_eq!(hits[0].3, "3");
+    Ok(())
+}

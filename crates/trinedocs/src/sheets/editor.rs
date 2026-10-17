@@ -1397,8 +1397,9 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                     .iter()
                     .find(|rule| {
                         rule.range.contains(r, c)
-                            && cell
-                                .and_then(|c| c.value.number().ok())
+                            && sheet
+                                .value(r, c)
+                                .and_then(|v| v.number().ok())
                                 .is_some_and(|n| match rule.operator.as_str() {
                                     ">" => n > rule.threshold,
                                     "<" => n < rule.threshold,
@@ -2669,8 +2670,8 @@ fn paint_chart(ui: &egui::Ui, sheet: &Sheet, chart: &super::model::Chart, rect: 
             (start..=r.r1.min(start + 199))
                 .map(|row| {
                     sheet
-                        .cell(row, c)
-                        .and_then(|c| c.value.number().ok())
+                        .value(row, c)
+                        .and_then(|v| v.number().ok())
                         .unwrap_or(0.0)
                 })
                 .collect()
@@ -2750,13 +2751,12 @@ fn paint_chart(ui: &egui::Ui, sheet: &Sheet, chart: &super::model::Chart, rect: 
                 }
                 ChartKind::Scatter => {
                     let xv = sheet
-                        .cell(start + i as u32, r.c0)
-                        .and_then(|c| c.value.number().ok())
+                        .value(start + i as u32, r.c0)
+                        .and_then(|v| v.number().ok())
                         .unwrap_or(i as f64);
                     let (xmin, xmax) = chart_bounds(
-                        (start..=r.r1.min(start + 199)).filter_map(|rr| {
-                            sheet.cell(rr, r.c0).and_then(|c| c.value.number().ok())
-                        }),
+                        (start..=r.r1.min(start + 199))
+                            .filter_map(|rr| sheet.value(rr, r.c0).and_then(|v| v.number().ok())),
                         false,
                     );
                     painter.circle_filled(
