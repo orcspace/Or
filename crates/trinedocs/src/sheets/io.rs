@@ -1291,7 +1291,7 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
                             .and_then(|v| v.parse::<f32>().ok())
                             .filter(|w| w.is_finite() && *w > 0.0)
                         {
-                            let pixels = if w < 1.0 { w * 12.0 } else { w * 7.0 + 5.0 };
+                            let pixels = if w < 1.0 { w * 7.0 } else { w * 7.0 + 5.0 };
                             s.widths.insert(c, pixels.clamp(1.0, 1800.0));
                         }
                         if xml_bool(a.get("hidden"), false) {
@@ -1942,6 +1942,32 @@ fn write_xlsx(book: &Book) -> Result<Vec<u8>, String> {
                 .set_scale_height(f64::from(model.height) / h);
             if !model.alt.is_empty() {
                 image = image.set_alt_text(&model.alt);
+            }
+            // The app's default cell is 96x26 px, Excel's is 64x20: pin the spanned
+            // cells so the two-cell anchor written for the picture reads back unchanged.
+            let spanned_cols = ((model.x_offset.max(0.0) + model.width) / 96.0).ceil() as u32 + 1;
+            let spanned_rows = ((model.y_offset.max(0.0) + model.height) / 26.0).ceil() as u32 + 1;
+            for col in model.col
+                ..model
+                    .col
+                    .saturating_add(spanned_cols)
+                    .min(super::model::MAX_COLS)
+            {
+                if !sheet.widths.contains_key(&col) && !sheet.hidden_cols.contains(&col) {
+                    ws.set_column_width_pixels(col as u16, 96)
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+            for row in model.row
+                ..model
+                    .row
+                    .saturating_add(spanned_rows)
+                    .min(super::model::MAX_ROWS)
+            {
+                if !sheet.row_heights.contains_key(&row) && !sheet.hidden_rows.contains(&row) {
+                    ws.set_row_height(row, 26.0 * 72.0 / 96.0)
+                        .map_err(|e| e.to_string())?;
+                }
             }
             ws.insert_image_with_offset(
                 model.row,

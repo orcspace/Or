@@ -1031,6 +1031,20 @@ fn dispatch_inner(
     a: &Value,
     client: &str,
 ) -> Result<Value, String> {
+    if a.is_object() && !read_only(name) {
+        if name == "replace_document_model" && a.get("base_version").is_none() {
+            return Err("invalid_args: replace_document_model требует base_version".into());
+        }
+        if let Some(t) = tabs
+            .iter()
+            .find(|t| Some(t.id) == a.get("document_id").and_then(Value::as_u64))
+            && a.get("base_version")
+                .and_then(Value::as_u64)
+                .is_some_and(|v| v != t.version)
+        {
+            return Err(format!("conflict: текущая версия {}", t.version));
+        }
+    }
     validate_args(name, a)?;
     if name == "slides_design_guide" {
         return Ok(super::media::design_guide());
