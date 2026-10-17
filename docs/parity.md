@@ -141,7 +141,7 @@
 | PAR-SHT-018 | Sheets | Абсолютные ссылки | P0 | 5 | REQ-11-007 | read_cells / write_cells / set_formula | planned | planned | planned |
 | PAR-SHT-019 | Sheets | Относительные ссылки | P0 | 5 | REQ-11-007 | read_cells / write_cells / set_formula | planned | planned | planned |
 | PAR-SHT-020 | Sheets | Ссылки между листами | P0 | 5 | REQ-11-007 | read_cells / write_cells / set_formula | planned | planned | planned |
-| PAR-SHT-021 | Sheets | Автодополнение функций | P0 | 5 | REQ-11-007 | explain_formula; GAP: UI hints API | n/a | n/a | planned |
+| PAR-SHT-021 | Sheets | Автодополнение функций и подсказка аргументов в строке формул | P0 | 5 | REQ-11-007 | explain_formula; UI: sheets/hints.rs — префикс EN/RU, ↑↓/Tab, сигнатура с текущим аргументом (ADR-0028). GAP: выбор мышью, русские описания библиотечных функций, GUI acceptance | n/a | n/a | partial_unverified |
 | PAR-SHT-022 | Sheets | Подсказка аргументов | P0 | 5 | REQ-11-007 | explain_formula; GAP: UI hints API | n/a | n/a | planned |
 | PAR-SHT-023 | Sheets | Подсветка зависимых диапазонов | P0 | 5 | REQ-11-007 | explain_formula; GAP: UI hints API | n/a | n/a | planned |
 | PAR-SHT-024 | Sheets | Формат общий | P0 | 5 | REQ-11-007 | format_cells | planned | planned | planned |

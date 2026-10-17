@@ -1622,14 +1622,14 @@
   {
     "id": "PAR-SHT-021",
     "mode": "Sheets",
-    "feature": "Автодополнение функций",
+    "feature": "Автодополнение функций и подсказка аргументов в строке формул",
     "priority": "P0",
     "phase": 5,
     "requirement": "REQ-11-007",
-    "mcp": "explain_formula; GAP: UI hints API",
+    "mcp": "explain_formula; UI: sheets/hints.rs — префикс EN/RU, ↑↓/Tab, сигнатура с текущим аргументом (ADR-0028). GAP: выбор мышью, русские описания библиотечных функций, GUI acceptance",
     "import": "n/a",
     "export": "n/a",
-    "status": "planned"
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-SHT-022",
