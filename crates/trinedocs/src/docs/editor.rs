@@ -371,7 +371,13 @@ pub fn show_with_edits(ui: &mut egui::Ui, doc: &mut Doc, edits: Option<&[TextEdi
         .ctx()
         .data_mut(|d| d.get_temp::<EditorState>(state_id))
         .unwrap_or_default();
-    let before = doc.clone();
+    // One comparison per frame decides whether the host changed the document; when it did not,
+    // the snapshot from the last frame is shared instead of deep-copying the whole document.
+    let synced = state.previous.as_deref() == Some(doc);
+    let before = match &state.previous {
+        Some(previous) if synced => previous.clone(),
+        _ => std::sync::Arc::new(doc.clone()),
+    };
     let follow_typing = state.previous.as_deref().is_some_and(|previous| {
         current_paragraph(previous, &state).is_some_and(|p| {
             p.format_at(if state.table_cell.is_some() {
@@ -382,7 +388,7 @@ pub fn show_with_edits(ui: &mut egui::Ui, doc: &mut Doc, edits: Option<&[TextEdi
         })
     });
     if let Some(previous) = state.previous.as_deref()
-        && previous != doc
+        && !synced
         && let Some(cursor) = state.table_cell
     {
         state.table_cell = rebase_active_cell(previous, doc, cursor);
@@ -393,11 +399,11 @@ pub fn show_with_edits(ui: &mut egui::Ui, doc: &mut Doc, edits: Option<&[TextEdi
             state.cursor = edit.transform(state.cursor);
             state.anchor = edit.transform(state.anchor);
         }
-        if !edits.is_empty() || state.previous.as_deref() != Some(doc) {
+        if !edits.is_empty() || !synced {
             state.cached_layout = None;
         }
     } else if let Some(previous) = &state.previous
-        && previous.as_ref() != doc
+        && !synced
     {
         state.cursor = rebase_position(previous, doc, state.cursor);
         state.anchor = rebase_position(previous, doc, state.anchor);
@@ -793,14 +799,15 @@ pub fn show_with_edits(ui: &mut egui::Ui, doc: &mut Doc, edits: Option<&[TextEdi
             }
         });
     });
-    let changed = before != *doc;
+    let changed = *before != *doc;
     if changed {
         state.cached_layout = None;
+        state.previous = Some(std::sync::Arc::new(doc.clone()));
     } else {
         state.cached_layout = Some(layout);
-    }
-    if state.previous.as_deref() != Some(doc) {
-        state.previous = Some(std::sync::Arc::new(doc.clone()));
+        if !synced {
+            state.previous = Some(before);
+        }
     }
     let selection = editor_selection(ui.ctx(), doc, &state, canvas_id);
     let tab = ui.ctx().data(|d| d.get_temp::<u64>(active_tab_id()));
@@ -2141,7 +2148,7 @@ fn paste_image(doc: &mut Doc, state: &mut EditorState, png: &[u8]) {
             doc.images.push(AnchoredImage {
                 id,
                 after_paragraph_id: anchor,
-                bytes: png.to_vec(),
+                bytes: png.to_vec().into(),
                 width,
                 height,
                 alt: String::new(),
@@ -2166,7 +2173,7 @@ fn poll_image(doc: &mut Doc, state: &mut EditorState) {
                     doc.images.push(AnchoredImage {
                         id,
                         after_paragraph_id: anchor,
-                        bytes: asset.bytes,
+                        bytes: asset.bytes.into(),
                         width: asset.width,
                         height: asset.height,
                         alt: String::new(),
@@ -3347,7 +3354,7 @@ mod tests {
         doc.images.push(AnchoredImage {
             id,
             after_paragraph_id: doc.paragraphs[0].id,
-            bytes: bytes.into_inner(),
+            bytes: bytes.into_inner().into(),
             width: w,
             height: h,
             alt: String::new(),

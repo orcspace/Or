@@ -552,7 +552,7 @@ mod tests {
                     y: 0.0,
                     w: 20.0,
                     h: 20.0,
-                    bytes: encoded.into_inner(),
+                    bytes: encoded.into_inner().into(),
                 },
             ],
         };

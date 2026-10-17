@@ -794,7 +794,7 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
                     }
                     super::model::image_dimensions(bytes)?;
                     element.kind = ElementKind::Image {
-                        bytes: bytes.clone(),
+                        bytes: bytes.as_slice().into(),
                     };
                 } else if let Some(table) = shape.descend("tbl") {
                     if let Some(cell) = table.child("tr").and_then(|row| row.child("tc")) {
@@ -1731,7 +1731,7 @@ fn write_pptx(deck: &Deck) -> Result<Vec<u8>, String> {
                     ));
                     parts.push((
                         format!("ppt/media/image{image_count}.{extension}"),
-                        bytes.clone(),
+                        bytes.to_vec(),
                     ));
                     shapes.push_str(&format!("<p:pic><p:nvPicPr><p:cNvPr id=\"{id}\" name=\"Image {id}\"/><p:cNvPicPr><a:picLocks noChangeAspect=\"1\"/></p:cNvPicPr><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed=\"{relationship}\"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr>{}<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr></p:pic>",xfrm(e,"a")));
                 }

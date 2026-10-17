@@ -31,7 +31,7 @@ pub enum ElementKind {
     Line,
     Arrow,
     Image {
-        bytes: Vec<u8>,
+        bytes: crate::blob::Blob,
     },
     Table {
         cells: Vec<Vec<String>>,
@@ -1472,7 +1472,12 @@ mod tests {
         assert!(deck.validate().is_err());
         let mut deck = Deck::default();
         let id = deck.slides.first().map(|s| s.id).ok_or("slide")?;
-        deck.add_element(id, ElementKind::Image { bytes: vec![0; 10] })?;
+        deck.add_element(
+            id,
+            ElementKind::Image {
+                bytes: vec![0; 10].into(),
+            },
+        )?;
         assert!(deck.validate().is_err());
         let deck = Deck {
             next_id: u64::MAX,

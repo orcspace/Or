@@ -838,7 +838,7 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
                         doc.images.push(AnchoredImage {
                             id: image_id,
                             after_paragraph_id: id,
-                            bytes: bytes.clone(),
+                            bytes: bytes.as_slice().into(),
                             width,
                             height,
                             alt,
@@ -3254,7 +3254,7 @@ mod tests {
         doc.images.push(AnchoredImage {
             id,
             after_paragraph_id: anchor,
-            bytes: png.into_inner(),
+            bytes: png.into_inner().into(),
             width: 200.0,
             height: 100.0,
             alt: "Схема".into(),
@@ -3352,7 +3352,7 @@ mod tests {
         doc.images.push(AnchoredImage {
             id,
             after_paragraph_id: anchor,
-            bytes: png.into_inner(),
+            bytes: png.into_inner().into(),
             width: 72.0,
             height: 72.0,
             alt: "sample".into(),

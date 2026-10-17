@@ -1369,8 +1369,13 @@ fn theme_menu(ui: &mut egui::Ui, deck: &mut Deck) -> bool {
 fn insert_image(deck: &mut Deck, state: &mut State, slide_id: u64, bytes: Vec<u8>) -> bool {
     let (width, height) = (deck.width, deck.height);
     match super::model::image_dimensions(&bytes).and_then(|size| {
-        deck.add_element(slide_id, ElementKind::Image { bytes })
-            .map(|id| (id, size))
+        deck.add_element(
+            slide_id,
+            ElementKind::Image {
+                bytes: bytes.into(),
+            },
+        )
+        .map(|id| (id, size))
     }) {
         Ok((id, (w, h))) => {
             if let Some(element) = deck
@@ -2798,10 +2803,7 @@ fn paint_element(
             }
         }
         ElementKind::Image { bytes } => {
-            let hash = bytes.iter().fold(0xcbf29ce484222325_u64, |h, b| {
-                (h ^ u64::from(*b)).wrapping_mul(0x100000001b3)
-            });
-            let key = egui::Id::new(("slide_image", hash));
+            let key = egui::Id::new(("slide_image", bytes.fingerprint()));
             let texture = ctx.data_mut(|d| d.get_temp::<egui::TextureHandle>(key));
             let texture = texture.or_else(|| {
                 let image = crate::util::decode_image(bytes).ok()?.to_rgba8();
