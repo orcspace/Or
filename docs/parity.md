@@ -320,7 +320,7 @@
 | PAR-TRI-019 | TrineDocs | AI off per-doc/app | P0 | 3 | REQ-11-013 | GAP: точная ops/tool-схема ещё не определена | planned | planned | planned |
 | PAR-DOC-095 | Docs | Формат .docx, .dotx открыть: ✓; сохранить: ✓ | P0 | 2 | REQ-08-001 | export_document / open_document; format implementation pending | planned | planned | planned |
 | PAR-DOC-096 | Docs | Формат .docm открыть: ✓, макросы не исполняются, сохраняются; сохранить: ✓ | P0 | 2 | REQ-08-002 | export_document / open_document; format implementation pending | planned | planned | planned |
-| PAR-DOC-097 | Docs | Формат .doc, .rtf, .odt открыть: ✓; сохранить: ✓ | P0 | 7 | REQ-08-003 | export_document / open_document; format implementation pending | planned | planned | planned |
+| PAR-DOC-097 | Docs | Формат .doc, .rtf, .odt открыть: ✓; сохранить: ✓ | P0 | 7 | REQ-08-003 | export_document / open_document; .odt/.ott/.fodt — собственный читатель/писатель docs/io/odt.rs (стили с наследованием, списки, таблицы с объединениями, рисунки, колонтитулы, номера страниц; ADR-0028). GAP: .doc, .rtf; сноски/комментарии/надписи ODT; проверка открытием в LibreOffice | partial_unverified | partial_unverified | partial_unverified |
 | PAR-DOC-098 | Docs | Формат .pdf открыть: P2: картинки/текст; сохранить: ✓; PDF/A — P1 | P2 | 9 | REQ-08-004 | export_document / open_document; format implementation pending | planned | planned | planned |
 | PAR-DOC-099 | Docs | Формат .txt открыть: ✓; сохранить: ✓ | P0 | 2 | REQ-08-005 | export_document / open_document; format implementation pending | planned | planned | planned |
 | PAR-DOC-100 | Docs | Формат .md открыть: ✓; сохранить: ✓ | P0 | 2 | REQ-08-006 | export_document / open_document; format implementation pending | planned | planned | planned |

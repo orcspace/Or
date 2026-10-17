@@ -48,6 +48,8 @@ impl Document {
             Self::Docs(_) => &[
                 ("docx", "Документ Word"),
                 ("pdf", "PDF"),
+                ("odt", "Текст OpenDocument"),
+                ("fodt", "Плоский XML OpenDocument"),
                 ("txt", "Обычный текст"),
                 ("md", "Markdown"),
                 ("html", "Веб-страница"),
@@ -187,7 +189,7 @@ pub fn open(path: &Path) -> Result<Document, String> {
     let doc = match ext.as_str() {
         "trinedoc" | "trinesheet" | "trineslide" => decode(&bytes)?,
         "lock" => Document::Docs(crate::docs::io::read(&bytes, "txt")?),
-        "docx" | "dotx" | "docm" | "txt" | "md" | "html" | "htm" => {
+        "docx" | "dotx" | "docm" | "odt" | "ott" | "fodt" | "txt" | "md" | "html" | "htm" => {
             Document::Docs(crate::docs::io::read(&bytes, &ext)?)
         }
         "xlsx" | "xlsm" | "xltx" | "xls" | "xlsb" | "ods" | "csv" | "tsv" => {

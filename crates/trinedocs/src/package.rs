@@ -72,7 +72,8 @@ pub fn write_zip(parts: Vec<(String, Vec<u8>)>) -> Result<Vec<u8>, String> {
     for (name, data) in parts {
         zip.start_file(
             name,
-            if data.len() > 1024 * 1024 {
+            // OpenDocument requires an uncompressed `mimetype` as the first entry.
+            if data.len() > 1024 * 1024 || name == "mimetype" {
                 options.compression_method(zip::CompressionMethod::Stored)
             } else {
                 options

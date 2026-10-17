@@ -3774,10 +3774,10 @@
     "priority": "P0",
     "phase": 7,
     "requirement": "REQ-08-003",
-    "mcp": "export_document / open_document; format implementation pending",
-    "import": "planned",
-    "export": "planned",
-    "status": "planned"
+    "mcp": "export_document / open_document; .odt/.ott/.fodt — собственный читатель/писатель docs/io/odt.rs (стили с наследованием, списки, таблицы с объединениями, рисунки, колонтитулы, номера страниц; ADR-0028). GAP: .doc, .rtf; сноски/комментарии/надписи ODT; проверка открытием в LibreOffice",
+    "import": "partial_unverified",
+    "export": "partial_unverified",
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-DOC-098",

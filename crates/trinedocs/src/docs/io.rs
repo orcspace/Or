@@ -3,6 +3,8 @@ use crate::package::{read_zip, write_zip, xml_escape as esc};
 use quick_xml::{Reader, events::Event};
 use std::collections::BTreeMap;
 
+mod odt;
+
 const XML_LIMIT: usize = 32 * 1024 * 1024;
 #[derive(Clone, Debug, Default)]
 struct Node {
@@ -167,6 +169,8 @@ pub fn read(bytes: &[u8], ext: &str) -> Result<Doc, String> {
         "txt" => Doc::from_text(&decode_text(bytes)?),
         "md" | "markdown" => read_markdown(&decode_text(bytes)?),
         "html" | "htm" => read_html(&decode_text(bytes)?)?,
+        "odt" | "ott" => odt::read_odt(bytes)?,
+        "fodt" => odt::read_fodt(&decode_text(bytes)?)?,
         _ => return Err(format!("Неподдерживаемый формат Docs: {ext}")),
     };
     if ext == "docm" {
@@ -185,6 +189,8 @@ pub fn write(doc: &Doc, ext: &str) -> Result<Vec<u8>, String> {
         "txt" => Ok(doc.plain_text().into_bytes()),
         "md" | "markdown" => Ok(write_markdown(doc).into_bytes()),
         "html" | "htm" => Ok(write_html(doc).into_bytes()),
+        "odt" | "ott" => odt::write_odt(doc, ext == "ott"),
+        "fodt" => odt::write_fodt(doc),
         _ => Err(format!("Неподдерживаемый формат Docs: {ext}")),
     }
 }

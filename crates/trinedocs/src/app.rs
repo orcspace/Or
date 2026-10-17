@@ -2720,7 +2720,9 @@ impl eframe::App for App {
                                 "Сохранить / экспортировать…",
                                 |ui| {
                                     let formats: &[&str] = match &t.document {
-                                        Document::Docs(_) => &["docx", "pdf", "txt", "md", "html"],
+                                        Document::Docs(_) => {
+                                            &["docx", "pdf", "odt", "txt", "md", "html"]
+                                        }
                                         Document::Sheets(_) => {
                                             &["xlsx", "pdf", "csv", "tsv", "html"]
                                         }
@@ -3275,13 +3277,14 @@ impl eframe::App for App {
                 }
             }
             Some(
-                ext @ ("docx" | "xlsx" | "pptx" | "txt" | "md" | "html" | "csv" | "tsv" | "png"),
+                ext @ ("docx" | "xlsx" | "pptx" | "odt" | "txt" | "md" | "html" | "csv" | "tsv"
+                | "png"),
             ) => {
                 if let Some(id) = self.active {
                     self.save(
                         id,
                         false,
-                        matches!(ext, "txt" | "md" | "html" | "csv" | "tsv" | "png"),
+                        matches!(ext, "odt" | "txt" | "md" | "html" | "csv" | "tsv" | "png"),
                         true,
                         Some(ext),
                     );
@@ -3462,7 +3465,8 @@ fn file_badge(path: &std::path::Path) -> (&'static str, egui::Color32) {
 /// Document tab of the shell: a rounded pill with a coloured kind marker.
 fn file_kind(path: &std::path::Path) -> Option<usize> {
     match crate::native::extension(path).as_str() {
-        "docx" | "dotx" | "docm" | "trinedoc" | "txt" | "md" | "html" | "htm" | "lock" => Some(1),
+        "docx" | "dotx" | "docm" | "odt" | "ott" | "fodt" | "trinedoc" | "txt" | "md" | "html"
+        | "htm" | "lock" => Some(1),
         "xlsx" | "xltx" | "xlsm" | "trinesheet" | "csv" | "tsv" | "xls" | "xlsb" | "ods" => Some(2),
         "pptx" | "potx" | "ppsx" | "pptm" | "trineslide" => Some(3),
         _ => None,
