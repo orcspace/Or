@@ -468,21 +468,17 @@ fn toolbar(
             {
                 start_image_job(ui.ctx(), state, book);
             }
-            ui.menu_button("Лист", |ui| {
-                ui.horizontal(|ui| {
-                    ui.menu_button("Строки и столбцы", |ui| {
-                        dimension_menu(ui, book, state, &mut changed);
-                    });
-                    let response = ui.button("Новый лист");
-                    #[cfg(test)]
-                    state
-                        .test_controls
-                        .insert("toolbar-new-sheet".into(), response.rect);
-                    if command_action(response, book, state, &mut changed) {
-                        changed |= add_sheet(book, state);
-                    }
-                });
+            ui.menu_button("Строки и столбцы", |ui| {
+                dimension_menu(ui, book, state, &mut changed);
             });
+            let response = ui.button("Новый лист");
+            #[cfg(test)]
+            state
+                .test_controls
+                .insert("toolbar-new-sheet".into(), response.rect);
+            if command_action(response, book, state, &mut changed) {
+                changed |= add_sheet(book, state);
+            }
         }
         2 => {
             ui.horizontal(|ui| {

@@ -1291,7 +1291,9 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
                             .and_then(|v| v.parse::<f32>().ok())
                             .filter(|w| w.is_finite() && *w > 0.0)
                         {
-                            let pixels = if w < 1.0 { w * 7.0 } else { w * 7.0 + 5.0 };
+                            // ECMA-376 §18.3.1.13: the stored width already includes
+                            // padding, pixels = trunc((256w + trunc(128/7)) / 256 * 7).
+                            let pixels = ((256.0 * w + 18.0) / 256.0 * 7.0).trunc();
                             s.widths.insert(c, pixels.clamp(1.0, 1800.0));
                         }
                         if xml_bool(a.get("hidden"), false) {
@@ -2036,6 +2038,12 @@ fn typed_formula_strings(xml: &[u8], sheet: &super::model::Sheet) -> Result<Vec<
                         .map_err(|error| error.to_string())?;
                 }
             }
+            Event::Start(e) if e.local_name().as_ref() == "row" => writer
+                .write_event(Event::Start(exact_row_height(e, &reader, sheet)?))
+                .map_err(|error| error.to_string())?,
+            Event::Empty(e) if e.local_name().as_ref() == "row" => writer
+                .write_event(Event::Empty(exact_row_height(e, &reader, sheet)?))
+                .map_err(|error| error.to_string())?,
             Event::Start(e) if e.local_name().as_ref() == "v" && result.is_some() => {
                 writer
                     .write_event(Event::Start(e.borrow()))
@@ -2064,22 +2072,47 @@ fn typed_formula_strings(xml: &[u8], sheet: &super::model::Sheet) -> Result<Vec<
     }
     Ok(writer.into_inner())
 }
-fn patch_formula_string_results(bytes: Vec<u8>, book: &Book) -> Result<Vec<u8>, String> {
-    if !book.sheets.iter().any(|sheet| {
-        sheet
+// rust_xlsxwriter stores row heights as whole pixels; restore the model's exact value.
+fn exact_row_height(
+    e: BytesStart<'_>,
+    reader: &Reader<&[u8]>,
+    sheet: &super::model::Sheet,
+) -> Result<BytesStart<'static>, String> {
+    let values = attrs(&e, reader)?;
+    let height = values
+        .get("r")
+        .and_then(|r| r.parse::<u32>().ok())
+        .and_then(|r| r.checked_sub(1))
+        .and_then(|r| sheet.row_heights.get(&r))
+        .filter(|height| height.fract() != 0.0);
+    let mut element = e.into_owned();
+    if let Some(height) = height {
+        element.clear_attributes();
+        for (key, value) in values.iter().filter(|(key, _)| key.as_str() != "ht") {
+            element.push_attribute((key.as_str(), value.as_str()));
+        }
+        let points = (f64::from(height.clamp(1.0, 600.0)) * 0.75).to_string();
+        element.push_attribute(("ht", points.as_str()));
+    }
+    Ok(element)
+}
+fn sheet_needs_patch(sheet: &super::model::Sheet) -> bool {
+    sheet
+        .row_heights
+        .values()
+        .any(|height| height.fract() != 0.0)
+        || sheet
             .cells
             .values()
             .any(|cell| ambiguous_formula_string(cell).is_some())
-    }) {
+}
+fn patch_formula_string_results(bytes: Vec<u8>, book: &Book) -> Result<Vec<u8>, String> {
+    if !book.sheets.iter().any(sheet_needs_patch) {
         return Ok(bytes);
     }
     let mut parts = crate::package::read_zip(&bytes)?;
     for (index, sheet) in book.sheets.iter().enumerate() {
-        if !sheet
-            .cells
-            .values()
-            .any(|cell| ambiguous_formula_string(cell).is_some())
-        {
+        if !sheet_needs_patch(sheet) {
             continue;
         }
         let path = format!("xl/worksheets/sheet{}.xml", index + 1);
