@@ -3,6 +3,7 @@ pub mod format;
 pub mod formula;
 pub mod io;
 pub mod model;
+pub mod xlfn;
 
 #[cfg(test)]
 mod tests;

@@ -2057,3 +2057,80 @@ fn root_review5_defined_name_backslash_prefix_and_unicode_periods_are_evaluable(
         Value::Number(47.0)
     );
 }
+
+#[test]
+fn library_functions_fill_the_gaps() -> Result<(), String> {
+    let b = seeded()?;
+    let id = b.active_id();
+    for (input, expected) in [
+        ("=NORM.S.DIST(1,TRUE)", 0.841_344_746_068_543),
+        ("=_xlfn.NORM.S.DIST(1,TRUE)", 0.841_344_746_068_543),
+        ("=FISHER(0.75)", 0.972_955_074_527_656_6),
+        ("=COMBINA(4,3)", 20.0),
+        ("=GEOMEAN(A1:A3)", 1.817_120_592_832_139_7),
+        ("=PERCENTRANK.INC(A1:A3,2)", 0.5),
+        ("=EFFECT(0.0525,4)", 0.053_542_667_370_758_3),
+        ("=MDETERM(C1:D2)", 800.0),
+        ("=ERROR.TYPE(1/0)", 2.0),
+        ("=SEQUENCE(3)", 1.0),
+        ("=SUM(SEQUENCE(3))", 6.0),
+    ] {
+        let actual = formula::evaluate(&b, id, input);
+        let Value::Number(n) = actual else {
+            return Err(format!("{input}: {actual:?}, expected {expected}"));
+        };
+        assert!(
+            (n - expected).abs() <= 1e-9 * expected.abs().max(1.0),
+            "{input}: {n}, expected {expected}"
+        );
+    }
+    for (input, expected) in [
+        (
+            "=REGEXEXTRACT(\"tel 555-1234\",\"[0-9]{3}-[0-9]{4}\")",
+            "555-1234",
+        ),
+        ("=REGEXREPLACE(\"a1b22c\",\"[0-9]+\",\"#\")", "a#b#c"),
+        ("=TEXTSPLIT(\"a,b\",\",\")", "a"),
+    ] {
+        assert_eq!(
+            formula::evaluate(&b, id, input),
+            Value::Text(expected.into()),
+            "{input}"
+        );
+    }
+    assert_eq!(
+        formula::evaluate(&b, id, "=REGEXTEST(\"abc123\",\"[0-9]+\")"),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        formula::evaluate(&b, id, "=NORM.S.DIST(\"x\",TRUE)"),
+        Value::Error("#VALUE!".into())
+    );
+    assert_eq!(
+        formula::evaluate(&b, id, "=COMBINA(1)"),
+        Value::Error("#VALUE!".into())
+    );
+
+    let mut db = Book::default();
+    let sheet = db.active_id();
+    db.set_range(
+        sheet,
+        0,
+        0,
+        &[
+            vec!["Fruit".into(), "Sales".into(), "".into(), "Fruit".into()],
+            vec!["apple".into(), "10".into(), "".into(), "apple".into()],
+            vec!["pear".into(), "20".into()],
+            vec!["apple".into(), "5".into()],
+        ],
+    )?;
+    assert_eq!(
+        formula::evaluate(&db, sheet, "=DSUM(A1:B4,\"Sales\",D1:D2)"),
+        Value::Number(15.0)
+    );
+    assert_eq!(
+        formula::evaluate(&db, sheet, "=DCOUNT(A1:B4,2,D1:D2)"),
+        Value::Number(2.0)
+    );
+    Ok(())
+}

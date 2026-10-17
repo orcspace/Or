@@ -2,7 +2,7 @@
 
 Первичный feature inventory по заданию и первым проверенным пробелам. Полная сверка всех вкладок Office ещё не завершена. Внутри каждого PAR-пункта варианты поведения проверяются отдельно. Ни одна функция не объявлена готовой. P2 не удаляется из конечного объёма; поздние фазы ждут решения владельца ADR-0005.
 
-Всего функций/вариантов: **361**.
+Всего функций/вариантов: **366**.
 
 | PAR ID | Режим | Функция | P | Фаза | REQ | MCP / пробел | Import | Export | Статус |
 |---|---|---|---|---|---|---|---|---|---|
@@ -367,3 +367,8 @@
 | PAR-TRI-039 | Slides | Автоматическая повестка презентации из разделов и заголовков с явным предпросмотром | P1 | 8 | REQ-11-011 | GAP: preview agenda + обычные slides ops после выбора | planned | planned | planned |
 | PAR-TRI-040 | TrineDocs | Параллельная подготовка AI-правок нескольких открытых Docs/Sheets/Slides с общим preflight commit | P1 | 8 | REQ-M06-072 | workspace_documents/apply/job_status/cancel; 4 документа/32 операции; GAP: полный apply_ops, дисковые side effects, persistent jobs и runtime-приёмка | not applicable | not applicable | partial |
 | PAR-TRI-041 | TrineDocs | Поиск, категории и копирование отчёта проверки документа; bounded read-only AI inspector с фоновым снимком | P1 | 8 | REQ-11-002 | inspect_document: preparing/completed, snapshot/current version, refresh, query/kind, index/count до100; первые200 с omitted/stale; один фоновый inspector. GAP: runtime/visual acceptance и полный анализ Office. | n/a | clipboard plain text | partial_unverified |
+| PAR-SHT-122 | Sheets | Инженерные функции: системы счисления, комплексные числа, биты, CONVERT, ERF, BESSEL* (GridCraft, ADR-0028) | P1 | 5 | REQ-11-007 | read_cells / write_cells / set_formula; GAP: разлива динамических массивов нет (ячейка показывает верхний левый элемент), runtime/GUI acceptance | planned | planned | partial_unverified |
+| PAR-SHT-123 | Sheets | Функции баз данных DSUM/DAVERAGE/DCOUNT/DGET/DMAX/… с диапазоном условий (GridCraft, ADR-0028) | P1 | 5 | REQ-11-007 | read_cells / write_cells / set_formula; GAP: разлива динамических массивов нет (ячейка показывает верхний левый элемент), runtime/GUI acceptance | planned | planned | partial_unverified |
+| PAR-SHT-124 | Sheets | Статистические распределения и проверки гипотез: NORM/T/CHISQ/F/BETA/GAMMA/BINOM/POISSON …, PERCENTRANK, ранги (GridCraft, ADR-0028) | P1 | 5 | REQ-11-007 | read_cells / write_cells / set_formula; GAP: разлива динамических массивов нет (ячейка показывает верхний левый элемент), runtime/GUI acceptance | planned | planned | partial_unverified |
+| PAR-SHT-125 | Sheets | Регулярные выражения REGEXTEST/REGEXEXTRACT/REGEXREPLACE и TEXTSPLIT/TEXTBEFORE/TEXTAFTER (GridCraft + regex, ADR-0028) | P1 | 5 | REQ-11-007 | read_cells / write_cells / set_formula; GAP: разлива динамических массивов нет (ячейка показывает верхний левый элемент), runtime/GUI acceptance | planned | planned | partial_unverified |
+| PAR-SHT-126 | Sheets | Матричные и массивные функции MMULT/MINVERSE/MDETERM/SEQUENCE/FILTER/SORT/UNIQUE/TOCOL/WRAPROWS … внутри формул (GridCraft, ADR-0028) | P1 | 5 | REQ-11-007 | read_cells / write_cells / set_formula; GAP: разлива динамических массивов нет (ячейка показывает верхний левый элемент), runtime/GUI acceptance | planned | planned | partial_unverified |

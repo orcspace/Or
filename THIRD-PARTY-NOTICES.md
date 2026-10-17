@@ -18,6 +18,12 @@ Copyright (c) 2026 Lucide Icons and Contributors. Сохраняется так�
 
 ISC: оба полных upstream notices — [assets/icons/LICENSE.txt](assets/icons/LICENSE.txt). Для 36 SVG изменена толщина контура на 1.75 и нормализован XML. Immutable upstream commit, исходные/производные SHA-256 — в [manifest](assets/icons/manifest.json).
 
+## GridCraft — библиотека функций листа
+
+Copyright (c) 2026 ArtCraft Team and the GridCraft contributors (https://github.com/storytold/gridcraft).
+
+MIT OR Apache-2.0, выбран MIT: полный текст — [crates/trinedocs/src/sheets/xlfn/LICENSE-MIT](crates/trinedocs/src/sheets/xlfn/LICENSE-MIT). Модули `gridcraft-functions` и часть `gridcraft-core` скопированы с адаптацией путей и удалением serde/wasm; в каждом файле — заголовок с источником. Решение: ADR-0028. Текст лицензии добавляется в THIRD-PARTY-NOTICES.txt установщика.
+
 ## Изолированный CRDT-эксперимент
 
 Loro 1.16.2 (MIT) и 155 других внешних пакетов закреплены отдельным Cargo.lock. Полный реестр заявленных лицензий/источников: [docs/dependencies/crdt-spike.md](docs/dependencies/crdt-spike.md). Сборки эксперимента не входят в выпуск приложения. Source notices всего графа ещё нужно собрать перед распространением его бинарников.

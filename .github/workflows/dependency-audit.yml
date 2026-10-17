@@ -1,0 +1,31 @@
+name: Dependency audit refresh (documentation artifact)
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ['Cargo.lock', 'tools/audit_dependencies.py', '.github/workflows/dependency-audit.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - name: Install pinned aged stable Rust toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal
+      - name: Download locked crates
+        run: cargo fetch --locked
+      - name: Refresh license registry and evidence
+        run: python -B tools/audit_dependencies.py --refresh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: dependency-audit
+          path: |
+            docs/licenses.md
+            docs/audit/dependencies.md

@@ -1,6 +1,8 @@
 use super::model::{Book, MAX_COLS, MAX_ROWS, Range, Value, address, parse_address};
+use super::xlfn;
 use chrono::{Datelike, Timelike};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 type CalcResult<T> = Result<T, String>;
@@ -1159,11 +1161,13 @@ impl<'a> Engine<'a> {
                     .is_some_and(|code| code >= 100.0);
                 self.skip_subtotal_cells(grid, target.as_deref(), &range, sheet, hidden);
             }
-            evaluated.push(if name.starts_with("IS") || name == "TYPE" {
-                value.unwrap_or_else(|e| Grid::scalar(Value::Error(e)))
-            } else {
-                value?
-            });
+            evaluated.push(
+                if name.starts_with("IS") || matches!(name, "TYPE" | "ERROR.TYPE") {
+                    value.unwrap_or_else(|e| Grid::scalar(Value::Error(e)))
+                } else {
+                    value?
+                },
+            );
         }
         let (name, a) = if name == "SUBTOTAL" {
             if evaluated.len() < 2 {
@@ -3124,8 +3128,93 @@ impl<'a> Engine<'a> {
                 }
                 num(((y2 - y1) * 360 + (m2 - m1) * 30 + d2 - d1) as f64)
             }
-            _ => Err("#NAME?".into()),
+            _ => self.library_call(name, a),
         }
+    }
+    /// Functions the engine does not implement itself come from the vendored worksheet function
+    /// library (ADR-0028). Unknown names stay `#NAME?`.
+    fn library_call(&mut self, name: &str, a: &[Grid]) -> CalcResult<Grid> {
+        let spec = xlfn::lookup(name).ok_or("#NAME?")?;
+        let args: Vec<xlfn::Arg> = a.iter().map(library_arg).collect();
+        let mut host = LibraryHost {
+            now: self.now,
+            random: &mut self.random,
+        };
+        library_grid(xlfn::call(spec, &args, &mut host))
+    }
+}
+struct LibraryHost<'a> {
+    now: f64,
+    random: &'a mut u64,
+}
+impl xlfn::Ctx for LibraryHost<'_> {
+    fn date_system(&self) -> xlfn::base::DateSystem {
+        xlfn::base::DateSystem::D1900
+    }
+    fn now_serial(&self) -> f64 {
+        self.now
+    }
+    fn random(&mut self) -> f64 {
+        *self.random ^= *self.random << 13;
+        *self.random ^= *self.random >> 7;
+        *self.random ^= *self.random << 17;
+        (*self.random >> 11) as f64 / (1u64 << 53) as f64
+    }
+}
+fn library_value(value: &Value) -> xlfn::base::Value {
+    use xlfn::base::{CellError, Value as L};
+    match value {
+        Value::Empty => L::Empty,
+        Value::Number(n) => L::Number(*n),
+        Value::Text(t) => L::Text(Arc::from(t.as_str())),
+        Value::Bool(b) => L::Bool(*b),
+        Value::Error(e) => L::Error(CellError::parse(e).unwrap_or(CellError::Value)),
+    }
+}
+/// A single cell or literal goes over as a scalar; ranges and arrays as an array. `from_ref`
+/// tells the library which values came from cells (text in a referenced cell is skipped by
+/// COUNT-like functions, while typed text is coerced).
+fn library_arg(grid: &Grid) -> xlfn::Arg {
+    let value = if grid.rows * grid.cols == 1 {
+        library_value(&grid.first())
+    } else {
+        let data = grid.values.iter().map(library_value).collect();
+        match xlfn::base::Array::new(grid.rows, grid.cols, data) {
+            Some(array) => xlfn::base::Value::Array(Arc::new(array)),
+            None => xlfn::base::Value::Error(xlfn::base::CellError::Value),
+        }
+    };
+    xlfn::Arg {
+        value,
+        from_ref: grid.reference,
+    }
+}
+fn engine_value(value: &xlfn::base::Value) -> Value {
+    use xlfn::base::Value as L;
+    match value {
+        L::Empty => Value::Empty,
+        L::Number(n) => Value::Number(*n),
+        L::Text(t) => Value::Text(t.to_string()),
+        L::Bool(b) => Value::Bool(*b),
+        L::Error(e) => Value::Error(e.as_str().into()),
+        L::Array(a) => a.data.first().map(engine_value).unwrap_or_default(),
+    }
+}
+fn library_grid(value: xlfn::base::Value) -> CalcResult<Grid> {
+    match value {
+        xlfn::base::Value::Error(e) => Err(e.as_str().into()),
+        xlfn::base::Value::Array(array) => {
+            if array.data.is_empty() {
+                return Err("#CALC!".into());
+            }
+            Ok(Grid {
+                values: array.data.iter().map(engine_value).collect(),
+                rows: array.rows,
+                cols: array.cols,
+                reference: false,
+            })
+        }
+        other => Ok(Grid::scalar(engine_value(&other))),
     }
 }
 fn ansi_encoding(ru: bool) -> &'static encoding_rs::Encoding {
