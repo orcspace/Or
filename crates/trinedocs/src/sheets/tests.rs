@@ -2134,3 +2134,38 @@ fn library_functions_fill_the_gaps() -> Result<(), String> {
     );
     Ok(())
 }
+
+fn shown(book: &Book, row: u32, col: u32) -> Option<Value> {
+    book.active_sheet()
+        .and_then(|sheet| sheet.value(row, col))
+        .cloned()
+}
+
+#[test]
+fn array_results_spill_into_empty_cells() -> Result<(), String> {
+    let mut book = Book::default();
+    let id = book.active_id();
+    book.set_cell(id, 0, 0, "=SEQUENCE(3,2)")?;
+    assert_eq!(shown(&book, 0, 0), Some(Value::Number(1.0)));
+    assert_eq!(shown(&book, 0, 1), Some(Value::Number(2.0)));
+    assert_eq!(shown(&book, 2, 0), Some(Value::Number(5.0)));
+    assert_eq!(shown(&book, 2, 1), Some(Value::Number(6.0)));
+    // A formula that reads the spilled area sees the values from the earlier pass.
+    book.set_cell(id, 0, 3, "=SUM(A1:B3)")?;
+    assert_eq!(shown(&book, 0, 3), Some(Value::Number(21.0)));
+    Ok(())
+}
+
+#[test]
+fn obstructed_spill_shows_spill_error_and_recovers() -> Result<(), String> {
+    let mut book = Book::default();
+    let id = book.active_id();
+    book.set_cell(id, 1, 0, "x")?;
+    book.set_cell(id, 0, 0, "=SEQUENCE(3)")?;
+    assert_eq!(shown(&book, 0, 0), Some(Value::Error("#SPILL!".into())));
+    assert_eq!(shown(&book, 2, 0), None);
+    book.set_cell(id, 1, 0, "")?;
+    assert_eq!(shown(&book, 0, 0), Some(Value::Number(1.0)));
+    assert_eq!(shown(&book, 2, 0), Some(Value::Number(3.0)));
+    Ok(())
+}
