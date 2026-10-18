@@ -3588,10 +3588,6 @@ fn criterion(value: &Value, criteria: &Value) -> bool {
         return if op == "=" { empty } else { !empty };
     }
     let target = literal(rest);
-    let blank_zero = Value::Number(0.0);
-    let value = if matches!(value, Value::Empty) && matches!(target, Value::Number(_)) {
-        &blank_zero
-    } else { value };
     // A criterion only matches values of its own kind: ">5" skips text and blanks, while
     // numbers stored as text still count as numbers.
     let coerced;
@@ -4081,14 +4077,11 @@ mod defect_batch_one {
         Ok(())
     }
     #[test]
-    fn empty_delimiter_and_blank_criteria() -> Result<(),String> {
-        let mut book=Book::default();
+    fn empty_delimiters_match_immediately() {
+        let book=Book::default();
         let id=book.active_id();
-        book.set_input(id,1,0,"1")?;
-        assert_eq!(evaluate(&book,id,"=COUNTIF(A1:A2,0)"),Value::Number(1.0));
         assert_eq!(evaluate(&book,id,"=TEXTBEFORE(\"abc\",\"\",2)"),Value::Text(String::new()));
         assert_eq!(evaluate(&book,id,"=TEXTAFTER(\"abc\",\"\",-2)"),Value::Text(String::new()));
-        Ok(())
     }
     #[test]
     fn minifs_treats_matched_blanks_as_zero() -> Result<(),String> {
@@ -4132,7 +4125,7 @@ fn scaled_product(coefficient: f64, first: f64, second: f64) -> f64 {
 mod defect_batch_two {
     use super::*;
     #[test]
-    fn optional_blank_references_and_averagea_text() {
+    fn optional_blank_references_and_numeric_value_text() {
         let book=Book::default();
         let id=book.active_id();
         assert_eq!(evaluate(&book,id,"=LOG(100,A1)"),Value::Error("#NUM!".into()));

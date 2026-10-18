@@ -158,6 +158,7 @@ impl Node {
         match self.name.as_str() {
             "t" => self.text.clone(),
             "br" => "\n".into(),
+            "tab" => "\t".into(),
             _ => self.children.iter().map(Node::text_content).collect(),
         }
     }
@@ -286,10 +287,17 @@ fn parse(bytes: &[u8]) -> Result<Node, String> {
     Ok(node)
 }
 fn relationships(bytes: Option<&Vec<u8>>, base: &str) -> Result<BTreeMap<String, String>, String> {
+    relationships_kind(bytes, base, None)
+}
+fn relationships_kind(
+    bytes: Option<&Vec<u8>>, base: &str, kind: Option<&str>,
+) -> Result<BTreeMap<String, String>, String> {
     let mut rels = BTreeMap::new();
     if let Some(bytes) = bytes {
         for rel in &parse(bytes)?.children {
-            if rel.name != "Relationship" || rel.attr("TargetMode") == "External" {
+            if rel.name != "Relationship" || rel.attr("TargetMode") == "External"
+                || kind.is_some_and(|kind| !rel.attr("Type").ends_with(&format!("/{kind}")))
+            {
                 continue;
             }
             let mut components: Vec<&str> = if rel.attr("Target").starts_with('/') {
@@ -315,7 +323,7 @@ fn relationships(bytes: Option<&Vec<u8>>, base: &str) -> Result<BTreeMap<String,
 }
 /// Colours and fonts of a PowerPoint theme. Scheme colours are reachable by their own names
 /// and by the default colour map aliases (`tx1` = `dk1`, `bg1` = `lt1`, ...).
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Look {
     colors: BTreeMap<String, [u8; 3]>,
     major: String,
@@ -361,6 +369,18 @@ impl Look {
         look.minor = face("minorFont");
         look
     }
+    /// Mapping targets are theme slots, not aliases from a preceding map.
+    fn mapped(&self, mapping: Option<&Node>) -> Self {
+        let mut mapped = self.clone();
+        if let Some(mapping) = mapping {
+            for (alias, target) in &mapping.attrs {
+                if let Some(rgb) = self.colors.get(target) {
+                    mapped.colors.insert(alias.clone(), *rgb);
+                }
+            }
+        }
+        mapped
+    }
     /// Resolves `+mj-lt` / `+mn-lt` theme font references.
     fn font(&self, face: &str) -> Option<String> {
         let face = face.trim();
@@ -381,20 +401,47 @@ fn parse_hex(value: &str) -> Option<[u8; 3]> {
     Some([(number >> 16) as u8, (number >> 8) as u8, number as u8])
 }
 fn color(node: Option<&Node>, look: &Look, fallback: [u8; 3]) -> [u8; 3] {
-    let Some(node) = node else {
-        return fallback;
-    };
-    node.descend("srgbClr")
-        .and_then(|n| parse_hex(n.attr("val")))
-        .or_else(|| {
-            node.descend("schemeClr")
-                .and_then(|n| look.colors.get(n.attr("val")).copied())
-        })
-        .or_else(|| {
-            node.descend("sysClr")
-                .and_then(|n| parse_hex(n.attr("lastClr")))
-        })
-        .unwrap_or(fallback)
+    let Some(node) = node else { return fallback; };
+    let source = node.descend("srgbClr").or_else(|| node.descend("schemeClr"))
+        .or_else(|| node.descend("sysClr"));
+    let Some(source) = source else { return fallback; };
+    let mut rgb = match source.name.as_str() {
+        "srgbClr" => parse_hex(source.attr("val")),
+        "schemeClr" => look.colors.get(source.attr("val")).copied(),
+        "sysClr" => parse_hex(source.attr("lastClr")),
+        _ => None,
+    }.unwrap_or(fallback);
+    for transform in &source.children {
+        let Some(amount) = transform.attr("val").parse::<f64>().ok()
+            .filter(|v| v.is_finite()) else { continue; };
+        let amount = amount / 100_000.0;
+        match transform.name.as_str() {
+            "tint" => rgb = rgb.map(|c| (f64::from(c) * amount
+                + 255.0 * (1.0 - amount)).round().clamp(0.0, 255.0) as u8),
+            "shade" => rgb = rgb.map(|c| (f64::from(c) * amount)
+                .round().clamp(0.0, 255.0) as u8),
+            "lumMod" => rgb = drawing_luminance(rgb, amount, 0.0),
+            "lumOff" => rgb = drawing_luminance(rgb, 1.0, amount),
+            _ => {}
+        }
+    }
+    rgb
+}
+fn drawing_luminance(rgb: [u8; 3], multiplier: f64, offset: f64) -> [u8; 3] {
+    let [r, g, b] = rgb.map(|c| f64::from(c) / 255.0);
+    let high = r.max(g).max(b);
+    let low = r.min(g).min(b);
+    let light = (high + low) / 2.0;
+    let next = (light * multiplier + offset).clamp(0.0, 1.0);
+    let delta = high - low;
+    if delta <= f64::EPSILON {
+        return [(next * 255.0).round() as u8; 3];
+    }
+    let saturation = delta / (1.0 - (2.0 * light - 1.0).abs());
+    let chroma = (1.0 - (2.0 * next - 1.0).abs()) * saturation;
+    let shift = next - chroma / 2.0;
+    [r, g, b].map(|c| (((c - low) / delta * chroma + shift) * 255.0)
+        .round().clamp(0.0, 255.0) as u8)
 }
 /// Placeholder type and index of a shape (`p:nvSpPr/p:nvPr/p:ph`).
 fn placeholder(shape: &Node) -> Option<(&str, &str)> {
@@ -583,22 +630,25 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
         deck.validate()?;
         return Ok(deck);
     }
-    let presentation = parse(
-        parts
-            .get("ppt/presentation.xml")
-            .ok_or("Нет ppt/presentation.xml")?,
-    )?;
-    let rels = relationships(parts.get("ppt/_rels/presentation.xml.rels"), "ppt")?;
+    let root_rels = relationships_kind(parts.get("_rels/.rels"), "", Some("officeDocument"))?;
+    let presentation_path = root_rels.values().next().map(String::as_str)
+        .unwrap_or("ppt/presentation.xml");
+    let presentation = parse(parts.get(presentation_path).ok_or("Нет XML презентации")?)?;
+    let rels_of_kind = |path: &str, kind: Option<&str>| {
+        let (base, name) = path.rsplit_once('/').unwrap_or(("", path));
+        let rel_path = if base.is_empty() { format!("_rels/{name}.rels") }
+            else { format!("{base}/_rels/{name}.rels") };
+        if kind.is_none() { relationships(parts.get(&rel_path), base) }
+        else { relationships_kind(parts.get(&rel_path), base, kind) }
+    };
+    let rels = rels_of_kind(presentation_path, Some("slide"))?;
     let mut deck = Deck::empty();
     let mut parsed: BTreeMap<String, Node> = BTreeMap::new();
     let mut looks: BTreeMap<String, Look> = BTreeMap::new();
     let no_look = Look::default();
     let mut themed = false;
     let mut approximated = 0_usize;
-    let rels_of = |path: &str| {
-        let (base, name) = path.rsplit_once('/').unwrap_or(("", path));
-        relationships(parts.get(&format!("{base}/_rels/{name}.rels")), base)
-    };
+    let rels_of = |path: &str| rels_of_kind(path, None);
     if let Some(size) = presentation.child("sldSz") {
         deck.width = size.number("cx", 12192000.0) / 12700.0;
         deck.height = size.number("cy", 6858000.0) / 12700.0;
@@ -626,17 +676,12 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
         if let Some(title) = named_title {
             slide.title = title.into();
         }
-        if !target.contains('/') {
-            return Err("Некорректный путь слайда".into());
-        }
         let slide_rels = rels_of(target.as_str())?;
         // The layout and its master supply placeholder geometry, the background and the theme.
         let mut chain = Vec::new();
-        if let Some(layout) = slide_rels.values().find(|p| p.contains("/slideLayouts/")) {
+        if let Some(layout) = rels_of_kind(target, Some("slideLayout"))?.values().next() {
             chain.push(layout.clone());
-            if let Some(master) = rels_of(layout.as_str())?
-                .values()
-                .find(|p| p.contains("/slideMasters/"))
+            if let Some(master) = rels_of_kind(layout, Some("slideMaster"))?.values().next()
             {
                 chain.push(master.clone());
             }
@@ -650,21 +695,32 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
         }
         let master = chain.get(1).cloned().unwrap_or_default();
         if !master.is_empty() && !looks.contains_key(&master) {
-            let theme = rels_of(master.as_str())?
-                .values()
-                .find(|p| p.contains("/theme/"))
+            let theme = rels_of_kind(&master, Some("theme"))?
+                .values().next()
                 .and_then(|p| parts.get(p))
                 .map(|bytes| parse(bytes))
                 .transpose()?;
             looks.insert(master.clone(), Look::read(theme.as_ref()));
         }
-        let look = looks.get(&master).unwrap_or(&no_look);
+        let raw_look = looks.get(&master).unwrap_or(&no_look);
         let sources: Vec<&Node> = chain.iter().filter_map(|p| parsed.get(p)).collect();
+        let master_look = raw_look.mapped(sources.get(1).and_then(|n| n.child("clrMap")));
+        let mut resolved_look = master_look.clone();
+        for node in sources.iter().take(1).copied().chain(std::iter::once(&xml)) {
+            if let Some(override_map) = node.child("clrMapOvr") {
+                if override_map.child("masterClrMapping").is_some() {
+                    resolved_look = master_look.clone();
+                } else if let Some(mapping) = override_map.child("overrideClrMapping") {
+                    resolved_look = raw_look.mapped(Some(mapping));
+                }
+            }
+        }
+        let look = &resolved_look;
         if !themed && !look.colors.is_empty() {
             themed = true;
             for (name, slot) in [
-                ("dk1", &mut deck.theme.foreground),
-                ("lt1", &mut deck.theme.background),
+                ("tx1", &mut deck.theme.foreground),
+                ("bg1", &mut deck.theme.background),
                 ("accent1", &mut deck.theme.accent),
             ] {
                 if let Some(rgb) = look.colors.get(name) {
@@ -1016,7 +1072,7 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
                 .filter(|v| v.is_finite() && *v > 0.0)
                 .map(|v| (v / 1000.0).clamp(0.001, 86400.0));
         }
-        for path in slide_rels.values().filter(|p| p.contains("/notesSlides/")) {
+        for path in rels_of_kind(target, Some("notesSlide"))?.values() {
             if let Some(bytes) = parts.get(path) {
                 // Only the notes body: the slide image and the slide number placeholders are
                 // not part of the speaker notes.
@@ -2396,13 +2452,17 @@ mod tests {
         let body = entries
             .iter()
             .map(|(id, target)| {
-                format!("<Relationship Id=\"{id}\" Type=\"x\" Target=\"{target}\"/>")
+                let kind = if target.contains("slideLayouts") { "slideLayout" }
+                    else if target.contains("slideMasters") { "slideMaster" }
+                    else if target.contains("notesSlides") { "notesSlide" }
+                    else if target.contains("theme") { "theme" } else { "slide" };
+                format!("<Relationship Id=\"{id}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/{kind}\" Target=\"{target}\"/>")
             })
             .collect::<String>();
         format!("<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">{body}</Relationships>").into_bytes()
     }
     /// A PowerPoint-like package: slide → layout → master → theme, plus a notes page.
-    fn external_deck(slide: &str) -> Result<Deck, String> {
+    fn external_parts(slide: &str) -> Vec<(String, Vec<u8>)> {
         let part = |path: &str, xml: String| (path.to_string(), xml.into_bytes());
         let parts = vec![
             part("ppt/presentation.xml", format!("<p:presentation {NS}><p:sldIdLst><p:sldId id=\"256\" r:id=\"rId1\"/></p:sldIdLst><p:sldSz cx=\"12192000\" cy=\"6858000\"/></p:presentation>")),
@@ -2416,7 +2476,88 @@ mod tests {
             part("ppt/theme/theme1.xml", "<a:theme xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"><a:themeElements><a:clrScheme name=\"T\"><a:dk1><a:sysClr val=\"windowText\" lastClr=\"000000\"/></a:dk1><a:lt1><a:sysClr val=\"window\" lastClr=\"FFFFFF\"/></a:lt1><a:dk2><a:srgbClr val=\"1F497D\"/></a:dk2><a:lt2><a:srgbClr val=\"EEECE1\"/></a:lt2><a:accent1><a:srgbClr val=\"4F81BD\"/></a:accent1></a:clrScheme><a:fontScheme name=\"T\"><a:majorFont><a:latin typeface=\"Georgia\"/></a:majorFont><a:minorFont><a:latin typeface=\"Verdana\"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>".into()),
             part("ppt/notesSlides/notesSlide1.xml", format!("<p:notes {NS}><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"N\"/><p:cNvSpPr/><p:nvPr><p:ph type=\"sldNum\" idx=\"5\"/></p:nvPr></p:nvSpPr><p:txBody><a:p><a:fld type=\"slidenum\"><a:t>1</a:t></a:fld></a:p></p:txBody></p:sp><p:sp><p:nvSpPr><p:cNvPr id=\"3\" name=\"Body\"/><p:cNvSpPr/><p:nvPr><p:ph type=\"body\" idx=\"1\"/></p:nvPr></p:nvSpPr><p:txBody><a:p><a:r><a:t>Говорить медленно</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:notes>")),
         ];
-        read(&write_zip(parts)?, "pptx")
+        parts
+    }
+    fn external_deck(slide: &str) -> Result<Deck, String> {
+        read(&write_zip(external_parts(slide))?, "pptx")
+    }
+    fn typed_rels(entries: &[(&str, &str, &str)]) -> Vec<u8> {
+        let body = entries.iter().map(|(id, kind, target)| format!(
+            "<Relationship Id=\"{id}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/{kind}\" Target=\"{target}\"/>"
+        )).collect::<String>();
+        format!("<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">{body}</Relationships>").into_bytes()
+    }
+    #[test]
+    fn pptx_relationship_roles_do_not_depend_on_part_names() -> Result<(), String> {
+        let slide = format!("<p:sld {NS}><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"Title\"/><p:cNvSpPr/><p:nvPr><p:ph type=\"title\"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:p><a:r><a:t>Custom paths</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>");
+        let mut parts = external_parts(&slide).into_iter().collect::<BTreeMap<_,_>>();
+        for (from, to) in [
+            ("ppt/presentation.xml","deck.xml"),
+            ("ppt/slides/slide1.xml","content/s1.xml"),
+            ("ppt/slideLayouts/slideLayout1.xml","design/l.xml"),
+            ("ppt/slideMasters/slideMaster1.xml","design/m.xml"),
+            ("ppt/theme/theme1.xml","colors/t.xml"),
+            ("ppt/notesSlides/notesSlide1.xml","notes/n.xml"),
+        ] {
+            let bytes = parts.remove(from).ok_or("fixture part")?;
+            parts.insert(to.into(), bytes);
+        }
+        parts.insert("_rels/.rels".into(), typed_rels(&[("r1","officeDocument","deck.xml")]));
+        parts.insert("_rels/deck.xml.rels".into(), typed_rels(&[("rId1","slide","content/s1.xml")]));
+        parts.insert("content/_rels/s1.xml.rels".into(), typed_rels(&[
+            ("r1","slideLayout","../design/l.xml"),("r2","notesSlide","../notes/n.xml")]));
+        parts.insert("design/_rels/l.xml.rels".into(), typed_rels(&[("r1","slideMaster","m.xml")]));
+        parts.insert("design/_rels/m.xml.rels".into(), typed_rels(&[("r1","theme","../colors/t.xml")]));
+        let deck = read(&write_zip(parts.into_iter().collect())?, "pptx")?;
+        assert_eq!(deck.theme.font, "Verdana");
+        assert_eq!(deck.slides[0].notes, "Говорить медленно");
+        assert_eq!(deck.slides[0].background, [238,236,225]);
+        assert_eq!(deck.slides[0].elements[0].x, 100.0);
+        Ok(())
+    }
+    #[test]
+    fn pptx_color_maps_resolve_theme_slots() -> Result<(), String> {
+        let template = format!("<p:sld {NS}><p:cSld><p:spTree/></p:cSld>{{override}}</p:sld>");
+        let load = |mapping: &str| -> Result<Deck,String> {
+            let mut parts = external_parts(&template.replace("{override}",mapping))
+                .into_iter().collect::<BTreeMap<_,_>>();
+            let master = String::from_utf8(parts.remove("ppt/slideMasters/slideMaster1.xml").ok_or("master")?)
+                .map_err(|e|e.to_string())?;
+            parts.insert("ppt/slideMasters/slideMaster1.xml".into(),
+                master.replace("</p:sldMaster>","<p:clrMap bg2=\"accent1\" tx1=\"accent1\"/></p:sldMaster>").into_bytes());
+            read(&write_zip(parts.into_iter().collect())?, "pptx")
+        };
+        let master = load("")?;
+        assert_eq!(master.slides[0].background,[79,129,189]);
+        assert_eq!(master.theme.foreground,[79,129,189]);
+        let overridden = load("<p:clrMapOvr><a:overrideClrMapping bg2=\"dk2\" tx1=\"dk1\"/></p:clrMapOvr>")?;
+        assert_eq!(overridden.slides[0].background,[31,73,125]);
+        assert_eq!(overridden.theme.foreground,[0,0,0]);
+        assert_eq!(load("<p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>")?.slides[0].background,
+            master.slides[0].background);
+        Ok(())
+    }
+    #[test]
+    fn drawingml_tabs_are_preserved() -> Result<(),String> {
+        let body=parse(b"<a:txBody><a:p><a:r><a:t>A</a:t></a:r><a:tab/><a:r><a:t>B</a:t></a:r></a:p><a:p><a:r><a:t>C</a:t></a:r></a:p></a:txBody>")?;
+        assert_eq!(body.paragraph_text(),"A\tB\nC");
+        Ok(())
+    }
+    #[test]
+    fn drawingml_color_transforms_preserve_order() -> Result<(), String> {
+        let transformed = |body: &str| -> Result<[u8;3],String> {
+            Ok(color(Some(&parse(format!("<a:srgbClr val=\"FF0000\">{body}</a:srgbClr>").as_bytes())?),
+                &Look::default(),[0,0,0]))
+        };
+        assert_eq!(transformed("<a:tint val=\"10000\"/>")?,[255,230,230]);
+        assert_eq!(transformed("<a:shade val=\"10000\"/>")?,[26,0,0]);
+        assert_eq!(transformed("<a:lumMod val=\"50000\"/>")?,[128,0,0]);
+        // Values are rounded only when stored as RGB; allow one channel unit.
+        let rgb = transformed("<a:lumMod val=\"50000\"/><a:lumOff val=\"50000\"/>")?;
+        assert_eq!(rgb[0],255);
+        assert!((i16::from(rgb[1])-128).abs()<=1);
+        assert!((i16::from(rgb[2])-128).abs()<=1);
+        Ok(())
     }
     #[test]
     fn external_pptx_inherits_layout_master_and_theme() -> Result<(), String> {

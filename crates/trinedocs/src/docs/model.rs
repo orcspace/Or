@@ -1491,7 +1491,22 @@ impl Doc {
                 if table.rows.len() == 1 {
                     remove = true;
                 } else {
-                    table.rows.remove(at);
+                    let deleted = table.rows.remove(at);
+                    if let Some(next_row) = table.rows.get_mut(at) {
+                        let mut heads = Vec::new();
+                        let mut column = 0;
+                        for cell in &deleted {
+                            if !cell.merged { heads.push((column, cell.span())); }
+                            column += cell.span();
+                        }
+                        column = 0;
+                        for cell in next_row {
+                            if cell.merged && heads.contains(&(column, cell.span())) {
+                                cell.merged = false;
+                            }
+                            column += cell.span();
+                        }
+                    }
                     if at < table.header_rows {
                         table.header_rows -= 1;
                     }
@@ -3292,5 +3307,26 @@ mod tests {
             })
             .collect::<String>();
         assert_eq!(rendered, text);
+    }
+}
+
+#[cfg(test)]
+mod merge_deletion_defect_tests {
+    use super::*;
+    #[test]
+    fn delete_middle_vertical_merge_head_promotes_its_continuation() -> Result<(),String> {
+        let mut doc = Doc::from_text("table");
+        let id = doc.add_table(doc.paragraphs[0].id,3,1)?;
+        doc.tables[0].rows[2][0].merged=true;
+        doc.validate()?;
+        doc.edit_table(id,TableEdit::DeleteRow(1))?;
+        assert!(!doc.tables[0].rows[1][0].merged);
+        let mut chain = Doc::from_text("chain");
+        let id = chain.add_table(chain.paragraphs[0].id,3,1)?;
+        chain.tables[0].rows[1][0].merged=true;
+        chain.tables[0].rows[2][0].merged=true;
+        chain.edit_table(id,TableEdit::DeleteRow(1))?;
+        assert!(chain.tables[0].rows[1][0].merged);
+        Ok(())
     }
 }
