@@ -1327,7 +1327,7 @@ impl<'a> Engine<'a> {
                         .count() as f64);
                 }
                 let mut vals = numbers(a, name == "AVERAGEA")?;
-                let sum = vals.iter().sum::<f64>();
+                let sum = scaled_sum(&vals);
                 let count = vals.len() as f64;
                 if name == "SUM" {
                     return num(sum);
@@ -1336,7 +1336,7 @@ impl<'a> Engine<'a> {
                     return num(if vals.is_empty() {
                         0.0
                     } else {
-                        vals.iter().product()
+                        scaled_product(&vals)
                     });
                 }
                 if name == "MIN" {
@@ -1645,7 +1645,10 @@ impl<'a> Engine<'a> {
                         if y == 0.0 {
                             Err("#DIV/0!".into())
                         } else {
-                            num(x - y * (x / y).floor())
+                            let remainder=x % y;
+                            num(if remainder==0.0 {0.0}
+                                else if remainder.is_sign_negative()!=y.is_sign_negative() {remainder+y}
+                                else {remainder})
                         }
                     }
                     "QUOTIENT" => {
@@ -1661,7 +1664,8 @@ impl<'a> Engine<'a> {
                         } else if y == 0.0 {
                             num(0.0)
                         } else {
-                            num(super::format::round_scaled(x / y) * y)
+                            let ratio=x/y;
+                            num(if ratio.is_finite() {super::format::round_scaled(ratio)*y}else{x})
                         }
                     }
                     _ => {
@@ -1672,6 +1676,7 @@ impl<'a> Engine<'a> {
                             if x > 0.0 && y < 0.0 {
                                 return Err("#NUM!".into());
                             }
+                            if !(x/y).is_finite() {return num(x);}
                             let ratio = super::format::snap(x / y);
                             return num(if name == "CEILING" {
                                 ratio.ceil() * y
@@ -1680,6 +1685,7 @@ impl<'a> Engine<'a> {
                             });
                         }
                         let sig = y.abs();
+                        if !(x/sig).is_finite() {return num(x);}
                         let ratio = super::format::snap(x / sig);
                         let away = default_n(2, 0.0)? != 0.0 && x < 0.0;
                         num(if name.starts_with("CEILING") {
@@ -1762,19 +1768,20 @@ impl<'a> Engine<'a> {
                 if a.iter().any(|g| g.rows != a[0].rows || g.cols != a[0].cols) {
                     return Err("#VALUE!".into());
                 }
-                let mut sum = 0.0;
+                let mut terms=Vec::with_capacity(count);
+                let mut factors=Vec::with_capacity(a.len());
                 for i in 0..count {
-                    let mut p = 1.0;
-                    for g in a {
-                        p *= match g.values.get(i) {
-                            Some(Value::Number(n)) => *n,
-                            Some(Value::Error(e)) => return Err(e.clone()),
-                            _ => 0.0,
-                        };
+                    factors.clear();
+                    for grid in a {
+                        factors.push(match grid.values.get(i) {
+                            Some(Value::Number(value))=>*value,
+                            Some(Value::Error(error))=>return Err(error.clone()),
+                            _=>0.0,
+                        });
                     }
-                    sum += p;
+                    terms.push(scaled_product(&factors));
                 }
-                num(sum)
+                num(scaled_sum(&terms))
             }
             "LARGE" | "SMALL" | "PERCENTILE" | "PERCENTILE.INC" | "QUARTILE" | "QUARTILE.INC"
             | "RANK" | "RANK.EQ" => {
@@ -2566,6 +2573,16 @@ impl<'a> Engine<'a> {
                 if periods == 0.0 && (name == "PMT") {
                     return Err("#DIV/0!".into());
                 }
+                if rate>0.0 && periods>0.0 && rate.ln_1p()*periods>700.0 && matches!(name,"PMT"|"PV") {
+                    let exponent=-rate.ln_1p()*periods;
+                    let discounted_future=exponential_scale(fourth,exponent);
+                    let difference=-exponent.exp_m1();
+                    return if name=="PMT" {
+                        num(-(third+discounted_future)*(rate/(1.0+rate*kind))/difference)
+                    }else {
+                        num(-(third*((1.0+rate*kind)/rate)*difference+discounted_future))
+                    };
+                }
                 let growth = growth(rate, periods);
                 let annuity = annuity(rate, periods, kind);
                 num(match name {
@@ -2593,11 +2610,14 @@ impl<'a> Engine<'a> {
                 if rate == -1.0 {
                     return Err("#DIV/0!".into());
                 }
-                num(vals
-                    .iter()
-                    .enumerate()
-                    .map(|(i, v)| v / (1.0 + rate).powf((i + 1) as f64))
-                    .sum())
+                let discounted=vals.iter().enumerate().map(|(index,value)| {
+                    if *value==0.0 {return 0.0;}
+                    let base=1.0+rate;
+                    let logarithm=if rate> -1.0 {rate.ln_1p()}else{base.abs().ln()};
+                    let sign=if base<0.0 && (index+1)%2==1 {-value.signum()}else{value.signum()};
+                    sign*(value.abs().ln()-logarithm*(index+1) as f64).exp()
+                }).collect::<Vec<_>>();
+                num(scaled_sum(&discounted))
             }
             "IRR" => {
                 arity(1, 2)?;
@@ -3668,6 +3688,7 @@ fn conditional(name: &str, a: &[Grid]) -> CalcResult<f64> {
     }) {
         return Err("#VALUE!".into());
     }
+    let mut values=Vec::new();
     let mut result = 0.0;
     let mut matched = 0;
     for i in 0..sum.values.len() {
@@ -3678,7 +3699,7 @@ fn conditional(name: &str, a: &[Grid]) -> CalcResult<f64> {
             if count {
                 result += 1.0;
             } else if let Some(Value::Number(v)) = sum.values.get(i) {
-                result += v;
+                values.push(*v);
                 matched += 1;
             } else if let Some(Value::Error(e)) = sum.values.get(i) {
                 return Err(e.clone());
@@ -3689,10 +3710,13 @@ fn conditional(name: &str, a: &[Grid]) -> CalcResult<f64> {
         if matched == 0 {
             Err("#DIV/0!".into())
         } else {
-            Ok(result / f64::from(matched))
+            let scale=values.iter().map(|value|value.abs()).fold(0.0,f64::max);
+            Ok(if scale==0.0 {0.0}else {
+                scaled_sum(&values.iter().map(|value|value/scale).collect::<Vec<_>>())/f64::from(matched)*scale
+            })
         }
     } else {
-        Ok(result)
+        Ok(if count {result}else{scaled_sum(&values)})
     }
 }
 const ROMAN: [(u32, &str); 13] = [
@@ -4274,4 +4298,93 @@ mod additional_calc_defect_tests {
         assert_eq!(engine.root_cell(0,0,0),Value::Text("xxxxxxxx".into()));
         Ok(())
     }
+}
+
+/// Sum in a shared scale so a finite cancellation does not pass through infinity.
+fn scaled_sum(values:&[f64])->f64 {
+    if values.iter().any(|value|!value.is_finite()) {return values.iter().sum();}
+    let scale=values.iter().map(|value|value.abs()).fold(0.0,f64::max);
+    if scale==0.0{return 0.0;}
+    let (mut sum,mut correction)=(0.0,0.0);
+    for value in values {
+        let value=value/scale;
+        let next=sum+value;
+        correction+=if sum.abs()>=value.abs() {(sum-next)+value}else{(value-next)+sum};
+        sum=next;
+    }
+    (sum+correction)*scale
+}
+fn scaled_product(values:&[f64])->f64 {
+    if values.iter().any(|value|*value==0.0) {return 0.0;}
+    let (mut mantissa,mut exponent,mut negative)=(1.0,0i64,false);
+    for value in values {
+        negative^=value.is_sign_negative();
+        let mut magnitude=value.abs();
+        let mut adjustment=0i64;
+        if magnitude<f64::MIN_POSITIVE {magnitude*=4503599627370496.0;adjustment=-52;}
+        let bits=magnitude.to_bits();
+        exponent+=i64::from(((bits>>52)&0x7ff) as u16)-1023+adjustment;
+        mantissa*=f64::from_bits((bits&0x000f_ffff_ffff_ffff)|(1023u64<<52));
+        if mantissa>=2.0 {mantissa*=0.5;exponent+=1;}
+    }
+    let value=if exponent>1023 {f64::INFINITY}
+        else if exponent< -1075 {0.0}
+        else if exponent== -1075 {mantissa*0.5*f64::from_bits(1)}
+        else if exponent< -1022 {mantissa*f64::MIN_POSITIVE*f64::from_bits(((exponent+1022+1023) as u64)<<52)}
+        else {mantissa*f64::from_bits(((exponent+1023) as u64)<<52)};
+    if negative {-value}else{value}
+}
+#[cfg(test)]
+mod next_arithmetic_defects {
+    use super::*;
+    fn number(book:&Book,input:&str)->Result<f64,String> {
+        match evaluate(book,book.active_id(),input) {Value::Number(value)=>Ok(value),value=>Err(format!("{input}: {value:?}"))}
+    }
+    #[test]
+    fn modulo_does_not_overflow_a_discarded_quotient()->Result<(),String> {
+        let book=Book::default();
+        assert_eq!(number(&book,"=MOD(1e308,1)")?,0.0);
+        assert_eq!(number(&book,"=MOD(-3,2)")?,1.0);
+        assert_eq!(number(&book,"=MOD(3,-2)")?,-1.0);Ok(())
+    }
+    #[test]
+    fn rounding_to_tiny_multiples_keeps_already_integral_large_values()->Result<(),String> {
+        let book=Book::default();
+        for function in ["MROUND","CEILING","FLOOR","CEILING.MATH","FLOOR.PRECISE"] {
+            assert_eq!(number(&book,&format!("={function}(1e308,1e-308)"))?,1e308);
+        }Ok(())
+    }
+    #[test]
+    fn products_balance_large_and_small_factors_and_zero()->Result<(),String> {
+        let book=Book::default();
+        assert!((number(&book,"=PRODUCT(1e200,1e200,1e-200,1e-200)")?-1.0).abs()<1e-12);
+        assert_eq!(number(&book,"=SUMPRODUCT(1e308,1e308,0)")?,0.0);Ok(())
+    }
+    #[test]
+    fn aggregate_cancellation_does_not_overflow_a_finite_result()->Result<(),String> {
+        let mut book=Book::default();let id=book.active_id();
+        for (row,value) in ["1e308","1e308","-1e308"].iter().enumerate() {book.set_input(id,row as u32,0,value)?;}
+        assert_eq!(number(&book,"=SUM(A1:A3)")?,1e308);
+        assert_eq!(number(&book,"=SUMIF(A1:A3,\"<>0\")")?,1e308);
+        assert!((number(&book,"=AVERAGEIF(A1:A3,\"<>0\")")?/1e308-1.0/3.0).abs()<1e-12);Ok(())
+    }
+    #[test]
+    fn npv_keeps_a_finite_late_discounted_cash_flow()->Result<(),String> {
+        let mut book=Book::default();let id=book.active_id();
+        for row in 0..1023 {book.set_input(id,row,0,"0")?;}
+        book.set_input(id,1023,0,"1e308")?;
+        let value=number(&book,"=NPV(1,A1:A1024)")?;
+        assert!(value>0.55 && value<0.56);Ok(())
+    }
+    #[test]
+    fn annuity_payments_and_present_values_use_discounted_growth()->Result<(),String> {
+        let book=Book::default();
+        assert!((number(&book,"=PMT(0.1,10000,1)")?+0.1).abs()<1e-12);
+        assert!((number(&book,"=PV(0.1,10000,-1)")?-10.0).abs()<1e-12);Ok(())
+    }
+}
+
+fn exponential_scale(value:f64,logarithm:f64)->f64 {
+    if value==0.0 {return 0.0;}
+    value.signum()*(value.abs().ln()+logarithm).exp()
 }

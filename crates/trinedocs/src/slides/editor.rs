@@ -19,6 +19,7 @@ struct State {
     table_columns: usize,
     show_thumbnails: bool,
     hide_thumbnails: bool,
+    slide_filter: String,
     show_properties: bool,
     canvas_rect: Option<Rect>,
     show_notes: bool,
@@ -330,8 +331,8 @@ pub fn show(ui: &mut egui::Ui, deck: &mut Deck) -> bool {
         }
     }
     if let Some((id, index)) = dropped_slide {
-        match deck.move_slide(id, index) {
-            Ok(()) => changed = true,
+        match move_slide_before(deck,id,index) {
+            Ok(moved) => {changed|=moved;state.scroll_to_selection=true;},
             Err(e) => state.error = e,
         }
     }
@@ -540,11 +541,21 @@ fn thumbnail_panel(
                     .size(12.0)
                     .color(crate::chrome::muted(ui)),
             );
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut state.slide_filter)
+                    .desired_width(112.0).hint_text("Найти слайд"));
+                if ui.small_button("×").on_hover_text("Очистить фильтр слайдов").clicked(){state.slide_filter.clear();}
+            });
+            let filter=state.slide_filter.to_lowercase();
+            let mut shown=0usize;
             egui::ScrollArea::vertical()
                 .id_salt("slide_thumbnails")
                 .max_height((main_height - 70.0).max(70.0))
                 .show(ui, |ui| {
                     for (index, slide) in deck.slides.iter().enumerate() {
+                        if !filter.is_empty() && !slide.title.to_lowercase().contains(&filter)
+                            && !slide.section.to_lowercase().contains(&filter) {continue;}
+                        shown+=1;
                         let selected = slide.id == state.slide_id;
                         if (index == 0
                             || deck
@@ -555,12 +566,12 @@ fn thumbnail_panel(
                         {
                             ui.strong(&slide.section);
                         }
-                        let preview_width = 140.0;
-                        let preview_height = preview_width * deck.height / deck.width;
-                        let (rect, response) = ui.allocate_exact_size(
-                            Vec2::new(150.0, preview_height + 35.0),
-                            Sense::click_and_drag(),
-                        );
+                        let preview=fit_slide_preview(deck.width,deck.height,Vec2::new(140.0,92.0));
+                        let response=ui.add_sized([150.0,127.0],egui::Button::new("")
+                            .selected(selected).sense(Sense::click_and_drag()));
+                        let rect=response.rect;
+                        let label=format!("Слайд {}: {}{}",index+1,slide.title,if slide.hidden {"; скрыт"}else{""});
+                        response.widget_info(||egui::WidgetInfo::labeled(egui::WidgetType::Button,ui.is_enabled(),&label));
                         if selected && state.scroll_to_selection {
                             ui.scroll_to_rect(rect, Some(egui::Align::Center));
                         }
@@ -592,10 +603,9 @@ fn thumbnail_panel(
                                 Stroke::new(2.0, crate::chrome::accent(ui)),
                             );
                         }
-                        let canvas = Rect::from_min_size(
-                            rect.min + Vec2::splat(5.0),
-                            Vec2::new(preview_width, preview_height),
-                        );
+                        let preview_area=Rect::from_min_size(rect.min+Vec2::splat(5.0),Vec2::new(140.0,92.0));
+                        ui.painter().rect_filled(preview_area,2.0,crate::chrome::workspace(ui));
+                        let canvas=Rect::from_center_size(preview_area.center(),preview);
                         paint_slide(ui.ctx(), ui.painter(), canvas, deck, slide, None);
                         ui.painter().text(
                             rect.left_bottom() + Vec2::new(8.0, -7.0),
@@ -609,11 +619,22 @@ fn thumbnail_panel(
                             FontId::proportional(11.0),
                             ui.visuals().text_color(),
                         );
-                        if response.clicked() {
+                        if response.has_focus() {
+                            ui.painter().rect_stroke(rect,6.0,Stroke::new(2.0,crate::chrome::accent(ui)),egui::StrokeKind::Inside);
+                        }
+                        if response.clone().on_hover_text(label).clicked() {
                             state.slide_id = slide.id;
                             state.selected.clear();
                             state.edit_text = None;
                         }
+                    }
+                    if shown==0 {ui.weak("Слайды не найдены");}
+                    let (rect,response)=ui.allocate_exact_size(Vec2::new(150.0,14.0),Sense::hover());
+                    if response.dnd_hover_payload::<SlideDrag>().is_some() {
+                        ui.painter().hline(rect.x_range(),rect.center().y,Stroke::new(3.0,crate::chrome::accent(ui)));
+                    }
+                    if let Some(payload)=response.dnd_release_payload::<SlideDrag>() {
+                        *dropped_slide=Some((payload.0,deck.slides.len()));
                     }
                 });
             ui.horizontal(|ui| {
@@ -3752,6 +3773,38 @@ mod tests {
                     assert!((width / height - 0.5).abs() < 1.0e-5);
                 }
             }
+        }
+    }
+}
+
+fn move_slide_before(deck:&mut Deck,id:u64,before:usize)->Result<bool,String> {
+    let source=deck.slides.iter().position(|slide|slide.id==id).ok_or("Слайд не найден")?;
+    if before>deck.slides.len() {return Err("Неверная позиция слайда".into());}
+    let target=before-usize::from(source<before);
+    if source==target {return Ok(false);}
+    deck.move_slide(id,target)?;Ok(true)
+}
+pub(super) fn fit_slide_preview(width:f32,height:f32,available:Vec2)->Vec2 {
+    let scale=(available.x/width).min(available.y/height);
+    Vec2::new(width*scale,height*scale)
+}
+#[cfg(test)]
+mod next_thumbnail_tests {
+    use super::*;
+    #[test]
+    fn thumbnail_drop_inserts_before_the_indicated_card_and_supports_the_end()->Result<(),String> {
+        let mut deck=Deck::empty();let a=deck.add_slide("blank");let b=deck.add_slide("blank");let c=deck.add_slide("blank");
+        assert!(move_slide_before(&mut deck,a,2)?);
+        assert_eq!(deck.slides.iter().map(|slide|slide.id).collect::<Vec<_>>(),vec![b,a,c]);
+        assert!(move_slide_before(&mut deck,b,3)?);
+        assert_eq!(deck.slides.iter().map(|slide|slide.id).collect::<Vec<_>>(),vec![a,c,b]);Ok(())
+    }
+    #[test]
+    fn portrait_and_extreme_slide_previews_stay_inside_the_thumbnail_bounds() {
+        for (width,height) in [(960.0,540.0),(540.0,960.0),(1.0,10000.0),(10000.0,1.0)] {
+            let size=fit_slide_preview(width,height,Vec2::new(140.0,92.0));
+            assert!(size.x<=140.001 && size.y<=92.001);
+            assert!((size.x/size.y-width/height).abs()<(width/height)*1e-5);
         }
     }
 }

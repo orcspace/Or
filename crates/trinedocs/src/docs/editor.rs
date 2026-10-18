@@ -44,6 +44,7 @@ struct EditorState {
     replacement: String,
     case_sensitive: bool,
     match_index: usize,
+    find_notice: String,
     preedit: String,
     format_painter: Option<TextFormat>,
     link: String,
@@ -75,6 +76,7 @@ impl Default for EditorState {
             replacement: String::new(),
             case_sensitive: false,
             match_index: 0,
+            find_notice: String::new(),
             preedit: String::new(),
             format_painter: None,
             link: String::new(),
@@ -2248,63 +2250,68 @@ fn find_bar(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id
     if let Some(replacement) = state.find_focus.take() {
         ui.memory_mut(|m| m.request_focus(find_field_id(canvas_id, replacement)));
     }
-    ui.horizontal_wrapped(|ui| {
-        ui.label("Найти:");
-        if ui
-            .add(
-                egui::TextEdit::singleline(&mut state.search)
-                    .id(query_id)
-                    .desired_width(170.0),
-            )
-            .changed()
-        {
-            state.match_index = 0;
-        }
-        ui.label("Заменить:");
-        ui.add(
-            egui::TextEdit::singleline(&mut state.replacement)
-                .id(replacement_id)
-                .desired_width(170.0),
-        );
-        if ui.checkbox(&mut state.case_sensitive, "Регистр").changed() {
-            state.match_index = 0;
-        }
-        let matches = doc.find(&state.search, state.case_sensitive);
-        ui.label(format!("{} совпадений", matches.len()));
-        if ui
-            .add_enabled(!matches.is_empty(), egui::Button::new("Следующее"))
-            .clicked()
-        {
-            let index = state.match_index % matches.len();
-            if let Some((a, b)) = matches.get(index) {
-                select_match(doc, state, *a, *b);
-            }
-            state.match_index = index + 1;
-        }
-        if ui
-            .add_enabled(
-                matches.contains(&state.range()),
-                egui::Button::new("Заменить"),
-            )
-            .clicked()
-        {
-            replace_current_match(doc, state);
-        }
-        if ui
-            .add_enabled(!matches.is_empty(), egui::Button::new("Заменить все"))
-            .clicked()
-        {
-            doc.replace_all(&state.search, &state.replacement, state.case_sensitive);
-            state.cursor = doc.clamp_position(state.cursor);
-            state.anchor = state.cursor;
-        }
-        if ui.button("×").on_hover_text("Закрыть поиск").clicked() {
-            state.show_find = false;
-            state.find_focus = None;
-            ui.memory_mut(|m| m.request_focus(canvas_id));
-        }
-    });
+    let direction=if ui.is_enabled() && ui.memory(|memory|memory.has_focus(query_id))
+        && ui.input_mut(|input|input.consume_key(input.modifiers,Key::Enter)) {
+        Some(ui.input(|input|input.modifiers.shift))
+    }else{None};
+    let mut navigation=direction;
+    egui::Frame::new().fill(ui.visuals().faint_bg_color).inner_margin(8.0).corner_radius(5.0)
+        .show(ui,|ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.strong("Найти");
+                if ui.add(egui::TextEdit::singleline(&mut state.search).id(query_id)
+                    .desired_width(170.0).hint_text("Текст документа")).changed() {
+                    state.match_index=0;state.find_notice.clear();
+                }
+                if ui.checkbox(&mut state.case_sensitive,"Учитывать регистр").changed() {state.find_notice.clear();}
+                if ui.button("← Назад").on_hover_text("Shift+Enter").clicked(){navigation=Some(true);}
+                if ui.button("Далее →").on_hover_text("Enter").clicked(){navigation=Some(false);}
+                if ui.button("Закрыть").on_hover_text("Esc").clicked() {
+                    state.show_find=false;state.find_focus=None;
+                    ui.memory_mut(|memory|memory.request_focus(canvas_id));
+                }
+            });
+            let matches=doc.find(&state.search,state.case_sensitive);
+            if let Some(backwards)=navigation {navigate_find_matches(doc,state,&matches,backwards);}
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Заменить на");
+                ui.add(egui::TextEdit::singleline(&mut state.replacement).id(replacement_id)
+                    .desired_width(170.0).hint_text("Новый текст"));
+                if ui.add_enabled(matches.contains(&state.range()),egui::Button::new("Заменить")).clicked() {
+                    replace_current_match(doc,state);
+                }
+                if ui.add_enabled(!matches.is_empty(),egui::Button::new("Заменить все")).clicked() {
+                    match doc.try_replace_all(&state.search,&state.replacement,state.case_sensitive) {
+                        Ok(count)=>{
+                            state.cursor=doc.clamp_position(state.cursor);state.anchor=state.cursor;
+                            state.message=None;state.find_notice=format!("Заменено совпадений: {count}");
+                        }
+                        Err(error)=>state.message=Some(error),
+                    }
+                }
+            });
+            ui.horizontal_wrapped(|ui| {
+                if let Some(index)=matches.iter().position(|range|*range==state.range()) {
+                    ui.small(format!("Совпадение {} из {}",index+1,matches.len()));
+                }else{ui.small(format!("Совпадений: {}",matches.len()));}
+                if !state.find_notice.is_empty(){ui.separator();ui.small(&state.find_notice);}
+                ui.separator();ui.small("Поиск в основном тексте документа.");
+            });
+        });
 }
+fn navigate_find_matches(doc:&Doc,state:&mut EditorState,matches:&[(Position,Position)],backwards:bool) {
+    if matches.is_empty(){return;}
+    let selected=matches.contains(&state.range());
+    let index=if backwards {
+        matches.iter().rposition(|(start,end)|if selected {*start<state.range().0}else{*end<=state.cursor})
+            .unwrap_or(matches.len()-1)
+    }else{
+        matches.iter().position(|(start,_)|if selected {*start>state.range().0}else{*start>=state.cursor})
+            .unwrap_or(0)
+    };
+    let (start,end)=matches[index];select_match(doc,state,start,end);state.match_index=index+1;
+}
+
 fn select_match(doc: &Doc, state: &mut EditorState, start: Position, end: Position) {
     state.move_to(doc, end, false);
     state.anchor = start;
@@ -4616,5 +4623,37 @@ mod tests {
             doc.paragraphs.first().map(|p| p.style.as_str()),
             Some("Heading2")
         );
+    }
+}
+
+#[cfg(test)]
+mod next_find_defects {
+    use super::*;
+    #[test]
+    fn find_navigation_uses_the_current_caret_and_wraps_in_both_directions() {
+        let doc=Doc::from_text("cat one cat two cat");
+        let mut state=EditorState{cursor:Position{paragraph:0,offset:9},anchor:Position{paragraph:0,offset:9},..Default::default()};
+        let matches=doc.find("cat",true);
+        navigate_find_matches(&doc,&mut state,&matches,false);
+        assert_eq!(state.range(),matches[2]);
+        navigate_find_matches(&doc,&mut state,&matches,false);assert_eq!(state.range(),matches[0]);
+        navigate_find_matches(&doc,&mut state,&matches,true);assert_eq!(state.range(),matches[2]);
+    }
+    #[test]
+    fn enter_in_the_query_routes_to_find_and_shift_enter_goes_back()->Result<(),String> {
+        let ctx=egui::Context::default();crate::fonts::install(&ctx)?;
+        let canvas=egui::Id::new("find-enter-canvas");
+        let mut doc=Doc::from_text("a a");let mut state=EditorState{search:"a".into(),show_find:true,..Default::default()};
+        let _=ctx.run_ui(egui::RawInput::default(),|ui|find_bar(ui,&mut doc,&mut state,canvas));
+        ctx.memory_mut(|memory|memory.request_focus(find_field_id(canvas,false)));
+        for (shift,offset) in [(false,1),(true,3)] {
+            let modifiers=egui::Modifiers{shift,..Default::default()};
+            let _=ctx.run_ui(egui::RawInput{events:vec![egui::Event::ModifiersChanged(modifiers),
+                egui::Event::Key{key:Key::Enter,physical_key:None,pressed:true,repeat:false,modifiers}],..Default::default()},
+                |ui|find_bar(ui,&mut doc,&mut state,canvas));
+            assert_eq!(state.cursor.offset,offset);
+            let _=ctx.run_ui(egui::RawInput{events:vec![egui::Event::Key{key:Key::Enter,physical_key:None,pressed:false,repeat:false,modifiers}],..Default::default()},
+                |ui|find_bar(ui,&mut doc,&mut state,canvas));
+        }Ok(())
     }
 }

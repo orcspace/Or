@@ -1296,24 +1296,78 @@ impl Doc {
         }
         matches
     }
-    pub fn replace_all(&mut self, needle: &str, replacement: &str, case_sensitive: bool) -> usize {
-        let mut matches = self.find(needle, case_sensitive);
-        // Only non-overlapping matches are replaced, matching Word's replace-all behaviour.
-        let mut previous: Option<Position> = None;
-        matches.retain(|(a, b)| {
-            let keep = previous.is_none_or(|end| *a >= end);
-            if keep {
-                previous = Some(*b);
-            }
-            keep
+    pub fn replace_all(&mut self,needle:&str,replacement:&str,case_sensitive:bool)->usize {
+        self.try_replace_all(needle,replacement,case_sensitive).unwrap_or(0)
+    }
+    /// Preflight the entire operation and build each affected paragraph only once.
+    pub fn try_replace_all(&mut self,needle:&str,replacement:&str,case_sensitive:bool)->Result<usize,String> {
+        self.replace_all_with_limits(needle,replacement,case_sensitive,16*1024*1024,100_000)
+    }
+    fn replace_all_with_limits(&mut self,needle:&str,replacement:&str,case_sensitive:bool,text_limit:usize,match_limit:usize)->Result<usize,String> {
+        let mut matches=self.find_bounded(needle,case_sensitive,match_limit.saturating_add(1));
+        if matches.len()>match_limit {return Err("Замена превышает 100 000 совпадений; уточните поиск".into());}
+        let mut previous=None;
+        matches.retain(|(start,end)| {
+            if previous.is_none_or(|previous|*start>=previous) {previous=Some(*end);true}else{false}
         });
-        let mut count = 0;
-        for (a, b) in matches.into_iter().rev() {
-            if self.replace_range(a, b, replacement, None).is_ok() {
-                count += 1;
+        if matches.is_empty(){return Ok(0);}
+        let replacement=replacement.replace("\r\n","\n").replace('\r',"\n");
+        let count=matches.len();
+        let extra_lines=replacement.chars().filter(|ch|*ch=='\n').count().checked_mul(count)
+            .and_then(|lines|lines.checked_add(self.paragraphs.len()));
+        if extra_lines.is_none_or(|lines|lines>100000) {return Err("Замена превышает предел числа абзацев".into());}
+        let mut grouped=std::collections::BTreeMap::<usize,Vec<(usize,usize)>>::new();
+        for (start,end) in matches {grouped.entry(start.paragraph).or_default().push((start.offset,end.offset));}
+        let bytes=self.paragraphs.iter().chain(self.tables.iter().flat_map(|table|table.rows.iter().flatten())
+                .flat_map(|cell|cell.paragraphs.iter()))
+            .flat_map(|paragraph|paragraph.runs.iter()).map(|run|run.text.len()).sum::<usize>();
+        let mut removed=0usize;
+        for (index,ranges) in &grouped {
+            let mut range=0;
+            for (offset,ch) in self.paragraphs[*index].runs.iter().flat_map(|run|run.text.chars()).enumerate() {
+                while ranges.get(range).is_some_and(|(_,end)|offset>=*end) {range+=1;}
+                if ranges.get(range).is_some_and(|(start,end)|offset>=*start && offset<*end) {removed+=ch.len_utf8();}
             }
         }
-        count
+        let projected=replacement.len().checked_mul(count)
+            .and_then(|added|bytes.saturating_sub(removed).checked_add(added));
+        if projected.is_none_or(|bytes|bytes>text_limit) {return Err("Замена превышает лимит текста Docs".into());}
+        let mut candidate=self.clone();
+        let originals=std::mem::take(&mut candidate.paragraphs);
+        for (index,original) in originals.into_iter().enumerate() {
+            let Some(ranges)=grouped.get(&index) else {candidate.paragraphs.push(original);continue;};
+            let mut template=original.clone();template.runs.clear();
+            let mut current=template.clone();
+            let mut source=original.runs.iter().flat_map(|run|
+                run.text.chars().map(move|ch|(ch,&run.format))).peekable();
+            let mut offset=0;
+            for (start,end) in ranges {
+                while offset<*start {
+                    if let Some((ch,format))=source.next() {push_replacement_char(&mut current,ch,format);}
+                    offset+=1;
+                }
+                let format=source.peek().map(|(_,format)|(**format).clone()).unwrap_or_default();
+                for _ in *start..*end {source.next();offset+=1;}
+                if current.runs.is_empty() {current.runs.push(Run{text:String::new(),format:format.clone()});}
+                for ch in replacement.chars() {
+                    if ch=='\n' {
+                        current.normalize();candidate.paragraphs.push(current);
+                        current=template.clone();current.id=candidate.alloc_id();current.page_break_before=false;
+                        current.runs.push(Run{text:String::new(),format:format.clone()});
+                    }else{push_replacement_char(&mut current,ch,&format);}
+                }
+            }
+            for (ch,format) in source {push_replacement_char(&mut current,ch,format);}
+            current.normalize();
+            let last=current.id;
+            candidate.paragraphs.push(current);
+            if last!=original.id {
+                for table in &mut candidate.tables {if table.after_paragraph_id==original.id {table.after_paragraph_id=last;}}
+                for image in &mut candidate.images {if image.after_paragraph_id==original.id {image.after_paragraph_id=last;}}
+            }
+        }
+        candidate.validate()?;
+        *self=candidate;Ok(count)
     }
     pub fn add_table(
         &mut self,
@@ -3328,5 +3382,31 @@ mod merge_deletion_defect_tests {
         chain.edit_table(id,TableEdit::DeleteRow(1))?;
         assert!(chain.tables[0].rows[1][0].merged);
         Ok(())
+    }
+}
+
+fn push_replacement_char(paragraph:&mut Paragraph,ch:char,format:&TextFormat) {
+    if let Some(run)=paragraph.runs.last_mut().filter(|run|run.format==*format) {run.text.push(ch);}
+    else{paragraph.runs.push(Run{text:ch.to_string(),format:format.clone()});}
+}
+#[cfg(test)]
+mod next_replace_all_defects {
+    use super::*;
+    #[test]
+    fn bulk_replacement_builds_dense_matches_and_preserves_rich_suffixes()->Result<(),String> {
+        let mut doc=Doc::from_text(&"a".repeat(20000));
+        doc.paragraphs[0].runs.push(Run{text:"tail".into(),format:TextFormat{bold:true,..Default::default()}});
+        assert_eq!(doc.try_replace_all("a","xy",true)?,20001);
+        assert_eq!(doc.paragraphs[0].text(),format!("{}txyil","xy".repeat(20000)));
+        assert!(doc.paragraphs[0].runs.last().is_some_and(|run|run.format.bold));
+        Ok(())
+    }
+    #[test]
+    fn bulk_replacement_limits_refuse_the_whole_operation_before_mutation()->Result<(),String> {
+        let mut doc=Doc::from_text("a a");let before=doc.clone();
+        assert!(doc.replace_all_with_limits("a","long",true,4,100).is_err());
+        assert_eq!(doc,before);
+        assert!(doc.replace_all_with_limits("a","x",true,100,1).is_err());
+        assert_eq!(doc,before);Ok(())
     }
 }

@@ -120,7 +120,11 @@ pub fn encode(doc: &Document) -> Result<Vec<u8>, String> {
                 }
             }
         }
-        Document::Sheets(_) => {}
+        Document::Sheets(book) => {
+            for sheet in &mut book.sheets {
+                for image in &mut sheet.images {add(image.id,&mut image.bytes);}
+            }
+        }
     }
     parts.push((
         "document.json".into(),
@@ -144,7 +148,8 @@ pub fn decode(bytes: &[u8]) -> Result<Document, String> {
         return Err("Версия документа не поддерживается".into());
     }
     if env.version == 2 {
-        let mut restore = |id: u64, bytes: &mut Vec<u8>| -> Result<(), String> {
+        let mut restore = |id: u64, bytes: &mut Vec<u8>, inline_legacy: bool| -> Result<(), String> {
+            if inline_legacy && !env.assets.contains_key(&id) && !bytes.is_empty() {return Ok(());}
             let path = env
                 .assets
                 .remove(&id)
@@ -158,7 +163,7 @@ pub fn decode(bytes: &[u8]) -> Result<Document, String> {
         match &mut env.document {
             Document::Docs(d) => {
                 for image in &mut d.images {
-                    restore(image.id, &mut image.bytes)?;
+                    restore(image.id, &mut image.bytes, false)?;
                 }
             }
             Document::Slides(d) => {
@@ -167,12 +172,19 @@ pub fn decode(bytes: &[u8]) -> Result<Document, String> {
                         if let crate::slides::model::ElementKind::Image { bytes } =
                             &mut element.kind
                         {
-                            restore(element.id, bytes)?;
+                            restore(element.id, bytes, false)?;
                         }
                     }
                 }
             }
-            Document::Sheets(_) => {}
+            Document::Sheets(book) => {
+                for sheet in &mut book.sheets {
+                    for image in &mut sheet.images {
+                        // Existing v2 Sheets packages kept images inline; retain that compatibility.
+                        restore(image.id,&mut image.bytes,true)?;
+                    }
+                }
+            }
         }
         if !env.assets.is_empty() {
             return Err("Неизвестный ID в asset manifest".into());
@@ -390,5 +402,26 @@ mod asset_tests {
         assert!(p.contains_key(&format!("assets/{id}.bin")));
         assert_eq!(decode(&zip)?, doc);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod next_native_image_tests {
+    use super::*;
+    #[test]
+    fn native_sheets_store_image_bytes_as_assets_and_open_legacy_inline_images()->Result<(),String> {
+        let mut png=std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(2,2).write_to(&mut png,image::ImageFormat::Png).map_err(|e|e.to_string())?;
+        let mut book=crate::sheets::model::Book::default();let id=book.active_id();
+        let image_id=book.add_image(id,0,0,png.into_inner())?;
+        let document=Document::Sheets(book);
+        let bytes=encode(&document)?;let parts=crate::package::read_zip(&bytes)?;
+        assert!(parts.contains_key(&format!("assets/{image_id}.bin")));
+        let metadata:serde_json::Value=serde_json::from_slice(parts.get("document.json").ok_or("json")?).map_err(|e|e.to_string())?;
+        assert_eq!(metadata["document"]["data"]["sheets"][0]["images"][0]["bytes"],serde_json::json!([]));
+        assert_eq!(decode(&bytes)?,document);
+        let legacy=crate::package::write_zip(vec![("document.json".into(),
+            serde_json::to_vec(&Envelope{version:2,document:document.clone(),assets:Default::default()}).map_err(|e|e.to_string())?)])?;
+        assert_eq!(decode(&legacy)?,document);Ok(())
     }
 }
