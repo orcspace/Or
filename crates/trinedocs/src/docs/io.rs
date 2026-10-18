@@ -5021,19 +5021,31 @@ fn markdown_emphasis_end(text:&str,marker:&str,budget:&mut usize)->Result<Option
 }
 
 type HtmlWalker=fn(&Node,&mut Doc,&str,Option<(List,u8)>)->Result<(),String>;
-fn html_table_rows<'a>(node:&'a Node,out:&mut Vec<(&'a Node,bool)>,header:bool) {
+fn html_table_rows<'a>(node:&'a Node,out:&mut Vec<(&'a Node,bool,usize)>,header:bool) {
+    let mut direct_start=out.len();
     for child in &node.children {
-        if child.name=="tr" {out.push((child,header));}
+        if child.name=="tr" {out.push((child,header,0));}
         else if matches!(child.name.as_str(),"thead"|"tbody"|"tfoot") {
+            let end=out.len();
+            for (_,_,group_end) in &mut out[direct_start..end] {*group_end=end;}
             html_table_rows(child,out,child.name=="thead");
+            direct_start=out.len();
         }
     }
+    let end=out.len();
+    for (_,_,group_end) in &mut out[direct_start..end] {*group_end=end;}
 }
 fn html_span(node:&Node,name:&str,maximum:usize)->Result<usize,String> {
     let Some(value)=node.attr(name) else{return Ok(1);};
-    let count=value.parse::<usize>().map_err(|_|format!("HTML: некорректный {name}"))?;
+    let count=value.trim().parse::<usize>().map_err(|_|format!("HTML: некорректный {name}"))?;
     if count==0 || count>maximum {return Err(format!("HTML: {name} превышает безопасный диапазон"));}
     Ok(count)
+}
+fn html_row_span(node:&Node,remaining:usize)->Result<usize,String> {
+    let Some(value)=node.attr("rowspan") else{return Ok(1);};
+    let count=value.trim().parse::<usize>().map_err(|_|"HTML: некорректный rowspan")?;
+    // rowspan=0 covers the remaining rows of this row group, never a later tbody.
+    Ok(if count==0 {remaining}else{count.min(remaining)})
 }
 fn html_import_table(node:&Node,doc:&mut Doc,css:&str,walk:HtmlWalker)->Result<(),String> {
     if doc.tables.len()>=1000 {return Err("HTML: превышен лимит1000 таблиц".into());}
@@ -5045,7 +5057,7 @@ fn html_import_table(node:&Node,doc:&mut Doc,css:&str,walk:HtmlWalker)->Result<(
     let mut rows=Vec::new();let mut row_heights=Vec::new();let mut header_rows=0;
     let mut borderless=true;let mut border_color=[0,0,0];let mut margin=WORD_CELL_MARGIN;
     let mut first_cell=true;
-    for (ri,(row_node,in_header)) in source.iter().enumerate() {
+    for (ri,(row_node,in_header,group_end)) in source.iter().enumerate() {
         let nodes=row_node.children.iter().filter(|child|matches!(child.name.as_str(),"td"|"th")).collect::<Vec<_>>();
         if nodes.len()>256 {return Err("HTML: таблица превышает256 столбцов".into());}
         if ri==header_rows && (*in_header || !nodes.is_empty() && nodes.iter().all(|cell|cell.name=="th")) {header_rows+=1;}
@@ -5062,7 +5074,7 @@ fn html_import_table(node:&Node,doc:&mut Doc,css:&str,walk:HtmlWalker)->Result<(
                 if column+span>256 || active[column..column+span].iter().any(|slot|slot.is_some_and(|(until,_)|until>ri)) {
                     return Err("HTML: пересечение объединений или больше256 столбцов".into());
                 }
-                let row_span=html_span(cell_node,"rowspan",10000)?.min(source.len()-ri);
+                let row_span=html_row_span(cell_node,group_end.saturating_sub(ri).max(1))?;
                 let cell_css=html_computed_css(&inherited_html_css(css),cell_node.attr("style").unwrap_or(""));
                 let mut nested=Doc{paragraphs:Vec::new(),next_id:doc.next_id,page:doc.page.clone(),..Default::default()};
                 walk(cell_node,&mut nested,css,None)?;
@@ -5140,7 +5152,7 @@ fn html_import_table(node:&Node,doc:&mut Doc,css:&str,walk:HtmlWalker)->Result<(
 fn html_import_list_item(node:&Node,doc:&mut Doc,css:&str,list:Option<(List,u8)>,walk:HtmlWalker)->Result<(),String> {
     fn emit(node:&Node,doc:&mut Doc,css:&str,list:(List,u8),first:&mut bool,walk:HtmlWalker)->Result<(),String> {
         let start=doc.paragraphs.len();
-        walk(node,doc,css,None)?;
+        walk(node,doc,css,Some(list))?;
         for paragraph in doc.paragraphs.iter_mut().skip(start).filter(|paragraph|paragraph.list==List::None) {
             if !*first {paragraph.list=list.0;paragraph.list_level=list.1;*first=true;}
             else {paragraph.indent+=(f32::from(list.1)+1.0)*18.0;}
@@ -5226,11 +5238,15 @@ mod hundred_docs_io_regressions {
         assert_eq!(doc.paragraphs.iter().map(Paragraph::text).collect::<Vec<_>>(),vec!["first","second","nested","last"]);
         assert_eq!((doc.paragraphs[0].list,doc.paragraphs[0].list_level),(List::Bullet,0));
         assert_eq!(doc.paragraphs[1].list,List::None);assert_eq!(doc.paragraphs[1].indent,18.0);
-        assert_eq!((doc.paragraphs[2].list,doc.paragraphs[2].list_level),(List::Number,1));Ok(())
+        assert_eq!((doc.paragraphs[2].list,doc.paragraphs[2].list_level),(List::Number,1));
+        let wrapped=html("<ul><li><div><p>A</p><ol><li>B</li></ol></div></li></ul>")?;
+        assert_eq!(wrapped.paragraphs.iter().map(Paragraph::text).collect::<Vec<_>>(),vec!["A","B"]);
+        assert_eq!((wrapped.paragraphs[0].list,wrapped.paragraphs[0].list_level),(List::Bullet,0));
+        assert_eq!((wrapped.paragraphs[1].list,wrapped.paragraphs[1].list_level),(List::Number,1));Ok(())
     }
     #[test]
     fn html_tables_import_bounded_structure_merges_and_native_export_geometry()->Result<(),String> {
-        let doc=html(r##"<p>anchor</p><table><colgroup><col style="width:70pt"/><col style="width:90pt"/></colgroup><thead><tr><th colspan="2" rowspan="2" style="padding:1pt 2pt 3pt 4pt;vertical-align:bottom;border:1px solid #123456;background-color:#abcdef;height:24pt"><p><b>merged</b></p></th></tr></thead><tbody><tr></tr><tr><td>a</td><td>b</td></tr></tbody></table>"##)?;
+        let doc=html(r##"<p>anchor</p><table><colgroup><col style="width:70pt"/><col style="width:90pt"/></colgroup><thead><tr><th colspan="2" rowspan="2" style="padding:1pt 2pt 3pt 4pt;vertical-align:bottom;border:1px solid #123456;background-color:#abcdef;height:24pt"><p><b>merged</b></p></th></tr><tr></tr></thead><tbody><tr><td>a</td><td>b</td></tr></tbody></table>"##)?;
         let table=&doc.tables[0];
         assert_eq!(table.rows.len(),3);assert_eq!(table.grid_columns(),2);
         assert_eq!(table.rows[0][0].span,2);assert!(table.rows[1][0].merged);
@@ -5238,12 +5254,20 @@ mod hundred_docs_io_regressions {
         assert!(table.rows[0][0].paragraphs[0].runs[0].format.bold);
         assert_eq!(table.column_widths,vec![70.0,90.0]);assert_eq!(table.cell_margin,[1.0,2.0,3.0,4.0]);
         assert_eq!(table.border_color,[18,52,86]);assert!(!table.borderless);
-        assert_eq!(table.header_rows,1);assert_eq!(table.row_heights[0],24.0);
+        assert_eq!(table.header_rows,2);assert_eq!(table.row_heights[0],24.0);
         let imported=read(&write(&doc,"html")?,"html")?;
         assert_eq!(imported.tables[0].rows[0][0].span,2);
         assert!(imported.tables[0].rows[1][0].merged);
         assert_eq!(imported.tables[0].column_widths,table.column_widths);
-        assert!(html("<table><tr><td colspan=\"257\">bad</td></tr></table>").is_err());Ok(())
+        assert!(html("<table><tr><td colspan=\"257\">bad</td></tr></table>").is_err());
+        for span in ["0","20"] {
+            let grouped=html(&format!("<table><thead><tr><th>H1</th><th>H2</th></tr></thead><tbody><tr><td rowspan=\"{span}\">A</td><td>B</td></tr><tr><td>C</td></tr></tbody><tbody><tr><td>D</td><td>E</td></tr></tbody></table>"))?;
+            let rows=&grouped.tables[0].rows;
+            assert_eq!(rows.len(),4);assert!(rows[2][0].merged);
+            assert!(!rows[3][0].merged);assert_eq!(cell_text(&rows[3][0]),"D");
+            assert_eq!(cell_text(&rows[2][1]),"C");
+        }
+        Ok(())
     }
     #[test]
     fn html_images_use_standard_attributes_and_css_with_intrinsic_ratio()->Result<(),String> {
