@@ -558,6 +558,9 @@ pub fn cell_text(cell: &Cell) -> String {
 }
 /// Replaces the text of a cell, keeping formats and IDs of unchanged parts.
 pub fn edit_cell_text(cell: &mut Cell, text: &str, next_id: &mut u64) {
+    let _=try_edit_cell_text(cell,text,next_id);
+}
+pub fn try_edit_cell_text(cell: &mut Cell, text: &str, next_id: &mut u64)->Result<(),String> {
     let mut nested = Doc {
         paragraphs: cell.paragraphs.clone(),
         next_id: *next_id,
@@ -599,10 +602,9 @@ pub fn edit_cell_text(cell: &mut Cell, text: &str, next_id: &mut u64) {
         .skip(prefix)
         .take(new_chars.len().saturating_sub(prefix + suffix))
         .collect();
-    if nested.replace_range(a, b, &inserted, None).is_ok() {
-        cell.paragraphs = nested.paragraphs;
-        *next_id = nested.next_id;
-    }
+    nested.replace_range(a,b,&inserted,None)?;
+    cell.paragraphs=nested.paragraphs;*next_id=nested.next_id;
+    Ok(())
 }
 type FaceMetrics = (
     String,
@@ -1008,7 +1010,11 @@ impl Doc {
         out.join("\n")
     }
     pub fn word_count(&self) -> usize {
-        self.plain_text().split_whitespace().count()
+        self.paragraphs.iter().map(|paragraph|paragraph.text().split_whitespace().count()).sum::<usize>()
+            + self.tables.iter().flat_map(|table|table.rows.iter().enumerate())
+                .flat_map(|(row,cells)|cells.iter().filter(move |cell|row==0 || !cell.merged))
+                .flat_map(|cell|&cell.paragraphs)
+                .map(|paragraph|paragraph.text().split_whitespace().count()).sum::<usize>()
     }
     pub fn position(&self, paragraph_id: u64, offset: usize) -> Result<Position, String> {
         let paragraph = self
@@ -1085,16 +1091,30 @@ impl Doc {
         let first = self
             .paragraphs
             .get(a.paragraph)
-            .cloned()
             .ok_or("Начальный абзац не найден")?;
         let last = self
             .paragraphs
             .get(b.paragraph)
-            .cloned()
             .ok_or("Конечный абзац не найден")?;
         if a.offset > first.len() || b.offset > last.len() {
             return Err("Недопустимый диапазон текста".into());
         }
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        let lines: Vec<&str> = normalized.split('\n').collect();
+        let remaining=self.paragraphs.len().saturating_sub(b.paragraph-a.paragraph+1);
+        if remaining.checked_add(lines.len()).is_none_or(|count|count>100000) {
+            return Err("Правка превышает100000 абзацев Docs".into());
+        }
+        let text_bytes=self.paragraphs.iter().chain(self.tables.iter()
+            .flat_map(|table|table.rows.iter().flatten()).flat_map(|cell|&cell.paragraphs))
+            .flat_map(|paragraph|&paragraph.runs).fold(0usize,|total,run|total.saturating_add(run.text.len()));
+        let removed=self.selected_text(a,b).len().saturating_sub(b.paragraph-a.paragraph);
+        let inserted=lines.iter().fold(0usize,|total,line|total.saturating_add(line.len()));
+        if text_bytes.saturating_sub(removed).checked_add(inserted).is_none_or(|total|total>16*1024*1024)
+            || self.next_id.max(2).checked_add(lines.len().saturating_sub(1) as u64).is_none_or(|next|next==u64::MAX) {
+            return Err("Правка превышает безопасный лимит текста или ID Docs".into());
+        }
+        let first=first.clone();let last=last.clone();
         let fmt = format.unwrap_or_else(|| {
             // Insertion follows the character before the caret; replacement follows
             // the first deleted character, including matches at a run boundary.
@@ -1102,11 +1122,10 @@ impl Doc {
         });
         let prefix = first.slice(0, a.offset);
         let suffix = last.slice(b.offset, last.len());
-        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-        let lines: Vec<&str> = normalized.split('\n').collect();
+        let mut template=first.clone();template.runs.clear();
         let mut replacement = Vec::new();
         for (i, line) in lines.iter().enumerate() {
-            let mut p = first.clone();
+            let mut p = template.clone();
             if i > 0 {
                 p.id = self.alloc_id();
                 p.page_break_before = false;
@@ -1756,7 +1775,7 @@ impl Doc {
         let cell = self
             .table_cell_mut(table_id, row, column)
             .ok_or("invalid_range: ячейка не найдена")?;
-        edit_cell_text(cell, text, &mut next);
+        try_edit_cell_text(cell, text, &mut next)?;
         let id = cell.id;
         self.next_id = next;
         Ok(id)
@@ -1907,11 +1926,11 @@ impl Doc {
             for image in doc.images.iter().filter(|im| im.after_paragraph_id == p.id) {
                 let max_w = setup.width - setup.margin_left - setup.margin_right;
                 let max_h = setup.height - setup.margin_top - setup.margin_bottom;
-                let scale = (max_w / image.width.max(1.0))
-                    .min(max_h / image.height.max(1.0))
+                let scale = (max_w / image.width)
+                    .min(max_h / image.height)
                     .min(1.0);
-                let width = image.width.max(1.0) * scale;
-                let height = image.height.max(1.0) * scale;
+                let width = image.width * scale;
+                let height = image.height * scale;
                 if y + height > setup.height - setup.margin_bottom {
                     next_page(&mut layout, setup, &mut y);
                 }
@@ -3408,5 +3427,41 @@ mod next_replace_all_defects {
         assert_eq!(doc,before);
         assert!(doc.replace_all_with_limits("a","x",true,100,1).is_err());
         assert_eq!(doc,before);Ok(())
+    }
+}
+
+#[cfg(test)]
+mod hundred_docs_model_regressions {
+    use super::*;
+    #[test]
+    fn subpoint_images_keep_their_model_dimensions_when_laid_out()->Result<(),String> {
+        let mut doc=Doc::from_text("anchor");let id=doc.alloc_id();
+        let mut png=std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(1,1).write_to(&mut png,image::ImageFormat::Png).map_err(|error|error.to_string())?;
+        doc.images.push(AnchoredImage{id,after_paragraph_id:doc.paragraphs[0].id,bytes:png.into_inner(),width:0.25,height:2.0,alt:String::new()});
+        doc.validate()?;
+        let layout=doc.layout();
+        assert!(layout.pages.iter().flat_map(|page|&page.items).any(|item|matches!(item,Primitive::Image{w,h,..} if *w==0.25 && *h==2.0)));Ok(())
+    }
+    #[test]
+    fn multiline_replace_preflights_limits_and_keeps_rich_suffix_without_repeated_source_clones()->Result<(),String> {
+        let mut doc=Doc::from_text(&"x".repeat(20000));
+        doc.paragraphs[0].runs.push(Run{text:"tail".into(),format:TextFormat{bold:true,..Default::default()}});
+        let pos=Position{paragraph:0,offset:0};
+        doc.replace_range(pos,pos,&"line\n".repeat(2000),None)?;
+        assert_eq!(doc.paragraphs.len(),2001);
+        assert!(doc.paragraphs.last().and_then(|paragraph|paragraph.runs.last()).is_some_and(|run|run.text=="tail" && run.format.bold));
+        doc.validate()?;let before=doc.clone();
+        assert!(doc.replace_range(pos,pos,&"\n".repeat(100000),None).is_err());
+        assert_eq!(doc,before);Ok(())
+    }
+    #[test]
+    fn word_count_excludes_invisible_vertical_merge_continuations()->Result<(),String> {
+        let mut doc=Doc::from_text("body");let anchor=doc.paragraphs[0].id;
+        doc.add_table(anchor,2,1)?;
+        let table=doc.tables[0].id;
+        doc.set_cell_text(table,0,0,"visible")?;doc.set_cell_text(table,1,0,"hidden extra words")?;
+        doc.tables[0].rows[1][0].merged=true;
+        assert_eq!(doc.word_count(),2);Ok(())
     }
 }
