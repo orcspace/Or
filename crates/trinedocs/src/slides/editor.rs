@@ -2319,6 +2319,7 @@ fn canvas(
         }
     }
     if response.clicked() || response.drag_started() {
+        if response.drag_started() {state.drag_target=None;}
         response.request_focus();
         let pointer=if response.drag_started() {ui.input(|input|input.pointer.press_origin())}
             else {response.interact_pointer_pos()};

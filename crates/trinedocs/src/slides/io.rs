@@ -734,6 +734,7 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
     let no_look = Look::default();
     let mut themed = false;
     let mut approximated = 0_usize;
+    let mut imported_image_bytes=0_usize;
     let rels_of = |path: &str| rels_of_kind(path, None);
     if let Some(size) = presentation.child("sldSz") {
         deck.width = size.number("cx", 12192000.0) / 12700.0;
@@ -955,6 +956,10 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
                     }
                     super::model::image_dimensions(bytes)?;
                     let image_bytes=if flip.0||flip.1 {flipped_image(bytes,flip)?}else{bytes.clone()};
+                    imported_image_bytes=imported_image_bytes.saturating_add(image_bytes.len());
+                    if image_bytes.len()>32*1024*1024||imported_image_bytes>64*1024*1024 {
+                        return Err("Изображения PPTX превышают допустимый размер после преобразования".into());
+                    }
                     element.kind = ElementKind::Image { bytes:image_bytes };
                 } else if let Some(table) = shape.descend("tbl") {
                     if let Some(cell) = table.child("tr").and_then(|row| row.child("tc")) {
@@ -1857,6 +1862,14 @@ fn sections_xml(deck:&Deck)->String {
     format!("<p:extLst><p:ext uri=\"{{521415D9-36F7-43E2-AB2F-B90AF26B5E84}}\"><p14:sectionLst xmlns:p14=\"http://schemas.microsoft.com/office/powerpoint/2010/main\">{body}</p14:sectionLst></p:ext></p:extLst>")
 }
 fn write_pptx(deck: &Deck) -> Result<Vec<u8>, String> {
+    let mut dense_cells=0_usize;
+    for element in deck.slides.iter().flat_map(|slide|&slide.elements) {
+        if let ElementKind::Table{cells}=&element.kind {
+            let columns=cells.iter().map(Vec::len).max().unwrap_or(1).max(1);
+            dense_cells=dense_cells.saturating_add(cells.len().max(1).saturating_mul(columns));
+            if dense_cells>100000 {return Err("Таблицы PPTX превышают общий предел плотных ячеек".into());}
+        }
+    }
     let mut parts: Vec<(String, Vec<u8>)> = Vec::new();
     let mut overrides = String::new();
     let mut slide_ids = String::new();
@@ -2943,7 +2956,7 @@ mod hundred_slide_io_tests {
     }
     #[test]
     fn unresolved_theme_face_keeps_the_fallback_font()->Result<(),String> {
-        let body=parse(br#"<txBody><p><r><rPr><latin typeface="+unknown"/></rPr><t>Text</t></r></p></txBody>"#)?;
+        let body=parse(br#"<txBody><p><r><rPr><latin typeface="+mn-ea"/></rPr><t>Text</t></r></p></txBody>"#)?;
         let look=Look{minor:"Verdana".into(),..Look::default()};let mut e=Element::default();
         apply_text_look(&body,&mut e,&look,None,18.0,false);assert_eq!(e.font,"Verdana");Ok(())
     }
@@ -2986,7 +2999,11 @@ mod hundred_slide_io_tests {
         let mut cells=vec![vec![];1000];cells[0]=vec!["x".into();1000];
         let e=Element{kind:ElementKind::Table{cells:cells.clone()},..Element::default()};
         let mut deck=blank_deck();deck.add_element(deck.slides[0].id,e.kind.clone())?;deck.validate()?;
-        assert!(table_xml(&e,2,&cells).is_err());assert!(write(&deck,"pptx").is_err());Ok(())
+        assert!(table_xml(&e,2,&cells).is_err());assert!(write(&deck,"pptx").is_err());
+        let mut cells=vec![vec![];51];cells[0]=vec!["x".into();1000];
+        let mut aggregate=blank_deck();
+        for _ in 0..2 {aggregate.add_element(aggregate.slides[0].id,ElementKind::Table{cells:cells.clone()})?;}
+        aggregate.validate()?;assert!(table_xml(&e,2,&cells).is_ok());assert!(write(&aggregate,"pptx").is_err());Ok(())
     }
     #[test]
     fn pptx_picture_flips_transform_the_image_pixels()->Result<(),String> {
