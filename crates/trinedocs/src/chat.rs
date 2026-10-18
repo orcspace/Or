@@ -1394,7 +1394,9 @@ fn codex_mcp_override(list: &[u8], shim: &str, client: &str) -> Result<String, S
     }
     let servers: Value = serde_json::from_slice(list)
         .map_err(|e| format!("Не удалось прочитать список MCP Codex: {e}"))?;
-    let servers = servers.as_array().ok_or("Неизвестный формат списка MCP Codex")?;
+    let servers = servers
+        .as_array()
+        .ok_or("Неизвестный формат списка MCP Codex")?;
     let mut disabled = std::collections::BTreeSet::new();
     for server in servers {
         let name = server
@@ -2329,7 +2331,10 @@ mod codex_isolation_review_tests {
     fn codex_launch_explicitly_disables_shell_and_inherited_execution_features() {
         let mut command = Command::new("codex");
         restrict_codex(&mut command);
-        let args = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
         for expected in [
             "features.shell_tool=false",
             "features.view_image=false",
@@ -2341,25 +2346,51 @@ mod codex_isolation_review_tests {
             "features.request_permissions_tool=false",
             "approval_policy=\"never\"",
         ] {
-            assert!(args.windows(2).any(|pair| pair[0] == "-c" && pair[1] == expected), "{expected}");
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair[0] == "-c" && pair[1] == expected),
+                "{expected}"
+            );
         }
     }
     #[test]
-    fn codex_mcp_override_disables_all_other_names_including_quoted_and_dotted_names() -> Result<(), String> {
+    fn codex_mcp_disables_quoted_and_dotted_server_names() -> Result<(), String> {
         let names = ["other", "name.with.dots", "O'Neil", "line\rbreak"];
-        let mut servers = names.iter().map(|name| serde_json::json!({"name":name})).collect::<Vec<_>>();
+        let mut servers = names
+            .iter()
+            .map(|name| serde_json::json!({"name":name}))
+            .collect::<Vec<_>>();
         servers.push(serde_json::json!({"name":"trinedocs"}));
         let bytes = serde_json::to_vec(&servers).map_err(|e| e.to_string())?;
-        let config = codex_mcp_override(&bytes, r"C:\Program Files\TrineDocs\trinedocs-mcp.exe", "nonce")?;
-        let parsed = config.parse::<toml_edit::DocumentMut>().map_err(|e| e.to_string())?;
+        let config = codex_mcp_override(
+            &bytes,
+            r"C:\Program Files\TrineDocs\trinedocs-mcp.exe",
+            "nonce",
+        )?;
+        let parsed = config
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|e| e.to_string())?;
         for name in names {
             assert_eq!(parsed["mcp_servers"][name]["enabled"].as_bool(), Some(false));
         }
         let own = &parsed["mcp_servers"]["trinedocs"];
         assert_eq!(own["enabled"].as_bool(), Some(true));
-        assert_eq!(own["command"].as_str(), Some(r"C:\Program Files\TrineDocs\trinedocs-mcp.exe"));
-        assert_eq!(own["args"].as_array().and_then(|args| args.get(1)).and_then(toml_edit::Value::as_str), Some("nonce"));
-        for malformed in [b"{}".as_slice(), b"[{}]".as_slice(), b"[{\"name\":\"\"}]".as_slice()] {
+        assert_eq!(
+            own["command"].as_str(),
+            Some(r"C:\Program Files\TrineDocs\trinedocs-mcp.exe")
+        );
+        assert_eq!(
+            own["args"]
+                .as_array()
+                .and_then(|args| args.get(1))
+                .and_then(toml_edit::Value::as_str),
+            Some("nonce")
+        );
+        for malformed in [
+            b"{}".as_slice(),
+            b"[{}]".as_slice(),
+            b"[{\"name\":\"\"}]".as_slice(),
+        ] {
             assert!(codex_mcp_override(malformed, "shim", "nonce").is_err());
         }
         Ok(())

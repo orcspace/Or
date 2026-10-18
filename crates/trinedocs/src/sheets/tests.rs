@@ -2068,9 +2068,15 @@ fn recalculation_gives_independent_formulas_separate_budgets() -> Result<(), Str
     book.recalculate();
     let sheet = book.active_sheet().ok_or("sheet")?;
     for row in 0..11 {
-        assert_eq!(sheet.cell(row, 1).map(|cell| &cell.value), Some(&Value::Number(0.0)));
+        assert_eq!(
+            sheet.cell(row, 1).map(|cell| &cell.value),
+            Some(&Value::Number(0.0))
+        );
     }
-    assert_eq!(sheet.cell(0, 25).map(|cell| &cell.value), Some(&Value::Number(1.0)));
+    assert_eq!(
+        sheet.cell(0, 25).map(|cell| &cell.value),
+        Some(&Value::Number(1.0))
+    );
     Ok(())
 }
 #[test]
@@ -2080,15 +2086,27 @@ fn html_export_omits_hidden_sheets_rows_and_columns() -> Result<(), String> {
     book.set_input(visible, 0, 0, "public")?;
     book.set_input(visible, 1, 0, "private-row")?;
     book.set_input(visible, 0, 1, "private-column")?;
-    book.sheet_by_id_mut(visible).ok_or("sheet")?.hidden_rows.insert(1);
-    book.sheet_by_id_mut(visible).ok_or("sheet")?.hidden_cols.insert(1);
+    book.sheet_by_id_mut(visible)
+        .ok_or("sheet")?
+        .hidden_rows
+        .insert(1);
+    book.sheet_by_id_mut(visible)
+        .ok_or("sheet")?
+        .hidden_cols
+        .insert(1);
     let hidden = book.add_sheet("private-sheet")?;
     book.set_input(hidden, 0, 0, "private-value")?;
     book.sheet_by_id_mut(hidden).ok_or("sheet")?.hidden = true;
     book.active = 0;
-    let html = String::from_utf8(super::io::write(&book, "html")?).map_err(|e| e.to_string())?;
+    let html =
+        String::from_utf8(super::io::write(&book, "html")?).map_err(|e| e.to_string())?;
     assert!(html.contains("public"));
-    for secret in ["private-row", "private-column", "private-sheet", "private-value"] {
+    for secret in [
+        "private-row",
+        "private-column",
+        "private-sheet",
+        "private-value",
+    ] {
         assert!(!html.contains(secret), "{secret}");
     }
     Ok(())

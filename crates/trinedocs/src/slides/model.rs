@@ -1667,7 +1667,9 @@ mod hidden_export_tests {
         let pages = deck.pages();
         assert_eq!(pages.len(), 2);
         for (page, expected) in pages.iter().zip([[10, 20, 30], [70, 80, 90]]) {
-            assert!(matches!(page.items.first(), Some(crate::render::Primitive::Rect { color, .. }) if *color == expected));
+            assert!(
+                matches!(page.items.first(), Some(crate::render::Primitive::Rect { color, .. }) if *color == expected)
+            );
         }
         assert_eq!(deck.page(&deck.slides[1]).items.len(), 1);
         Ok(())

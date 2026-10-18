@@ -203,7 +203,12 @@ fn normalize_alternate_content(node: &mut Node) {
                 .children
                 .iter()
                 .position(|branch| branch.name == "Choice" && branch.supported_choice)
-                .or_else(|| child.children.iter().position(|branch| branch.name == "Fallback"));
+                .or_else(|| {
+                    child
+                        .children
+                        .iter()
+                        .position(|branch| branch.name == "Fallback")
+                });
             if let Some(index) = selected {
                 let mut branch = child.children.remove(index);
                 normalize_alternate_content(&mut branch);
@@ -3656,12 +3661,19 @@ mod alternate_content_review_tests {
         let document = format!(
             r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:core="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:future="urn:unsupported" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><w:body>{body}</w:body></w:document>"#
         );
-        read(&write_zip(vec![("word/document.xml".into(), document.into_bytes())])?, "docx")
+        read(
+            &write_zip(vec![("word/document.xml".into(), document.into_bytes())])?,
+            "docx",
+        )
     }
     #[test]
     fn docx_alternate_content_selects_one_supported_branch_at_every_level() -> Result<(), String> {
         let doc = import_body(r#"<mc:AlternateContent><mc:Choice Requires="core"><w:p><w:r><w:t>body</w:t></w:r></w:p></mc:Choice><mc:Fallback><w:p><w:r><w:t>duplicate body</w:t></w:r></w:p></mc:Fallback></mc:AlternateContent><w:p><mc:AlternateContent><mc:Choice Requires="core"><w:r><w:t>choice</w:t></w:r></mc:Choice><mc:Fallback><w:r><w:t>duplicate run</w:t></w:r></mc:Fallback></mc:AlternateContent><w:r><mc:AlternateContent><mc:Choice Requires="future"><w:t>unsupported</w:t></mc:Choice><mc:Fallback><w:t> fallback</w:t></mc:Fallback></mc:AlternateContent></w:r></w:p>"#)?;
-        let texts = doc.paragraphs.iter().map(|p| p.text()).collect::<Vec<_>>();
+        let texts = doc
+            .paragraphs
+            .iter()
+            .map(|p| p.text())
+            .collect::<Vec<_>>();
         assert_eq!(texts, vec!["body", "choice fallback"]);
         Ok(())
     }
