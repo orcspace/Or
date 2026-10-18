@@ -60,45 +60,7 @@ pub fn write(book: &Book, ext: &str) -> Result<Vec<u8>, String> {
             )
             .into_bytes())
         }
-        "html" => {
-            let mut out = String::from(
-                "<!doctype html><meta charset=\"utf-8\"><style>td{border:1px solid #d6dbe1;padding:4px;white-space:pre-wrap}table{border-collapse:collapse}</style>",
-            );
-            for s in book.sheets.iter().filter(|sheet| !sheet.hidden) {
-                let (r, c) = s.extent();
-                if (u64::from(r) + 1) * (u64::from(c) + 1) > MAX_RANGE_CELLS as u64 {
-                    return Err("Слишком большой диапазон HTML".into());
-                }
-                out.push_str(&format!(
-                    "<h2>{}</h2><table>",
-                    crate::package::xml_escape(&s.name)
-                ));
-                for row in (0..=r).filter(|row| !s.hidden_rows.contains(row)) {
-                    out.push_str("<tr>");
-                    for col in (0..=c).filter(|col| !s.hidden_cols.contains(col)) {
-                        let fmt = s.cell(row, col).map(|c| c.fmt.clone()).unwrap_or_default();
-                        let fill = fmt
-                            .fill
-                            .map(|v| format!("background:#{:02x}{:02x}{:02x};", v[0], v[1], v[2]))
-                            .unwrap_or_default();
-                        out.push_str(&format!(
-                            "<td style=\"{}color:#{:02x}{:02x}{:02x};font-size:{}pt;{}{}\">{}</td>",
-                            fill,
-                            fmt.color[0],
-                            fmt.color[1],
-                            fmt.color[2],
-                            fmt.size,
-                            if fmt.bold { "font-weight:bold;" } else { "" },
-                            if fmt.italic { "font-style:italic;" } else { "" },
-                            crate::package::xml_escape(&s.display(row, col, book.locale_ru))
-                        ));
-                    }
-                    out.push_str("</tr>");
-                }
-                out.push_str("</table>");
-            }
-            Ok(out.into_bytes())
-        }
+        "html" => write_html_book(book,1_000_000,MAX_FILE),
         "md" => {
             let s = book.active_sheet().ok_or("Нет активного листа")?;
             let (r, c) = s.extent();
@@ -140,6 +102,7 @@ fn markdown_text(text: &str) -> String {
     out
 }
 pub fn decode_text(bytes: &[u8]) -> Result<String, String> {
+    if let Some(decoded)=crate::util::decode_utf32_bom(bytes) {return decoded;}
     if bytes.starts_with(&[0xff, 0xfe]) || bytes.starts_with(&[0xfe, 0xff]) {
         if !(bytes.len() - 2).is_multiple_of(2) {
             return Err("Нечётная длина UTF-16".into());
@@ -159,7 +122,9 @@ pub fn decode_text(bytes: &[u8]) -> Result<String, String> {
             .collect::<Vec<_>>();
         return String::from_utf16(&units).map_err(|e| e.to_string());
     }
-    let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
+    if let Some(content)=bytes.strip_prefix(&[0xef,0xbb,0xbf]) {
+        return std::str::from_utf8(content).map(str::to_owned).map_err(|error|format!("Некорректный UTF-8 после BOM: {error}"));
+    }
     match std::str::from_utf8(bytes) {
         Ok(s) => Ok(s.into()),
         Err(_) => {
@@ -2802,5 +2767,138 @@ mod additional_xlsx_defect_tests {
         read_charts(&mut book,&parts)?;
         let chart=book.sheets[0].charts.first().ok_or("chart")?;
         assert_eq!(chart.title,"Revenue");assert_eq!(chart.range,super::super::model::Range::new(0,0,1,0));Ok(())
+    }
+}
+
+fn html_push(output:&mut String,value:&str,limit:usize)->Result<(),String> {
+    if output.len().checked_add(value.len()).is_none_or(|length|length>limit) {return Err("HTML превышает лимит размера экспорта".into());}
+    output.push_str(value);Ok(())
+}
+fn html_font(value:&str)->String {
+    let mut escaped=String::from("'");
+    for ch in value.chars() {
+        match ch {'\\'=>escaped.push_str("\\\\"),'\''=>escaped.push_str("\\'"),
+            '\n'|'\r'=>escaped.push_str("\\A "),ch=>escaped.push(ch)}
+    }
+    escaped.push('\'');escaped
+}
+fn write_html_book(book:&Book,cell_limit:u64,byte_limit:usize)->Result<Vec<u8>,String> {
+    let mut dense=0u64;let mut extents=Vec::new();
+    for sheet in book.sheets.iter().filter(|sheet|!sheet.hidden) {
+        let (mut rows,mut cols)=sheet.extent();
+        for range in &sheet.merges {rows=rows.max(range.r1);cols=cols.max(range.c1);}
+        let cells=(u64::from(rows)+1)*(u64::from(cols)+1);
+        if cells>MAX_RANGE_CELLS as u64 {return Err("Слишком большой диапазон HTML".into());}
+        dense=dense.checked_add(cells).ok_or("Слишком большой HTML")?;
+        if dense>cell_limit {return Err("Суммарный диапазон HTML превышает безопасный лимит".into());}
+        extents.push((sheet,rows,cols));
+    }
+    let mut out=String::new();
+    html_push(&mut out,"<!doctype html><html lang=\"ru\"><head><meta charset=\"utf-8\"><style>table{border-collapse:collapse;table-layout:fixed}td{padding:4px}img{max-width:100%}</style></head><body>",byte_limit)?;
+    for (sheet,rows,cols) in extents {
+        let mut merged=BTreeMap::new();let mut covered=0u64;
+        for range in &sheet.merges {
+            covered=covered.saturating_add(u64::from(range.r1-range.r0+1)*u64::from(range.c1-range.c0+1));
+            if covered>cell_limit {return Err("Слишком большой индекс объединённых ячеек HTML".into());}
+            for row in range.r0..=range.r1 {for col in range.c0..=range.c1 {merged.entry((row,col)).or_insert(range);}}
+        }
+        html_push(&mut out,&format!("<section><h2>{}</h2><table><colgroup>",crate::package::xml_escape(&sheet.name)),byte_limit)?;
+        for col in (0..=cols).filter(|col|!sheet.hidden_cols.contains(col)) {
+            html_push(&mut out,&format!("<col style=\"width:{}px\">",sheet.widths.get(&col).copied().unwrap_or(96.0)),byte_limit)?;
+        }
+        html_push(&mut out,"</colgroup>",byte_limit)?;
+        for row in (0..=rows).filter(|row|!sheet.hidden_rows.contains(row)) {
+            html_push(&mut out,&format!("<tr style=\"height:{}px\">",sheet.row_heights.get(&row).copied().unwrap_or(26.0)),byte_limit)?;
+            for col in (0..=cols).filter(|col|!sheet.hidden_cols.contains(col)) {
+                let merge=merged.get(&(row,col)).copied();
+                if merge.is_some_and(|range|(range.r0,range.c0)!=(row,col)) {continue;}
+                let span=merge.map(|range|format!(" rowspan=\"{}\" colspan=\"{}\"",
+                    (range.r0..=range.r1).filter(|row|!sheet.hidden_rows.contains(row)).count(),
+                    (range.c0..=range.c1).filter(|col|!sheet.hidden_cols.contains(col)).count())).unwrap_or_default();
+                let format=sheet.cell(row,col).map(|cell|cell.fmt.clone()).unwrap_or_default();
+                let align=match format.align {Align::Left=>"left",Align::Center=>"center",Align::Right=>"right",
+                    Align::General=>if sheet.cell(row,col).is_some_and(|cell|matches!(cell.value,Value::Number(_))) {"right"}else{"left"}};
+                let decoration=format!("{}{}",if format.underline {"underline "}else{""},if format.strike {"line-through"}else{""});
+                let mut style=format!("color:#{:02X}{:02X}{:02X};font-family:{};font-size:{}pt;font-weight:{};font-style:{};text-decoration:{};text-align:{};white-space:{};border:{}",
+                    format.color[0],format.color[1],format.color[2],html_font(&format.font),format.size,
+                    if format.bold {"bold"}else{"normal"},if format.italic {"italic"}else{"normal"},decoration,align,
+                    if format.wrap {"pre-wrap"}else{"pre"},if format.border {"1px solid #666"}else{"none"});
+                if let Some(fill)=format.fill {style.push_str(&format!(";background:#{:02X}{:02X}{:02X}",fill[0],fill[1],fill[2]));}
+                html_push(&mut out,&format!("<td{span} style=\"{}\">{}</td>",
+                    crate::package::xml_escape(&style),crate::package::xml_escape(&sheet.display(row,col,book.locale_ru))),byte_limit)?;
+            }
+            html_push(&mut out,"</tr>",byte_limit)?;
+        }
+        html_push(&mut out,"</table>",byte_limit)?;
+        for image in &sheet.images {
+            let encoded=image.bytes.len().div_ceil(3).saturating_mul(4);
+            if out.len().saturating_add(encoded).saturating_add(image.alt.len().saturating_mul(6)).saturating_add(512)>byte_limit {
+                return Err("Изображения превышают лимит HTML".into());
+            }
+            let mime=if matches!(image::guess_format(&image.bytes),Ok(image::ImageFormat::Jpeg)) {"image/jpeg"}else{"image/png"};
+            html_push(&mut out,&format!("<figure><img src=\"data:{mime};base64,{}\" alt=\"{}\" width=\"{}\" height=\"{}\"><figcaption>{} · {}</figcaption></figure>",
+                html_image_base64(&image.bytes),crate::package::xml_escape(&image.alt),image.width,image.height,
+                super::model::address(image.row,image.col),crate::package::xml_escape(&image.alt)),byte_limit)?;
+        }
+        html_push(&mut out,"</section>",byte_limit)?;
+    }
+    html_push(&mut out,"</body></html>",byte_limit)?;Ok(out.into_bytes())
+}
+fn html_image_base64(bytes:&[u8])->String {
+    const ALPHABET:&[u8;64]=b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut result=String::with_capacity(bytes.len().div_ceil(3)*4);
+    for chunk in bytes.chunks(3) {
+        let value=(u32::from(chunk[0])<<16)|(u32::from(*chunk.get(1).unwrap_or(&0))<<8)|u32::from(*chunk.get(2).unwrap_or(&0));
+        result.push(char::from(ALPHABET[((value>>18)&63) as usize]));result.push(char::from(ALPHABET[((value>>12)&63) as usize]));
+        result.push(if chunk.len()>1 {char::from(ALPHABET[((value>>6)&63) as usize])}else{'='});
+        result.push(if chunk.len()>2 {char::from(ALPHABET[(value&63) as usize])}else{'='});
+    }result
+}
+#[cfg(test)]
+mod next_html_export_tests {
+    use super::*;
+    fn text(book:&Book)->Result<String,String>{String::from_utf8(write(book,"html")?).map_err(|e|e.to_string())}
+    #[test]
+    fn html_export_preserves_merged_ranges_and_does_not_repeat_covered_cells()->Result<(),String> {
+        let mut book=Book::default();let id=book.active_id();book.set_cell(id,0,0,"merged")?;
+        book.sheets[0].merges.push(super::super::model::Range::new(0,0,1,1));
+        let output=text(&book)?;
+        assert!(output.contains("rowspan=\"2\" colspan=\"2\""));assert_eq!(output.matches("<td").count(),1);Ok(())
+    }
+    #[test]
+    fn html_export_keeps_shared_text_format_and_row_column_geometry()->Result<(),String> {
+        let mut book=Book::default();let id=book.active_id();book.set_cell(id,0,0,"text")?;
+        let cell=book.sheets[0].cell_mut(0,0).ok_or("cell")?;
+        cell.fmt.font="A';color:red;/*".into();cell.fmt.underline=true;cell.fmt.strike=true;
+        cell.fmt.align=Align::Right;cell.fmt.wrap=true;cell.fmt.border=true;
+        book.sheets[0].widths.insert(0,150.0);book.sheets[0].row_heights.insert(0,42.0);
+        let output=text(&book)?;
+        assert!(output.contains("width:150px"));assert!(output.contains("height:42px"));
+        assert!(output.contains("text-decoration:underline line-through"));assert!(output.contains("text-align:right"));
+        assert!(output.contains("white-space:pre-wrap"));assert!(output.contains("font-family:&apos;A\\&apos;"));Ok(())
+    }
+    #[test]
+    fn html_export_includes_sheet_images_and_their_cell_anchor()->Result<(),String> {
+        let mut png=Cursor::new(Vec::new());image::DynamicImage::new_rgba8(2,2)
+            .write_to(&mut png,image::ImageFormat::Png).map_err(|e|e.to_string())?;
+        let mut book=Book::default();let id=book.active_id();book.add_image(id,1,2,png.into_inner())?;
+        let output=text(&book)?;assert!(output.contains("data:image/png;base64,"));
+        assert!(output.contains("C2 ·"));Ok(())
+    }
+    #[test]
+    fn html_export_limits_cover_the_whole_workbook_and_output_bytes()->Result<(),String> {
+        let mut book=Book::default();let id=book.active_id();book.set_cell(id,9,9,"x")?;
+        let second=book.add_sheet("Second")?;book.set_cell(second,9,9,"y")?;
+        assert!(write_html_book(&book,150,MAX_FILE).is_err());
+        assert!(write_html_book(&book,1000,500).is_err());Ok(())
+    }
+}
+
+#[cfg(test)]
+mod next_csv_bom_tests {
+    #[test]
+    fn a_declared_utf8_csv_never_falls_back_to_windows1251() {
+        assert!(super::decode_text(&[0xef,0xbb,0xbf,0xff]).is_err());
+        assert_eq!(super::decode_text("Привет".as_bytes()),Ok("Привет".into()));
     }
 }

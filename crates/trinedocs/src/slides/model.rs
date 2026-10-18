@@ -132,6 +132,8 @@ pub struct Element {
     pub h: f32,
     pub rotation: f32,
     pub fill: [u8; 3],
+    /// Whether the shape has a fill; independent of its outline and text.
+    pub fill_visible: bool,
     pub stroke: [u8; 3],
     pub stroke_width: f32,
     pub text: String,
@@ -187,6 +189,7 @@ impl Default for Element {
             h: 80.0,
             rotation: 0.0,
             fill: [237, 242, 247],
+            fill_visible: true,
             stroke: [74, 85, 104],
             stroke_width: 1.0,
             text: String::new(),
@@ -1016,13 +1019,13 @@ impl Deck {
                 }
                 ElementKind::Line | ElementKind::Arrow => {}
                 ElementKind::Ellipse => {
-                    items.push(Primitive::Ellipse {
+                    if element.fill_visible {items.push(Primitive::Ellipse {
                         x: element.x,
                         y: element.y,
                         w: element.w,
                         h: element.h,
                         color: element.fill,
-                    });
+                    });}
                     if element.stroke_width > 0.0 {
                         for index in 0..48 {
                             let a = index as f32 * std::f32::consts::TAU / 48.0;
@@ -1166,13 +1169,14 @@ impl Deck {
                     h: element.h,
                     bytes: bytes.clone(),
                 }),
-                ElementKind::Rect => items.push(Primitive::Rect {
+                ElementKind::Rect if element.fill_visible => items.push(Primitive::Rect {
                     x: element.x,
                     y: element.y,
                     w: element.w,
                     h: element.h,
                     color: element.fill,
                 }),
+                ElementKind::Rect=>{},
             }
             if !element.text.is_empty() {
                 for (index, line) in text_lines(element).iter().enumerate() {

@@ -10,6 +10,10 @@ const XML: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>
 const GROUP: &str = "<p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"0\" cy=\"0\"/><a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"0\" cy=\"0\"/></a:xfrm></p:grpSpPr>";
 
 pub fn read(bytes: &[u8], ext: &str) -> Result<Deck, String> {
+    read_with_limit(bytes,ext,crate::package::MAX_FILE)
+}
+fn read_with_limit(bytes:&[u8],ext:&str,limit:usize)->Result<Deck,String> {
+    if bytes.len()>limit {return Err("Файл презентации превышает безопасный размер".into());}
     match ext.trim_start_matches('.').to_ascii_lowercase().as_str() {
         "pptx" | "ppsx" | "potx" | "pptm" => read_pptx(bytes),
         "trineslide" => match crate::native::decode(bytes)? {
@@ -974,11 +978,11 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
                         element.rotation += turn.to_degrees();
                     }
                     element.rotation = element.rotation.rem_euclid(360.0);
-                    if !matches!(element.kind, ElementKind::Line | ElementKind::Arrow)
-                        && props.and_then(|n| n.child("noFill")).is_some()
-                        && shape.child("txBody").is_some()
-                    {
-                        element.kind = ElementKind::Text;
+                    if shape.descend("cNvSpPr").is_some_and(|node|matches!(node.attr("txBox"),"1"|"true")) {
+                        element.kind=ElementKind::Text;
+                    }
+                    if matches!(element.kind,ElementKind::Rect|ElementKind::Ellipse) {
+                        element.fill_visible=props.and_then(|node|node.child("noFill")).is_none();
                     }
                 }
                 if let Some(body) = shape.child("txBody") {
@@ -1367,7 +1371,7 @@ fn shape_xml(e: &Element, id: usize) -> String {
     let fill = if matches!(
         e.kind,
         ElementKind::Text | ElementKind::Line | ElementKind::Arrow
-    ) {
+    ) || !e.fill_visible {
         "<a:noFill/>".into()
     } else {
         format!(
@@ -1448,7 +1452,7 @@ fn table_xml(e: &Element, id: usize, cells: &[Vec<String>]) -> String {
         xfrm(e, "p")
     )
 }
-fn chart_xml(values: &[f32], labels: &[String], fill: [u8; 3]) -> String {
+fn chart_xml(values: &[f32], labels: &[String], fill: [u8; 3],title:&str) -> String {
     let cats = values
         .iter()
         .enumerate()
@@ -1469,8 +1473,11 @@ fn chart_xml(values: &[f32], labels: &[String], fill: [u8; 3]) -> String {
         .enumerate()
         .map(|(i, v)| format!("<c:pt idx=\"{i}\"><c:v>{v}</c:v></c:pt>"))
         .collect::<String>();
+    let title=if title.is_empty() {String::new()}else {
+        format!("<c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>{}</a:t></a:r></a:p></c:rich></c:tx><c:overlay val=\"0\"/></c:title>",xml_escape(title))
+    };
     format!(
-        "{XML}<c:chartSpace xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\" xmlns:a=\"{A}\"><c:chart><c:plotArea><c:layout/><c:barChart><c:barDir val=\"col\"/><c:grouping val=\"clustered\"/><c:ser><c:idx val=\"0\"/><c:order val=\"0\"/><c:spPr><a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill></c:spPr><c:cat><c:strLit><c:ptCount val=\"{}\"/>{cats}</c:strLit></c:cat><c:val><c:numLit><c:formatCode>General</c:formatCode><c:ptCount val=\"{}\"/>{vals}</c:numLit></c:val></c:ser><c:axId val=\"1\"/><c:axId val=\"2\"/></c:barChart><c:catAx><c:axId val=\"1\"/><c:scaling><c:orientation val=\"minMax\"/></c:scaling><c:axPos val=\"b\"/><c:crossAx val=\"2\"/><c:crosses val=\"autoZero\"/><c:auto val=\"1\"/><c:lblAlgn val=\"ctr\"/><c:lblOffset val=\"100\"/></c:catAx><c:valAx><c:axId val=\"2\"/><c:scaling><c:orientation val=\"minMax\"/></c:scaling><c:axPos val=\"l\"/><c:numFmt formatCode=\"General\" sourceLinked=\"1\"/><c:crossAx val=\"1\"/><c:crosses val=\"autoZero\"/><c:crossBetween val=\"between\"/></c:valAx></c:plotArea><c:plotVisOnly val=\"1\"/></c:chart></c:chartSpace>",
+        "{XML}<c:chartSpace xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\" xmlns:a=\"{A}\"><c:chart>{title}<c:plotArea><c:layout/><c:barChart><c:barDir val=\"col\"/><c:grouping val=\"clustered\"/><c:ser><c:idx val=\"0\"/><c:order val=\"0\"/><c:spPr><a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill></c:spPr><c:cat><c:strLit><c:ptCount val=\"{}\"/>{cats}</c:strLit></c:cat><c:val><c:numLit><c:formatCode>General</c:formatCode><c:ptCount val=\"{}\"/>{vals}</c:numLit></c:val></c:ser><c:axId val=\"1\"/><c:axId val=\"2\"/></c:barChart><c:catAx><c:axId val=\"1\"/><c:scaling><c:orientation val=\"minMax\"/></c:scaling><c:axPos val=\"b\"/><c:crossAx val=\"2\"/><c:crosses val=\"autoZero\"/><c:auto val=\"1\"/><c:lblAlgn val=\"ctr\"/><c:lblOffset val=\"100\"/></c:catAx><c:valAx><c:axId val=\"2\"/><c:scaling><c:orientation val=\"minMax\"/></c:scaling><c:axPos val=\"l\"/><c:numFmt formatCode=\"General\" sourceLinked=\"1\"/><c:crossAx val=\"1\"/><c:crosses val=\"autoZero\"/><c:crossBetween val=\"between\"/></c:valAx></c:plotArea><c:plotVisOnly val=\"1\"/></c:chart></c:chartSpace>",
         hex(fill),
         values.len(),
         values.len()
@@ -1797,7 +1804,7 @@ fn write_pptx(deck: &Deck) -> Result<Vec<u8>, String> {
                     overrides.push_str(&format!("<Override PartName=\"/ppt/charts/chart{chart_count}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.drawingml.chart+xml\"/>"));
                     parts.push((
                         format!("ppt/charts/chart{chart_count}.xml"),
-                        chart_xml(values, labels, e.fill).into_bytes(),
+                        chart_xml(values, labels, e.fill,&e.text).into_bytes(),
                     ));
                     shapes.push_str(&format!("<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"{id}\" name=\"Chart {id}\"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>{}<a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/chart\"><c:chart xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\" r:id=\"{relationship}\"/></a:graphicData></a:graphic></p:graphicFrame>",xfrm(e,"p")));
                 }
@@ -2659,5 +2666,47 @@ mod additional_text_property_tests {
         apply_text_look(&body,&mut element,&Look::default(),None,12.0,false);
         assert_eq!(element.font_size,16.0);assert!(!element.bold);
         assert_eq!(element.color,[18,52,86]);assert_eq!(element.font,"Georgia");Ok(())
+    }
+}
+
+#[cfg(test)]
+mod next_read_limit_tests {
+    #[test]
+    fn slide_json_limits_apply_before_deserializing_the_document() {
+        let json=br#"{"slides":[],"padding":"long long long"}"#;
+        let error=super::read_with_limit(json,"json",8).err().unwrap_or_default();
+        assert!(error.contains("размер"));
+    }
+}
+
+#[cfg(test)]
+mod next_chart_title_tests {
+    use super::*;
+    #[test]
+    fn pptx_chart_exports_the_object_title_as_rich_chart_text()->Result<(),String> {
+        let xml=chart_xml(&[1.0,2.0],&["a".into(),"b".into()],[1,2,3],"Revenue & costs");
+        let node=parse(xml.as_bytes())?;
+        assert_eq!(node.descend("title").map(Node::text_content).as_deref(),Some("Revenue & costs"));Ok(())
+    }
+}
+
+#[cfg(test)]
+mod next_no_fill_tests {
+    use super::*;
+    #[test]
+    fn transparent_auto_shapes_keep_their_geometry_outline_and_text_in_pptx()->Result<(),String> {
+        let mut deck=Deck::empty();let slide=deck.add_slide("blank");
+        let object=deck.add_element(slide,ElementKind::Rect)?;
+        let element=deck.slide_mut(slide).and_then(|slide|slide.element_mut(object)).ok_or("shape")?;
+        element.fill_visible=false;element.stroke_width=2.0;element.text="outline".into();
+        let parts=read_zip(&write(&deck,"pptx")?)?.into_iter().filter(|(path,_)|!path.starts_with("customXml/")).collect();
+        let imported=read(&write_zip(parts)?,"pptx")?;
+        let element=imported.slides[0].elements.iter().find(|element|element.text=="outline").ok_or("imported")?;
+        assert!(matches!(element.kind,ElementKind::Rect));assert!(!element.fill_visible);assert_eq!(element.stroke_width,2.0);
+        let xml=shape_xml(element,2);assert!(xml.contains("<a:noFill/>"));
+        assert!(!imported.page(&imported.slides[0]).items.iter().any(|primitive|
+            matches!(primitive,crate::render::Primitive::Rect{x,y,w,h,..}
+                if *x==element.x && *y==element.y && *w==element.w && *h==element.h)));
+        Ok(())
     }
 }

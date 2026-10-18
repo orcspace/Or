@@ -12,6 +12,7 @@ pub fn app_dir() -> PathBuf {
         .join("TrineDocs")
 }
 pub fn decode_text(bytes: &[u8]) -> String {
+    if let Some(decoded)=decode_utf32_bom(bytes) {return decoded.unwrap_or_else(|_|"\u{fffd}".into());}
     if bytes.starts_with(&[0xff, 0xfe]) {
         encoding_rs::UTF_16LE.decode(&bytes[2..]).0.into_owned()
     } else if bytes.starts_with(&[0xfe, 0xff]) {
@@ -256,4 +257,32 @@ pub fn adjust_rgb_luminance(rgb: [u8;3],multiplier: f64,offset: f64) -> [u8;3] {
     let saturation=delta/(1.0-(2.0*light-1.0).abs());
     let chroma=(1.0-(2.0*next-1.0).abs())*saturation;let shift=next-chroma/2.0;
     [r,g,b].map(|channel|(((channel-low)/delta*chroma+shift)*255.0).round().clamp(0.0,255.0) as u8)
+}
+
+/// A UTF-32 BOM must be checked before the UTF-16 LE prefix that it shares.
+pub fn decode_utf32_bom(bytes:&[u8])->Option<Result<String,String>> {
+    let little=bytes.starts_with(&[0xff,0xfe,0,0]);
+    if !little && !bytes.starts_with(&[0,0,0xfe,0xff]) {return None;}
+    Some((|| {
+        if !(bytes.len()-4).is_multiple_of(4) {return Err("Неполный UTF-32 символ".into());}
+        let mut out=String::new();
+        for unit in bytes[4..].as_chunks::<4>().0 {
+            let value=if little {u32::from_le_bytes(*unit)}else{u32::from_be_bytes(*unit)};
+            out.push(char::from_u32(value).ok_or("Недопустимый UTF-32 scalar")?);
+        }Ok(out)
+    })())
+}
+#[cfg(test)]
+mod next_text_encoding_tests {
+    #[test]
+    fn utf32_bom_is_decoded_before_utf16_and_rejects_invalid_scalars()->Result<(),String> {
+        for little in [true,false] {
+            let mut bytes=if little {vec![0xff,0xfe,0,0]}else{vec![0,0,0xfe,0xff]};
+            for ch in "A😀".chars() {bytes.extend_from_slice(&if little {(ch as u32).to_le_bytes()}else{(ch as u32).to_be_bytes()});}
+            assert_eq!(super::decode_utf32_bom(&bytes).ok_or("BOM")??,"A😀");
+            assert_eq!(crate::docs::io::read(&bytes,"txt")?.plain_text(),"A😀");
+            assert_eq!(crate::sheets::io::decode_text(&bytes)?,"A😀");
+        }
+        assert!(super::decode_utf32_bom(&[0xff,0xfe,0,0,0,0xd8,0,0]).ok_or("BOM")?.is_err());Ok(())
+    }
 }

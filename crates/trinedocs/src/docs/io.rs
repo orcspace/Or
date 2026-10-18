@@ -243,8 +243,20 @@ pub fn write(doc: &Doc, ext: &str) -> Result<Vec<u8>, String> {
     let ext = ext.trim_start_matches('.').to_ascii_lowercase();
     match ext.as_str() {
         "docx" | "dotx" | "docm" => write_docx(doc, &ext),
-        "txt" => Ok(doc.plain_text().into_bytes()),
-        "md" | "markdown" => Ok(write_markdown(doc).into_bytes()),
+        "txt" => Ok(document_plain_export(doc).into_bytes()),
+        "md" | "markdown" => {
+            if doc.images.iter().any(|image| !matches!(image::guess_format(&image.bytes),
+                Ok(image::ImageFormat::Png | image::ImageFormat::Jpeg))) {
+                return Err("Markdown: поддерживаются изображения PNG и JPEG".into());
+            }
+            let limit=64*1024*1024;
+            let image_bytes=doc.images.iter().fold(0usize,|total,image|
+                total.saturating_add(image.bytes.len().div_ceil(3).saturating_mul(4)));
+            if image_bytes>limit {return Err("Markdown превышает лимит 64 МиБ".into());}
+            let markdown=write_markdown(doc);
+            if markdown.len()>limit {return Err("Markdown превышает лимит 64 МиБ".into());}
+            Ok(markdown.into_bytes())
+        },
         "html" | "htm" => {
             if doc.images.iter().any(|image| !matches!(image::guess_format(&image.bytes),
                 Ok(image::ImageFormat::Png | image::ImageFormat::Jpeg))) {
@@ -264,6 +276,7 @@ fn decode_text(bytes: &[u8]) -> Result<String, String> {
     if bytes.len() > 64 * 1024 * 1024 {
         return Err("Текст превышает лимит 64 МБ".into());
     }
+    if let Some(decoded)=crate::util::decode_utf32_bom(bytes) {return decoded;}
     if bytes.starts_with(&[0xff, 0xfe]) || bytes.starts_with(&[0xfe, 0xff]) {
         let big = bytes.starts_with(&[0xfe, 0xff]);
         if !(bytes.len() - 2).is_multiple_of(2) {
@@ -296,23 +309,10 @@ fn decode_text(bytes: &[u8]) -> Result<String, String> {
     if let Ok(text) = std::str::from_utf8(content) {
         return Ok(text.into());
     }
-    // Windows-1251 fallback for legacy Russian text.
-    let special: Vec<char> =
-        "ЂЃ‚ѓ„…†‡€‰Љ‹ЊЌЋЏђ‘’“”•–—\u{0098}™љ›њќћџ\u{00a0}ЎўЈ¤Ґ¦§Ё©Є«¬\u{00ad}®Ї°±Ііґµ¶·ё№є»јЅѕї"
-            .chars()
-            .collect();
-    Ok(content
-        .iter()
-        .map(|b| match *b {
-            0..=127 => char::from(*b),
-            128..=191 => special
-                .get(usize::from(*b) - 128)
-                .copied()
-                .unwrap_or('\u{fffd}'),
-            _ => char::from_u32(0x410 + u32::from(*b) - 192).unwrap_or('\u{fffd}'),
-        })
-        .collect())
+    let (text,_,errors)=encoding_rs::WINDOWS_1251.decode(content);
+    if errors {Err("Некорректный Windows-1251".into())}else{Ok(text.into_owned())}
 }
+
 fn bool_prop(node: &Node, name: &str) -> Option<bool> {
     node.child(name)
         .map(|n| !matches!(n.value(), Some("0" | "false" | "off")))
@@ -1807,6 +1807,38 @@ fn inline_md(text: &str, inherited: &TextFormat) -> Vec<Run> {
                 offset += end + 1;
                 continue;
             }
+            if ch=='`' {
+                let length=rest.bytes().take_while(|ch|*ch==b'`').count();
+                let marker="`".repeat(length);
+                let closing=match markdown_code_end(rest,length,budget) {
+                    Ok(end)=>end,Err(())=>{plain.push_str(rest);break;}
+                };
+                if let Some(end)=closing {
+                    if !plain.is_empty(){out.push(Run{text:std::mem::take(&mut plain),format:inherited.clone()});}
+                    let mut content=rest[length..end].replace(['\n','\u{000b}']," ");
+                    if content.starts_with(' ') && content.ends_with(' ') && !content.chars().all(|ch|ch==' ') {
+                        content=content[1..content.len()-1].into();
+                    }
+                    let mut format=inherited.clone();format.font="Consolas".into();
+                    out.push(Run{text:content,format});offset+=end+length;continue;
+                }
+                plain.push_str(&marker);offset+=length;continue;
+            }
+            if ch=='<' {
+                let end=match md_unescaped(rest,">",budget) {
+                    Ok(end)=>end,Err(())=>{plain.push_str(rest);break;}
+                };
+                if let Some(end)=end {
+                    let target=&rest[1..end];
+                    if !target.chars().any(char::is_whitespace)
+                        && (target.starts_with("https://") || target.starts_with("http://") || target.starts_with("mailto:")) {
+                        if !plain.is_empty(){out.push(Run{text:std::mem::take(&mut plain),format:inherited.clone()});}
+                        let mut format=inherited.clone();format.link=Some(target.into());
+                        out.push(Run{text:target.strip_prefix("mailto:").unwrap_or(target).into(),format});
+                        offset+=end+1;continue;
+                    }
+                }
+            }
             if ch == '[' {
                 let close = match md_unescaped(rest, "](", budget) {
                     Ok(close) => close,
@@ -1848,15 +1880,9 @@ fn inline_md(text: &str, inherited: &TextFormat) -> Vec<Run> {
                             });
                         }
                         let mut format = inherited.clone();
-                        let mut url = String::new();
-                        let mut chars = rest[url_start..end].chars();
-                        while let Some(ch) = chars.next() {
-                            url.push(if ch == '\\' {
-                                chars.next().unwrap_or('\\')
-                            } else {
-                                ch
-                            });
-                        }
+                        let Some(url)=markdown_destination(&rest[url_start..end]) else {
+                            plain.push(ch);offset+=ch.len_utf8();continue;
+                        };
                         format.link = Some(url);
                         parse(&rest[1..close], &format, depth + 1, budget, out);
                         offset += end + 1;
@@ -1952,56 +1978,173 @@ fn escape_markdown(text: &str) -> String {
     }
     out
 }
-fn markdown_list_prefix(text: &str) -> Option<(List, &str)> {
-    if let Some(rest) = text.strip_prefix("- ").or_else(|| text.strip_prefix("* ")) {
-        return Some((List::Bullet, rest));
+fn markdown_list_prefix(text:&str)->Option<(List,&str)> {
+    if let Some(marker)=text.chars().next().filter(|ch|matches!(ch,'-'|'*'|'+')) {
+        let tail=&text[marker.len_utf8()..];
+        if tail.is_empty() || tail.starts_with([' ','\t']) {return Some((List::Bullet,tail.trim_start_matches([' ','\t'])));}
     }
-    text.split_once(". ")
-        .filter(|(prefix, _)| {
-            !prefix.is_empty() && prefix.len() <= 9 && prefix.bytes().all(|ch| ch.is_ascii_digit())
-        })
-        .map(|(_, rest)| (List::Number, rest))
+    let digits=text.bytes().take_while(u8::is_ascii_digit).count();
+    if (1..=9).contains(&digits) && matches!(text.as_bytes().get(digits),Some(b'.'|b')')) {
+        let tail=&text[digits+1..];
+        if tail.is_empty() || tail.starts_with([' ','\t']) {return Some((List::Number,tail.trim_start_matches([' ','\t'])));}
+    }
+    None
 }
-fn read_markdown(text: &str) -> Doc {
-    let mut doc = Doc::default();
-    doc.paragraphs.clear();
-    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+fn md_fence(line:&str)->Option<(char,usize)> {
+    let rest=line.trim_start_matches(' ');
+    if line.len()-rest.len()>3 {return None;}
+    let marker=rest.chars().next().filter(|ch|matches!(ch,'`'|'~'))?;
+    let count=rest.chars().take_while(|ch|*ch==marker).count();
+    (count>=3).then_some((marker,count))
+}
+fn md_setext(line:&str)->Option<&'static str> {
+    let text=line.trim();
+    if !text.is_empty() && text.chars().all(|ch|ch=='=') {Some("Heading1")}
+    else if !text.is_empty() && text.chars().all(|ch|ch=='-') {Some("Heading2")}else{None}
+}
+fn md_atx(line:&str)->Option<(usize,&str)> {
+    let text=line.trim_start_matches(' ');
+    if line.len()-text.len()>3 {return None;}
+    let count=text.bytes().take_while(|ch|*ch==b'#').count();
+    if !(1..=6).contains(&count) {return None;}
+    let tail=&text[count..];
+    if !tail.is_empty() && !tail.starts_with([' ','\t']) {return None;}
+    let tail=tail.trim();
+    let without=tail.trim_end_matches('#');
+    let tail=if without.len()<tail.len() && (without.is_empty() || without.ends_with([' ','\t'])) {
+        without.trim_end()
+    }else{tail};
+    Some((count,tail))
+}
+fn md_starts_block(line:&str)->bool {
+    let text=line.trim_start_matches([' ','\t']);
+    line.trim().is_empty() || md_atx(line).is_some() || md_fence(line).is_some()
+        || markdown_list_prefix(text).is_some() || text.starts_with('>')
+        || line.starts_with("    ") || line.starts_with('\t')
+}
+fn md_code_paragraph(doc:&mut Doc,lines:&[String]) {
+    let id=doc.alloc_id();
+    doc.paragraphs.push(Paragraph{id,style:"Code".into(),runs:vec![Run{
+        text:lines.join("\u{000b}"),format:TextFormat{font:"Consolas".into(),..Default::default()}
+    }],..Default::default()});
+}
+fn read_markdown(text:&str)->Doc {
+    let mut doc=Doc::default();doc.paragraphs.clear();
+    let normalized=text.replace("\r\n","\n").replace('\r',"\n");
     let versioned=normalized.starts_with(MD_PARAGRAPHS);
-    let input=if versioned {normalized.strip_prefix(MD_PARAGRAPHS).unwrap_or(&normalized).trim_start_matches('\n')} else {normalized.as_str()};
-    let mut physical = input.split_terminator('\n').peekable();
-    while let Some(line) = physical.next() {
-        if versioned && line.is_empty() {continue;}
-        let mut logical = line.to_string();
-        while logical.ends_with("  ") && physical.peek().is_some() {
-            logical.truncate(logical.len() - 2);
-            logical.push('\u{000b}');
-            if let Some(next) = physical.next() {
-                logical.push_str(next);
+    let input=if versioned {normalized.strip_prefix(MD_PARAGRAPHS).unwrap_or(&normalized).trim_start_matches('\n')}else{normalized.as_str()};
+    let lines=input.split_terminator('\n').collect::<Vec<_>>();
+    let mut index=0;
+    let mut list_indents=Vec::new();
+    while index<lines.len() {
+        let line=lines[index];index+=1;
+        if line.trim().is_empty(){continue;}
+        if let Some((marker,count))=md_fence(line) {
+            let mut content=Vec::new();
+            while index<lines.len() {
+                let value=lines[index];index+=1;
+                if md_fence(value).is_some_and(|(next,length)|next==marker && length>=count)
+                    && value.trim().chars().all(|ch|ch==marker) {break;}
+                content.push(value.to_string());
+            }
+            md_code_paragraph(&mut doc,&content);list_indents.clear();continue;
+        }
+        if (line.starts_with("    ") || line.starts_with('\t'))
+            && !(markdown_list_prefix(line.trim_start()).is_some() && (versioned || !list_indents.is_empty())) {
+            let mut content=vec![line.strip_prefix("    ").or_else(||line.strip_prefix('\t')).unwrap_or(line).to_string()];
+            while index<lines.len() {
+                if let Some(value)=lines[index].strip_prefix("    ").or_else(||lines[index].strip_prefix('\t')) {
+                    content.push(value.to_string());index+=1;
+                }else{break;}
+            }
+            md_code_paragraph(&mut doc,&content);list_indents.clear();continue;
+        }
+        if index<lines.len() && let Some(header)=markdown_table_row(line)
+            && let Some(alignments)=markdown_table_separator(lines[index])
+            && header.len()==alignments.len() && !header.is_empty() && header.len()<=256 {
+            index+=1;
+            let mut source=vec![header];
+            while index<lines.len() && source.len()<10000
+                && (source.len()+1).saturating_mul(alignments.len())<=100000 {
+                let Some(row)=markdown_table_row(lines[index]) else{break;};
+                source.push(row);index+=1;
+            }
+            if index<lines.len() && markdown_table_row(lines[index]).is_some()
+                && (source.len()>=10000 || (source.len()+1).saturating_mul(alignments.len())>100000) {
+                doc.losses.push("Markdown: таблица превышает лимит строк/ячеек; остаток импортируется как текст.".into());
+            }
+            if doc.paragraphs.is_empty() {let id=doc.alloc_id();doc.paragraphs.push(Paragraph{id,..Default::default()});}
+            let anchor=doc.paragraphs.last().map(|paragraph|paragraph.id).unwrap_or_default();
+            let id=doc.alloc_id();let mut rows=Vec::new();
+            for row in source {
+                let mut cells=Vec::new();
+                for (column,align) in alignments.iter().enumerate() {
+                    let text=row.get(column).map(String::as_str).unwrap_or("");
+                    let text=text.replace("<br>","\u{000b}").replace("<br/>","\u{000b}").replace("<br />","\u{000b}");
+                    let paragraph=Paragraph{id:doc.alloc_id(),align:*align,runs:inline_md(&text,&TextFormat::default()),..Default::default()};
+                    cells.push(Cell::new(doc.alloc_id(),vec![paragraph],[255,255,255]));
+                }
+                rows.push(cells);
+            }
+            let width=(doc.page.width-doc.page.margin_left-doc.page.margin_right)/alignments.len() as f32;
+            doc.tables.push(Table{id,after_paragraph_id:anchor,rows,column_widths:vec![width;alignments.len()],
+                border_color:[100,110,120],borderless:false,cell_margin:WORD_CELL_MARGIN,row_heights:Vec::new(),header_rows:1});
+            list_indents.clear();continue;
+        }
+        let mut logical=line.to_string();
+        while index<lines.len() && !lines[index].trim().is_empty()
+            && !md_starts_block(lines[index]) && md_setext(lines[index]).is_none()
+            && !(index+1<lines.len() && markdown_table_row(lines[index]).is_some()
+                && markdown_table_separator(lines[index+1]).is_some()) {
+            let slashes=logical.chars().rev().take_while(|ch|*ch=='\\').count();
+            let hard=logical.ends_with("  ") || slashes%2==1;
+            if !hard && (versioned || md_atx(line).is_some()) {break;}
+            if hard {
+                logical.truncate(logical.len()-if slashes%2==1 {1}else{2});
+                logical.push('\u{000b}');
+            }else{
+                logical.truncate(logical.trim_end().len());logical.push(' ');
+            }
+            logical.push_str(lines[index].trim_start());index+=1;
+        }
+        let id=doc.alloc_id();let mut paragraph=Paragraph{id,..Default::default()};
+        let mut content=logical.as_str();
+        let trimmed=content.trim_start_matches([' ','\t']);
+        if let Some((list,rest))=markdown_list_prefix(trimmed) {
+            let indent=content.len()-trimmed.len();
+            paragraph.list=list;
+            paragraph.list_level=if versioned {(indent/4).min(8) as u8}else{
+                while list_indents.last().is_some_and(|value|*value>indent) {list_indents.pop();}
+                if list_indents.last()!=Some(&indent) {list_indents.push(indent);}
+                list_indents.len().saturating_sub(1).min(8) as u8
+            };
+            content=rest;
+        }else{list_indents.clear();}
+        if let Some((level,rest))=md_atx(content) {
+            paragraph.set_style(&format!("Heading{level}"));content=rest;
+        }else if let Some(style)=lines.get(index).and_then(|line|md_setext(line)).filter(|_|paragraph.list==List::None) {
+            paragraph.set_style(style);index+=1;
+        }else if let Some(rest)=content.strip_prefix('>') {
+            paragraph.set_style("Quote");content=rest.trim_start_matches(' ');
+        }
+        let (visible,images)=markdown_inline_images(content);
+        let content=visible.as_str();
+        paragraph.runs=if versioned && content=="<!--td-empty-->" {
+            vec![Run{text:String::new(),format:paragraph.format_at(0)}]
+        }else{inline_md(content,&paragraph.format_at(0))};
+        let standalone=!images.is_empty() && content.trim().is_empty();
+        if standalone && doc.paragraphs.is_empty() {let id=doc.alloc_id();doc.paragraphs.push(Paragraph{id,..Default::default()});}
+        let anchor=if standalone {doc.paragraphs.last().map(|paragraph|paragraph.id).unwrap_or_default()}else{paragraph.id};
+        if !standalone {doc.paragraphs.push(paragraph);}
+        for (alt,bytes) in images {
+            if doc.images.len()>=1000 {doc.losses.push("Markdown: превышен лимит изображений".into());break;}
+            if let Ok(image)=crate::util::decode_image(&bytes) {
+                let id=doc.alloc_id();
+                doc.images.push(AnchoredImage{id,after_paragraph_id:anchor,bytes,
+                    width:(image.width() as f32*0.75).clamp(1.0,10000.0),
+                    height:(image.height() as f32*0.75).clamp(1.0,10000.0),alt});
             }
         }
-        let line = logical.as_str();
-        let id = doc.alloc_id();
-        let mut p = Paragraph {
-            id,
-            ..Paragraph::default()
-        };
-        let mut text = line;
-        let list_text=if versioned {text.trim_start_matches(' ')}else{text};
-        if let Some((list, rest)) = markdown_list_prefix(list_text) {
-            p.list = list;
-            p.list_level=(line.len()-line.trim_start_matches(' ').len()).checked_div(4).unwrap_or(0).min(8) as u8;
-            text = rest;
-        }
-        let headings = text.chars().take_while(|c| *c == '#').count();
-        if (1..=6).contains(&headings) && text.as_bytes().get(headings) == Some(&b' ') {
-            p.set_style(&format!("Heading{headings}"));
-            text = text.get(headings + 1..).unwrap_or_default();
-        } else if let Some(rest) = text.strip_prefix("> ") {
-            p.set_style("Quote");
-            text = rest;
-        }
-        p.runs = if versioned && text=="<!--td-empty-->" {vec![Run {text:String::new(),format:p.format_at(0)}]} else {inline_md(text, &p.format_at(0))};
-        doc.paragraphs.push(p);
     }
     doc
 }
@@ -2045,6 +2188,12 @@ fn write_markdown(doc: &Doc) -> String {
         && doc.tables.is_empty() && doc.images.is_empty() {return "\n".into();}
     let mut out=format!("{MD_PARAGRAPHS}\n");
     for p in &doc.paragraphs {
+        if p.style=="Code" {
+            let text=p.text().replace('\u{000b}',"\n");
+            let length=text.split(|ch|ch!='`').map(str::len).max().unwrap_or(0).max(2)+1;
+            let fence="`".repeat(length);
+            out.push_str(&format!("{fence}\n{text}\n{fence}\n\n"));
+        }else{
         if p.list!=List::None {out.push_str(&"    ".repeat(usize::from(p.list_level)));}
         match p.list {List::Bullet=>out.push_str("- "),List::Number=>out.push_str("1. "),List::None=>{}}
         if let Some(level)=heading_level(&p.style) {
@@ -2054,6 +2203,11 @@ fn write_markdown(doc: &Doc) -> String {
         else {for run in &p.runs {out.push_str(&markdown_run(run));}}
         // Blank lines preserve paragraph boundaries in CommonMark/GFM renderers.
         out.push_str("\n\n");
+        }
+        for image in doc.images.iter().filter(|image|image.after_paragraph_id==p.id) {
+            let mime=if matches!(image::guess_format(&image.bytes),Ok(image::ImageFormat::Jpeg)) {"image/jpeg"}else{"image/png"};
+            out.push_str(&format!("![{}](data:{mime};base64,{})\n\n",escape_markdown(&image.alt),encode_image_base64(&image.bytes)));
+        }
         for table in doc.tables.iter().filter(|t|t.after_paragraph_id==p.id) {
             let columns=table.grid_columns();
             for (row_index,row) in table.rows.iter().enumerate() {
@@ -2269,7 +2423,11 @@ fn normalize_html_names(node: &mut Node) {
     }
 }
 
-fn read_html(text: &str) -> Result<Doc, String> {
+fn read_html(text:&str)->Result<Doc,String> {
+    read_html_with_limit(text,XML_LIMIT)
+}
+fn read_html_with_limit(text:&str,limit:usize)->Result<Doc,String> {
+    if text.len()>limit {return Err("HTML превышает безопасный лимит размера".into());}
     // HTML is imported as data only; scripts, CSS imports and network images are never executed.
     let mut clean=normalize_html_voids(&normalize_html_entities(text));
     if let Some(start) = clean.to_ascii_lowercase().find("<!doctype")
@@ -2314,7 +2472,8 @@ fn read_html(text: &str) -> Result<Doc, String> {
             }
             return;
         }
-        let css=merge_html_css(inherited_css,node.attr("style").unwrap_or_default());
+        let inherited=inherited_html_css(inherited_css);
+        let css=merge_html_css(&inherited,node.attr("style").unwrap_or_default());
         let list=match node.name.as_str() {
             "ol"|"ul"=>Some((if node.name=="ol" {List::Number}else{List::Bullet},
                 list.map(|(_,depth)|depth.saturating_add(1).min(8)).unwrap_or(0))),
@@ -2322,7 +2481,7 @@ fn read_html(text: &str) -> Result<Doc, String> {
         };
         let block = matches!(
             node.name.as_str(),
-            "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "blockquote" | "li"
+            "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "blockquote" | "li" | "pre"
         );
         if block {
             let id = doc.alloc_id();
@@ -2337,6 +2496,7 @@ fn read_html(text: &str) -> Result<Doc, String> {
                 }
                 let mut fmt = f.clone();
                 match n.name.as_str() {
+                    "pre" | "code" | "kbd" | "samp" => fmt.font="Consolas".into(),
                     "b" | "strong" => fmt.bold = true,
                     "i" | "em" => fmt.italic = true,
                     "u" => fmt.underline = true,
@@ -2403,6 +2563,7 @@ fn read_html(text: &str) -> Result<Doc, String> {
                 "h5" => Some("Heading5"),
                 "h6" => Some("Heading6"),
                 "blockquote" => Some("Quote"),
+                "pre"=>Some("Code"),
                 _ => None,
             };
             p.runs.push(Run::default());
@@ -2473,7 +2634,7 @@ fn read_html(text: &str) -> Result<Doc, String> {
             fn boundary(node: &Node) -> bool {
                 matches!(
                     node.name.as_str(),
-                    "p" | "h1"
+                    "p" | "pre" | "h1"
                         | "h2"
                         | "h3"
                         | "h4"
@@ -2530,7 +2691,7 @@ fn read_html(text: &str) -> Result<Doc, String> {
     normalize_html_names(&mut node);
     walk(&node, &mut doc, "", None);
     doc.losses.push(
-        "HTML: сложные CSS-макеты и сетевые изображения не импортируются; таблицы преобразуются в абзацы.".into(),
+        "HTML: сложные CSS-макеты и сетевые изображения не поддерживаются; обычные таблицы без метаданных TrineDocs могут быть преобразованы в абзацы.".into(),
     );
     doc.normalize();
     Ok(doc)
@@ -3634,9 +3795,9 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn markdown_legacy_newlines_form_separate_paragraphs() -> Result<(), String> {
+    fn markdown_external_newlines_are_soft_breaks_after_normalization() -> Result<(), String> {
         let doc = read(b"first\rsecond\r\nthird", "md")?;
-        assert_eq!(doc.plain_text(), "first\nsecond\nthird");
+        assert_eq!(doc.plain_text(), "first second third");
         Ok(())
     }
     #[test]
@@ -3940,7 +4101,9 @@ mod text_export_defect_tests {
         assert!(md.starts_with(MD_PARAGRAPHS));
         assert!(md.contains("one\n\n<!--td-empty-->\n\ntwo\n\n"));
         assert_eq!(read(md.as_bytes(),"md")?.plain_text(),doc.plain_text());
-        assert_eq!(read(b"legacy\nlines","md")?.plain_text(),"legacy\nlines");
+        assert_eq!(read(b"external\nlines","md")?.plain_text(),"external lines");
+        let versioned=format!("{MD_PARAGRAPHS}\nlegacy\nlines");
+        assert_eq!(read(versioned.as_bytes(),"md")?.plain_text(),"legacy\nlines");
         let mut nested=Doc::from_text("item");
         nested.paragraphs[0].list=List::Bullet;
         nested.paragraphs[0].list_level=2;
@@ -4453,5 +4616,259 @@ mod additional_part_name_tests {
         let doc=read(&write_zip(parts)?,"docx")?;
         assert_eq!(doc.plain_text(),"kept");assert!(doc.paragraphs[0].runs[0].format.bold);
         assert!(normalize_docx_part_names(BTreeMap::from([("A".into(),vec![]),("a".into(),vec![])])).is_err());Ok(())
+    }
+}
+
+fn markdown_destination(raw:&str)->Option<String> {
+    let raw=raw.trim();
+    let (target,tail)=if let Some(rest)=raw.strip_prefix('<') {
+        let end=rest.find('>')?;(&rest[..end],rest[end+1..].trim())
+    }else{
+        let mut escaped=false;let mut split=raw.len();
+        for (index,ch) in raw.char_indices() {
+            if escaped {escaped=false;continue;}
+            if ch=='\\' {escaped=true;}else if ch.is_whitespace(){split=index;break;}
+        }
+        (&raw[..split],raw[split..].trim())
+    };
+    if !tail.is_empty() {
+        let quote=tail.chars().next()?;
+        let close=if quote=='(' {')'}else{quote};
+        if !matches!(quote,'"'|'\''|'(') || !tail.ends_with(close) || tail.len()<2 {return None;}
+    }
+    let mut out=String::new();let mut chars=target.chars().peekable();
+    while let Some(ch)=chars.next() {
+        if ch=='\\' && chars.peek().is_some_and(char::is_ascii_punctuation) {out.push(chars.next()?);}
+        else{out.push(ch);}
+    }
+    Some(quick_xml::escape::unescape(&out).map(|value|value.into_owned()).unwrap_or(out))
+}
+#[cfg(test)]
+mod next_markdown_defect_tests {
+    use super::*;
+    fn md(source:&str)->Result<Doc,String>{read(source.as_bytes(),"md")}
+    #[test]
+    fn markdown_code_spans_keep_literal_markers_and_monospace_text()->Result<(),String> {
+        let doc=md("before `` a`*b* `` after")?;
+        assert_eq!(doc.plain_text(),"before a`*b* after");
+        let run=doc.paragraphs[0].runs.iter().find(|run|run.text=="a`*b*").ok_or("code")?;
+        assert_eq!(run.format.font,"Consolas");assert!(!run.format.italic);Ok(())
+    }
+    #[test]
+    fn fenced_and_indented_code_blocks_do_not_parse_inline_formatting()->Result<(),String> {
+        let doc=md("```rust\n**literal**\n# still code\n```\n\n    *literal*\n")?;
+        assert_eq!(doc.paragraphs.len(),2);
+        assert_eq!(doc.paragraphs[0].text(),"**literal**\u{000b}# still code");
+        assert_eq!(doc.paragraphs[1].text(),"*literal*");
+        assert!(doc.paragraphs.iter().all(|paragraph|paragraph.style=="Code" && !paragraph.runs[0].format.bold));Ok(())
+    }
+    #[test]
+    fn setext_underlines_create_headings_instead_of_text_paragraphs()->Result<(),String> {
+        let doc=md("Title\n=====\n\nSection\n---\n")?;
+        assert_eq!(doc.paragraphs.len(),2);
+        assert_eq!(doc.paragraphs[0].style,"Heading1");assert_eq!(doc.paragraphs[1].style,"Heading2");Ok(())
+    }
+    #[test]
+    fn markdown_paragraphs_join_soft_lines_and_ignore_separator_blank_lines()->Result<(),String> {
+        let doc=md("one\nwrapped line\n\nnext\n")?;
+        assert_eq!(doc.plain_text(),"one wrapped line\nnext");assert_eq!(doc.paragraphs.len(),2);Ok(())
+    }
+    #[test]
+    fn backslash_hard_breaks_remain_inside_the_paragraph()->Result<(),String> {
+        let doc=md("one\\\ntwo")?;assert_eq!(doc.plain_text(),"one\u{000b}two");assert_eq!(doc.paragraphs.len(),1);Ok(())
+    }
+    #[test]
+    fn atx_headings_accept_tabs_and_strip_only_valid_closing_hashes()->Result<(),String> {
+        let doc=md("#\tTitle ###\n\n## text#\n")?;
+        assert_eq!(doc.paragraphs[0].style,"Heading1");assert_eq!(doc.paragraphs[0].text(),"Title");
+        assert_eq!(doc.paragraphs[1].text(),"text#");Ok(())
+    }
+    #[test]
+    fn external_list_markers_and_nested_indentation_are_recognized()->Result<(),String> {
+        let doc=md("+ outer\n  - inner\n2) next")?;
+        assert_eq!(doc.paragraphs.len(),3);assert_eq!(doc.paragraphs[0].list,List::Bullet);
+        assert_eq!(doc.paragraphs[1].list_level,1);assert_eq!(doc.paragraphs[2].list,List::Number);
+        assert_eq!(doc.paragraphs[2].list_level,0);Ok(())
+    }
+    #[test]
+    fn markdown_link_titles_and_angle_destinations_are_not_part_of_the_url()->Result<(),String> {
+        let doc=md("[label](<https://example.com/a> \"title\")")?;
+        assert_eq!(doc.plain_text(),"label");
+        assert_eq!(doc.paragraphs[0].runs[0].format.link.as_deref(),Some("https://example.com/a"));Ok(())
+    }
+    #[test]
+    fn explicit_uri_autolinks_become_clickable_without_angle_brackets()->Result<(),String> {
+        let doc=md("<https://example.com/a>")?;
+        assert_eq!(doc.plain_text(),"https://example.com/a");
+        assert_eq!(doc.paragraphs[0].runs[0].format.link.as_deref(),Some("https://example.com/a"));Ok(())
+    }
+}
+
+fn markdown_code_end(text:&str,length:usize,budget:&mut usize)->Result<Option<usize>,()> {
+    let mut offset=length;
+    while offset<text.len() {
+        let tail=&text[offset..];
+        let found=tail.find('`');
+        let distance=found.unwrap_or(tail.len());
+        if !md_spend(budget,distance+1) {return Err(());}
+        let Some(found)=found else{return Ok(None);};
+        offset+=found;
+        let run=text[offset..].bytes().take_while(|ch|*ch==b'`').count();
+        if !md_spend(budget,run) {return Err(());}
+        if run==length {return Ok(Some(offset));}
+        offset+=run;
+    }
+    Ok(None)
+}
+
+fn markdown_table_row(line:&str)->Option<Vec<String>> {
+    if !line.contains('|') {return None;}
+    let mut result=Vec::new();let mut value=String::new();let mut escaped=false;
+    for ch in line.trim().chars() {
+        if ch=='|' && !escaped {result.push(std::mem::take(&mut value));}
+        else{value.push(ch);}
+        if ch=='\\' {escaped=!escaped;}else{escaped=false;}
+    }
+    result.push(value);
+    if result.first().is_some_and(String::is_empty) {result.remove(0);}
+    if result.last().is_some_and(String::is_empty) {result.pop();}
+    Some(result.into_iter().map(|value|value.trim().to_string()).collect())
+}
+fn markdown_table_separator(line:&str)->Option<Vec<Align>> {
+    markdown_table_row(line)?.into_iter().map(|value| {
+        let value=value.trim();
+        let hyphens=value.trim_start_matches(':').trim_end_matches(':');
+        if hyphens.len()<3 || !hyphens.chars().all(|ch|ch=='-') {return None;}
+        Some(if value.starts_with(':') && value.ends_with(':'){Align::Center}
+            else if value.ends_with(':'){Align::Right}else{Align::Left})
+    }).collect()
+}
+fn markdown_inline_images(text:&str)->(String,Vec<(String,Vec<u8>)>) {
+    let mut visible=String::new();let mut images=Vec::new();let mut rest=text;
+    let mut budget=text.len().saturating_mul(16).clamp(4096,16*1024*1024);
+    while !rest.is_empty() {
+        if !md_spend(&mut budget,1) {visible.push_str(rest);break;}
+        let Some(ch)=rest.chars().next() else{break;};
+        if ch=='\\' && let Some(next)=rest.chars().nth(1) {
+            let length=1+next.len_utf8();visible.push_str(&rest[..length]);rest=&rest[length..];continue;
+        }
+        if ch=='`' {
+            let length=rest.bytes().take_while(|ch|*ch==b'`').count();
+            match markdown_code_end(rest,length,&mut budget) {
+                Ok(Some(end))=>{visible.push_str(&rest[..end+length]);rest=&rest[end+length..];continue;}
+                Err(())=>{visible.push_str(rest);break;}
+                _=>{visible.push_str(&rest[..length]);rest=&rest[length..];continue;}
+            }
+        }
+        if rest.starts_with("![") {
+            let close=match md_unescaped(rest,"](",&mut budget) {
+                Ok(close)=>close,Err(())=>{visible.push_str(rest);break;}
+            };
+            if let Some(close)=close {
+                let destination=&rest[close+2..];
+                let end=destination.find(')');
+                if !md_spend(&mut budget,end.unwrap_or(destination.len())) {visible.push_str(rest);break;}
+                if let Some(end)=end
+                    && let Some(bytes)=markdown_destination(&destination[..end]).as_deref().and_then(decode_html_image) {
+                    let alt=inline_md(&rest[2..close],&TextFormat::default()).into_iter().map(|run|run.text).collect::<String>();
+                    images.push((alt,bytes));rest=&rest[close+2+end+1..];continue;
+                }
+            }
+        }
+        visible.push(ch);rest=&rest[ch.len_utf8()..];
+    }
+    (visible,images)
+}
+fn document_plain_export(doc:&Doc)->String {
+    let mut blocks=Vec::new();
+    for paragraph in &doc.paragraphs {
+        blocks.push(paragraph.text());
+        for table in doc.tables.iter().filter(|table|table.after_paragraph_id==paragraph.id) {
+            for row in &table.rows {
+                let mut cells=Vec::new();
+                for cell in row {
+                    cells.push(if cell.merged {String::new()}else{cell_text(cell)});
+                    for _ in 1..cell.span() {cells.push(String::new());}
+                }
+                blocks.push(cells.join("\t"));
+            }
+        }
+    }
+    blocks.join("\n")
+}
+#[cfg(test)]
+mod next_markdown_table_image_tests {
+    use super::*;
+    #[test]
+    fn gfm_tables_import_structure_escaped_pipes_breaks_and_alignment()->Result<(),String> {
+        let doc=read(b"|left|right|\n|:---|---:|\n|a\\|b|x<br>y|\n","md")?;
+        let table=doc.tables.first().ok_or("table")?;
+        assert_eq!(table.rows.len(),2);
+        assert_eq!(cell_text(&table.rows[1][0]),"a|b");assert_eq!(cell_text(&table.rows[1][1]),"x\u{000b}y");
+        assert_eq!(table.rows[1][1].paragraphs[0].align,Align::Right);Ok(())
+    }
+    #[test]
+    fn markdown_export_keeps_data_images_and_import_restores_their_anchor()->Result<(),String> {
+        let mut png=std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(2,2).write_to(&mut png,image::ImageFormat::Png).map_err(|e|e.to_string())?;
+        let mut doc=Doc::from_text("anchor");let id=doc.alloc_id();
+        doc.images.push(AnchoredImage{id,after_paragraph_id:doc.paragraphs[0].id,bytes:png.into_inner(),width:1.5,height:1.5,alt:"icon".into()});
+        let imported=read(&write(&doc,"md")?,"md")?;
+        assert_eq!(imported.images.len(),1);assert_eq!(imported.images[0].bytes,doc.images[0].bytes);
+        assert_eq!(imported.images[0].alt,"icon");assert_eq!(imported.paragraphs.len(),1);
+        assert_eq!(imported.images[0].after_paragraph_id,imported.paragraphs[0].id);Ok(())
+    }
+    #[test]
+    fn txt_export_keeps_grid_columns_after_spanning_cells()->Result<(),String> {
+        let mut doc=Doc::from_text("before\nafter");
+        let id=doc.add_table(doc.paragraphs[0].id,1,3)?;
+        doc.set_cell_text(id,0,0,"one")?;doc.set_cell_text(id,0,2,"two")?;
+        doc.tables[0].rows[0].remove(1);doc.tables[0].rows[0][0].span=2;
+        let output=String::from_utf8(write(&doc,"txt")?).map_err(|e|e.to_string())?;
+        assert_eq!(output,"before\none\t\ttwo\nafter");Ok(())
+    }
+}
+
+fn inherited_html_css(css:&str)->String {
+    css_declarations(css).into_iter().filter(|(key,_)|matches!(key.as_str(),
+        "font-size"|"font-family"|"font-weight"|"font-style"|"color"|"text-align"|"text-indent"|
+        "line-height"|"widows"|"orphans"|"white-space"))
+        .map(|(key,value)|format!("{key}:{value}")).collect::<Vec<_>>().join(";")
+}
+#[cfg(test)]
+mod next_html_semantic_tests {
+    use super::*;
+    #[test]
+    fn html_container_margins_do_not_become_each_child_paragraphs_margins()->Result<(),String> {
+        let doc=read(br#"<div style="margin-left:30pt;margin-bottom:40pt;color:red"><p>one</p><p>two</p></div>"#,"html")?;
+        assert_eq!(doc.paragraphs.len(),2);
+        assert!(doc.paragraphs.iter().all(|paragraph|paragraph.indent==0.0 && paragraph.spacing_after!=40.0));
+        assert_eq!(doc.paragraphs[0].runs[0].format.color,[255,0,0]);Ok(())
+    }
+    #[test]
+    fn html_pre_and_code_elements_keep_monospace_format_and_line_boundaries()->Result<(),String> {
+        let doc=read(b"<pre>one\n  two</pre><p><code>a*b</code></p>","html")?;
+        assert_eq!(doc.paragraphs[0].style,"Code");assert_eq!(doc.paragraphs[0].text(),"one\n  two");
+        assert_eq!(doc.paragraphs[1].runs[0].format.font,"Consolas");Ok(())
+    }
+    #[test]
+    fn html_import_does_not_claim_that_preserved_native_tables_were_dropped()->Result<(),String> {
+        let mut doc=Doc::from_text("anchor");doc.add_table(doc.paragraphs[0].id,1,1)?;
+        let imported=read(&write(&doc,"html")?,"html")?;
+        assert_eq!(imported.tables.len(),1);
+        assert!(!imported.losses.iter().any(|message|message.contains("таблицы преобразуются в абзацы")));Ok(())
+    }
+}
+
+#[cfg(test)]
+mod next_decode_limit_tests {
+    #[test]
+    fn docs_legacy_decoder_rejects_the_undefined_windows1251_byte() {
+        assert!(super::read(&[0x98],"txt").is_err());
+    }
+    #[test]
+    fn oversized_html_is_rejected_before_plain_text_fallback() {
+        let html=format!("<p><b>kept</b></p><!--{}-->"," ".repeat(256));
+        assert!(super::read_html_with_limit(&html,64).is_err());
     }
 }

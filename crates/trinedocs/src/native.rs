@@ -55,7 +55,7 @@ impl Document {
             Self::Sheets(_) => &[
                 ("xlsx", "Книга Excel"),
                 ("pdf", "PDF"),
-                ("csv", "CSV (разделители — запятые)"),
+                ("csv", "CSV (разделитель — точка с запятой)"),
                 ("tsv", "TSV (разделители — табуляция)"),
                 ("html", "Веб-страница"),
             ],
@@ -423,5 +423,19 @@ mod next_native_image_tests {
         let legacy=crate::package::write_zip(vec![("document.json".into(),
             serde_json::to_vec(&Envelope{version:2,document:document.clone(),assets:Default::default()}).map_err(|e|e.to_string())?)])?;
         assert_eq!(decode(&legacy)?,document);Ok(())
+    }
+}
+
+#[cfg(test)]
+mod next_csv_label_tests {
+    #[test]
+    fn csv_save_description_matches_the_written_separator()->Result<(),String> {
+        let mut book=crate::sheets::model::Book::default();let id=book.active_id();
+        book.set_cell(id,0,0,"left")?;book.set_cell(id,0,1,"right")?;
+        let document=super::Document::Sheets(book);
+        let label=document.save_formats().iter().find(|(ext,_)|*ext=="csv").map(|(_,label)|*label).ok_or("CSV label")?;
+        assert!(label.contains("точка с запятой"));
+        let output=String::from_utf8(super::export(&document,"csv")?).map_err(|e|e.to_string())?;
+        assert!(output.contains("left;right"));Ok(())
     }
 }

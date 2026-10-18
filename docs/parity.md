@@ -2,7 +2,7 @@
 
 Первичный feature inventory по заданию и первым проверенным пробелам. Полная сверка всех вкладок Office ещё не завершена. Внутри каждого PAR-пункта варианты поведения проверяются отдельно. Ни одна функция не объявлена готовой. P2 не удаляется из конечного объёма; поздние фазы ждут решения владельца ADR-0005.
 
-Всего функций/вариантов: **364**.
+Всего функций/вариантов: **365**.
 
 | PAR ID | Режим | Функция | P | Фаза | REQ | MCP / пробел | Import | Export | Статус |
 |---|---|---|---|---|---|---|---|---|---|
@@ -10,7 +10,7 @@
 | PAR-COM-002 | Общее | Вставка из Word/Excel/PowerPoint/браузера | P0 | 1 | REQ-11-002 | GAP: точная ops/tool-схема ещё не определена | planned | planned | planned |
 | PAR-COM-003 | Общее | Вставить без формата | P0 | 1 | REQ-11-002 | GAP: точная ops/tool-схема ещё не определена | planned | planned | planned |
 | PAR-COM-004 | Общее | Специальная вставка значения/формулы/форматы/transpose | P0 | 1 | REQ-11-002 | UI Sheets: внутренний типизированный буфер; всё/значения/ввод/форматы и transpose; атомарный preflight. GAP: специальные внешние HTML/RTF/Excel форматы и runtime acceptance. | internal clipboard | n/a | partial_unverified |
-| PAR-COM-005 | Общее | Поиск/замена case/words/regex/format | P0 | 1 | REQ-11-002 | Sheets UI: единый Unicode literal matcher, регистр, назад/вперёд, Enter/Shift+Enter, Esc, счётчик и атомарная замена с общим лимитом текста. sheets_find/replace_all сохраняют существующую MCP-схему; GAP: полный words/regex/format, UI других режимов и runtime acceptance. | planned | planned | partial_unverified |
+| PAR-COM-005 | Общее | Поиск/замена case/words/regex/format | P0 | 1 | REQ-11-002 | Sheets literal Unicode search; Docs body search от курсора, назад/вперёд, Enter/Shift+Enter и checked bulk replace с preflight. Существующие MCP tools сохраняются; GAP: Docs tables, words/regex/format, остальные режимы и runtime acceptance. | n/a | n/a | partial_unverified |
 | PAR-COM-006 | Общее | Zoom | P0 | 1 | REQ-11-002 | GAP: точная ops/tool-схема ещё не определена | planned | planned | planned |
 | PAR-COM-007 | Общее | Линейки | P0 | 1 | REQ-11-002 | GAP: точная ops/tool-схема ещё не определена | planned | planned | planned |
 | PAR-COM-008 | Общее | Сетка/направляющие | P0 | 1 | REQ-11-002 | GAP: точная ops/tool-схема ещё не определена | planned | planned | planned |
@@ -246,7 +246,7 @@
 | PAR-SLD-010 | Slides | Шрифты темы | P0 | 6 | REQ-11-010 | set_layout / apply_theme / add_shape / update_shape / align_shapes / group_shapes / set_z_order; GAP: master editing/distribute schema | planned | planned | planned |
 | PAR-SLD-011 | Slides | Фон темы | P0 | 6 | REQ-11-010 | set_layout / apply_theme / add_shape / update_shape / align_shapes / group_shapes / set_z_order; GAP: master editing/distribute schema | planned | planned | planned |
 | PAR-SLD-012 | Slides | Text autofit | P0 | 6 | REQ-11-010 | set_layout / apply_theme / add_shape / update_shape / align_shapes / group_shapes / set_z_order; GAP: master editing/distribute schema | planned | planned | planned |
-| PAR-SLD-013 | Slides | Базовые фигуры | P0 | 6 | REQ-11-010 | set_layout / apply_theme / add_shape / update_shape / align_shapes / group_shapes / set_z_order; GAP: master editing/distribute schema | planned | planned | planned |
+| PAR-SLD-013 | Slides | Базовые фигуры | P0 | 6 | REQ-11-010 | slides_update_element element.fill_visible и UI: отдельный noFill для Rect/Ellipse, контур/текст сохраняются, Page/PPTX путь. GAP: все DrawingML fills/effects, runtime/Office acceptance. | subset | subset | partial_unverified |
 | PAR-SLD-014 | Slides | Линии | P0 | 6 | REQ-11-010 | set_layout / apply_theme / add_shape / update_shape / align_shapes / group_shapes / set_z_order; GAP: master editing/distribute schema | planned | planned | planned |
 | PAR-SLD-015 | Slides | Соединители | P0 | 6 | REQ-11-010 | set_layout / apply_theme / add_shape / update_shape / align_shapes / group_shapes / set_z_order; GAP: master editing/distribute schema | planned | planned | planned |
 | PAR-SLD-016 | Slides | Crop изображений | P0 | 6 | REQ-11-010 | set_layout / apply_theme / add_shape / update_shape / align_shapes / group_shapes / set_z_order; GAP: master editing/distribute schema | planned | planned | planned |
@@ -322,9 +322,9 @@
 | PAR-DOC-096 | Docs | Формат .docm открыть: ✓, макросы не исполняются, сохраняются; сохранить: ✓ | P0 | 2 | REQ-08-002 | export_document / open_document; format implementation pending | planned | planned | planned |
 | PAR-DOC-097 | Docs | Формат .doc, .rtf, .odt открыть: ✓; сохранить: ✓ | P0 | 7 | REQ-08-003 | export_document / open_document; format implementation pending | planned | planned | planned |
 | PAR-DOC-098 | Docs | Формат .pdf открыть: P2: картинки/текст; сохранить: ✓; PDF/A — P1 | P2 | 9 | REQ-08-004 | export_document / open_document; format implementation pending | planned | planned | planned |
-| PAR-DOC-099 | Docs | Формат .txt открыть: ✓; сохранить: ✓ | P0 | 2 | REQ-08-005 | export_document / open_document; format implementation pending | planned | planned | planned |
-| PAR-DOC-100 | Docs | Формат .md открыть: ✓; сохранить: ✓ | P0 | 2 | REQ-08-006 | export_document / open_document; format implementation pending | planned | planned | planned |
-| PAR-DOC-101 | Docs | Формат .html открыть: ✓; сохранить: ✓ | P0 | 2 | REQ-08-007 | export_document / open_document; format implementation pending | planned | planned | planned |
+| PAR-DOC-099 | Docs | Формат .txt открыть: ✓; сохранить: ✓ | P0 | 2 | REQ-08-005 | open/export: BOM UTF-8/16/32, строгий legacy decode; текст таблиц и span-поля в TXT. GAP: runtime/encoding corpus, полная структура отсутствует по природе TXT. | text subset | body/table text | partial_unverified |
+| PAR-DOC-100 | Docs | Формат .md открыть: ✓; сохранить: ✓ | P0 | 2 | REQ-08-006 | open/export: subset code spans/blocks, headings/lists/links/autolinks, soft/hard breaks, GFM tables и PNG/JPEG data images. v2 сохраняет абзацы; GAP: полный CommonMark/GFM, image display size и runtime round-trip. | subset | subset | partial_unverified |
+| PAR-DOC-101 | Docs | Формат .html открыть: ✓; сохранить: ✓ | P0 | 2 | REQ-08-007 | open/export: rich text, native table metadata, data images, ограниченное CSS inheritance и pre/code. GAP: полноценный браузерный layout/CSS, внешние tables и runtime corpus. | subset | subset | partial_unverified |
 | PAR-DOC-102 | Docs | Формат .epub открыть: —; сохранить: P2 | P2 | 9 | REQ-08-008 | export_document / open_document; format implementation pending | planned | planned | planned |
 | PAR-DOC-103 | Docs | Формат Google Docs открыть: ✓; сохранить: ✓ | P0 | 7 | REQ-08-009 | export_document / open_document; format implementation pending | planned | planned | planned |
 | PAR-SHT-114 | Sheets | Формат .xlsx, .xltx открыть: ✓; сохранить: ✓ | P0 | 5 | REQ-08-010 | export_document / open_document; format implementation pending | planned | planned | planned |
@@ -333,9 +333,9 @@
 | PAR-SHT-117 | Sheets | Формат .xls, .ods открыть: ✓; сохранить: ✓ | P0 | 7 | REQ-08-013 | export_document / open_document; format implementation pending | planned | planned | planned |
 | PAR-SHT-118 | Sheets | Формат .csv, .tsv открыть: ✓: мастер UTF-8/UTF-16/Windows-1251 и др.; разделитель, кавычки, типы, локаль; сохранить: ✓: лист или все листы в zip | P0 | 5 | REQ-08-014 | export_document / open_document; format implementation pending | planned | planned | planned |
 | PAR-SHT-119 | Sheets | Формат .pdf открыть: —; сохранить: ✓: область, масштаб | P0 | 5 | REQ-08-015 | export_document / open_document; format implementation pending | planned | planned | planned |
-| PAR-SHT-120 | Sheets | Формат .html, .md открыть: —; сохранить: ✓: таблица | P0 | 5 | REQ-08-016 | export_document / open_document; format implementation pending | planned | planned | planned |
+| PAR-SHT-120 | Sheets | Формат .html, .md открыть: —; сохранить: ✓: таблица | P0 | 5 | REQ-08-016 | export: HTML merges/text formatting/geometry, data images с адресом после таблицы, общий бюджет; MD table. GAP: charts/полный conditional formatting/floating image geometry/runtime acceptance. | unsupported | subset | partial_unverified |
 | PAR-SHT-121 | Sheets | Формат Google Sheets открыть: ✓; сохранить: ✓ | P0 | 7 | REQ-08-017 | export_document / open_document; format implementation pending | planned | planned | planned |
-| PAR-SLD-066 | Slides | Формат .pptx, .potx, .ppsx открыть: ✓; сохранить: ✓ | P0 | 6 | REQ-08-018 | export_document / open_document; format implementation pending | planned | planned | planned |
+| PAR-SLD-066 | Slides | Формат .pptx, .potx, .ppsx открыть: ✓; сохранить: ✓ | P0 | 6 | REQ-08-018 | open/export: исправлены noFill shape classification и chart title export; общий input budget. GAP: полный OOXML corpus, native-manifest bypass и runtime Office acceptance. | subset | subset | partial_unverified |
 | PAR-SLD-067 | Slides | Формат .pptm открыть: ✓, макросы не исполняются, сохраняются; сохранить: ✓ | P0 | 6 | REQ-08-019 | export_document / open_document; format implementation pending | planned | planned | planned |
 | PAR-SLD-068 | Slides | Формат .ppt, .odp открыть: ✓; сохранить: ✓ | P0 | 7 | REQ-08-020 | export_document / open_document; format implementation pending | planned | planned | planned |
 | PAR-SLD-069 | Slides | Формат .pdf открыть: —; сохранить: ✓: слайды/заметки/раздаточные | P0 | 6 | REQ-08-021 | export_document / open_document; format implementation pending | planned | planned | planned |
@@ -370,8 +370,11 @@
 
 | PAR-TRI-042 | Общее | Адаптация вкладок ленты и доступные палитры цветов | P0 | 1 | REQ-11-002 | UI view-only: горизонтальная прокрутка ленты, scoped font filter, имена swatches и видимый фокус. GAP: runtime keyboard/AccessKit/visual acceptance. | n/a | n/a | implemented_unverified |
 | PAR-TRI-043 | Sheets | Отдельная строка статистики выделения с локалью и устойчивым средним | P1 | 8 | REQ-11-008 | UI read-only: сумма/среднее/заполненность отдельно от прокрутки вкладок; overflow суммы отображается как —. GAP: runtime/visual acceptance. | n/a | n/a | implemented_unverified |
-| PAR-TRI-044 | Slides | Чернила докладчика в координатах слайда и разделение клавиш панели/показа | P1 | 8 | REQ-11-011 | UI-only presentation state: normalized ink, clipping, focused native controls consume their keys before global navigation. GAP: runtime resize/keyboard/visual acceptance. | n/a | n/a | implemented_unverified |
+| PAR-TRI-044 | Slides | Чернила докладчика в координатах слайда и разделение клавиш панели/показа | P1 | 8 | REQ-11-011 | UI-only presentation state: normalized ink/clipping, 100000 точек/1000 штрихов и clear, blank/end click, manual navigation перед timer. GAP: runtime resize/keyboard/visual acceptance. | n/a | n/a | implemented_unverified |
+| PAR-TRI-045 | Slides | Фильтр навигатора по заголовку/разделу, фиксированные карточки и вставка перед drop-marker | P1 | 8 | REQ-11-011 | Фильтр view-only; перенос через существующие model/ops и undo. Native buttons с полными подписями. GAP: runtime DnD/keyboard/AccessKit/visual acceptance. | n/a | n/a | implemented_unverified |
 
 Дополнение 2026-10-18: [50 исправлений кода с регрессиями](audit/bugs-50-2026-10-18.md) и [отчёт фазы](plan/phase-capabilities-50-fixes-2026-10-18-report.md). Сборка и тесты запрещены владельцем; runtime-приёмка и полный Office/MCP-паритет этим срезом не подтверждены.
 
 Дополнение UI 2026-10-18: [ещё 50 дефектов BUG-051…100](audit/bugs-51-100-2026-10-18.md) и [отчёт UI-фазы](plan/phase-ui-50-more-fixes-2026-10-18-report.md). Все добавления остаются implemented/partial_unverified; 50 новых тестов только написаны, не запускались.
+
+Следующий проход2026-10-18: [BUG-101…150](audit/bugs-101-150-2026-10-18.md) и [отчёт](plan/phase-ui-50-next-2026-10-18-report.md). Статусы указывают наличие кода; сборка, тесты и runtime-приёмка не проводились.

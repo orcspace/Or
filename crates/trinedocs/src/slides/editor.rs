@@ -743,7 +743,7 @@ fn slide_panel(ui: &mut egui::Ui, deck: &mut Deck, state: &mut State, main_heigh
                                 changed |= ui
                                     .add(
                                         egui::DragValue::new(seconds)
-                                            .range(0.1..=3600.0)
+                                            .range(0.001..=3600.0)
                                             .suffix(" сек."),
                                     )
                                     .changed();
@@ -1053,7 +1053,7 @@ fn ribbon(ui: &mut egui::Ui, deck: &mut Deck, state: &mut State) -> bool {
                         if ui
                             .add(
                                 egui::DragValue::new(&mut width)
-                                    .range(0.0..=40.0)
+                                    .range(0.001..=86400.0)
                                     .speed(0.25)
                                     .suffix(" pt"),
                             )
@@ -1677,11 +1677,11 @@ fn properties(ui: &mut egui::Ui, e: &mut Element) -> bool {
             ui.horizontal(|ui| {
                 ui.label("Ш");
                 changed |= ui
-                    .add(egui::DragValue::new(&mut e.w).range(1.0..=10000.0))
+                    .add(egui::DragValue::new(&mut e.w).range(0.001..=10000.0))
                     .changed();
                 ui.label("В");
                 changed |= ui
-                    .add(egui::DragValue::new(&mut e.h).range(1.0..=10000.0))
+                    .add(egui::DragValue::new(&mut e.h).range(0.001..=10000.0))
                     .changed();
             });
             let rotation_supported = matches!(
@@ -1693,12 +1693,10 @@ fn properties(ui: &mut egui::Ui, e: &mut Element) -> bool {
                     | ElementKind::Arrow
                     | ElementKind::Image { .. }
             );
-            changed |= ui
-                .add_enabled(
-                    rotation_supported,
-                    egui::Slider::new(&mut e.rotation, -180.0..=180.0).text("Поворот"),
-                )
-                .changed();
+            let mut rotation=(e.rotation+180.0).rem_euclid(360.0)-180.0;
+            if ui.add_enabled(rotation_supported,egui::Slider::new(&mut rotation,-180.0..=180.0).text("Поворот")).changed() {
+                e.rotation=rotation;changed=true;
+            }
             if !rotation_supported {
                 ui.small("Поворот этого типа объекта на холсте пока не поддерживается");
             }
@@ -1708,15 +1706,17 @@ fn properties(ui: &mut egui::Ui, e: &mut Element) -> bool {
         .default_open(false)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label("Заливка");
-                changed |= ui.color_edit_button_srgb(&mut e.fill).changed();
+                if matches!(e.kind,ElementKind::Rect|ElementKind::Ellipse) {
+                    changed|=ui.checkbox(&mut e.fill_visible,"Заливка").changed();
+                    ui.add_enabled_ui(e.fill_visible,|ui|{changed|=ui.color_edit_button_srgb(&mut e.fill).changed();});
+                }else{ui.label("Заливка");changed|=ui.color_edit_button_srgb(&mut e.fill).changed();}
                 ui.label("Контур");
                 changed |= ui.color_edit_button_srgb(&mut e.stroke).changed();
             });
             changed |= ui
                 .add(
                     egui::DragValue::new(&mut e.stroke_width)
-                        .range(0.0..=30.0)
+                        .range(0.0..=300.0)
                         .prefix("Контур "),
                 )
                 .changed();
@@ -1990,21 +1990,21 @@ fn animation_controls(ui: &mut egui::Ui, a: &mut Animation, slot: usize) -> (boo
         changed |= ui
             .add(
                 egui::DragValue::new(&mut a.duration)
-                    .range(0.05..=30.0)
+                    .range(0.001..=3600.0)
                     .prefix("Длительность "),
             )
             .changed();
         changed |= ui
             .add(
                 egui::DragValue::new(&mut a.delay)
-                    .range(0.0..=60.0)
+                    .range(0.0..=86400.0)
                     .prefix("Задержка "),
             )
             .changed();
         changed |= ui
             .add(
                 egui::DragValue::new(&mut a.order)
-                    .range(0..=999)
+                    .range(0..=u32::MAX)
                     .prefix("Порядок "),
             )
             .on_hover_text("0 — по порядку слоёв, раньше пронумерованных шагов")
@@ -2014,14 +2014,14 @@ fn animation_controls(ui: &mut egui::Ui, a: &mut Animation, slot: usize) -> (boo
                 changed |= ui
                     .add(
                         egui::DragValue::new(&mut a.dx)
-                            .range(-4000.0..=4000.0)
+                            .range(-100000.0..=100000.0)
                             .prefix("Δx "),
                     )
                     .changed();
                 changed |= ui
                     .add(
                         egui::DragValue::new(&mut a.dy)
-                            .range(-4000.0..=4000.0)
+                            .range(-100000.0..=100000.0)
                             .prefix("Δy "),
                     )
                     .changed();
@@ -2836,13 +2836,13 @@ fn paint_element(
     match &e.kind {
         ElementKind::Rect => {
             let mut shape =
-                egui::epaint::RectShape::new(rect, 0.0, rgb(e.fill), stroke, StrokeKind::Inside);
+                egui::epaint::RectShape::new(rect,0.0,if e.fill_visible {rgb(e.fill)}else{Color32::TRANSPARENT},stroke,StrokeKind::Inside);
             shape.angle = e.rotation.to_radians();
             painter.add(shape);
         }
         ElementKind::Ellipse => {
             let mut shape =
-                egui::epaint::EllipseShape::filled(rect.center(), rect.size() / 2.0, rgb(e.fill));
+                egui::epaint::EllipseShape::filled(rect.center(),rect.size()/2.0,if e.fill_visible {rgb(e.fill)}else{Color32::TRANSPARENT});
             shape.stroke = stroke;
             shape.angle = e.rotation.to_radians();
             painter.add(shape);
@@ -3806,5 +3806,18 @@ mod next_thumbnail_tests {
             assert!(size.x<=140.001 && size.y<=92.001);
             assert!((size.x/size.y-width/height).abs()<(width/height)*1e-5);
         }
+    }
+}
+
+#[cfg(test)]
+mod next_property_range_tests {
+    use super::*;
+    #[test]
+    fn viewing_imported_animation_values_does_not_clamp_them_to_short_ui_ranges()->Result<(),String> {
+        let ctx=egui::Context::default();crate::fonts::install(&ctx)?;
+        let mut animation=Animation{effect:"move".into(),duration:1200.0,delay:60000.0,order:4000,dx:90000.0,dy:-90000.0,..Default::default()};
+        let before=animation.clone();
+        let _=ctx.run_ui(egui::RawInput::default(),|ui|{animation_controls(ui,&mut animation,0);});
+        assert_eq!(animation,before);Ok(())
     }
 }

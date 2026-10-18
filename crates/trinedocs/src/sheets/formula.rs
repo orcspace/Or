@@ -748,6 +748,7 @@ struct Grid {
     rows: usize,
     cols: usize,
     reference: bool,
+    origin: Option<(usize,u32,u32)>,
 }
 impl Grid {
     fn scalar(value: Value) -> Self {
@@ -756,6 +757,7 @@ impl Grid {
             rows: 1,
             cols: 1,
             reference: false,
+            origin: None,
         }
     }
     fn first(&self) -> Value {
@@ -908,6 +910,7 @@ impl<'a> Engine<'a> {
                     rows: (range.r1 - range.r0 + 1) as usize,
                     cols: (range.c1 - range.c0 + 1) as usize,
                     reference: true,
+                    origin: Some((target,range.r0,range.c0)),
                 })
             }
             Expr::Name(n) => {
@@ -1146,6 +1149,10 @@ impl<'a> Engine<'a> {
                     range.c0 + 1
                 }))));
             }
+            let grid=self.eval(&args[0],sheet,row,col)?;
+            if let Some((_,row,col))=grid.origin {
+                return Ok(Grid::scalar(Value::Number(f64::from(if name=="ROW" {row+1}else{col+1}))));
+            }
             return Err("#VALUE!".into());
         }
         let mut evaluated = Vec::new();
@@ -1336,7 +1343,7 @@ impl<'a> Engine<'a> {
                     return num(if vals.is_empty() {
                         0.0
                     } else {
-                        scaled_product(&vals)
+                        balanced_product(&vals)
                     });
                 }
                 if name == "MIN" {
@@ -1512,9 +1519,10 @@ impl<'a> Engine<'a> {
                                     .and_then(|s| s.cell(r.r0, r.c0))
                                     .is_some_and(|c| c.input.starts_with('=')),
                             )
-                        } else {
-                            boolean(false)
-                        }
+                        } else if let Some((sheet,row,col))=a[0].origin {
+                            boolean(self.book.sheets.get(sheet).and_then(|sheet|sheet.cell(row,col))
+                                .is_some_and(|cell|cell.input.starts_with('=')))
+                        }else{boolean(false)}
                     }
                     "N" => num(match value {
                         Value::Number(v) => v,
@@ -1779,7 +1787,7 @@ impl<'a> Engine<'a> {
                             _=>0.0,
                         });
                     }
-                    terms.push(scaled_product(&factors));
+                    terms.push(balanced_product(&factors));
                 }
                 num(scaled_sum(&terms))
             }
@@ -2007,7 +2015,7 @@ impl<'a> Engine<'a> {
                 let needle = text(0)?;
                 let hay = text(1)?;
                 let start = default_n(2, 1.0)?.trunc();
-                if start < 1.0 || start > hay.chars().count() as f64 + 1.0 {
+                if start < 1.0 || start > hay.chars().count().max(1) as f64 {
                     return Err("#VALUE!".into());
                 }
                 let chars: Vec<_> = hay.chars().collect();
@@ -2022,6 +2030,8 @@ impl<'a> Engine<'a> {
                                 .chars()
                                 .count()
                         })
+                } else if !needle.contains(['*','?','~']) {
+                    literal_search(&chars[offset..],&needle)
                 } else {
                     let pattern = needle.to_lowercase();
                     (offset..=chars.len())
@@ -2173,7 +2183,8 @@ impl<'a> Engine<'a> {
                 for row in r0..r1 {
                     for col in c0..c1 { values.push(a[0].at(row,col)?); }
                 }
-                Ok(Grid { values, rows:r1-r0, cols:c1-c0, reference:a[0].reference })
+                Ok(Grid { values, rows:r1-r0, cols:c1-c0, reference:a[0].reference,
+                    origin:a[0].origin.map(|(sheet,row,col)|(sheet,row+r0 as u32,col+c0 as u32)) })
             }
             "MATCH" | "XMATCH" => {
                 arity(2, if name == "MATCH" { 3 } else { 4 })?;
@@ -3028,20 +3039,15 @@ impl<'a> Engine<'a> {
                 }
             }
             "ROMAN" => {
-                arity(1, 1)?;
-                let x = n(0)?.trunc();
-                if !(0.0..=3999.0).contains(&x) {
-                    return Err("#VALUE!".into());
-                }
-                let mut rest = x as u32;
-                let mut out = String::new();
-                for (value, symbol) in ROMAN {
-                    while rest >= value {
-                        out.push_str(symbol);
-                        rest -= value;
-                    }
-                }
-                string(out)
+                arity(1,2)?;
+                let value=n(0)?.trunc();
+                if !(0.0..=3999.0).contains(&value) {return Err("#VALUE!".into());}
+                let form=match a.get(1).map(Grid::first) {
+                    Some(Value::Bool(true))=>0.0,Some(Value::Bool(false))=>4.0,
+                    _=>default_n(1,0.0)?.trunc(),
+                };
+                if !(0.0..=4.0).contains(&form) {return Err("#VALUE!".into());}
+                string(roman_form(value as u32,form as usize))
             }
             "ARABIC" => {
                 arity(1, 1)?;
@@ -4053,7 +4059,8 @@ fn lookup_result(grid: &Grid, index: usize, vertical: bool) -> CalcResult<Grid> 
             values.push(if vertical { grid.at(index,col)? } else { grid.at(row,index)? });
         }
     }
-    Ok(Grid { values, rows, cols, reference:grid.reference })
+    Ok(Grid { values, rows, cols, reference:grid.reference,
+        origin:grid.origin.map(|(sheet,row,col)|(sheet,row+if vertical {index as u32}else{0},col+if vertical {0}else{index as u32})) })
 }
 fn binary_lookup(values: &[Value], needle: &Value, mode: i32, search: i32) -> Option<usize> {
     let (mut low, mut high) = (0,values.len());
@@ -4314,7 +4321,7 @@ fn scaled_sum(values:&[f64])->f64 {
     }
     (sum+correction)*scale
 }
-fn scaled_product(values:&[f64])->f64 {
+fn balanced_product(values:&[f64])->f64 {
     if values.iter().any(|value|*value==0.0) {return 0.0;}
     let (mut mantissa,mut exponent,mut negative)=(1.0,0i64,false);
     for value in values {
@@ -4387,4 +4394,75 @@ mod next_arithmetic_defects {
 fn exponential_scale(value:f64,logarithm:f64)->f64 {
     if value==0.0 {return 0.0;}
     value.signum()*(value.abs().ln()+logarithm).exp()
+}
+
+fn roman_form(mut value:u32,form:usize)->String {
+    if form==0 {
+        let mut out=String::new();
+        for (amount,symbol) in ROMAN {while value>=amount {out.push_str(symbol);value-=amount;}}
+        return out;
+    }
+    let symbols=[("I",1u32),("V",5),("X",10),("L",50),("C",100),("D",500),("M",1000)];
+    let mut choices=symbols.iter().map(|(symbol,value)|(*value,symbol.to_string())).collect::<Vec<_>>();
+    for high in 1..symbols.len() {
+        let classic=high-if high%2==0 {2}else{1};
+        for low in classic.saturating_sub(form)..=classic {
+            choices.push((symbols[high].1-symbols[low].1,format!("{}{}",symbols[low].0,symbols[high].0)));
+        }
+    }
+    choices.sort_by(|a,b|b.0.cmp(&a.0).then_with(||a.1.len().cmp(&b.1.len())));
+    let mut out=String::new();
+    for (amount,symbol) in choices {while value>=amount {out.push_str(&symbol);value-=amount;}}
+    out
+}
+#[cfg(test)]
+mod next_reference_roman_tests {
+    use super::*;
+    #[test]
+    fn computed_references_keep_their_source_coordinates_and_formula_identity()->Result<(),String> {
+        let mut book=Book::default();let id=book.active_id();book.set_input(id,4,2,"=1+1")?;
+        for (formula,expected) in [("=ROW(INDEX(B4:D8,2,2))",Value::Number(5.0)),
+            ("=COLUMN(INDEX(B4:D8,2,2))",Value::Number(3.0)),
+            ("=ISFORMULA(INDEX(B4:D8,2,2))",Value::Bool(true)),
+            ("=ROW(CHOOSE(2,A1,C5))",Value::Number(5.0))] {
+            assert_eq!(evaluate(&book,id,formula),expected,"{formula}");
+        }Ok(())
+    }
+    #[test]
+    fn roman_accepts_all_documented_forms_and_boolean_aliases() {
+        let book=Book::default();let id=book.active_id();
+        for (form,expected) in [("0","CDXCIX"),("1","LDVLIV"),("2","XDIX"),("3","VDIV"),("4","ID"),("TRUE","CDXCIX"),("FALSE","ID")] {
+            assert_eq!(evaluate(&book,id,&format!("=ROMAN(499,{form})")),Value::Text(expected.into()));
+        }
+    }
+}
+
+fn literal_search(source:&[char],needle:&str)->Option<usize> {
+    let mut folded=String::new();let mut offsets=Vec::new();
+    for (index,ch) in source.iter().enumerate() {
+        offsets.push((folded.len(),index));folded.extend(ch.to_lowercase());
+    }
+    let pattern=needle.chars().flat_map(char::to_lowercase).collect::<String>();
+    let found=folded.find(&pattern)?;
+    if offsets.is_empty(){return Some(0);}
+    let slot=offsets.partition_point(|(offset,_)|*offset<=found).saturating_sub(1);
+    offsets.get(slot).map(|(_,index)|*index)
+}
+#[cfg(test)]
+mod next_search_formula_tests {
+    use super::*;
+    #[test]
+    fn empty_find_text_does_not_allow_a_start_after_the_haystack() {
+        let book=Book::default();let id=book.active_id();
+        for input in ["=FIND(\"\",\"abc\",4)","=SEARCH(\"\",\"abc\",4)"] {
+            assert_eq!(evaluate(&book,id,input),Value::Error("#VALUE!".into()));
+        }
+        assert_eq!(evaluate(&book,id,"=FIND(\"\",\"abc\",3)"),Value::Number(3.0));
+    }
+    #[test]
+    fn literal_search_handles_long_misses_and_keeps_original_unicode_positions() {
+        let source="a".repeat(32767).chars().collect::<Vec<_>>();
+        assert_eq!(literal_search(&source,"missing"),None);
+        assert_eq!(literal_search(&"😀Привет".chars().collect::<Vec<_>>(),"ВЕТ"),Some(4));
+    }
 }

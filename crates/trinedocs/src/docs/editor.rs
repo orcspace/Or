@@ -1967,7 +1967,7 @@ fn paragraph_controls(ui: &mut egui::Ui, doc: &mut Doc, state: &EditorState, ind
                 if ui
                     .add(
                         egui::DragValue::new(&mut value)
-                            .range(-250.0..=250.0)
+                            .range(-10000.0..=10000.0)
                             .suffix(" pt"),
                     )
                     .changed()
@@ -2061,6 +2061,7 @@ fn outline_menu(ui: &mut egui::Ui, doc: &Doc, state: &mut EditorState) {
         for (id, _, text) in outline {
             if ui.button(&text).clicked() {
                 if let Some(paragraph) = doc.paragraphs.iter().position(|p| p.id == id) {
+                    state.table_cell=None;state.table_page=None;state.focus_cell=false;
                     state.move_to(
                         doc,
                         Position {
@@ -2313,6 +2314,7 @@ fn navigate_find_matches(doc:&Doc,state:&mut EditorState,matches:&[(Position,Pos
 }
 
 fn select_match(doc: &Doc, state: &mut EditorState, start: Position, end: Position) {
+    state.table_cell=None;state.table_page=None;state.focus_cell=false;
     state.move_to(doc, end, false);
     state.anchor = start;
 }
@@ -2353,12 +2355,12 @@ fn object_panels(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState) {
                                 ui.label("Ширина / высота");
                                 ui.add(
                                     egui::DragValue::new(&mut image.width)
-                                        .range(1.0..=2000.0)
+                                        .range(0.001..=10000.0).clamp_existing_to_range(false)
                                         .suffix(" pt"),
                                 );
                                 ui.add(
                                     egui::DragValue::new(&mut image.height)
-                                        .range(1.0..=2000.0)
+                                        .range(0.001..=10000.0).clamp_existing_to_range(false)
                                         .suffix(" pt"),
                                 );
                             });
@@ -4655,5 +4657,18 @@ mod next_find_defects {
             let _=ctx.run_ui(egui::RawInput{events:vec![egui::Event::Key{key:Key::Enter,physical_key:None,pressed:false,repeat:false,modifiers}],..Default::default()},
                 |ui|find_bar(ui,&mut doc,&mut state,canvas));
         }Ok(())
+    }
+}
+
+#[cfg(test)]
+mod next_body_navigation_tests {
+    use super::*;
+    #[test]
+    fn finding_body_text_leaves_the_active_table_editor()->Result<(),String> {
+        let mut doc=Doc::from_text("body target");let table=doc.add_table(doc.paragraphs[0].id,1,1)?;
+        let mut state=EditorState{table_cell:Some(TableCursor{table,row:0,column:0}),table_page:Some(0),focus_cell:true,..Default::default()};
+        select_match(&doc,&mut state,Position{paragraph:0,offset:5},Position{paragraph:0,offset:11});
+        assert!(state.table_cell.is_none());assert!(state.table_page.is_none());assert!(!state.focus_cell);
+        assert_eq!(state.cursor.offset,11);Ok(())
     }
 }

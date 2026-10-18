@@ -22,6 +22,8 @@ pub struct Presentation {
     strokes: Vec<Vec<Pos2>>,
     control_ids: Vec<egui::Id>,
     inking: bool,
+    ink_points: usize,
+    ink_full: bool,
 }
 impl Presentation {
     pub fn start(&mut self, ctx: &egui::Context, deck: &Deck, index: usize) {
@@ -52,13 +54,15 @@ impl Presentation {
         self.previous = None;
         self.clicks = 0;
         self.click_times.clear();
-        self.strokes.clear();
-        self.inking=false;
+        self.clear_ink();
         self.blank = 0;
         self.blank_since = None;
         self.ended = false;
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
         ctx.request_repaint();
+    }
+    fn clear_ink(&mut self) {
+        self.strokes.clear();self.inking=false;self.ink_points=0;self.ink_full=false;
     }
     fn move_to(&mut self, deck: &Deck, index: usize, time: f64) {
         self.previous = deck.slides.get(self.index).map(|slide| slide.id);
@@ -67,8 +71,7 @@ impl Presentation {
         self.slide_started = time;
         self.clicks = 0;
         self.click_times.clear();
-        self.strokes.clear();
-        self.inking=false;
+        self.clear_ink();
         self.blank = 0;
         self.blank_since = None;
         self.ended = false;
@@ -237,7 +240,12 @@ pub fn show(ui: &mut egui::Ui, deck: &Deck, state: &mut Presentation) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
         return;
     }
-    if presentation_shortcuts_allowed(&ctx,state) {
+    let shortcuts=presentation_shortcuts_allowed(&ctx,state);
+    let mut manual_navigation=shortcuts && ctx.input(|input|[
+        egui::Key::ArrowRight,egui::Key::ArrowDown,egui::Key::PageDown,egui::Key::Space,
+        egui::Key::ArrowLeft,egui::Key::ArrowUp,egui::Key::PageUp,egui::Key::Home,egui::Key::End
+    ].iter().any(|key|input.key_pressed(*key)));
+    if shortcuts {
     if ctx.input(|i| {
         i.key_pressed(egui::Key::ArrowRight)
             || i.key_pressed(egui::Key::ArrowDown)
@@ -287,7 +295,6 @@ pub fn show(ui: &mut egui::Ui, deck: &Deck, state: &mut Presentation) {
             let ratio = (outer.width() / deck.width).min(outer.height() / deck.height);
             let size = Vec2::new(deck.width * ratio, deck.height * ratio);
             let rect = Rect::from_center_size(outer.center(), size);
-            let mut advanced_automatically = false;
             if let Some(slide) = deck.slides.get(state.index) {
                 let elapsed = (time - state.slide_started) as f32;
                 let progress =
@@ -366,7 +373,6 @@ pub fn show(ui: &mut egui::Ui, deck: &Deck, state: &mut Presentation) {
                             Some((animation_time, &state.click_times)),
                         ),
                     }
-                    advanced_automatically = state.advance_timed(deck, time);
                     for points in &state.strokes {
                         if points.len() > 1 {
                             painter.with_clip_rect(rect).add(egui::Shape::line(
@@ -382,21 +388,21 @@ pub fn show(ui: &mut egui::Ui, deck: &Deck, state: &mut Presentation) {
                     }
                 }
             }
-            if response.clicked() && !state.ink && !advanced_automatically {
-                state.next(deck, time);
+            if response.clicked() && presentation_click_allowed(state) {
+                state.next(deck,time);manual_navigation=true;
             }
             if response.drag_started() {
                 state.inking=false;
                 if state.ink && state.blank==0
                     && let Some(point)=ctx.pointer_interact_pos().and_then(|pos|ink_from_screen(rect,pos)) {
-                    state.strokes.push(vec![point]);state.inking=true;
+                    state.inking=append_ink(state,point,true,100000,1000);
                 }
             }
             if !state.ink || state.blank!=0 || response.drag_stopped() {state.inking=false;}
             if state.inking && response.dragged()
                 && let Some(point)=ctx.pointer_interact_pos().and_then(|pos|ink_from_screen(rect,pos))
-                && let Some(points)=state.strokes.last_mut() {
-                points.push(point);
+            {
+                append_ink(state,point,false,100000,1000);
             }
             let controls = Rect::from_min_size(
                 outer.min + Vec2::new(12.0, 10.0),
@@ -417,7 +423,7 @@ pub fn show(ui: &mut egui::Ui, deck: &Deck, state: &mut Presentation) {
                             .on_hover_text("Предыдущий слайд · ←")
                             .clicked()
                         {
-                            state.previous(deck, time);
+                            state.previous(deck, time);manual_navigation=true;
                         }
                         let visible_count =
                             deck.slides.iter().filter(|slide| !slide.hidden).count();
@@ -431,25 +437,26 @@ pub fn show(ui: &mut egui::Ui, deck: &Deck, state: &mut Presentation) {
                         if present_button(ui,state,"→")
                             .on_hover_text("Следующий слайд · →")
                             .clicked()
-                            && !advanced_automatically
                         {
-                            state.next(deck, time);
+                            state.next(deck,time);manual_navigation=true;
                         }
                         let response=ui.checkbox(&mut state.pointer,"Указка");
                         state.control_ids.push(response.id);
                         let response=ui.checkbox(&mut state.ink,"Перо");
                         state.control_ids.push(response.id);
                         if present_button(ui,state,"Очистить").clicked() {
-                            state.strokes.clear();
+                            state.clear_ink();
                         }
                         let response=ui.checkbox(&mut state.notes,"Заметки (P)");
                         state.control_ids.push(response.id);
+                        if state.ink_full {ui.colored_label(Color32::YELLOW,"Перо: достигнут лимит. Очистите рисунок для продолжения.");}
                         if present_button(ui,state,"Завершить Esc").clicked() {
                             state.active = false;
                             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
                         }
                     });
                 });
+            advance_after_controls(state,deck,time,manual_navigation);
         });
     if state.notes {
         egui::Window::new("Докладчик · текущий экран")
@@ -758,5 +765,51 @@ mod additional_presenter_tests {
         assert!(!presentation_shortcuts_allowed(&ctx,&state));
         ctx.memory_mut(|memory|memory.surrender_focus(id));
         assert!(presentation_shortcuts_allowed(&ctx,&state));
+    }
+}
+
+fn presentation_click_allowed(state:&Presentation)->bool {
+    !state.ink || state.blank!=0 || state.ended
+}
+fn advance_after_controls(state:&mut Presentation,deck:&Deck,time:f64,manual:bool)->bool {
+    state.active && !manual && state.advance_timed(deck,time)
+}
+fn append_ink(state:&mut Presentation,point:Pos2,start:bool,point_limit:usize,stroke_limit:usize)->bool {
+    if state.ink_points>=point_limit || start && state.strokes.len()>=stroke_limit {
+        state.ink_full=true;return false;
+    }
+    if start {state.strokes.push(Vec::new());}
+    let Some(points)=state.strokes.last_mut() else{return false;};
+    points.push(point);state.ink_points+=1;true
+}
+#[cfg(test)]
+mod next_presenter_defects {
+    use super::*;
+    #[test]
+    fn manual_previous_has_priority_over_a_timer_expiring_in_the_same_frame() {
+        let mut deck=Deck::empty();for _ in 0..3 {deck.add_slide("blank");}
+        for slide in &mut deck.slides {slide.transition.advance_after=Some(1.0);}
+        let mut state=Presentation{active:true,..Default::default()};state.move_to(&deck,1,0.0);
+        state.previous(&deck,2.0);
+        assert!(!advance_after_controls(&mut state,&deck,2.0,true));assert_eq!(state.index,0);
+        assert!(advance_after_controls(&mut state,&deck,4.0,false));assert_eq!(state.index,1);
+    }
+    #[test]
+    fn blank_and_end_screens_accept_clicks_even_when_the_pen_is_enabled() {
+        let mut state=Presentation{ink:true,..Default::default()};
+        assert!(!presentation_click_allowed(&state));
+        state.blank=1;assert!(presentation_click_allowed(&state));
+        state.ended=true;assert!(presentation_click_allowed(&state));
+    }
+    #[test]
+    fn presenter_ink_has_shared_point_and_stroke_budgets_with_an_explicit_reset() {
+        let mut state=Presentation::default();
+        assert!(append_ink(&mut state,Pos2::ZERO,true,2,2));
+        assert!(append_ink(&mut state,Pos2::new(1.0,1.0),false,2,2));
+        assert!(!append_ink(&mut state,Pos2::ZERO,true,2,2));
+        assert_eq!(state.ink_points,2);assert_eq!(state.strokes.len(),1);assert!(state.ink_full);
+        state.clear_ink();assert_eq!(state.ink_points,0);assert!(!state.ink_full);
+        assert!(append_ink(&mut state,Pos2::ZERO,true,10,1));
+        assert!(!append_ink(&mut state,Pos2::ZERO,true,10,1));
     }
 }
