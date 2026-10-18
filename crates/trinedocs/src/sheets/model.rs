@@ -508,8 +508,12 @@ impl Book {
         let mut defined_names = BTreeSet::new();
         if self.names.len() > 10000
             || self.names.iter().any(|(name, value)| {
-                !valid_defined_name(name) || !defined_names.insert(name.to_lowercase())
-                    || value.len() > 32767
+                // Office stores these built-in metadata names; callers still cannot create
+                // them through the user-defined-name MCP command.
+                let office_metadata=matches!(name.to_ascii_uppercase().as_str(),
+                    "_XLNM.PRINT_AREA"|"_XLNM.PRINT_TITLES"|"_XLNM._FILTERDATABASE");
+                (!valid_defined_name(name) && !office_metadata)
+                    || !defined_names.insert(name.to_lowercase()) || value.len() > 32767
             })
         {
             return Err("Недопустимое имя диапазона".into());
@@ -1576,6 +1580,12 @@ mod model_defect_tests {
         book.names.insert("Tax".into(),"=1".into());
         book.names.insert("tax".into(),"=2".into());
         assert!(book.validate().is_err());
+        let mut imported=Book::default();
+        for name in ["_xlnm.Print_Area","_xlnm.Print_Titles","_xlnm._FilterDatabase"] {
+            imported.names.insert(name.into(),"=A1".into());
+            assert!(!valid_defined_name(name));
+        }
+        assert!(imported.validate().is_ok());
     }
     #[test]
     fn fill_rejects_excessive_text_before_replication() -> Result<(),String> {
