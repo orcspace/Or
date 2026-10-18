@@ -377,7 +377,7 @@ pub fn inspect(document: &Document) -> Report {
                             target,
                         );
                     }
-                    let background = if matches!(&element.kind, ElementKind::Text) {
+                    let background = if matches!(&element.kind, ElementKind::Text) || !element.fill_visible {
                         slide.background
                     } else {
                         element.fill
@@ -562,5 +562,22 @@ mod style_lens_tests {
         assert_eq!(formatting[0].target, Target::Paragraph(target_id));
         assert_eq!(Category::parse("formatting"), Some(Category::Formatting));
         assert_eq!(document, before);
+    }
+}
+
+#[cfg(test)]
+mod hundred_inspector_background_tests {
+    use super::*;
+    #[test]
+    fn transparent_shapes_use_the_slide_background_for_contrast()->Result<(),String> {
+        let mut deck=crate::slides::model::Deck::empty();let slide=deck.add_slide("blank");
+        let id=deck.add_element(slide,ElementKind::Rect)?;
+        let slide=deck.slide_mut(slide).ok_or("slide")?;slide.background=[255;3];
+        let element=slide.element_mut(id).ok_or("shape")?;
+        element.text="Readable".into();element.color=[0;3];element.fill=[0;3];element.fill_visible=false;
+        let report=inspect(&Document::Slides(deck.clone()));
+        assert!(!report.findings.iter().any(|finding|finding.message.contains("контраст")));
+        deck.slides[0].elements[0].fill_visible=true;
+        assert!(inspect(&Document::Slides(deck)).findings.iter().any(|finding|finding.message.contains("контраст")));Ok(())
     }
 }

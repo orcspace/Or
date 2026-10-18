@@ -33,6 +33,17 @@ enum Pending {
         export: bool,
     },
 }
+fn consume_shell_key(ctx:&egui::Context,modifiers:egui::Modifiers,key:egui::Key)->bool {
+    ctx.input_mut(|input| {
+        let mut found=false;
+        input.events.retain(|event| {
+            let matches=matches!(event,egui::Event::Key{key:pressed,pressed:true,modifiers:actual,..}
+                if *pressed==key&&actual.shift==modifiers.shift&&actual.alt==modifiers.alt&&actual.matches_logically(modifiers));
+            found|=matches;!matches
+        });
+        found
+    })
+}
 fn palette_commands(has_document: bool, query: &str) -> Vec<(&'static str, &'static str)> {
     let query = query.trim().to_lowercase();
     [
@@ -43,7 +54,7 @@ fn palette_commands(has_document: bool, query: &str) -> Vec<(&'static str, &'sta
         ("settings", "Настройки"),
         ("inspect", "Проверить документ"),
         ("save", "Сохранить · Ctrl+S"),
-        ("saveas", "Сохранить как…"),
+        ("saveas", "Сохранить как… · Ctrl+Shift+S"),
         ("copy", "Сохранить копию…"),
         ("pdf", "Экспорт в PDF"),
         ("close", "Закрыть документ · Ctrl+W"),
@@ -1564,7 +1575,9 @@ impl App {
                 "save_document" | "close_document" | "open_document" | "export"
             ) && dry_run
             {
-                let _ = r.reply.send(Ok(json!({"applied":false})));
+                let result=self.preflight_file_request(&r.tool,&r.args)
+                    .map(|_|json!({"applied":false}));
+                let _=r.reply.send(result);
                 continue;
             }
             if crate::mcp::media::is_background(&r.tool) {
@@ -1670,6 +1683,31 @@ impl App {
         }
     }
     /// Starts a design-guide, image or export tool on a worker thread (ADR-0027).
+    fn preflight_file_request(&self,tool:&str,args:&Value)->Result<(),String> {
+        if tool=="open_document" {
+            let path=args.get("path").and_then(Value::as_str).filter(|path|!path.trim().is_empty())
+                .ok_or("invalid_args: требуется непустой path")?;
+            if path.chars().any(|ch|ch=='\0') {return Err("invalid_args: недопустимый path".into());}
+            return Err("needs_confirmation: открытие пути выполняется через меню Файл".into());
+        }
+        let id=args.get("document_id").and_then(Value::as_u64).ok_or("invalid_args: требуется document_id")?;
+        let tab=self.tabs.iter().find(|tab|tab.id==id).ok_or("not_found: документ не открыт")?;
+        if tool=="export" {
+            let ext=args.get("format_extension").and_then(Value::as_str).unwrap_or_else(||tab.document.office_extension());
+            let ext=ext.trim_start_matches('.').to_ascii_lowercase();
+            if !tab.document.save_formats().iter().any(|(format,_)|*format==ext) {
+                return Err("invalid_args: неподдерживаемый format_extension".into());
+            }
+        }else if tool=="save_document" {
+            if tab.read_only {return Err("read_only: документ защищён от правки".into());}
+            if tab.save_locked {return Err("file_locked: сохраните копию или снимите блокировку".into());}
+            if tab.path.is_none(){return Err("needs_path: сначала выберите путь через интерфейс".into());}
+            if self.picking.contains(&id)||self.saving.contains(&id)||self.reloading.contains_key(&id)||self.mcp_saves.contains_key(&id) {
+                return Err("busy: дождитесь файловой операции".into());
+            }
+        }
+        Ok(())
+    }
     fn start_media_job(&mut self, r: crate::mcp::BridgeRequest, ctx: &egui::Context) {
         use crate::mcp::media::Snapshot;
         if self.media_jobs.len() >= MAX_MEDIA_JOBS {
@@ -1768,6 +1806,11 @@ impl App {
             let request = job.request;
             if request.reply.is_closed() {
                 continue;
+            }
+            if !self.settings.mcp
+                || (self.chat.was_ours(&request.client)&&!self.chat.owns(&request.client))
+                || (!self.allowed.contains(&request.client)&&!self.chat.owns(&request.client)) {
+                let _=request.reply.send(Err("permission_denied: доступ MCP отозван".into()));continue;
             }
             let result = match output {
                 Err(error) => Err(error),
@@ -1954,26 +1997,28 @@ impl App {
             return;
         }
         let cmd = egui::Modifiers::COMMAND;
-        if ctx.input_mut(|i| i.consume_key(cmd | egui::Modifiers::SHIFT, egui::Key::A)) {
+        if consume_shell_key(ctx,cmd|egui::Modifiers::SHIFT,egui::Key::A) {
             self.show_ai = !self.show_ai;
         }
-        if ctx.input_mut(|i| i.consume_key(cmd, egui::Key::O)) {
+        if consume_shell_key(ctx,cmd,egui::Key::O) {
             self.send(Job::PickOpen);
         }
-        if ctx.input_mut(|i| i.consume_key(cmd, egui::Key::S))
+        if consume_shell_key(ctx,cmd|egui::Modifiers::SHIFT,egui::Key::S)
+            && let Some(id)=self.active {self.deferred.push((id,"saveas"));}
+        if consume_shell_key(ctx,cmd,egui::Key::S)
             && let Some(id) = self.active
         {
             self.deferred.push((id, "save"));
         }
-        if ctx.input_mut(|i| i.consume_key(cmd, egui::Key::W))
+        if consume_shell_key(ctx,cmd,egui::Key::W)
             && let Some(id) = self.active
         {
             self.deferred.push((id, "close"));
         }
-        let palette_boundary = ctx.input(|i| i.events.iter().position(|e| matches!(e, egui::Event::Key { key: egui::Key::K, pressed: true, modifiers, .. } if modifiers.command || modifiers.ctrl)));
+        let palette_boundary = ctx.input(|i| i.events.iter().position(|e| matches!(e, egui::Event::Key { key: egui::Key::K, pressed: true, repeat:false, modifiers, .. } if (modifiers.command || modifiers.ctrl)&&!modifiers.alt&&!modifiers.shift)));
         if let Some(boundary) = palette_boundary {
             if self.palette {
-                ctx.input_mut(|i| i.consume_key(cmd, egui::Key::K));
+                consume_shell_key(ctx,cmd,egui::Key::K);
                 self.palette = false;
                 ctx.memory_mut(|m| m.surrender_focus(egui::Id::new("command-palette-query")));
             } else {
@@ -1986,15 +2031,18 @@ impl App {
             self.palette = false;
         }
         if !ctx.text_edit_focused() {
+            if consume_shell_key(ctx,cmd|egui::Modifiers::SHIFT,egui::Key::Z)
+                && let Some(id)=self.active {self.deferred.push((id,"redo"));}
             for (key, action) in [(egui::Key::Z, "undo"), (egui::Key::Y, "redo")] {
-                if ctx.input_mut(|i| i.consume_key(cmd, key))
+                if consume_shell_key(ctx,cmd,key)
                     && let Some(id) = self.active
                 {
                     self.deferred.push((id, action));
                 }
             }
         }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Tab))
+        let backwards=consume_shell_key(ctx,egui::Modifiers::CTRL|egui::Modifiers::SHIFT,egui::Key::Tab);
+        if (backwards||consume_shell_key(ctx,egui::Modifiers::CTRL,egui::Key::Tab))
             && !self.tabs.is_empty()
         {
             let index = self
@@ -2002,7 +2050,7 @@ impl App {
                 .iter()
                 .position(|t| Some(t.id) == self.active)
                 .unwrap_or(self.tabs.len() - 1);
-            if let Some(id) = self.tabs.get((index + 1) % self.tabs.len()).map(|t| t.id) {
+            if let Some(id) = self.tabs.get(if backwards {(index+self.tabs.len()-1)%self.tabs.len()}else{(index+1)%self.tabs.len()}).map(|t| t.id) {
                 self.deferred.push((id, "activate"));
             }
         }
@@ -3210,6 +3258,7 @@ impl eframe::App for App {
             match action {
                 "activate_external" => external_activation = Some(id),
                 "save" => self.save(id, false, false, false, None),
+                "saveas"=>self.save(id,false,false,true,None),
                 "close" => self.close(id),
                 "unlock" => self.request_unlock(id),
                 "activate" | "home" => {
@@ -4925,4 +4974,61 @@ mod shell_input_tests {
         assert!(!crate::mcp::workspace::batchable("inspect_document"));
         Ok(())
     }
+    fn hundred_shortcut_frame(app:&mut App,key:egui::Key,modifiers:egui::Modifiers,repeat:bool) {
+        let ctx=app.editor_ctx.clone();
+        let _=ctx.run_ui(egui::RawInput{events:vec![egui::Event::Key{key,physical_key:None,pressed:true,repeat,modifiers}],..Default::default()},
+            |ui|app.shortcuts(ui.ctx()));
+    }
+    #[test]
+    fn shift_save_routes_to_save_as_without_overwriting_the_current_path()->Result<(),String> {
+        let mut app=fixture()?;
+        hundred_shortcut_frame(&mut app,egui::Key::S,egui::Modifiers::CTRL|egui::Modifiers::COMMAND|egui::Modifiers::SHIFT,false);
+        assert_eq!(app.deferred,vec![(10,"saveas")]);Ok(())
+    }
+    #[test]
+    fn reverse_tab_switching_uses_the_previous_document()->Result<(),String> {
+        let mut app=fixture()?;app.tabs.push(Tab::new(12,Document::create("docs")?,"Third".into(),None));
+        hundred_shortcut_frame(&mut app,egui::Key::Tab,egui::Modifiers::CTRL|egui::Modifiers::SHIFT,false);
+        assert_eq!(app.deferred,vec![(12,"activate")]);Ok(())
+    }
+    #[test]
+    fn shift_undo_routes_to_redo_instead_of_undo()->Result<(),String> {
+        let mut app=fixture()?;
+        hundred_shortcut_frame(&mut app,egui::Key::Z,egui::Modifiers::CTRL|egui::Modifiers::COMMAND|egui::Modifiers::SHIFT,false);
+        assert_eq!(app.deferred,vec![(10,"redo")]);Ok(())
+    }
+    #[test]
+    fn altgr_combinations_do_not_trigger_shell_commands()->Result<(),String> {
+        for key in [egui::Key::S,egui::Key::K,egui::Key::O,egui::Key::W] {
+            let mut app=fixture()?;
+            hundred_shortcut_frame(&mut app,key,egui::Modifiers::CTRL|egui::Modifiers::COMMAND|egui::Modifiers::ALT,false);
+            assert!(app.deferred.is_empty());assert!(!app.palette);assert!(!app.opening);
+        }Ok(())
+    }
+    #[test]
+    fn repeating_the_palette_shortcut_does_not_toggle_the_palette()->Result<(),String> {
+        let mut app=fixture()?;
+        hundred_shortcut_frame(&mut app,egui::Key::K,egui::Modifiers::CTRL|egui::Modifiers::COMMAND,true);
+        assert!(!app.palette);assert!(app.palette_tail.is_none());Ok(())
+    }
+    #[test]
+    fn dry_run_of_file_tools_checks_real_arguments_and_preconditions()->Result<(),String> {
+        let app=fixture()?;
+        assert!(app.preflight_file_request("export",&json!({})).is_err());
+        assert!(app.preflight_file_request("export",&json!({"document_id":10,"format_extension":"exe"})).is_err());
+        assert!(app.preflight_file_request("save_document",&json!({"document_id":10})).is_err());
+        assert!(app.preflight_file_request("close_document",&json!({"document_id":10})).is_ok());
+        assert!(app.preflight_file_request("export",&json!({"document_id":10,"format_extension":"pdf"})).is_ok());Ok(())
+    }
+    #[test]
+    fn finished_media_replies_are_rejected_after_access_is_revoked()->Result<(),String> {
+        let mut app=fixture()?;app.settings.mcp=true;
+        let (reply,mut received)=tokio::sync::oneshot::channel();
+        let (sender,result)=std::sync::mpsc::channel();
+        sender.send(Ok(crate::mcp::media::Output::Reply(json!({"private":"result"})))).map_err(|e|e.to_string())?;
+        app.media_jobs.push(MediaJob{request:crate::mcp::BridgeRequest{tool:"export".into(),args:json!({"document_id":10}),client:"revoked".into(),reply,deadline:Instant::now()+std::time::Duration::from_secs(10)},result});
+        let ctx=app.editor_ctx.clone();app.finish_media_jobs(&ctx);
+        assert!(received.try_recv().map_err(|e|e.to_string())?.is_err());Ok(())
+    }
+
 }

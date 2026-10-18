@@ -247,16 +247,17 @@ pub fn export(doc: &Document, ext: &str) -> Result<Vec<u8>, String> {
 /// Every slide that is not hidden as PNG, with its 1-based slide number.
 pub fn slide_pictures(deck: &crate::slides::model::Deck) -> Result<Vec<(usize, Vec<u8>)>, String> {
     deck.validate()?;
-    let pictures = deck
-        .slides
-        .iter()
-        .enumerate()
-        .filter(|(_, slide)| !slide.hidden)
-        .map(|(index, slide)| Ok((index + 1, crate::png::write(&deck.page(slide), 2.0)?)))
-        .collect::<Result<Vec<_>, String>>()?;
-    if pictures.is_empty() {
-        return Err("В презентации нет показываемых слайдов".into());
+    collect_slide_pictures(deck,256*1024*1024,|slide|crate::png::write(&deck.page(slide),2.0))
+}
+fn collect_slide_pictures(deck:&crate::slides::model::Deck,limit:usize,mut render:impl FnMut(&crate::slides::model::Slide)->Result<Vec<u8>,String>)->Result<Vec<(usize,Vec<u8>)>,String> {
+    let mut pictures=Vec::new();let mut bytes=0usize;
+    for (index,slide) in deck.slides.iter().enumerate().filter(|(_,slide)|!slide.hidden) {
+        let picture=render(slide)?;
+        bytes=bytes.checked_add(picture.len()).ok_or("Размер PNG экспорта переполнен")?;
+        if bytes>limit {return Err("Совокупный PNG экспорт превышает безопасный лимит256 МиБ".into());}
+        pictures.push((index+1,picture));
     }
+    if pictures.is_empty(){return Err("В презентации нет показываемых слайдов".into());}
     Ok(pictures)
 }
 /// Sibling file for slide `number` of a multi-slide PNG export to `path` (`Имя (слайд 2).png`).
@@ -437,5 +438,20 @@ mod next_csv_label_tests {
         assert!(label.contains("точка с запятой"));
         let output=String::from_utf8(super::export(&document,"csv")?).map_err(|e|e.to_string())?;
         assert!(output.contains("left;right"));Ok(())
+    }
+}
+
+#[cfg(test)]
+mod hundred_png_aggregate_tests {
+    use super::*;
+    #[test]
+    fn multi_slide_pngs_have_one_aggregate_byte_budget() {
+        let mut deck=crate::slides::model::Deck::empty();for _ in 0..3 {deck.add_slide("blank");}
+        let mut calls=0;
+        let result=collect_slide_pictures(&deck,10,|_|{calls+=1;Ok(vec![1;6])});
+        assert!(result.is_err());assert_eq!(calls,2);
+        deck.slides[1].hidden=true;
+        let output=collect_slide_pictures(&deck,12,|_|Ok(vec![1;6]));
+        assert_eq!(output.map(|items|items.into_iter().map(|(number,_)|number).collect::<Vec<_>>()),Ok(vec![1,3]));
     }
 }

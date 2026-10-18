@@ -82,7 +82,9 @@ pub fn write(pages: &[Page]) -> Result<Vec<u8>, String> {
     }
     let mut slots: BTreeMap<FontKey, usize> = BTreeMap::new();
     let mut fonts = Vec::new();
-    let used_keys: BTreeSet<FontKey> = keys.iter().cloned().collect();
+    let used_keys:BTreeSet<FontKey>=pages.iter().flat_map(|page|page.items.iter()).zip(&keys)
+        .filter(|(item,_)|text(item).is_some_and(|value|!value.is_empty()))
+        .map(|(_,key)|key.clone()).collect();
     for (index, key) in used_keys.into_iter().enumerate() {
         let used: BTreeSet<char> = pages
             .iter()
@@ -250,6 +252,7 @@ pub fn write(pages: &[Page]) -> Result<Vec<u8>, String> {
                     color,
                     ..
                 } => {
+                    if text.is_empty(){continue;}
                     let f = slots
                         .get(key)
                         .and_then(|slot| fonts.get(*slot))
@@ -495,5 +498,16 @@ mod limit_tests {
             }],
         };
         assert!(write(&[p]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod hundred_pdf_shape_tests {
+    use super::*;
+    #[test]
+    fn shape_only_pdf_exports_do_not_load_or_embed_a_system_font()->Result<(),String> {
+        let bytes=write(&[Page{width:200.0,height:200.0,items:vec![Primitive::Text{x:0.0,y:0.0,size:12.0,text:String::new(),color:[0;3]},Primitive::Rect{x:10.0,y:10.0,w:40.0,h:20.0,color:[10,20,30]}]}])?;
+        assert!(bytes.starts_with(b"%PDF-"));
+        assert!(!bytes.windows(b"/FontFile2".len()).any(|value|value==b"/FontFile2"));Ok(())
     }
 }

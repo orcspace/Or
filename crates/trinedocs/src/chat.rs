@@ -425,6 +425,7 @@ impl Chat {
         self.stop();
         self.messages.clear();
         self.session = [None, None];
+        self.input.clear();self.last_sent=None;self.needs_login=false;
     }
     fn send(&mut self, ctx: &egui::Context, document: Option<&Context>, mcp_enabled: bool) {
         let text = self.input.trim().to_string();
@@ -695,8 +696,7 @@ impl Chat {
                         self.login();
                         ui.close();
                     }
-                    if ui.button("Обновить статус").clicked() {
-                        self.probe = None;
+                    if ui.add_enabled(self.probe.is_none(),egui::Button::new("Обновить статус")).clicked() {
                         self.refresh(ui.ctx());
                         ui.close();
                     }
@@ -992,8 +992,7 @@ impl Drop for Chat {
     }
 }
 fn push_text(messages: &mut Vec<Message>, text: String) {
-    let text = text.trim().to_string();
-    if text.is_empty() {
+    if text.trim().is_empty() {
         return;
     }
     match messages.last_mut() {
@@ -1103,22 +1102,8 @@ fn prompt(document: Option<&Context>, selection: &str, history: &str, text: &str
 }
 /// Assistant text with light Markdown: headings, lists, **bold**, `code` and code blocks.
 fn markdown(ui: &mut Ui, text: &str) {
-    let mut code: Option<String> = None;
-    for line in text.lines() {
-        if line.trim_start().starts_with("```") {
-            match code.take() {
-                Some(block) => code_block(ui, &block),
-                None => code = Some(String::new()),
-            }
-            continue;
-        }
-        if let Some(block) = &mut code {
-            if !block.is_empty() {
-                block.push('\n');
-            }
-            block.push_str(line);
-            continue;
-        }
+    for block in chat_blocks(text) {
+        let line=match block {ChatBlock::Code(text)=>{code_block(ui,&text);continue;},ChatBlock::Text(line)=>line};
         let trimmed = line.trim_start();
         let indent = (line.len() - trimmed.len()).min(12) as f32 * 4.0;
         if trimmed.is_empty() {
@@ -1158,9 +1143,29 @@ fn markdown(ui: &mut Ui, text: &str) {
             ui.add(egui::Label::new(job).wrap().selectable(true));
         });
     }
-    if let Some(block) = code {
-        code_block(ui, &block);
+}
+/** A bounded line parser for the subset displayed in chat. */
+enum ChatBlock<'a>{Text(&'a str),Code(String)}
+fn chat_fence(line:&str)->Option<(char,usize)> {
+    let rest=line.trim_start_matches(' ');
+    if line.len()-rest.len()>3{return None;}
+    let marker=rest.chars().next().filter(|ch|matches!(ch,'`'|'~'))?;
+    let length=rest.chars().take_while(|ch|*ch==marker).count();
+    (length>=3).then_some((marker,length))
+}
+fn chat_blocks(text:&str)->Vec<ChatBlock<'_>> {
+    let mut blocks=Vec::new();let mut fence=None;let mut lines=Vec::new();
+    for line in text.lines() {
+        if let Some((marker,length))=fence {
+            if chat_fence(line).is_some_and(|(other,count)|other==marker&&count>=length)
+                && line.trim().chars().all(|ch|ch==marker) {
+                blocks.push(ChatBlock::Code(lines.join("\n")));lines.clear();fence=None;
+            }else{lines.push(line);}
+        }else if let Some(open)=chat_fence(line) {fence=Some(open);}
+        else{blocks.push(ChatBlock::Text(line));}
     }
+    if fence.is_some(){blocks.push(ChatBlock::Code(lines.join("\n")));}
+    blocks
 }
 /// Splits a list item into its marker («•  », «2.  ») and text.
 fn list_marker(line: &str) -> (String, &str) {
@@ -1204,10 +1209,18 @@ fn inline(ui: &Ui, text: &str) -> egui::text::LayoutJob {
     let (mut bold, mut code) = (false, false);
     let mut rest = text;
     while !rest.is_empty() {
+        if !code && rest.starts_with('\\') && let Some(next)=rest.chars().nth(1).filter(char::is_ascii_punctuation) {
+            let length=1+next.len_utf8();
+            job.append(&rest[1..length],0.0,egui::TextFormat{
+                font_id:if bold {egui::FontId::new(body.size,egui::FontFamily::Name("bold".into()))}else{body.clone()},
+                color:if bold {strong}else{color},..Default::default()
+            });
+            rest=&rest[length..];continue;
+        }
         let next = if code {
             rest.find('`')
         } else {
-            [rest.find("**"), rest.find('`')]
+            [rest.find("**"), rest.find('`'),rest.find('\\')]
                 .into_iter()
                 .flatten()
                 .min()
@@ -1219,7 +1232,9 @@ fn inline(ui: &Ui, text: &str) -> egui::text::LayoutJob {
                 piece,
                 0.0,
                 egui::TextFormat {
-                    font_id: if code { mono.clone() } else { body.clone() },
+                    font_id: if code { mono.clone() } else if bold {
+                        egui::FontId::new(body.size,egui::FontFamily::Name("bold".into()))
+                    } else { body.clone() },
                     color: if bold { strong } else { color },
                     background: if code { code_bg } else { Color32::TRANSPARENT },
                     ..Default::default()
@@ -1227,11 +1242,19 @@ fn inline(ui: &Ui, text: &str) -> egui::text::LayoutJob {
             );
         }
         if let Some(after) = marker.strip_prefix('`') {
-            code = !code;
-            rest = after;
+            if !code && !after.contains('`') {
+                job.append("`",0.0,egui::TextFormat{font_id:body.clone(),color,..Default::default()});
+            }else {code=!code;}
+            rest=after;
         } else if let Some(after) = marker.strip_prefix("**") {
-            bold = !bold;
-            rest = after;
+            if !bold && !after.contains("**") {
+                job.append("**",0.0,egui::TextFormat{font_id:body.clone(),color,..Default::default()});
+            }else{bold=!bold;}
+            rest=after;
+        } else if let Some(after)=marker.strip_prefix('\\') {
+            let length=after.chars().next().map_or(0,char::len_utf8);
+            job.append(&marker[..1+length],0.0,egui::TextFormat{font_id:body.clone(),color,..Default::default()});
+            rest=&marker[1+length..];
         } else {
             rest = "";
         }
@@ -1264,6 +1287,7 @@ fn tool_label(name: &str) -> String {
             "Читает таблицу"
         }
         "sheets_find" => "Ищет в таблице",
+        "sheets_explain_formula"=>"Объясняет формулу",
         name if name.starts_with("sheets_") => "Меняет таблицу",
         "slides_design_guide" => "Изучает правила дизайна",
         "slides_search_images" => "Ищет изображения",
@@ -2394,5 +2418,54 @@ mod codex_isolation_review_tests {
             assert!(codex_mcp_override(malformed, "shim", "nonce").is_err());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod hundred_chat_content_tests {
+    use super::*;
+    #[test]
+    fn chat_bold_spans_select_a_bold_font_face()->Result<(),String> {
+        let ctx=egui::Context::default();crate::fonts::install(&ctx)?;let mut result=None;
+        let _=ctx.run_ui(egui::RawInput::default(),|ui| {result=Some(inline(ui,"plain **bold**"));});
+        let job=result.unwrap_or_default();
+        assert!(job.sections.iter().any(|section|&job.text[section.byte_range.clone()]=="bold"
+            && section.format.font_id.family==egui::FontFamily::Name("bold".into())));Ok(())
+    }
+    #[test]
+    fn incomplete_and_escaped_chat_markers_remain_literal()->Result<(),String> {
+        let ctx=egui::Context::default();crate::fonts::install(&ctx)?;
+        for (source,expected) in [("an unmatched `code","an unmatched `code"),("literal **","literal **"),(r"\**literal\**","**literal**")] {
+            let mut output=String::new();
+            let _=ctx.run_ui(egui::RawInput::default(),|ui|{output=inline(ui,source).text;});
+            assert_eq!(output,expected);
+        }Ok(())
+    }
+    #[test]
+    fn chat_code_fences_match_their_opening_length_and_preserve_blank_lines() {
+        let blocks=chat_blocks("````rust\n\n```\ninside\n````\nafter");
+        assert!(matches!(&blocks[0],ChatBlock::Code(text) if text=="\n```\ninside"));
+        assert!(matches!(&blocks[1],ChatBlock::Text("after")));
+    }
+    #[test]
+    fn assistant_text_keeps_code_indentation_and_trailing_line_breaks() {
+        let mut messages=Vec::new();push_text(&mut messages,"    code\n".into());
+        assert_eq!(messages[0].text,"    code\n");
+    }
+    #[test]
+    fn new_chat_resets_retry_login_and_unsent_text() {
+        let mut chat=Chat::new();chat.input="private draft".into();chat.last_sent=Some("old prompt".into());chat.needs_login=true;
+        chat.clear();assert!(chat.input.is_empty());assert!(chat.last_sent.is_none());assert!(!chat.needs_login);
+    }
+    #[test]
+    fn formula_explanation_is_not_labelled_as_a_mutating_tool() {
+        assert_eq!(tool_label("sheets_explain_formula"),"Объясняет формулу");
+        assert!(crate::mcp::tools::read_only("sheets_explain_formula"));
+    }
+    #[test]
+    fn refreshing_status_keeps_the_existing_probe_receiver() {
+        let mut chat=Chat::new();let (_sender,receiver)=channel();
+        chat.probe=Some(receiver);
+        chat.refresh(&egui::Context::default());assert!(chat.probe.is_some());
     }
 }
