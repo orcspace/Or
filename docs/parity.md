@@ -2,7 +2,7 @@
 
 Первичный feature inventory по заданию и первым проверенным пробелам. Полная сверка всех вкладок Office ещё не завершена. Внутри каждого PAR-пункта варианты поведения проверяются отдельно. Ни одна функция не объявлена готовой. P2 не удаляется из конечного объёма; поздние фазы ждут решения владельца ADR-0005.
 
-Всего функций/вариантов: **361**.
+Всего функций/вариантов: **364**.
 
 | PAR ID | Режим | Функция | P | Фаза | REQ | MCP / пробел | Import | Export | Статус |
 |---|---|---|---|---|---|---|---|---|---|
@@ -10,7 +10,7 @@
 | PAR-COM-002 | Общее | Вставка из Word/Excel/PowerPoint/браузера | P0 | 1 | REQ-11-002 | GAP: точная ops/tool-схема ещё не определена | planned | planned | planned |
 | PAR-COM-003 | Общее | Вставить без формата | P0 | 1 | REQ-11-002 | GAP: точная ops/tool-схема ещё не определена | planned | planned | planned |
 | PAR-COM-004 | Общее | Специальная вставка значения/формулы/форматы/transpose | P0 | 1 | REQ-11-002 | UI Sheets: внутренний типизированный буфер; всё/значения/ввод/форматы и transpose; атомарный preflight. GAP: специальные внешние HTML/RTF/Excel форматы и runtime acceptance. | internal clipboard | n/a | partial_unverified |
-| PAR-COM-005 | Общее | Поиск/замена case/words/regex/format | P0 | 1 | REQ-11-002 | GAP: точная ops/tool-схема ещё не определена | planned | planned | planned |
+| PAR-COM-005 | Общее | Поиск/замена case/words/regex/format | P0 | 1 | REQ-11-002 | Sheets UI: единый Unicode literal matcher, регистр, назад/вперёд, Enter/Shift+Enter, Esc, счётчик и атомарная замена с общим лимитом текста. sheets_find/replace_all сохраняют существующую MCP-схему; GAP: полный words/regex/format, UI других режимов и runtime acceptance. | planned | planned | partial_unverified |
 | PAR-COM-006 | Общее | Zoom | P0 | 1 | REQ-11-002 | GAP: точная ops/tool-схема ещё не определена | planned | planned | planned |
 | PAR-COM-007 | Общее | Линейки | P0 | 1 | REQ-11-002 | GAP: точная ops/tool-схема ещё не определена | planned | planned | planned |
 | PAR-COM-008 | Общее | Сетка/направляющие | P0 | 1 | REQ-11-002 | GAP: точная ops/tool-схема ещё не определена | planned | planned | planned |
@@ -368,4 +368,10 @@
 | PAR-TRI-040 | TrineDocs | Параллельная подготовка AI-правок нескольких открытых Docs/Sheets/Slides с общим preflight commit | P1 | 8 | REQ-M06-072 | workspace_documents/apply/job_status/cancel; 4 документа/32 операции; GAP: полный apply_ops, дисковые side effects, persistent jobs и runtime-приёмка | not applicable | not applicable | partial |
 | PAR-TRI-041 | TrineDocs | Поиск, категории и копирование отчёта проверки документа; bounded read-only AI inspector с фоновым снимком | P1 | 8 | REQ-11-002 | inspect_document: preparing/completed, snapshot/current version, refresh, query/kind, index/count до100; первые200 с omitted/stale; один фоновый inspector. GAP: runtime/visual acceptance и полный анализ Office. | n/a | clipboard plain text | partial_unverified |
 
+| PAR-TRI-042 | Общее | Адаптация вкладок ленты и доступные палитры цветов | P0 | 1 | REQ-11-002 | UI view-only: горизонтальная прокрутка ленты, scoped font filter, имена swatches и видимый фокус. GAP: runtime keyboard/AccessKit/visual acceptance. | n/a | n/a | implemented_unverified |
+| PAR-TRI-043 | Sheets | Отдельная строка статистики выделения с локалью и устойчивым средним | P1 | 8 | REQ-11-008 | UI read-only: сумма/среднее/заполненность отдельно от прокрутки вкладок; overflow суммы отображается как —. GAP: runtime/visual acceptance. | n/a | n/a | implemented_unverified |
+| PAR-TRI-044 | Slides | Чернила докладчика в координатах слайда и разделение клавиш панели/показа | P1 | 8 | REQ-11-011 | UI-only presentation state: normalized ink, clipping, focused native controls consume their keys before global navigation. GAP: runtime resize/keyboard/visual acceptance. | n/a | n/a | implemented_unverified |
+
 Дополнение 2026-10-18: [50 исправлений кода с регрессиями](audit/bugs-50-2026-10-18.md) и [отчёт фазы](plan/phase-capabilities-50-fixes-2026-10-18-report.md). Сборка и тесты запрещены владельцем; runtime-приёмка и полный Office/MCP-паритет этим срезом не подтверждены.
+
+Дополнение UI 2026-10-18: [ещё 50 дефектов BUG-051…100](audit/bugs-51-100-2026-10-18.md) и [отчёт UI-фазы](plan/phase-ui-50-more-fixes-2026-10-18-report.md). Все добавления остаются implemented/partial_unverified; 50 новых тестов только написаны, не запускались.

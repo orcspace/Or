@@ -4397,7 +4397,7 @@ mod additional_word_defect_tests {
     #[test]
     fn word_table_content_controls_keep_rows_and_cells() -> Result<(),String> {
         let doc=document("<w:tbl><w:sdt><w:sdtContent><w:tr><w:sdt><w:sdtContent><w:tc><w:p><w:r><w:t>kept</w:t></w:r></w:p></w:tc></w:sdtContent></w:sdt></w:tr></w:sdtContent></w:sdt></w:tbl>","","")?;
-        assert_eq!(doc.tables.len(),1);assert_eq!(cell_text(&doc.tables[0].rows[0][0]),"kept");Ok(())
+        assert_eq!(doc.tables.len(),1);assert_eq!(doc.tables[0].rows[0][0].paragraphs.iter().map(Paragraph::text).collect::<Vec<_>>().join("\n"),"kept");Ok(())
     }
     #[test]
     fn word_table_cell_fill_inherits_the_table_style() -> Result<(),String> {

@@ -54,10 +54,10 @@
     "priority": "P0",
     "phase": 1,
     "requirement": "REQ-11-002",
-    "mcp": "GAP: точная ops/tool-схема ещё не определена",
+    "mcp": "Sheets UI: единый Unicode literal matcher, регистр, назад/вперёд, Enter/Shift+Enter, Esc, счётчик и атомарная замена с общим лимитом текста. sheets_find/replace_all сохраняют существующую MCP-схему; GAP: полный words/regex/format, UI других режимов и runtime acceptance.",
     "import": "planned",
     "export": "planned",
-    "status": "planned"
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-COM-006",
@@ -4330,5 +4330,41 @@
     "import": "n/a",
     "export": "clipboard plain text",
     "status": "partial_unverified"
+  },
+  {
+    "id": "PAR-TRI-042",
+    "mode": "Общее",
+    "feature": "Адаптация вкладок ленты и доступные палитры цветов",
+    "priority": "P0",
+    "phase": 1,
+    "requirement": "REQ-11-002",
+    "mcp": "UI view-only: горизонтальная прокрутка ленты, scoped font filter, имена swatches и видимый фокус. GAP: runtime keyboard/AccessKit/visual acceptance.",
+    "import": "n/a",
+    "export": "n/a",
+    "status": "implemented_unverified"
+  },
+  {
+    "id": "PAR-TRI-043",
+    "mode": "Sheets",
+    "feature": "Отдельная строка статистики выделения с локалью и устойчивым средним",
+    "priority": "P1",
+    "phase": 8,
+    "requirement": "REQ-11-008",
+    "mcp": "UI read-only: сумма/среднее/заполненность отдельно от прокрутки вкладок; overflow суммы отображается как —. GAP: runtime/visual acceptance.",
+    "import": "n/a",
+    "export": "n/a",
+    "status": "implemented_unverified"
+  },
+  {
+    "id": "PAR-TRI-044",
+    "mode": "Slides",
+    "feature": "Чернила докладчика в координатах слайда и разделение клавиш панели/показа",
+    "priority": "P1",
+    "phase": 8,
+    "requirement": "REQ-11-011",
+    "mcp": "UI-only presentation state: normalized ink, clipping, focused native controls consume their keys before global navigation. GAP: runtime resize/keyboard/visual acceptance.",
+    "import": "n/a",
+    "export": "n/a",
+    "status": "implemented_unverified"
   }
 ]

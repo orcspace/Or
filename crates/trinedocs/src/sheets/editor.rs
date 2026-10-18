@@ -1025,11 +1025,15 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                 let mut direction=None;
                 ui.horizontal_wrapped(|ui| {
                     ui.strong("Найти");
-                    ui.add(egui::TextEdit::singleline(&mut state.find).desired_width(150.0)
-                        .id(find_id).hint_text("Текст или формула"));
+                    if ui.add(egui::TextEdit::singleline(&mut state.find).desired_width(150.0)
+                        .id(find_id).hint_text("Текст или формула")).changed() {
+                        state.find_message.clear();
+                    }
                     if ui.button("← Назад").on_hover_text("Shift+Enter").clicked(){direction=Some(true);}
                     if ui.button("Далее →").on_hover_text("Enter").clicked(){direction=Some(false);}
-                    ui.checkbox(&mut state.find_case,"Учитывать регистр");
+                    if ui.checkbox(&mut state.find_case,"Учитывать регистр").changed() {
+                        state.find_message.clear();
+                    }
                     if ui.button("Закрыть").on_hover_text("Esc").clicked(){
                         state.find_open=false;
                         ui.memory_mut(|memory|memory.request_focus(canvas_id));
