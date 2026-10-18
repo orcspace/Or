@@ -726,28 +726,7 @@ fn slide_panel(ui: &mut egui::Ui, deck: &mut Deck, state: &mut State, main_heigh
                                             .changed();
                                     }
                                 });
-                            changed |= ui
-                                .add(
-                                    egui::Slider::new(&mut slide.transition.duration, 0.1..=3.0)
-                                        .text("Сек."),
-                                )
-                                .changed();
-                            let mut auto = slide.transition.advance_after.is_some();
-                            if ui.checkbox(&mut auto, "Автоматический переход").changed()
-                            {
-                                slide.transition.advance_after =
-                                    if auto { Some(5.0) } else { None };
-                                changed = true;
-                            }
-                            if let Some(seconds) = &mut slide.transition.advance_after {
-                                changed |= ui
-                                    .add(
-                                        egui::DragValue::new(seconds)
-                                            .range(0.001..=3600.0)
-                                            .suffix(" сек."),
-                                    )
-                                    .changed();
-                            }
+                            changed |= transition_timing_controls(ui,&mut slide.transition);
                         });
                     ui.separator();
                     if let Some(id) = state.selected.first().copied() {
@@ -1053,7 +1032,7 @@ fn ribbon(ui: &mut egui::Ui, deck: &mut Deck, state: &mut State) -> bool {
                         if ui
                             .add(
                                 egui::DragValue::new(&mut width)
-                                    .range(0.001..=86400.0)
+                                    .range(0.0..=300.0)
                                     .speed(0.25)
                                     .suffix(" pt"),
                             )
@@ -1948,6 +1927,18 @@ fn properties(ui: &mut egui::Ui, e: &mut Element) -> bool {
     changed
 }
 /// Controls of one animation step; returns (changed, remove requested).
+fn transition_timing_controls(ui:&mut egui::Ui,transition:&mut super::model::Transition)->bool {
+    let mut changed=ui.add(egui::DragValue::new(&mut transition.duration)
+        .range(0.001..=3600.0).prefix("Длительность ").suffix(" сек.")).changed();
+    let mut auto=transition.advance_after.is_some();
+    if ui.checkbox(&mut auto,"Автоматический переход").changed() {
+        transition.advance_after=if auto {Some(5.0)}else{None};changed=true;
+    }
+    if let Some(seconds)=&mut transition.advance_after {
+        changed|=ui.add(egui::DragValue::new(seconds).range(0.001..=86400.0).prefix("После ").suffix(" сек.")).changed();
+    }
+    changed
+}
 fn animation_controls(ui: &mut egui::Ui, a: &mut Animation, slot: usize) -> (bool, bool) {
     let mut changed = false;
     let mut remove = false;
@@ -3818,6 +3809,14 @@ mod next_property_range_tests {
         let mut animation=Animation{effect:"move".into(),duration:1200.0,delay:60000.0,order:4000,dx:90000.0,dy:-90000.0,..Default::default()};
         let before=animation.clone();
         let _=ctx.run_ui(egui::RawInput::default(),|ui|{animation_controls(ui,&mut animation,0);});
-        assert_eq!(animation,before);Ok(())
+        assert_eq!(animation,before);
+        let mut element=Element{kind:ElementKind::Rect,w:0.25,h:0.5,stroke_width:250.0,rotation:270.0,..Default::default()};
+        let before=element.clone();
+        let mut transition=super::super::model::Transition{effect:"fade".into(),duration:1200.0,advance_after:Some(60000.0)};
+        let before_transition=transition.clone();
+        let _=ctx.run_ui(egui::RawInput::default(),|ui| {
+            properties(ui,&mut element);transition_timing_controls(ui,&mut transition);
+        });
+        assert_eq!(element,before);assert_eq!(transition,before_transition);Ok(())
     }
 }
