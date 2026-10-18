@@ -18,6 +18,8 @@ struct State {
     find: String,
     replace: String,
     find_open: bool,
+    find_case: bool,
+    find_message: String,
     passport_open: bool,
     paste_transpose: bool,
     rename: String,
@@ -1010,70 +1012,48 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
     if !state.error.is_empty() {
         ui.colored_label(Color32::from_rgb(200, 60, 50), &state.error);
     }
+    if close_find_on_escape(ui,&mut state) {
+        ui.memory_mut(|memory|memory.request_focus(canvas_id));
+    }
     if state.find_open {
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Найти").strong());
-            ui.add(
-                egui::TextEdit::singleline(&mut state.find)
-                    .desired_width(140.0)
-                    .id(state_id.with("find")),
-            );
-            if ui.button("Следующее").clicked()
-                && !state.find.is_empty()
-                && let Some(s) = book.active_sheet()
-            {
-                let mut cells: Vec<_> = s
-                    .cells
-                    .iter()
-                    .filter_map(|(a, c)| super::model::parse_address(a).map(|pos| (pos, c)))
-                    .collect();
-                cells.sort_by_key(|x| x.0);
-                let needle = state.find.to_lowercase();
-                let found = cells
-                    .iter()
-                    .filter(|((r, c), _)| (*r, *c) > (row, col))
-                    .chain(cells.iter().filter(|((r, c), _)| (*r, *c) <= (row, col)))
-                    .find(|((r, col), c)| {
-                        c.input.to_lowercase().contains(&needle)
-                            || s.display(*r, *col, book.locale_ru)
-                                .to_lowercase()
-                                .contains(&needle)
-                    })
-                    .map(|(pos, _)| *pos);
-                if let Some((r, c)) = found {
-                    changed |= commit(book, &mut state);
-                    if !state.editing {
-                        book.selection = Selection {
-                            row: r,
-                            col: c,
-                            anchor_row: r,
-                            anchor_col: c,
-                        };
-                        state.scroll_to_selection = true;
+        egui::Frame::new().fill(ui.visuals().faint_bg_color).inner_margin(8.0)
+            .corner_radius(5.0).show(ui,|ui| {
+                let find_id=state_id.with("find");
+                let search_key=ui.is_enabled() && ui.memory(|m|m.has_focus(find_id))
+                    && ui.input_mut(|input|input.consume_key(input.modifiers,Key::Enter));
+                let backwards=ui.input(|input|input.modifiers.shift);
+                let mut direction=None;
+                ui.horizontal_wrapped(|ui| {
+                    ui.strong("Найти");
+                    ui.add(egui::TextEdit::singleline(&mut state.find).desired_width(150.0)
+                        .id(find_id).hint_text("Текст или формула"));
+                    if ui.button("← Назад").on_hover_text("Shift+Enter").clicked(){direction=Some(true);}
+                    if ui.button("Далее →").on_hover_text("Enter").clicked(){direction=Some(false);}
+                    ui.checkbox(&mut state.find_case,"Учитывать регистр");
+                    if ui.button("Закрыть").on_hover_text("Esc").clicked(){
+                        state.find_open=false;
+                        ui.memory_mut(|memory|memory.request_focus(canvas_id));
                     }
+                });
+                if search_key {direction=Some(backwards);}
+                if let Some(backwards)=direction {
+                    changed|=commit(book,&mut state);
+                    if !state.editing {find_step(book,&mut state,backwards);}
                 }
-            }
-            ui.label("Заменить");
-            ui.add(
-                egui::TextEdit::singleline(&mut state.replace)
-                    .desired_width(140.0)
-                    .id(state_id.with("replace")),
-            );
-            if command_action(ui.button("Заменить все"), book, &mut state, &mut changed)
-                && !state.find.is_empty()
-            {
-                match book.replace_all(id, &state.find, &state.replace) {
-                    Ok(count) => {
-                        changed |= count > 0;
-                        state.error.clear();
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Заменить на");
+                    ui.add(egui::TextEdit::singleline(&mut state.replace).desired_width(150.0)
+                        .id(state_id.with("replace")).hint_text("Новый текст"));
+                    if command_action(ui.add_enabled(!state.find.is_empty(),egui::Button::new("Заменить все")),book,&mut state,&mut changed) {
+                        match book.replace_all_with_case(id,&state.find,&state.replace,state.find_case) {
+                            Ok(count)=>{changed|=count>0;state.error.clear();state.find_message=format!("Изменено ячеек: {count}");}
+                            Err(error)=>state.error=error,
+                        }
                     }
-                    Err(error) => state.error = error,
-                }
-            }
-            if ui.button("×").on_hover_text("Закрыть поиск").clicked() {
-                state.find_open = false;
-            }
-        });
+                    ui.small("Замена изменяет исходный текст ячеек.");
+                });
+                if !state.find_message.is_empty() {ui.small(&state.find_message);}
+            });
     }
     let loaded = ui
         .is_enabled()
@@ -1959,42 +1939,19 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                 if response.clicked() {
                     changed |= add_sheet(book, &mut state);
                 }
-                let range = book.selection.range();
-                if range.validate().is_ok()
-                    && let Some(s) = book.active_sheet()
-                {
-                    let mut sum = 0.0;
-                    let mut count = 0;
-                    let mut nonempty = 0;
-                    for r in range.r0..=range.r1 {
-                        for c in range.c0..=range.c1 {
-                            if let Some(cell) = s.cell(r, c) {
-                                if cell.value != Value::Empty {
-                                    nonempty += 1;
-                                }
-                                if let Value::Number(v) = cell.value {
-                                    sum += v;
-                                    count += 1;
-                                }
-                            }
-                        }
-                    }
-                    ui.separator();
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "Сумма: {sum:.4}  Среднее: {:.4}  Количество: {nonempty}",
-                            if count == 0 {
-                                0.0
-                            } else {
-                                sum / f64::from(count)
-                            }
-                        ))
-                        .small()
-                        .color(crate::chrome::muted(ui)),
-                    );
-                }
             });
         });
+    let range=book.selection.range();
+    if range.validate().is_ok() && let Some(sheet)=book.active_sheet() {
+        let (sum,mean,nonempty)=selection_statistics(sheet,range);
+        ui.horizontal_wrapped(|ui| {
+            ui.small(format!("Выделено: {}:{}  ·  Заполнено: {nonempty}",
+                address(range.r0,range.c0),address(range.r1,range.c1)));
+            ui.separator();
+            ui.small(format!("Сумма: {}  ·  Среднее: {}",
+                statistic_text(sum,book.locale_ru),statistic_text(mean,book.locale_ru)));
+        });
+    }
     if state.passport_open {
         let mut open = true;
         egui::Window::new("Паспорт формулы")
@@ -3973,5 +3930,86 @@ mod paste_special_tests {
         assert!(paste_cells_with(&mut book, id, MAX_ROWS-1, 0, &clipboard, PasteMode::Values, true).is_err());
         assert_eq!(book, before);
         Ok(())
+    }
+}
+
+fn close_find_on_escape(ui:&mut egui::Ui,state:&mut State)->bool {
+    if state.find_open && ui.is_enabled()
+        && ui.input_mut(|input|input.consume_key(input.modifiers,Key::Escape)) {
+        state.find_open=false;true
+    }else{false}
+}
+fn find_step(book:&mut Book,state:&mut State,backwards:bool) {
+    match book.find_positions(book.active_id(),&state.find,state.find_case) {
+        Ok(found)=>{
+            if found.is_empty(){state.find_message="Совпадений нет".into();return;}
+            let current=(book.selection.row,book.selection.col);
+            let index=if backwards {
+                found.iter().rposition(|position|*position<current).unwrap_or(found.len()-1)
+            }else{
+                found.iter().position(|position|*position>current).unwrap_or(0)
+            };
+            let (row,col)=&found[index];
+            book.selection=Selection{row:*row,col:*col,anchor_row:*row,anchor_col:*col};
+            state.scroll_to_selection=true;state.error.clear();
+            state.find_message=format!("Совпадение {} из {}",index+1,found.len());
+        }
+        Err(error)=>state.error=error,
+    }
+}
+fn selection_statistics(sheet:&Sheet,range:Range)->(Option<f64>,Option<f64>,usize) {
+    let mut numbers=Vec::new();let mut nonempty=0;
+    for r in range.r0..=range.r1 {
+        for c in range.c0..=range.c1 {
+            if let Some(cell)=sheet.cell(r,c) {
+                if cell.value!=Value::Empty {nonempty+=1;}
+                if let Value::Number(value)=cell.value {numbers.push(value);}
+            }
+        }
+    }
+    if numbers.is_empty(){return (Some(0.0),None,nonempty);}
+    let scale=numbers.iter().map(|value|value.abs()).fold(0.0,f64::max);
+    if scale==0.0{return (Some(0.0),Some(0.0),nonempty);}
+    let (mut normalized,mut compensation)=(0.0,0.0);
+    for value in &numbers {
+        let next=value/scale-compensation;
+        let total=normalized+next;
+        compensation=(total-normalized)-next;normalized=total;
+    }
+    let sum=normalized*scale;
+    let mean=(normalized/numbers.len() as f64)*scale;
+    (sum.is_finite().then_some(sum),Some(mean),nonempty)
+}
+fn statistic_text(value:Option<f64>,ru:bool)->String {
+    value.map(|value|super::format::display(&Value::Number(value),"General",ru))
+        .unwrap_or_else(||"—".into())
+}
+#[cfg(test)]
+mod additional_search_status_tests {
+    use super::*;
+    #[test]
+    fn selection_mean_stays_finite_when_the_sum_overflows()->Result<(),String> {
+        let mut book=Book::default();let id=book.active_id();
+        book.set_cell(id,0,0,"1e308")?;book.set_cell(id,0,1,"1e308")?;
+        let sheet=book.active_sheet().ok_or("sheet")?;
+        let (sum,mean,count)=selection_statistics(sheet,Range::new(0,0,0,1));
+        assert_eq!(sum,None);assert_eq!(mean,Some(1e308));assert_eq!(count,2);Ok(())
+    }
+    #[test]
+    fn status_numbers_keep_small_values_and_the_workbook_locale() {
+        assert_eq!(statistic_text(Some(0.00001),true),"0,00001");
+        assert_eq!(statistic_text(Some(1.25),true),"1,25");
+        assert_eq!(statistic_text(Some(1.25),false),"1.25");
+    }
+    #[test]
+    fn escape_closes_the_find_bar_and_consumes_the_key() {
+        let ctx=egui::Context::default();let mut state=State{find_open:true,..State::default()};
+        let input=egui::RawInput{events:vec![egui::Event::Key{key:Key::Escape,physical_key:None,
+            pressed:true,repeat:false,modifiers:egui::Modifiers::NONE}],..Default::default()};
+        let _=ctx.run_ui(input,|ui|{
+            assert!(close_find_on_escape(ui,&mut state));
+            assert!(!ui.input(|input|input.key_pressed(Key::Escape)));
+        });
+        assert!(!state.find_open);
     }
 }

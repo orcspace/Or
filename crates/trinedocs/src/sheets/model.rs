@@ -827,79 +827,75 @@ impl Book {
         case_sensitive: bool,
         limit: usize,
     ) -> Result<Vec<(u32, u32, String, String)>, String> {
-        let s = self.sheet_by_id(sheet).ok_or("Лист не найден")?;
-        if query.is_empty() || limit == 0 {
+        if limit==0 {
+            self.sheet_by_id(sheet).ok_or("Лист не найден")?;
             return Ok(Vec::new());
         }
-        let fold = |text: &str| {
-            if case_sensitive {
-                text.to_string()
-            } else {
-                text.to_lowercase()
-            }
-        };
-        let needle = fold(query);
+        let found = self.find_positions(sheet, query, case_sensitive)?;
+        let sheet = self.sheet_by_id(sheet).ok_or("Лист не найден")?;
+        Ok(found.into_iter().take(limit).filter_map(|(row,col)| {
+            sheet.cell(row,col).map(|cell|
+                (row,col,cell.input.clone(),sheet.display(row,col,self.locale_ru)))
+        }).collect())
+    }
+    /// Search positions without cloning the text of every matching cell into UI state.
+    pub fn find_positions(
+        &self,
+        sheet: u64,
+        query: &str,
+        case_sensitive: bool,
+    ) -> Result<Vec<(u32,u32)>,String> {
+        let sheet = self.sheet_by_id(sheet).ok_or("Лист не найден")?;
+        if query.is_empty() { return Ok(Vec::new()); }
         let mut found = Vec::new();
-        for (key, cell) in &s.cells {
-            let Some((r, c)) = parse_address(key) else {
-                continue;
-            };
-            let shown = s.display(r, c, self.locale_ru);
-            if fold(&cell.input).contains(&needle) || fold(&shown).contains(&needle) {
-                found.push((r, c));
+        for (key,cell) in &sheet.cells {
+            let Some((row,col)) = parse_address(key) else { continue; };
+            if !match_ranges(&cell.input,query,case_sensitive).is_empty()
+                || !match_ranges(&sheet.display(row,col,self.locale_ru),query,case_sensitive).is_empty() {
+                found.push((row,col));
             }
         }
         found.sort_unstable();
-        Ok(found
-            .into_iter()
-            .take(limit)
-            .filter_map(|(r, c)| {
-                s.cell(r, c)
-                    .map(|cell| (r, c, cell.input.clone(), s.display(r, c, self.locale_ru)))
-            })
-            .collect())
+        Ok(found)
     }
-    pub fn replace_all(
-        &mut self,
-        sheet: u64,
-        query: &str,
-        replacement: &str,
-    ) -> Result<usize, String> {
-        let s = self.sheet_by_id(sheet).ok_or("Лист не найден")?;
-        if query.is_empty() {
-            return Ok(0);
+    pub fn replace_all(&mut self,sheet:u64,query:&str,replacement:&str)->Result<usize,String> {
+        self.replace_all_with_case(sheet,query,replacement,true)
+    }
+    pub fn replace_all_with_case(&mut self,sheet:u64,query:&str,replacement:&str,case_sensitive:bool)->Result<usize,String> {
+        self.replace_all_with_limit(sheet,query,replacement,case_sensitive,MAX_BOOK_TEXT_BYTES)
+    }
+    fn replace_all_with_limit(&mut self,sheet:u64,query:&str,replacement:&str,case_sensitive:bool,limit:usize)->Result<usize,String> {
+        let s=self.sheet_by_id(sheet).ok_or("Лист не найден")?;
+        if query.is_empty(){return Ok(0);}
+        let mut bytes=self.text_bytes();
+        let mut changes=Vec::new();
+        for (key,cell) in &s.cells {
+            let ranges=match_ranges(&cell.input,query,case_sensitive);
+            if ranges.is_empty(){continue;}
+            let removed:usize=ranges.iter().map(|(start,end)|end-start).sum();
+            let length=ranges.len().checked_mul(replacement.len())
+                .and_then(|added|(cell.input.len()-removed).checked_add(added));
+            let Some(length)=length.filter(|length|*length<=32767) else {return Err("Замена превышает предел длины ячейки".into());};
+            let projected=bytes.saturating_sub(cell.input.len()).checked_add(length)
+                .filter(|bytes|*bytes<=limit).ok_or("Замена превышает предел текста книги")?;
+            let mut input=String::with_capacity(length);
+            let mut offset=0;
+            for (start,end) in ranges {
+                input.push_str(&cell.input[offset..start]);input.push_str(replacement);offset=end;
+            }
+            input.push_str(&cell.input[offset..]);
+            let input=super::formula::canonicalize(&input);
+            if input.len()>32767{return Err("Нормализованная формула превышает предел длины ячейки".into());}
+            bytes=projected.saturating_sub(length).checked_add(input.len())
+                .filter(|bytes|*bytes<=limit).ok_or("Замена превышает предел текста книги")?;
+            if input!=cell.input {changes.push((key.clone(),input));}
         }
-        let mut changes = Vec::new();
-        for (key, cell) in &s.cells {
-            if !cell.input.contains(query) {
-                continue;
-            }
-            let matches = cell.input.matches(query).count();
-            let length = matches
-                .checked_mul(replacement.len())
-                .and_then(|added| (cell.input.len() - matches * query.len()).checked_add(added));
-            if length.is_none_or(|length| length > 32767) {
-                return Err("Замена превышает предел длины ячейки".into());
-            }
-            let input = cell.input.replace(query, replacement);
-            let input = super::formula::canonicalize(&input);
-            if input.len() > 32767 {
-                return Err("Нормализованная формула превышает предел длины ячейки".into());
-            }
-            if input != cell.input {
-                changes.push((key.clone(), input));
-            }
+        let count=changes.len();
+        let s=self.sheet_by_id_mut(sheet).ok_or("Лист не найден")?;
+        for (key,input) in changes {
+            if let Some(cell)=s.cells.get_mut(&key) {cell.input=input;}
         }
-        let count = changes.len();
-        let s = self.sheet_by_id_mut(sheet).ok_or("Лист не найден")?;
-        for (key, input) in changes {
-            if let Some(cell) = s.cells.get_mut(&key) {
-                cell.input = input;
-            }
-        }
-        if count > 0 {
-            self.recalculate();
-        }
+        if count>0 {self.recalculate();}
         Ok(count)
     }
     pub fn recalculate(&mut self) {
@@ -1618,5 +1614,47 @@ mod model_defect_tests {
         book.next_id=5;
         assert!(book.validate().err().is_some_and(|error| error.contains("64 МиБ")));
         Ok(())
+    }
+}
+
+fn match_ranges(text:&str,query:&str,case_sensitive:bool)->Vec<(usize,usize)> {
+    if query.is_empty(){return Vec::new();}
+    if case_sensitive{return text.match_indices(query).map(|(start,value)|(start,start+value.len())).collect();}
+    let mut folded=String::new();
+    let mut boundaries=Vec::new();
+    for (offset,ch) in text.char_indices() {
+        boundaries.push((folded.len(),offset));
+        folded.extend(ch.to_lowercase());
+    }
+    boundaries.push((folded.len(),text.len()));
+    let needle:String=query.chars().flat_map(char::to_lowercase).collect();
+    folded.match_indices(&needle).filter_map(|(start,value)| {
+        let a=boundaries.binary_search_by_key(&start,|pair|pair.0).ok()?;
+        let end=start+value.len();
+        let z=boundaries.binary_search_by_key(&end,|pair|pair.0).ok()?;
+        Some((boundaries[a].1,boundaries[z].1))
+    }).collect()
+}
+#[cfg(test)]
+mod additional_replace_defect_tests {
+    use super::*;
+    #[test]
+    fn replacement_uses_the_same_case_mode_as_search_without_splitting_unicode()->Result<(),String> {
+        let mut book=Book::default();let id=book.active_id();
+        book.set_cell(id,0,0,"КОТ кот İ")?;
+        assert_eq!(book.find(id,"Кот",false,10)?.len(),1);
+        assert_eq!(book.replace_all_with_case(id,"Кот","пёс",false)?,1);
+        assert_eq!(book.active_sheet().and_then(|s|s.cell(0,0)).map(|c|c.input.as_str()),Some("пёс пёс İ"));
+        assert_eq!(book.replace_all_with_case(id,"i\u{0307}","X",false)?,1);
+        assert_eq!(book.active_sheet().and_then(|s|s.cell(0,0)).map(|c|c.input.as_str()),Some("пёс пёс X"));
+        Ok(())
+    }
+    #[test]
+    fn replacement_checks_the_workbook_text_budget_before_any_mutation()->Result<(),String> {
+        let mut book=Book::default();let id=book.active_id();
+        book.set_cell(id,0,0,"a")?;book.set_cell(id,0,1,"a")?;
+        let before=book.clone();let limit=book.text_bytes()+3;
+        assert!(book.replace_all_with_limit(id,"a","1234",true,limit).is_err());
+        assert_eq!(book,before);Ok(())
     }
 }

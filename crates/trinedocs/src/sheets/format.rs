@@ -999,7 +999,7 @@ mod second_format_defects {
     #[test]
     fn fraction_formats_keep_percentages_and_literal_affixes() {
         assert_eq!(display(&Value::Number(0.125),"# ?/?%",false),"12 1/2%");
-        assert_eq!(display(&Value::Number(1.25),r#""$"# ?/?" kg""#,false),"$1 1/4 kg");
+        assert_eq!(display(&Value::Number(1.25),r##""$"# ?/?" kg""##,false),"$1 1/4 kg");
     }
     #[test]
     fn quoted_words_cannot_change_month_tokens_into_minutes() {

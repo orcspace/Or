@@ -719,10 +719,10 @@ fn resolve_part(target: &str) -> Option<String> {
             _ => components.push(c),
         }
     }
-    Some(components.join("/"))
+    Some(components.join("/").to_ascii_lowercase())
 }
 fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
-    let mut parts = read_zip(bytes)?;
+    let mut parts = normalize_docx_part_names(read_zip(bytes)?)?;
     normalize_docx_parts(&mut parts)?;
     let theme=parts.get("word/theme/theme1.xml").map(|bytes|xml(bytes)).transpose()?
         .map(|node|WordTheme::read(&node)).unwrap_or_default();
@@ -4302,7 +4302,7 @@ fn docx_part(source: &str,target: &str) -> Option<String> {
     for component in raw.split('/') {
         match component {""|"."=>{},".."=>{parts.pop()?;},_=>parts.push(component)}
     }
-    Some(parts.join("/"))
+    Some(parts.join("/").to_ascii_lowercase())
 }
 fn docx_rels_path(source: &str) -> String {
     let (base,name)=source.rsplit_once('/').unwrap_or(("",source));
@@ -4429,5 +4429,29 @@ mod additional_word_defect_tests {
         let doc=document("<w:tbl><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>",
             r#"<w:style w:type="table" w:default="1" w:styleId="DefaultTable"><w:tcPr><w:shd w:val="clear" w:fill="010203"/></w:tcPr></w:style>"#,"")?;
         assert_eq!(doc.tables[0].rows[0][0].fill,[1,2,3]);Ok(())
+    }
+}
+
+fn normalize_docx_part_names(parts:BTreeMap<String,Vec<u8>>)->Result<BTreeMap<String,Vec<u8>>,String> {
+    let mut normalized=BTreeMap::new();
+    for (path,bytes) in parts {
+        if normalized.insert(path.to_ascii_lowercase(),bytes).is_some() {
+            return Err("Повторяющиеся без учёта регистра имена частей DOCX".into());
+        }
+    }Ok(normalized)
+}
+#[cfg(test)]
+mod additional_part_name_tests {
+    use super::*;
+    #[test]
+    fn docx_part_identity_is_ascii_case_insensitive_and_unambiguous()->Result<(),String> {
+        let parts=vec![
+            ("WORD/DOCUMENT.XML".into(),br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>kept</w:t></w:r></w:p></w:body></w:document>"#.to_vec()),
+            ("WORD/_RELS/DOCUMENT.XML.RELS".into(),br#"<Relationships><Relationship Id="s" Type="http://x/styles" Target="STYLES.XML"/></Relationships>"#.to_vec()),
+            ("word/styles.xml".into(),br#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:default="1" w:styleId="Base"><w:rPr><w:b/></w:rPr></w:style></w:styles>"#.to_vec()),
+        ];
+        let doc=read(&write_zip(parts)?,"docx")?;
+        assert_eq!(doc.plain_text(),"kept");assert!(doc.paragraphs[0].runs[0].format.bold);
+        assert!(normalize_docx_part_names(BTreeMap::from([("A".into(),vec![]),("a".into(),vec![])])).is_err());Ok(())
     }
 }

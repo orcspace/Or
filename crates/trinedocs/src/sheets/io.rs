@@ -1034,7 +1034,10 @@ fn indexed_palette(bytes: &[u8]) -> Result<Vec<[u8; 3]>, String> {
 fn styles(bytes: &[u8]) -> Result<Vec<CellFormat>, String> {
     styles_with_theme(bytes,&[])
 }
-fn styles_with_theme(bytes: &[u8], theme: &[[u8;3]]) -> Result<Vec<CellFormat>, String> {
+fn styles_with_theme(bytes: &[u8],theme:&[[u8;3]])->Result<Vec<CellFormat>,String> {
+    styles_with_theme_fonts(bytes,theme,&BTreeMap::new())
+}
+fn styles_with_theme_fonts(bytes: &[u8],theme:&[[u8;3]],faces:&BTreeMap<String,String>)->Result<Vec<CellFormat>,String> {
     let palette = indexed_palette(bytes)?;
     let mut reader = Reader::from_str(std::str::from_utf8(bytes).map_err(|e| e.to_string())?);
     let mut section = String::new();
@@ -1044,6 +1047,8 @@ fn styles_with_theme(bytes: &[u8], theme: &[[u8;3]]) -> Result<Vec<CellFormat>, 
     let mut current_border = false;
     let mut current_fill_active = false;
     let mut formats = Vec::new();
+    let mut base_formats:Vec<CellFormat> = Vec::new();
+    let mut font_scheme=String::new();
     let mut num_formats = BTreeMap::new();
     let mut current_font = CellFormat::default();
     let mut current_fill = None;
@@ -1068,6 +1073,7 @@ fn styles_with_theme(bytes: &[u8], theme: &[[u8;3]]) -> Result<Vec<CellFormat>, 
                     section = tag.clone();
                 }
                 if tag == "font" {
+                    font_scheme.clear();
                     current_font = CellFormat::default();
                 }
                 if tag == "fill" {
@@ -1097,6 +1103,7 @@ fn styles_with_theme(bytes: &[u8], theme: &[[u8;3]]) -> Result<Vec<CellFormat>, 
                 }
                 if section == "fonts" {
                     match tag.as_str() {
+                        "scheme"=>font_scheme=a.get("val").cloned().unwrap_or_default(),
                         "name" => {
                             if let Some(v) = a.get("val") {
                                 current_font.font = v.clone();
@@ -1133,37 +1140,25 @@ fn styles_with_theme(bytes: &[u8], theme: &[[u8;3]]) -> Result<Vec<CellFormat>, 
                 {
                     num_formats.insert(id, code.clone());
                 }
-                if section == "cellXfs" && tag == "xf" {
-                    let font = a
-                        .get("fontId")
-                        .and_then(|s| s.parse::<usize>().ok())
-                        .and_then(|i| fonts.get(i))
-                        .cloned()
-                        .unwrap_or_default();
-                    let mut fmt: CellFormat = font;
-                    let id = a
-                        .get("numFmtId")
-                        .and_then(|s| s.parse::<u32>().ok())
-                        .unwrap_or(0);
-                    fmt.number = num_formats.get(&id).cloned().unwrap_or_else(|| builtin(id));
-                    fmt.fill = a
-                        .get("fillId")
-                        .and_then(|s| s.parse::<usize>().ok())
-                        .and_then(|i| fills.get(i))
-                        .copied()
-                        .flatten();
-                    fmt.border = a
-                        .get("borderId")
-                        .and_then(|s| s.parse::<usize>().ok())
-                        .and_then(|index| borders.get(index))
-                        .copied()
-                        .unwrap_or(false);
-                    formats.push(fmt);
+                if matches!(section.as_str(),"cellXfs"|"cellStyleXfs") && tag=="xf" {
+                    let mut fmt=if section=="cellXfs" {
+                        a.get("xfId").and_then(|value|value.parse::<usize>().ok())
+                            .and_then(|index|base_formats.get(index)).cloned().unwrap_or_default()
+                    }else{CellFormat::default()};
+                    if let Some(font)=a.get("fontId").and_then(|v|v.parse::<usize>().ok()).and_then(|i|fonts.get(i)) {
+                        fmt.font=font.font.clone();fmt.size=font.size;fmt.bold=font.bold;fmt.italic=font.italic;
+                        fmt.underline=font.underline;fmt.strike=font.strike;fmt.color=font.color;
+                    }
+                    if let Some(id)=a.get("numFmtId").and_then(|v|v.parse::<u32>().ok()) {
+                        fmt.number=num_formats.get(&id).cloned().unwrap_or_else(||builtin(id));
+                    }
+                    if let Some(fill)=a.get("fillId").and_then(|v|v.parse::<usize>().ok()).and_then(|i|fills.get(i)) {fmt.fill=*fill;}
+                    if let Some(border)=a.get("borderId").and_then(|v|v.parse::<usize>().ok()).and_then(|i|borders.get(i)) {fmt.border=*border;}
+                    if section=="cellXfs" {formats.push(fmt);}else{base_formats.push(fmt);}
                 }
-                if section == "cellXfs"
-                    && tag == "alignment"
-                    && let Some(fmt) = formats.last_mut()
-                {
+                if matches!(section.as_str(),"cellXfs"|"cellStyleXfs") && tag=="alignment" {
+                    let target=if section=="cellXfs" {&mut formats}else{&mut base_formats};
+                    if let Some(fmt)=target.last_mut() {
                     fmt.align = match a.get("horizontal").map(String::as_str) {
                         Some("left") => Align::Left,
                         Some("center") => Align::Center,
@@ -1180,11 +1175,13 @@ fn styles_with_theme(bytes: &[u8], theme: &[[u8;3]]) -> Result<Vec<CellFormat>, 
                     } else {
                         rotation
                     };
+                    }
                 }
             }
             Event::End(e) => {
                 let tag = e.local_name().as_ref().to_string();
                 if tag == "font" {
+                    if let Some(face)=faces.get(&font_scheme) {current_font.font=face.clone();}
                     fonts.push(current_font.clone());
                 }
                 if tag == "fill" {
@@ -1218,9 +1215,10 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
         .unwrap_or_default();
     let theme_path=workbook_rels.values().find(|(kind,_)| kind.ends_with("/theme")).map(|(_,path)| path.as_str());
     let theme=theme_path.and_then(|path| parts.get(path)).map(|bytes| theme_colors(bytes)).transpose()?.unwrap_or_default();
+    let faces=theme_path.and_then(|path|parts.get(path)).map(|bytes|theme_font_faces(bytes)).transpose()?.unwrap_or_default();
     let formats = parts
         .get(style_path)
-        .map(|b| styles_with_theme(b,&theme))
+        .map(|b| styles_with_theme_fonts(b,&theme,&faces))
         .transpose()?
         .unwrap_or_default();
     let mut targets = BTreeMap::new();
@@ -1259,6 +1257,7 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
             Ok(())
         })?;
     }
+    let mut selections=BTreeMap::new();
     for (name, path, hidden) in paths {
         let Some(id) = book.sheets.iter().find(|s| s.name == name).map(|s| s.id) else {
             continue;
@@ -1269,10 +1268,16 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
         let Some(bytes) = parts.get(&path) else {
             continue;
         };
+        let mut pane=String::from("topLeft");
+        let mut sheet_selections=Vec::new();
         let mut row_styles=BTreeMap::new();
         let mut col_styles=BTreeMap::new();
         let (mut current_row,mut next_row,mut next_col)=(0u32,0u32,0u32);
         each_tag(bytes, |tag, a| {
+            if tag=="pane" {pane=a.get("activePane").cloned().unwrap_or_else(||"topLeft".into());}
+            if tag=="selection" && let Some(selection)=xlsx_selection(a) {
+                sheet_selections.push((a.get("pane").map(String::as_str).unwrap_or("topLeft").to_string(),selection));
+            }
             if tag == "row" {
                 current_row=match a.get("r") {
                     Some(value) => value.parse::<u32>().ok().and_then(|v| v.checked_sub(1)).ok_or("Неверный номер строки")?,
@@ -1379,6 +1384,9 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
             }
             Ok(())
         })?;
+        if let Some((_,selection))=sheet_selections.iter().find(|(name,_)|name==&pane).or_else(||sheet_selections.first()) {
+            selections.insert(id,selection.clone());
+        }
         read_sheet_images(book, id, &path, parts);
     }
     if book.active_sheet().is_some_and(|sheet| sheet.hidden) {
@@ -1388,6 +1396,7 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
             .position(|sheet| !sheet.hidden)
             .ok_or("Книга не содержит видимых листов")?;
     }
+    if let Some(selection)=selections.remove(&book.active_id()) {book.selection=selection;}
     Ok(())
 }
 fn read_charts(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(), String> {
@@ -1399,6 +1408,7 @@ fn read_charts(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(),
         let mut kind = ChartKind::Column;
         let mut refs = Vec::new();
         let mut title = String::new();
+        let mut title_refs=Vec::new();
         let mut in_title = false;
         loop {
             match reader.read_event().map_err(|e| e.to_string())? {
@@ -1426,7 +1436,8 @@ fn read_charts(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(),
                             let text = quick_xml::escape::unescape(&text)
                                 .map_err(|e| e.to_string())?
                                 .into_owned();
-                            refs.extend(super::formula::dependencies(&format!("={text}")));
+                            let found=super::formula::dependencies(&format!("={text}"));
+                            if in_title {title_refs.extend(found);}else{refs.extend(found);}
                         }
                         "t" if in_title => {
                             let text = reader
@@ -1450,6 +1461,10 @@ fn read_charts(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(),
                 Event::Eof => break,
                 _ => (),
             }
+        }
+        if title.is_empty() && let Some((Some(sheet),range))=title_refs.first()
+            && let Some(sheet)=book.sheets.iter().find(|value|value.name.eq_ignore_ascii_case(sheet)) {
+            title=sheet.display(range.r0,range.c0,book.locale_ru);
         }
         if let Some((Some(sheet), first)) = refs.first()
             && let Some(id) = book
@@ -2713,5 +2728,78 @@ mod metadata_defect_tests {
         assert_eq!(parse_csv(&to_csv(&rows,','),',')?,rows);
         assert_eq!(parse_csv(&to_csv(&[vec!["".into()]],','),',')?,vec![vec!["".to_string()]]);
         Ok(())
+    }
+}
+
+fn theme_font_faces(bytes:&[u8])->Result<BTreeMap<String,String>,String> {
+    let mut reader=Reader::from_str(std::str::from_utf8(bytes).map_err(|e|e.to_string())?);
+    let mut faces=BTreeMap::new();let mut kind=None;
+    loop {
+        match reader.read_event().map_err(|e|e.to_string())? {
+            Event::Start(e)|Event::Empty(e)=>{
+                match local(&e).as_str() {
+                    "majorFont"=>kind=Some("major"),
+                    "minorFont"=>kind=Some("minor"),
+                    "latin"=>if let Some(kind)=kind && let Some(face)=attrs(&e,&reader)?.get("typeface")
+                        .filter(|face|!face.is_empty() && face.len()<=256) {faces.insert(kind.into(),face.clone());},
+                    _=>(),
+                }
+            }
+            Event::End(e)=>if matches!(e.local_name().as_ref(),"majorFont"|"minorFont"){kind=None;},
+            Event::DocType(_)=>return Err("DTD запрещён".into()),
+            Event::Eof=>break,_=>(),
+        }
+    }Ok(faces)
+}
+fn xlsx_selection(attrs:&BTreeMap<String,String>)->Option<super::model::Selection> {
+    let (row,col)=parse_address(attrs.get("activeCell")?)?;
+    let mut result=super::model::Selection{row,col,anchor_row:row,anchor_col:col};
+    for token in attrs.get("sqref").map(String::as_str).unwrap_or("").split_whitespace() {
+        let (first,last)=token.split_once(':').unwrap_or((token,token));
+        let (r0,c0)=parse_address(first)?;let (r1,c1)=parse_address(last)?;
+        let range=super::model::Range::new(r0,c0,r1,c1);
+        if range.contains(row,col) && (row==range.r0 || row==range.r1) && (col==range.c0 || col==range.c1) {
+            result.anchor_row=if row==range.r0{range.r1}else{range.r0};
+            result.anchor_col=if col==range.c0{range.c1}else{range.c0};break;
+        }
+    }Some(result)
+}
+#[cfg(test)]
+mod additional_xlsx_defect_tests {
+    use super::*;
+    use crate::package::xml_escape as esc;
+    #[test]
+    fn cell_xfs_inherit_missing_properties_from_the_referenced_style()->Result<(),String> {
+        let bytes=br#"<styleSheet><fonts><font><name val="Georgia"/><b/><color rgb="FF123456"/></font></fonts><fills><fill><patternFill patternType="solid"><fgColor rgb="FFAABBCC"/></patternFill></fill></fills><cellStyleXfs><xf fontId="0" fillId="0" numFmtId="2"><alignment horizontal="right" wrapText="1"/></xf></cellStyleXfs><cellXfs><xf xfId="0"/></cellXfs></styleSheet>"#;
+        let formats=styles_with_theme(bytes,&[])?;let fmt=formats.first().ok_or("format")?;
+        assert_eq!(fmt.font,"Georgia");assert!(fmt.bold);assert_eq!(fmt.fill,Some([170,187,204]));
+        assert_eq!(fmt.number,"0.00");assert_eq!(fmt.align,Align::Right);assert!(fmt.wrap);Ok(())
+    }
+    #[test]
+    fn spreadsheet_font_scheme_resolves_custom_theme_faces()->Result<(),String> {
+        let faces=theme_font_faces(br#"<theme><fontScheme><majorFont><latin typeface="Georgia"/></majorFont><minorFont><latin typeface="Verdana"/></minorFont></fontScheme></theme>"#)?;
+        let formats=styles_with_theme_fonts(br#"<styleSheet><fonts><font><name val="Calibri"/><scheme val="minor"/></font><font><scheme val="major"/></font></fonts><cellXfs><xf fontId="0"/><xf fontId="1"/></cellXfs></styleSheet>"#,&[],&faces)?;
+        assert_eq!(formats[0].font,"Verdana");assert_eq!(formats[1].font,"Georgia");Ok(())
+    }
+    #[test]
+    fn worksheet_selection_uses_the_active_pane_and_preserves_the_anchor()->Result<(),String> {
+        let mut book=Book::default();let name=book.sheets[0].name.clone();
+        let parts=BTreeMap::from([
+            ("xl/workbook.xml".into(),format!(r#"<workbook><sheets><sheet name="{}" r:id="s"/></sheets></workbook>"#,esc(&name)).into_bytes()),
+            ("xl/_rels/workbook.xml.rels".into(),br#"<Relationships><Relationship Id="s" Target="worksheets/sheet1.xml"/></Relationships>"#.to_vec()),
+            ("xl/worksheets/sheet1.xml".into(),br#"<worksheet><sheetViews><sheetView><pane state="frozen" activePane="bottomRight"/><selection pane="topLeft" activeCell="A1"/><selection pane="bottomRight" activeCell="E10" sqref="D8:E10"/></sheetView></sheetViews></worksheet>"#.to_vec()),
+        ]);
+        read_metadata(&mut book,&parts)?;
+        assert_eq!((book.selection.row,book.selection.col,book.selection.anchor_row,book.selection.anchor_col),(9,4,7,3));Ok(())
+    }
+    #[test]
+    fn linked_chart_titles_do_not_expand_the_plot_data_range()->Result<(),String> {
+        let mut book=Book::default();let id=book.active_id();let name=book.sheets[0].name.clone();
+        book.set_cell(id,9,25,"Revenue")?;book.set_cell(id,0,0,"1")?;book.set_cell(id,1,0,"2")?;
+        let parts=BTreeMap::from([("xl/charts/chart1.xml".into(),
+            format!("<chartSpace><chart><title><strRef><f>'{}'!$Z$10</f></strRef></title><plotArea><barChart><ser><val><numRef><f>'{}'!$A$1:$A$2</f></numRef></val></ser></barChart></plotArea></chart></chartSpace>",esc(&name),esc(&name)).into_bytes())]);
+        read_charts(&mut book,&parts)?;
+        let chart=book.sheets[0].charts.first().ok_or("chart")?;
+        assert_eq!(chart.title,"Revenue");assert_eq!(chart.range,super::super::model::Range::new(0,0,1,0));Ok(())
     }
 }

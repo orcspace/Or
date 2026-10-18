@@ -574,7 +574,10 @@ fn apply_text_look(
     if let Some(defaults) = body.descend("defRPr") {
         layers.push(defaults);
     }
-    if let Some(direct) = body.descend("rPr").or_else(|| body.descend("endParaRPr")) {
+    // endParaRPr describes the next typed run; it must not restyle existing text.
+    let has_text=body.descend("t").is_some();
+    let direct=body.descend("rPr").or_else(||(!has_text).then(||body.descend("endParaRPr")).flatten());
+    if let Some(direct) = direct {
         layers.push(direct);
     }
     element.font_size = default_size;
@@ -597,22 +600,14 @@ fn apply_text_look(
             element.font = font;
         }
     }
-    if body
-        .descend("rPr")
-        .and_then(|p| p.child("solidFill"))
-        .is_none()
-        && body
-            .descend("defRPr")
-            .and_then(|p| p.child("solidFill"))
-            .is_none()
+    if direct.and_then(|props|props.child("solidFill")).is_none()
+        && body.descend("defRPr").and_then(|props|props.child("solidFill")).is_none()
     {
         element.color = color(style.and_then(|n| n.child("fontRef")), look, element.color);
     }
     let theme_face = if title { &look.major } else { &look.minor };
-    let explicit_font = body
-        .descend("rPr")
-        .and_then(|p| p.child("latin"))
-        .or_else(|| body.descend("defRPr").and_then(|p| p.child("latin")));
+    let explicit_font=direct.and_then(|props|props.child("latin"))
+        .or_else(||body.descend("defRPr").and_then(|props|props.child("latin")));
     if explicit_font.is_none() && !theme_face.is_empty() {
         element.font.clone_from(theme_face);
     }
@@ -2651,5 +2646,18 @@ mod tests {
             ElementKind::Table { cells } if cells.first().and_then(|r| r.first()).map(String::as_str) == Some("Строка 1\nСтрока 2")
         )));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod additional_text_property_tests {
+    use super::*;
+    #[test]
+    fn future_run_properties_do_not_restyle_existing_slide_text()->Result<(),String> {
+        let body=parse(br#"<txBody><p><pPr><defRPr sz="1600"><solidFill><srgbClr val="123456"/></solidFill><latin typeface="Georgia"/></defRPr></pPr><r><t>text</t></r><endParaRPr sz="4000" b="1"><solidFill><srgbClr val="FF0000"/></solidFill><latin typeface="Verdana"/></endParaRPr></p></txBody>"#)?;
+        let mut element=Element::default();
+        apply_text_look(&body,&mut element,&Look::default(),None,12.0,false);
+        assert_eq!(element.font_size,16.0);assert!(!element.bold);
+        assert_eq!(element.color,[18,52,86]);assert_eq!(element.font,"Georgia");Ok(())
     }
 }

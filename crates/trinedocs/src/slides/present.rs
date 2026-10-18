@@ -18,7 +18,10 @@ pub struct Presentation {
     blank_since: Option<f64>,
     /// The black "end of slide show" screen after the last slide.
     ended: bool,
+    /// Ink positions in slide coordinates (0..1), independent of the viewport.
     strokes: Vec<Vec<Pos2>>,
+    control_ids: Vec<egui::Id>,
+    inking: bool,
 }
 impl Presentation {
     pub fn start(&mut self, ctx: &egui::Context, deck: &Deck, index: usize) {
@@ -50,6 +53,7 @@ impl Presentation {
         self.clicks = 0;
         self.click_times.clear();
         self.strokes.clear();
+        self.inking=false;
         self.blank = 0;
         self.blank_since = None;
         self.ended = false;
@@ -64,6 +68,7 @@ impl Presentation {
         self.clicks = 0;
         self.click_times.clear();
         self.strokes.clear();
+        self.inking=false;
         self.blank = 0;
         self.blank_since = None;
         self.ended = false;
@@ -232,6 +237,7 @@ pub fn show(ui: &mut egui::Ui, deck: &Deck, state: &mut Presentation) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
         return;
     }
+    if presentation_shortcuts_allowed(&ctx,state) {
     if ctx.input(|i| {
         i.key_pressed(egui::Key::ArrowRight)
             || i.key_pressed(egui::Key::ArrowDown)
@@ -266,6 +272,8 @@ pub fn show(ui: &mut egui::Ui, deck: &Deck, state: &mut Presentation) {
     if ctx.input(|i| i.key_pressed(egui::Key::P)) {
         state.notes = !state.notes;
     }
+    }
+    state.control_ids.clear();
     let screen = ctx.content_rect();
     egui::Area::new(egui::Id::new("slides_presentation_overlay"))
         .order(egui::Order::Foreground)
@@ -361,14 +369,14 @@ pub fn show(ui: &mut egui::Ui, deck: &Deck, state: &mut Presentation) {
                     advanced_automatically = state.advance_timed(deck, time);
                     for points in &state.strokes {
                         if points.len() > 1 {
-                            painter.add(egui::Shape::line(
-                                points.clone(),
+                            painter.with_clip_rect(rect).add(egui::Shape::line(
+                                points.iter().map(|point|ink_to_screen(rect,*point)).collect(),
                                 Stroke::new(2.5, Color32::from_rgb(235, 50, 50)),
                             ));
                         }
                     }
                     if state.pointer
-                        && let Some(pos) = ctx.pointer_hover_pos()
+                        && let Some(pos) = ctx.pointer_hover_pos().filter(|pos|rect.contains(*pos))
                     {
                         painter.circle_filled(pos, 6.0, Color32::from_rgb(240, 50, 45));
                     }
@@ -377,15 +385,18 @@ pub fn show(ui: &mut egui::Ui, deck: &Deck, state: &mut Presentation) {
             if response.clicked() && !state.ink && !advanced_automatically {
                 state.next(deck, time);
             }
-            if state.ink && response.drag_started() {
-                state.strokes.push(Vec::new());
+            if response.drag_started() {
+                state.inking=false;
+                if state.ink && state.blank==0
+                    && let Some(point)=ctx.pointer_interact_pos().and_then(|pos|ink_from_screen(rect,pos)) {
+                    state.strokes.push(vec![point]);state.inking=true;
+                }
             }
-            if state.ink
-                && response.dragged()
-                && let Some(pos) = ctx.pointer_interact_pos()
-                && let Some(points) = state.strokes.last_mut()
-            {
-                points.push(pos);
+            if !state.ink || state.blank!=0 || response.drag_stopped() {state.inking=false;}
+            if state.inking && response.dragged()
+                && let Some(point)=ctx.pointer_interact_pos().and_then(|pos|ink_from_screen(rect,pos))
+                && let Some(points)=state.strokes.last_mut() {
+                points.push(point);
             }
             let controls = Rect::from_min_size(
                 outer.min + Vec2::new(12.0, 10.0),
@@ -402,8 +413,7 @@ pub fn show(ui: &mut egui::Ui, deck: &Deck, state: &mut Presentation) {
                 .corner_radius(5.0)
                 .show(&mut controls_ui, |ui| {
                     ui.horizontal_wrapped(|ui| {
-                        if ui
-                            .button("←")
+                        if present_button(ui,state,"←")
                             .on_hover_text("Предыдущий слайд · ←")
                             .clicked()
                         {
@@ -418,21 +428,23 @@ pub fn show(ui: &mut egui::Ui, deck: &Deck, state: &mut Presentation) {
                             .filter(|slide| !slide.hidden)
                             .count();
                         ui.label(format!("{visible_index} / {visible_count}"));
-                        if ui
-                            .button("→")
+                        if present_button(ui,state,"→")
                             .on_hover_text("Следующий слайд · →")
                             .clicked()
                             && !advanced_automatically
                         {
                             state.next(deck, time);
                         }
-                        ui.checkbox(&mut state.pointer, "Указка");
-                        ui.checkbox(&mut state.ink, "Перо");
-                        if ui.button("Очистить").clicked() {
+                        let response=ui.checkbox(&mut state.pointer,"Указка");
+                        state.control_ids.push(response.id);
+                        let response=ui.checkbox(&mut state.ink,"Перо");
+                        state.control_ids.push(response.id);
+                        if present_button(ui,state,"Очистить").clicked() {
                             state.strokes.clear();
                         }
-                        ui.checkbox(&mut state.notes, "Заметки (P)");
-                        if ui.button("Завершить Esc").clicked() {
+                        let response=ui.checkbox(&mut state.notes,"Заметки (P)");
+                        state.control_ids.push(response.id);
+                        if present_button(ui,state,"Завершить Esc").clicked() {
                             state.active = false;
                             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
                         }
@@ -710,5 +722,41 @@ mod tests {
                 .position(|slide| Some(slide.id) == state.slide_id),
             Some(0)
         );
+    }
+}
+
+fn ink_from_screen(rect:Rect,position:Pos2)->Option<Pos2> {
+    if !rect.contains(position) || rect.width()<=0.0 || rect.height()<=0.0 {return None;}
+    Some(Pos2::new((position.x-rect.left())/rect.width(),(position.y-rect.top())/rect.height()))
+}
+fn ink_to_screen(rect:Rect,position:Pos2)->Pos2 {
+    Pos2::new(rect.left()+position.x*rect.width(),rect.top()+position.y*rect.height())
+}
+fn presentation_shortcuts_allowed(ctx:&egui::Context,state:&Presentation)->bool {
+    !ctx.memory(|memory|memory.focused().is_some_and(|id|state.control_ids.contains(&id)))
+}
+fn present_button(ui:&mut egui::Ui,state:&mut Presentation,label:&str)->egui::Response {
+    let response=ui.button(label);state.control_ids.push(response.id);response
+}
+#[cfg(test)]
+mod additional_presenter_tests {
+    use super::*;
+    #[test]
+    fn ink_tracks_slide_geometry_across_resize_and_ignores_letterbox() {
+        let before=Rect::from_min_size(Pos2::new(100.0,200.0),Vec2::new(800.0,450.0));
+        let after=Rect::from_min_size(Pos2::new(20.0,30.0),Vec2::new(400.0,225.0));
+        let point=ink_from_screen(before,Pos2::new(500.0,425.0));
+        assert_eq!(point,Some(Pos2::new(0.5,0.5)));
+        assert_eq!(point.map(|point|ink_to_screen(after,point)),Some(after.center()));
+        assert_eq!(ink_from_screen(before,Pos2::ZERO),None);
+    }
+    #[test]
+    fn focused_presenter_controls_do_not_also_trigger_slide_shortcuts() {
+        let ctx=egui::Context::default();let id=egui::Id::new("presenter-control");
+        let state=Presentation{control_ids:vec![id],..Default::default()};
+        ctx.memory_mut(|memory|memory.request_focus(id));
+        assert!(!presentation_shortcuts_allowed(&ctx,&state));
+        ctx.memory_mut(|memory|memory.surrender_focus(id));
+        assert!(presentation_shortcuts_allowed(&ctx,&state));
     }
 }
