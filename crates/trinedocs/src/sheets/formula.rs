@@ -631,6 +631,7 @@ impl Parser {
             if self.peek() == TokenKind::Op("%".into()) {
                 self.index += 1;
                 left = Expr::Unary("%".into(), Box::new(left));
+                bounded_expression_depth(&left)?;
                 continue;
             }
             let TokenKind::Op(op) = self.peek() else {
@@ -650,7 +651,9 @@ impl Parser {
             self.index += 1;
             let right = self.expression(precedence + 1)?;
             left = Expr::Binary(op, Box::new(left), Box::new(right));
+            bounded_expression_depth(&left)?;
         }
+        bounded_expression_depth(&left)?;
         self.depth -= 1;
         Ok(left)
     }
@@ -726,6 +729,24 @@ impl Parser {
             _ => Err("#VALUE!".into()),
         }
     }
+}
+// The parser's call depth does not bound a left-associative or postfix AST chain.
+// Reject before a deep boxed tree can reach recursive evaluation or destruction.
+fn bounded_expression_depth(expr: &Expr) -> CalcResult<()> {
+    let mut pending = vec![(expr, 1usize)];
+    while let Some((expr, depth)) = pending.pop() {
+        if depth > 128 { return Err("#NUM!".into()); }
+        match expr {
+            Expr::Unary(_, value) => pending.push((value, depth + 1)),
+            Expr::Binary(_, left, right) => {
+                pending.push((left, depth + 1));
+                pending.push((right, depth + 1));
+            }
+            Expr::Call(_, args) => pending.extend(args.iter().map(|expr| (expr, depth + 1))),
+            _ => (),
+        }
+    }
+    Ok(())
 }
 fn parse(input: &str) -> CalcResult<Expr> {
     if input.len() > 32767 {
@@ -1131,6 +1152,13 @@ impl<'a> Engine<'a> {
                 Err("#N/A".into())
             };
         }
+        if matches!(name, "ROWS" | "COLUMNS") {
+            if args.len() != 1 { return Err("#VALUE!".into()); }
+            if let Some((_, range)) = self.reference(&args[0], 0)? {
+                let size = if name == "ROWS" { range.r1 - range.r0 + 1 } else { range.c1 - range.c0 + 1 };
+                return Ok(Grid::scalar(Value::Number(f64::from(size))));
+            }
+        }
         if name == "ROW" || name == "COLUMN" {
             if args.is_empty() {
                 return Ok(Grid::scalar(Value::Number(f64::from(if name == "ROW" {
@@ -1292,9 +1320,13 @@ impl<'a> Engine<'a> {
                     .random
                     .wrapping_mul(6364136223846793005)
                     .wrapping_add(1);
-                num(low
-                    + ((self.random >> 11) as f64 / (1u64 << 53) as f64 * (high - low + 1.0))
-                        .floor())
+                let fraction = (self.random >> 11) as f64 / (1u64 << 53) as f64;
+                let span = high - low + 1.0;
+                num(if span.is_finite() {
+                    (low + (fraction * span).floor()).min(high)
+                } else {
+                    interpolate(low, high, fraction).floor().clamp(low, high)
+                })
             }
             "TODAY" | "NOW" => {
                 arity(0, 0)?;
@@ -2051,11 +2083,11 @@ impl<'a> Engine<'a> {
                 if name == "VALUE" {
                     return num(value_text(&raw, self.book.locale_ru)?);
                 }
-                let mut s = raw.trim().to_string();
-                let mut divisor = 1.0;
+                let mut s = raw.chars().filter(|c| !matches!(*c, ' ' | '\u{a0}')).collect::<String>();
+                let mut percent = 0usize;
                 while s.ends_with('%') {
                     s.pop();
-                    divisor *= 100.0;
+                    percent += 1;
                 }
                 if name == "NUMBERVALUE" {
                     let decimal = if a.len() > 1 {
@@ -2105,7 +2137,9 @@ impl<'a> Engine<'a> {
                         _ => s.replace(',', "."),
                     };
                 }
-                num(s.parse::<f64>().map_err(|_| "#VALUE!")? / divisor)
+                let mut value = s.parse::<f64>().map_err(|_| "#VALUE!")?;
+                for _ in 0..percent { value /= 100.0; }
+                num(value)
             }
             "TEXT" => {
                 arity(2, 2)?;
@@ -2691,6 +2725,10 @@ impl<'a> Engine<'a> {
                 let present = n(2)?;
                 let future = default_n(3, 0.0)?;
                 let kind = if default_n(4, 0.0)? == 0.0 { 0.0 } else { 1.0 };
+                // NPER is invariant when every cash flow is scaled by the same factor.
+                let scale = payment.abs().max(present.abs()).max(future.abs());
+                if scale == 0.0 { return Err("#NUM!".into()); }
+                let (payment, present, future) = (payment / scale, present / scale, future / scale);
                 if rate == 0.0 {
                     if payment == 0.0 {
                         return Err("#NUM!".into());
@@ -4464,5 +4502,61 @@ mod next_search_formula_tests {
         let source="a".repeat(32767).chars().collect::<Vec<_>>();
         assert_eq!(literal_search(&source,"missing"),None);
         assert_eq!(literal_search(&"😀Привет".chars().collect::<Vec<_>>(),"ВЕТ"),Some(4));
+    }
+}
+
+#[cfg(test)]
+mod hundred_numeric_tests {
+    use super::*;
+    #[test]
+    fn numbervalue_ignores_spaces_between_percent_marks() {
+        let book = Book::default();
+        assert_eq!(evaluate(&book, book.active_id(), "=NUMBERVALUE(\"9% %\")"), Value::Number(0.0009));
+    }
+    #[test]
+    fn numbervalue_applies_many_percent_marks_without_an_infinite_divisor() {
+        let book = Book::default();
+        let input = format!("=NUMBERVALUE(\"1e308{}\")", "%".repeat(200));
+        let Value::Number(value) = evaluate(&book, book.active_id(), &input) else { panic!("number"); };
+        assert!((value / 1e-92 - 1.0).abs() < 1e-12);
+    }
+    #[test]
+    fn nper_is_invariant_under_large_cash_flow_scaling() {
+        let book = Book::default();
+        let small = evaluate(&book, book.active_id(), "=NPER(0.1,-1,1,1)");
+        let large = evaluate(&book, book.active_id(), "=NPER(0.1,-1e308,1e308,1e308)");
+        let (Value::Number(small), Value::Number(large)) = (small, large) else { panic!("numbers"); };
+        assert!((small - large).abs() < 1e-12);
+    }
+    #[test]
+    fn random_between_opposite_large_bounds_stays_finite() {
+        let book = Book::default();
+        for _ in 0..16 {
+            let Value::Number(value) = evaluate(&book, book.active_id(), "=RANDBETWEEN(-1e308,1e308)") else { panic!("number"); };
+            assert!((-1e308..=1e308).contains(&value));
+        }
+    }
+}
+
+#[cfg(test)]
+mod hundred_parser_reference_tests {
+    use super::*;
+    #[test]
+    fn left_associative_and_postfix_trees_are_bounded_before_drop() {
+        assert!(parse(&format!("={}1", "1+".repeat(8000))).is_err());
+        assert!(parse(&format!("=1{}", "%".repeat(8000))).is_err());
+        assert!(parse("=SUM(1,2,3)+4").is_ok());
+    }
+    #[test]
+    fn rows_and_columns_do_not_materialize_direct_references() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.set_input(id, 0, 0, "=1/0")?;
+        let mut engine = Engine::new(&book);
+        engine.materialized = 64 * 1024 * 1024;
+        assert_eq!(engine.eval(&parse("=ROWS(A1:B2)")?, 0, 0, 0)?.first(), Value::Number(2.0));
+        assert_eq!(engine.eval(&parse("=COLUMNS(A1:D2)")?, 0, 0, 0)?.first(), Value::Number(4.0));
+        assert!(engine.cache.is_empty());
+        Ok(())
     }
 }

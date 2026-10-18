@@ -67,6 +67,9 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
     } else {
         *number
     };
+    if section.eq_ignore_ascii_case("General") {
+        return localize(&general_number(numeric, 10), ru);
+    }
     let lower = section.to_ascii_lowercase();
     let bare = outside_quotes(&lower);
     if bare
@@ -406,16 +409,19 @@ fn outside_tokens(code: &str) -> Vec<(usize, char)> {
 fn numeric_pattern(number: f64, decimals: &str, minimum_digits: usize) -> String {
     let mut text = fixed(number, decimals.len());
     let mandatory = decimals.rfind('0').map_or(0, |index| index + 1);
-    let optional = decimals.chars().rev().take_while(|c| *c == '#').count();
-    for _ in 0..optional.min(decimals.len() - mandatory) {
-        if text.ends_with('0') {
-            text.pop();
-        } else {
-            break;
+    if let Some(dot) = text.find('.') {
+        let mut significant = text.len() - dot - 1;
+        while significant > mandatory && text.as_bytes().get(dot + significant) == Some(&b'0') {
+            significant -= 1;
         }
-    }
-    if text.ends_with('.') {
-        text.pop();
+        let fraction = text[dot + 1..dot + 1 + significant].to_string();
+        text.truncate(dot);
+        let padding = decimals.chars().skip(significant).filter(|c| *c == '?').count();
+        if significant > 0 || padding > 0 {
+            text.push('.');
+            text.push_str(&fraction);
+            text.extend(std::iter::repeat_n(' ', padding));
+        }
     }
     let sign = usize::from(text.starts_with('-'));
     let end = text.find('.').unwrap_or(text.len());
@@ -424,9 +430,7 @@ fn numeric_pattern(number: f64, decimals: &str, minimum_digits: usize) -> String
         text.insert_str(sign, &"0".repeat(minimum_digits - digits));
     } else if minimum_digits == 0 && text.get(sign..end) == Some("0") {
         text.remove(sign);
-        if text == "-" {
-            text.clear();
-        }
+        if text == "-" { text.clear(); }
     }
     text
 }
@@ -564,6 +568,11 @@ fn date_display(serial: f64, code: &str, ru: bool) -> String {
         if quote {
             out.push(c);
             i += 1;
+            continue;
+        }
+        if matches!(c, '_' | '*') {
+            if c == '_' { out.push(' '); }
+            i = (i + 2).min(chars.len());
             continue;
         }
         if chars[i..].iter().take(3).collect::<String>().eq_ignore_ascii_case("A/P") {
@@ -1005,5 +1014,28 @@ mod second_format_defects {
     fn quoted_words_cannot_change_month_tokens_into_minutes() {
         assert_eq!(display(&Value::Number(super::super::formula::date_serial(2024,1,15)),
             r#"mm" seconds""#,false),"01 seconds");
+    }
+}
+
+#[cfg(test)]
+mod hundred_format_tests {
+    use super::*;
+    #[test]
+    fn bracketed_general_keeps_numeric_rendering() {
+        assert_eq!(display(&Value::Number(1234.5), "[Red]General", false), "1234.5");
+        assert_eq!(display(&Value::Number(12.5), "[>=10][Blue]General;0", true), "12,5");
+    }
+    #[test]
+    fn question_decimal_slots_reserve_spaces_instead_of_zeroes() {
+        assert_eq!(display(&Value::Number(1.2), "0.??", false), "1.2 ");
+        assert_eq!(display(&Value::Number(1.0), "0.??", false), "1.  ");
+        assert_eq!(display(&Value::Number(1.2), "0.0?", false), "1.2 ");
+        assert_eq!(display(&Value::Number(1.0), "0.##", false), "1");
+    }
+    #[test]
+    fn date_spacing_and_fill_arguments_are_not_calendar_tokens() {
+        let serial = super::super::formula::date_serial(2024, 1, 15);
+        assert_eq!(display(&Value::Number(serial), "yyyy_m-mm", false), "2024 -01");
+        assert_eq!(display(&Value::Number(serial), "yyyy*mmm", false), "202401");
     }
 }

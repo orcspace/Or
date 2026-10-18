@@ -366,15 +366,20 @@ impl Book {
     fn text_bytes(&self) -> usize {
         let names = self.names.iter().fold(0usize, |total,(name,value)| total.saturating_add(name.len()).saturating_add(value.len()));
         self.sheets.iter().fold(names, |total,sheet| {
-            sheet.cells.values().fold(total.saturating_add(sheet.name.len()), |total,cell| {
+            let metadata = sheet.charts.iter().fold(0usize, |bytes, chart| bytes.saturating_add(chart.title.len()))
+                .saturating_add(sheet.images.iter().fold(0usize, |bytes, image| bytes.saturating_add(image.alt.len())));
+            sheet.cells.values().fold(total.saturating_add(sheet.name.len()).saturating_add(metadata), |total,cell| {
                 total.saturating_add(cell.input.len()).saturating_add(cell.fmt.font.len()).saturating_add(cell.fmt.number.len())
             })
         })
     }
+    fn validate_text_budget(&self, limit: usize) -> Result<(), String> {
+        if self.text_bytes() > limit {
+            Err("Текст книги и метаданных превышает общий лимит".into())
+        } else { Ok(()) }
+    }
     pub fn validate(&self) -> Result<(), String> {
-        if self.text_bytes() > MAX_BOOK_TEXT_BYTES {
-            return Err("Исходный текст книги превышает 64 МиБ".into());
-        }
+        self.validate_text_budget(MAX_BOOK_TEXT_BYTES)?;
         if self.sheets.is_empty()
             || self.sheets.len() > 1024
             || self.sheets.iter().all(|sheet| sheet.hidden)
@@ -1656,5 +1661,20 @@ mod additional_replace_defect_tests {
         let before=book.clone();let limit=book.text_bytes()+3;
         assert!(book.replace_all_with_limit(id,"a","1234",true,limit).is_err());
         assert_eq!(book,before);Ok(())
+    }
+}
+
+#[cfg(test)]
+mod hundred_book_budget_tests {
+    use super::*;
+    #[test]
+    fn chart_titles_and_picture_descriptions_share_the_workbook_text_budget() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        let before = book.text_bytes();
+        book.add_chart(id, ChartKind::Column, Range::new(0, 0, 0, 1), &"x".repeat(128))?;
+        assert!(book.validate_text_budget(before + 127).is_err());
+        assert!(book.validate_text_budget(before + 128).is_ok());
+        Ok(())
     }
 }

@@ -1946,7 +1946,7 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
             });
         });
     let range=book.selection.range();
-    if range.validate().is_ok() && let Some(sheet)=book.active_sheet() {
+    if statistics_range_valid(range) && let Some(sheet)=book.active_sheet() {
         let (sum,mean,nonempty)=selection_statistics(sheet,range);
         ui.horizontal_wrapped(|ui| {
             ui.small(format!("Выделено: {}:{}  ·  Заполнено: {nonempty}",
@@ -3961,13 +3961,27 @@ fn find_step(book:&mut Book,state:&mut State,backwards:bool) {
         Err(error)=>state.error=error,
     }
 }
+fn statistics_range_valid(range: Range) -> bool {
+    range.r0 <= range.r1 && range.c0 <= range.c1 && range.r1 < MAX_ROWS && range.c1 < MAX_COLS
+}
 fn selection_statistics(sheet:&Sheet,range:Range)->(Option<f64>,Option<f64>,usize) {
     let mut numbers=Vec::new();let mut nonempty=0;
-    for r in range.r0..=range.r1 {
-        for c in range.c0..=range.c1 {
-            if let Some(cell)=sheet.cell(r,c) {
-                if cell.value!=Value::Empty {nonempty+=1;}
-                if let Value::Number(value)=cell.value {numbers.push(value);}
+    let mut take = |cell: &Cell| {
+        if cell.value != Value::Empty { nonempty += 1; }
+        if let Value::Number(value) = cell.value { numbers.push(value); }
+    };
+    if range.validate().is_ok() {
+        for r in range.r0..=range.r1 {
+            for c in range.c0..=range.c1 {
+                if let Some(cell) = sheet.cell(r, c) { take(cell); }
+            }
+        }
+    } else {
+        // Whole rows/columns may contain billions of coordinates but at most the
+        // workbook's bounded stored cells. Never walk the rectangular area here.
+        for (key, cell) in &sheet.cells {
+            if super::model::parse_address(key).is_some_and(|(r, c)| range.contains(r, c)) {
+                take(cell);
             }
         }
     }
@@ -4015,5 +4029,23 @@ mod additional_search_status_tests {
             assert!(!ui.input(|input|input.key_pressed(Key::Escape)));
         });
         assert!(!state.find_open);
+    }
+}
+
+#[cfg(test)]
+mod hundred_statistics_tests {
+    use super::*;
+    #[test]
+    fn full_column_and_sheet_statistics_use_sparse_cells() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.set_cell(id, 0, 0, "10")?;
+        book.set_cell(id, MAX_ROWS - 1, 0, "20")?;
+        book.set_cell(id, 0, 1, "100")?;
+        let column = Range::new(0, 0, MAX_ROWS - 1, 0);
+        assert!(statistics_range_valid(column));
+        assert_eq!(selection_statistics(book.active_sheet().ok_or("sheet")?, column), (Some(30.0), Some(15.0), 2));
+        assert!(statistics_range_valid(Range::new(0, 0, MAX_ROWS - 1, MAX_COLS - 1)));
+        Ok(())
     }
 }
