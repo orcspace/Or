@@ -21,3 +21,12 @@
 - Реализован отдельный read-only `sheets_explain_formula` с координатами, пределами и версией снимка; инспектор принимает kind=formatting. Добавлен контрактный тест, запуск не проводился.
 - Новые UI-команды «Специальная вставка» (режим/transpose/внутренний снимок) и «Повестка» (предпросмотр/разбиение) проходят обычный UI→ops→undo. Их отдельные MCP-схемы одного вызова ещё нужны; generic ops не выдаются за такие контракты.
 - Паспорт формулы — карта прямых/именованных ссылок с кэшированными значениями, не полный пошаговый debugger вычисления Excel. Линза оформления пока охватывает body-абзацы и встроенные стили.
+
+
+## Срез BUG-151…250
+
+- `docs_read_objects` получил layout/merge metadata и bounded table pages, `sheets_read_objects` — paging каждой коллекции и total_*; точные defaults и изменение поведения описаны в [MCP.md](MCP.md). Эти чтения не закрывают full rich-cell content streaming и version-pinned snapshots.
+- `slides_read` теперь возвращает fill_visible, `slides_format_text` принимает noFill. Остальные shape/master/flip gaps не считаются закрытыми.
+- `docs_replace_all` существовал до этой фазы. Отсутствует отдельный контракт управления новыми UI-панелями; это не отсутствие инструмента замены текста. UI checked bulk replace и существующий MCP positioned-edit path не объявляются идентичными.
+- Dry-run preflight и повторная проверка разрешений media jobs реализованы в коде; transport/permission race/undo/runtime acceptance не проводились.
+- Dedicated tools для typed clipboard с merge/transpose, section management и новых view controls остаются отдельными задачами. Сборка, тесты, GUI и внешние MCP-клиенты не запускались.

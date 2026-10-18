@@ -247,4 +247,23 @@ Subscriptions: document edit → resource-updated; resource set change → list_
 
 Код, без runtime-приёмки: `slides_read` сериализует `fill_visible`; `slides_update_element` принимает существующий nested patch `element: {"fill_visible": false}` вместе с обязательными document_id/slide_id/element_id. Права, version/mode, кандидатная модель и undo проходят существующий dispatch; новый bypass не добавлен. Поле применяется к Rect/Ellipse, хранится отдельно от fill RGB и stroke, экспортируется в PPTX как a:noFill. Старые модели без поля получают true. Подробности и ограничения: [BUG-150](audit/bugs-101-150-2026-10-18.md).
 
-Панель поиска Docs и фильтр навигатора Slides изменяют view state. Новых MCP tools управления этими панелями нет. Checked Docs bulk replace пока используется UI/model API; прямого нового MCP-контракта Docs replace-all эта фаза не добавляет. Не путать с существующим Sheets replace_all. Это остаётся пробелом полного MCP-паритета.
+Панель поиска Docs и фильтр навигатора Slides изменяют view state. Новых MCP tools управления этими панелями нет. Инструмент `docs_replace_all` уже существует, как и Sheets replace_all; UI использует отдельный checked bulk-replace API модели. Наличие существующего tool не означает одинаковых алгоритмов/лимитов или полного MCP-паритета. Предыдущая формулировка могла ошибочно создавать впечатление отсутствия Docs replace-all и здесь уточнена.
+
+
+## Дополнение2026-10-18: BUG-151…250, bounded object reads
+
+Статус — реализация по исходникам, без компиляции, запуска тестов или MCP/GUI-приёмки. Полный реестр: [BUG-151…250](audit/bugs-151-250-2026-10-18.md).
+
+`docs_read_objects` принимает обязательный `document_id`; `index` (по умолчанию0) и `count` (по умолчанию20, clamp1…50) листают независимо списки таблиц и изображений. Необязательный `table_id` фильтрует таблицы **до** применения index/count; для конкретной таблицы используйте index=0, отсутствующий ID возвращает not_found. Изображения этим фильтром не ограничиваются.
+
+В каждой возвращаемой таблице `row`/`rows` задают начало/число строк (0/20, rows clamp1…100), `col`/`columns` — начало/число физических ячеек каждой строки (0/64, columns clamp1…256). Индексы нулевые. Это физические элементы массива ячеек, не логические grid column coordinates; `span` и `merged` нужны для восстановления сетки. Ответ содержит `row_offset`, `column_offset`, `total_rows`, `grid_columns`, размеры колонок, border_color/borderless, cell_margin, header_rows и страницу row_heights; ячейки добавляют span/merged/v_align к text/fill/align/format. Корень содержит total_tables/total_images, offset/page_size, page и version.
+
+Это изменение поведения: по умолчанию table rows теперь ограничены20, cells —64; клиенты, которым нужна вся таблица, должны листать обе оси. `text` остаётся плоским текстом ячейки, `format` — её первым оформлением, не полной rich-run моделью. Общий лимит ответа1MiB сохраняется; одна огромная ячейка/поле может по-прежнему дать too_large. Потоковое чтение содержимого одной ячейки не добавлено.
+
+`sheets_read_objects(document_id,sheet_id,index?,count?)`: index=0, count=100, clamp1…100. Один index/count применяется **отдельно** к каждой коллекции widths, row_heights, hidden_rows, hidden_cols, merges, conditional, charts, images и workbook names. Пары BTreeMap возвращаются JSON-объектами с прежними ключами; последовательности — массивами. `total_widths`, `total_row_heights`, `total_hidden_rows`, `total_hidden_cols`, `total_merges`, `total_conditional`, `total_charts`, `total_images`, `total_names` относятся к полным коллекциям, `offset/page_size/version` описывают страницу. sheet name/extent/freeze/filter/hidden/tab_color остаются скалярными полями. Bytes изображений не возвращаются.
+
+Оба read tool сохраняют обычные document/client permissions и не меняют draft/selection/undo. Между страницами возможна правка документа: клиент сравнивает version и начинает чтение заново при изменении; закреплённого snapshot token нет.
+
+`slides_read` теперь фактически включает `fill_visible` в element metadata (предыдущая документация опережала сериализатор). `slides_format_text` допускает `format: {"fill_visible":false}` для массива element_ids; `slides_update_element` по-прежнему принимает nested element patch. Существующие typed validation/candidate/ops/undo и права edit сохраняются. Это noFill для поддержанных фигур, не полная модель DrawingML fills.
+
+Файловый dry_run выполняет общий preflight: ID документа, поддержанный формат, путь сохранения, read-only/save-lock/busy для соответствующей команды. Он не пишет файл и не запускает экспорт; это проверка базовых предпосылок, не гарантия успешного рендера/дисковой записи. Open по-прежнему проходит пользовательский UI-путь. Возврат фонового media job повторно проверяет MCP enabled и актуальное разрешение/поколение встроенного чата; отзыв не отменяет уже выполненный дисковый export.
