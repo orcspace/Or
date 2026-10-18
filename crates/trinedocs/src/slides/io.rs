@@ -1051,7 +1051,7 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
                             .map(cached_points)
                             .transpose()?
                             .unwrap_or_default();
-                        element.text = chart.descend("title").map(Node::text_content).unwrap_or_default();
+                        element.text = chart_title(&chart)?;
                         element.fill = color(chart.descend("ser").and_then(|series|series.child("spPr")), look, element.fill);
                         element.kind = ElementKind::Chart { values, labels };
                     } else {
@@ -1598,11 +1598,18 @@ fn table_xml(e: &Element, id: usize, cells: &[Vec<String>]) -> Result<String,Str
         xfrm(e, "p")
     ))
 }
+fn chart_title(chart:&Node)->Result<String,String> {
+    let Some(title)=chart.descend("title") else{return Ok(String::new());};
+    let Some(text)=title.child("tx") else{return Ok(String::new());};
+    if let Some(rich)=text.child("rich") {return Ok(rich.paragraph_text());}
+    if let Some(reference)=text.child("strRef").or_else(||text.child("strLit")) {
+        return Ok(cached_points(reference)?.into_iter().next().unwrap_or_default());
+    }
+    Ok(text.child("v").map(|node|node.text.clone()).unwrap_or_default())
+}
 fn chart_xml(values: &[f32], labels: &[String], fill: [u8; 3],title:&str) -> String {
-    let cats = values
-        .iter()
-        .enumerate()
-        .map(|(i, _)| {
+    let point_count=values.len().max(labels.len());
+    let cats = (0..point_count).map(|i| {
             format!(
                 "<c:pt idx=\"{i}\"><c:v>{}</c:v></c:pt>",
                 xml_escape(
@@ -1614,10 +1621,8 @@ fn chart_xml(values: &[f32], labels: &[String], fill: [u8; 3],title:&str) -> Str
             )
         })
         .collect::<String>();
-    let vals = values
-        .iter()
-        .enumerate()
-        .map(|(i, v)| format!("<c:pt idx=\"{i}\"><c:v>{v}</c:v></c:pt>"))
+    let vals = (0..point_count)
+        .map(|i| {let value=values.get(i).copied().unwrap_or(0.0);format!("<c:pt idx=\"{i}\"><c:v>{value}</c:v></c:pt>")})
         .collect::<String>();
     let title=if title.is_empty() {String::new()}else {
         format!("<c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>{}</a:t></a:r></a:p></c:rich></c:tx><c:overlay val=\"0\"/></c:title>",xml_escape(title))
@@ -1625,8 +1630,8 @@ fn chart_xml(values: &[f32], labels: &[String], fill: [u8; 3],title:&str) -> Str
     format!(
         "{XML}<c:chartSpace xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\" xmlns:a=\"{A}\"><c:chart>{title}<c:plotArea><c:layout/><c:barChart><c:barDir val=\"col\"/><c:grouping val=\"clustered\"/><c:ser><c:idx val=\"0\"/><c:order val=\"0\"/><c:spPr><a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill></c:spPr><c:cat><c:strLit><c:ptCount val=\"{}\"/>{cats}</c:strLit></c:cat><c:val><c:numLit><c:formatCode>General</c:formatCode><c:ptCount val=\"{}\"/>{vals}</c:numLit></c:val></c:ser><c:axId val=\"1\"/><c:axId val=\"2\"/></c:barChart><c:catAx><c:axId val=\"1\"/><c:scaling><c:orientation val=\"minMax\"/></c:scaling><c:axPos val=\"b\"/><c:crossAx val=\"2\"/><c:crosses val=\"autoZero\"/><c:auto val=\"1\"/><c:lblAlgn val=\"ctr\"/><c:lblOffset val=\"100\"/></c:catAx><c:valAx><c:axId val=\"2\"/><c:scaling><c:orientation val=\"minMax\"/></c:scaling><c:axPos val=\"l\"/><c:numFmt formatCode=\"General\" sourceLinked=\"1\"/><c:crossAx val=\"1\"/><c:crosses val=\"autoZero\"/><c:crossBetween val=\"between\"/></c:valAx></c:plotArea><c:plotVisOnly val=\"1\"/></c:chart></c:chartSpace>",
         hex(fill),
-        values.len(),
-        values.len()
+        point_count,
+        point_count
     )
 }
 fn theme_xml(deck: &Deck) -> String {
@@ -3058,5 +3063,32 @@ mod hundred_slide_io_tests {
         let shape="<p:grpSp><p:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"2540000\" cy=\"2540000\"/><a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"1270000\" cy=\"1270000\"/></a:xfrm></p:grpSpPr><p:sp><p:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"1270000\" cy=\"1270000\"/></a:xfrm><a:prstGeom prst=\"rect\"/><a:ln w=\"19050\"><a:solidFill><a:srgbClr val=\"000000\"/></a:solidFill></a:ln></p:spPr><p:txBody><a:p><a:r><a:rPr sz=\"1200\"/><a:t>Scaled</a:t></a:r></a:p></p:txBody></p:sp></p:grpSp>";
         let imported=import_parts(shape_parts(shape)?)?;let e=&imported.slides[0].elements[0];
         assert_eq!((e.font_size,e.stroke_width),(24.0,3.0));Ok(())
+    }
+}
+
+
+#[cfg(test)]
+mod phase200_io_tests {
+    use super::*;
+    fn external(deck:&Deck)->Result<Deck,String> {
+        let parts=read_zip(&write(deck,"pptx")?)?.into_iter().filter(|(path,_)|!path.starts_with("customXml/")).collect();
+        read(&write_zip(parts)?,"pptx")
+    }
+    #[test]
+    fn chart_categories_without_values_survive_pptx_and_display()->Result<(),String> {
+        let mut deck=Deck::empty();let slide=deck.add_slide("blank");
+        deck.add_element(slide,ElementKind::Chart{values:vec![1.0],labels:vec!["A".into(),"B".into(),"C".into()]})?;
+        let imported=external(&deck)?;
+        let ElementKind::Chart{values,labels}=&imported.slides[0].elements[0].kind else{return Err("chart".into());};
+        assert_eq!(values,&vec![1.0,0.0,0.0]);assert_eq!(labels,&vec!["A".to_string(),"B".into(),"C".into()]);
+        let page=deck.page(&deck.slides[0]);
+        assert!(page.items.iter().any(|item|matches!(item,crate::render::Primitive::TextStyled{text,..} if text=="C")));Ok(())
+    }
+    #[test]
+    fn linked_chart_titles_import_the_cached_scalar_text()->Result<(),String> {
+        let chart=parse(br#"<chart><title><tx><strRef><f>Sheet1!$A$1</f><strCache><ptCount val="1"/><pt idx="0"><v>Revenue &amp; costs</v></pt></strCache></strRef></tx></title></chart>"#)?;
+        assert_eq!(chart_title(&chart)?,"Revenue & costs");
+        let rich=parse(br#"<chart><title><tx><rich><p><r><t>A</t></r></p><p><r><t>B</t></r></p></rich></tx></title></chart>"#)?;
+        assert_eq!(chart_title(&rich)?,"A\nB");Ok(())
     }
 }
