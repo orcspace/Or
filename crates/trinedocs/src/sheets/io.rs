@@ -40,46 +40,9 @@ pub fn write(book: &Book, ext: &str) -> Result<Vec<u8>, String> {
     let ext = ext.trim_start_matches('.').to_ascii_lowercase();
     match ext.as_str() {
         "xlsx" => write_xlsx(book),
-        "csv" | "tsv" => {
-            let s = book.active_sheet().ok_or("Нет активного листа")?;
-            let (r, c) = s.extent();
-            if (u64::from(r) + 1) * (u64::from(c) + 1) > MAX_RANGE_CELLS as u64 {
-                return Err("Экспортируемый диапазон превышает 100 000 ячеек".into());
-            }
-            let rows = book.read_range(s.id, 0, 0, r, c)?;
-            Ok(format!(
-                "\u{feff}{}",
-                to_csv(
-                    &rows,
-                    if ext.eq_ignore_ascii_case("tsv") {
-                        '\t'
-                    } else {
-                        ';'
-                    }
-                )
-            )
-            .into_bytes())
-        }
+        "csv" | "tsv" => write_text_book(book, &ext, MAX_FILE),
         "html" => write_html_book(book,1_000_000,MAX_FILE),
-        "md" => {
-            let s = book.active_sheet().ok_or("Нет активного листа")?;
-            let (r, c) = s.extent();
-            let rows = book.read_range(s.id, 0, 0, r, c)?;
-            let mut out = format!("# {}\n\n", markdown_text(&s.name));
-            for (i, row) in rows.iter().enumerate() {
-                out.push_str(&format!(
-                    "| {} |\n",
-                    row.iter()
-                        .map(|s| markdown_text(s))
-                        .collect::<Vec<_>>()
-                        .join(" | ")
-                ));
-                if i == 0 {
-                    out.push_str(&format!("|{}|\n", vec![" --- "; row.len()].join("|")));
-                }
-            }
-            Ok(out.into_bytes())
-        }
+        "md" => write_text_book(book, &ext, MAX_FILE),
         _ => Err(format!("Не поддерживается сохранение {ext}")),
     }
 }
@@ -1018,6 +981,7 @@ fn styles_with_theme_fonts(bytes: &[u8],theme:&[[u8;3]],faces:&BTreeMap<String,S
     let mut num_formats = BTreeMap::new();
     let mut current_font = CellFormat::default();
     let mut current_fill = None;
+    let mut apply_style_alignment = true;
     loop {
         let event = reader.read_event().map_err(|e| e.to_string())?;
         let empty = matches!(event, Event::Empty(_));
@@ -1111,18 +1075,23 @@ fn styles_with_theme_fonts(bytes: &[u8],theme:&[[u8;3]],faces:&BTreeMap<String,S
                         a.get("xfId").and_then(|value|value.parse::<usize>().ok())
                             .and_then(|index|base_formats.get(index)).cloned().unwrap_or_default()
                     }else{CellFormat::default()};
-                    if let Some(font)=a.get("fontId").and_then(|v|v.parse::<usize>().ok()).and_then(|i|fonts.get(i)) {
+                    apply_style_alignment = section != "cellStyleXfs" || xml_bool(a.get("applyAlignment"), true);
+                    if (section != "cellStyleXfs" || xml_bool(a.get("applyFont"), true))
+                        && let Some(font)=a.get("fontId").and_then(|v|v.parse::<usize>().ok()).and_then(|i|fonts.get(i)) {
                         fmt.font=font.font.clone();fmt.size=font.size;fmt.bold=font.bold;fmt.italic=font.italic;
                         fmt.underline=font.underline;fmt.strike=font.strike;fmt.color=font.color;
                     }
-                    if let Some(id)=a.get("numFmtId").and_then(|v|v.parse::<u32>().ok()) {
+                    if (section != "cellStyleXfs" || xml_bool(a.get("applyNumberFormat"), true))
+                        && let Some(id)=a.get("numFmtId").and_then(|v|v.parse::<u32>().ok()) {
                         fmt.number=num_formats.get(&id).cloned().unwrap_or_else(||builtin(id));
                     }
-                    if let Some(fill)=a.get("fillId").and_then(|v|v.parse::<usize>().ok()).and_then(|i|fills.get(i)) {fmt.fill=*fill;}
-                    if let Some(border)=a.get("borderId").and_then(|v|v.parse::<usize>().ok()).and_then(|i|borders.get(i)) {fmt.border=*border;}
+                    if (section != "cellStyleXfs" || xml_bool(a.get("applyFill"), true))
+                        && let Some(fill)=a.get("fillId").and_then(|v|v.parse::<usize>().ok()).and_then(|i|fills.get(i)) {fmt.fill=*fill;}
+                    if (section != "cellStyleXfs" || xml_bool(a.get("applyBorder"), true))
+                        && let Some(border)=a.get("borderId").and_then(|v|v.parse::<usize>().ok()).and_then(|i|borders.get(i)) {fmt.border=*border;}
                     if section=="cellXfs" {formats.push(fmt);}else{base_formats.push(fmt);}
                 }
-                if matches!(section.as_str(),"cellXfs"|"cellStyleXfs") && tag=="alignment" {
+                if matches!(section.as_str(),"cellXfs"|"cellStyleXfs") && tag=="alignment" && apply_style_alignment {
                     let target=if section=="cellXfs" {&mut formats}else{&mut base_formats};
                     if let Some(fmt)=target.last_mut() {
                     fmt.align = match a.get("horizontal").map(String::as_str) {
@@ -1365,23 +1334,69 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
     if let Some(selection)=selections.remove(&book.active_id()) {book.selection=selection;}
     Ok(())
 }
-fn read_charts(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(), String> {
-    for (name, bytes) in parts {
-        if !name.starts_with("xl/charts/chart") || !name.ends_with(".xml") {
-            continue;
+struct ChartLocation {
+    sheet: u64,
+    path: String,
+    anchor: PictureAnchor,
+}
+fn chart_locations(book: &Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<Vec<ChartLocation>, String> {
+    let mut locations = Vec::new();
+    let workbook_rels = relationships("xl/workbook.xml", parts);
+    let mut sheets = Vec::new();
+    if let Some(workbook) = parts.get("xl/workbook.xml") {
+        each_tag(workbook, |tag, attrs| {
+            if tag == "sheet" && let (Some(name), Some(id)) = (attrs.get("name"), attrs.get("r:id"))
+                && let Some(sheet) = book.sheets.iter().find(|sheet| sheet.name == *name)
+                && let Some((_, path)) = workbook_rels.get(id) {
+                    sheets.push((sheet.id, path.clone()));
+                }
+            Ok(())
+        })?;
+    }
+    for (sheet, path) in sheets {
+        let Some(bytes) = parts.get(&path) else { continue; };
+        let rels = relationships(&path, parts);
+        let mut drawing_ids = Vec::new();
+        each_tag(bytes, |tag, attrs| {
+            if tag == "drawing" && let Some(id) = attrs.get("r:id") { drawing_ids.push(id.clone()); }
+            Ok(())
+        })?;
+        for id in drawing_ids {
+            let Some((_, drawing)) = rels.get(&id).filter(|(kind, _)| kind.ends_with("/drawing")) else { continue; };
+            let drawing_rels = relationships(drawing, parts);
+            let Some(bytes) = parts.get(drawing) else { continue; };
+            let text = std::str::from_utf8(bytes).map_err(|error| error.to_string())?;
+            for anchor in drawing_pictures(text)? {
+                if let Some((_, path)) = drawing_rels.get(&anchor.chart).filter(|(kind, _)| kind.ends_with("/chart")) {
+                    locations.push(ChartLocation { sheet, path: path.clone(), anchor });
+                    if locations.len() > 10000 { return Err("Слишком много импортируемых диаграмм".into()); }
+                }
+            }
         }
+    }
+    Ok(locations)
+}
+fn read_charts(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(), String> {
+    for location in chart_locations(book, parts)? {
+        let Some(bytes) = parts.get(&location.path) else { continue; };
         let mut reader = Reader::from_str(std::str::from_utf8(bytes).map_err(|e| e.to_string())?);
         let mut kind = ChartKind::Column;
         let mut refs = Vec::new();
         let mut title = String::new();
         let mut title_refs=Vec::new();
         let mut in_title = false;
+        let mut in_plot_area = false;
+        let mut in_series_name = false;
         loop {
-            match reader.read_event().map_err(|e| e.to_string())? {
+            let event = reader.read_event().map_err(|e| e.to_string())?;
+            let empty = matches!(event, Event::Empty(_));
+            match event {
                 Event::Start(e) | Event::Empty(e) => {
                     let tag = local(&e);
                     match tag.as_str() {
-                        "title" => in_title = true,
+                        "plotArea" if !empty => in_plot_area = true,
+                        "tx" if !in_title && !empty => in_series_name = true,
+                        "title" if !in_plot_area && !empty => in_title = true,
                         "barChart" => kind = ChartKind::Column,
                         "lineChart" => kind = ChartKind::Line,
                         "areaChart" => kind = ChartKind::Area,
@@ -1403,7 +1418,7 @@ fn read_charts(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(),
                                 .map_err(|e| e.to_string())?
                                 .into_owned();
                             let found=super::formula::dependencies(&format!("={text}"));
-                            if in_title {title_refs.extend(found);}else{refs.extend(found);}
+                            if in_title {title_refs.extend(found);}else if !in_series_name {refs.extend(found);}
                         }
                         "t" if in_title => {
                             let text = reader
@@ -1419,6 +1434,8 @@ fn read_charts(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(),
                     }
                 }
                 Event::End(e) => {
+                    if e.local_name().as_ref() == "plotArea" { in_plot_area = false; }
+                    if e.local_name().as_ref() == "tx" { in_series_name = false; }
                     if e.local_name().as_ref() == "title" {
                         in_title = false;
                     }
@@ -1429,14 +1446,14 @@ fn read_charts(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(),
             }
         }
         if title.is_empty() && let Some((Some(sheet),range))=title_refs.first()
-            && let Some(sheet)=book.sheets.iter().find(|value|value.name.eq_ignore_ascii_case(sheet)) {
+            && let Some(sheet)=book.sheets.iter().find(|value|value.name.to_lowercase() == sheet.to_lowercase()) {
             title=sheet.display(range.r0,range.c0,book.locale_ru);
         }
         if let Some((Some(sheet), first)) = refs.first()
             && let Some(id) = book
                 .sheets
                 .iter()
-                .find(|s| s.name.eq_ignore_ascii_case(sheet))
+                .find(|s| s.name.to_lowercase() == sheet.to_lowercase())
                 .map(|s| s.id)
         {
             let mut range = *first;
@@ -1447,7 +1464,21 @@ fn read_charts(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(),
                 range.c1 = range.c1.max(r.c1);
             }
             if range.validate().is_ok() {
-                book.add_chart(id, kind, range, &title)?;
+                let owner = book.sheet_by_id(location.sheet).ok_or("Нет листа диаграммы")?;
+                if owner.id != id || refs.iter().any(|(source, _)| source.as_ref()
+                    .is_some_and(|source| source.to_lowercase() != owner.name.to_lowercase())) {
+                    return Err("Диаграмма с данными другого листа пока не поддерживается; импорт остановлен без переноса её на чужой лист".into());
+                }
+                let (row, col, _, _, width, height) = picture_geometry(owner, &location.anchor);
+                let chart_id = book.add_chart(location.sheet, kind, range, &title)?;
+                if let Some(chart) = book.sheet_by_id_mut(location.sheet)
+                    .and_then(|sheet| sheet.charts.iter_mut().find(|chart| chart.id == chart_id)) {
+                    chart.row = row; chart.col = col;
+                    if width > 0.0 && height > 0.0 {
+                        chart.width = width.clamp(1.0, 4000.0);
+                        chart.height = height.clamp(1.0, 4000.0);
+                    }
+                }
             }
         }
     }
@@ -1547,17 +1578,18 @@ fn read_sheet_images(
 struct PicturePoint {
     row: u32,
     col: u32,
-    row_off: u64,
-    col_off: u64,
+    row_off: i64,
+    col_off: i64,
 }
 #[derive(Default)]
 struct PictureAnchor {
     from: PicturePoint,
     to: Option<PicturePoint>,
-    absolute: Option<(u64, u64)>,
+    absolute: Option<(i64, i64)>,
     cx: u64,
     cy: u64,
     embed: String,
+    chart: String,
     alt: String,
 }
 fn drawing_pictures(text: &str) -> Result<Vec<PictureAnchor>, String> {
@@ -1586,7 +1618,7 @@ fn drawing_pictures(text: &str) -> Result<Vec<PictureAnchor>, String> {
                             .read_text(e.name())
                             .map_err(|error| error.to_string())?
                             .trim()
-                            .parse::<u64>()
+                            .parse::<i64>()
                             .map_err(|_| "Неверная координата рисунка")?;
                         if let Some(anchor) = current.as_mut() {
                             let position = if point == Some(true) {
@@ -1619,7 +1651,7 @@ fn drawing_pictures(text: &str) -> Result<Vec<PictureAnchor>, String> {
                 "from" | "to" => point = None,
                 "oneCellAnchor" | "twoCellAnchor" | "absoluteAnchor" => {
                     if let Some(anchor) = current.take()
-                        && !anchor.embed.is_empty()
+                        && (!anchor.embed.is_empty() || !anchor.chart.is_empty())
                     {
                         pictures.push(anchor);
                     }
@@ -1659,6 +1691,9 @@ fn picture_attrs(
             ) {
                 anchor.absolute = Some((x, y));
             }
+        }
+        "chart" => {
+            if let Some(id) = values.get("r:id") { anchor.chart = id.clone(); }
         }
         "blip" => {
             if let Some(embed) = values.get("r:embed") {
@@ -1722,7 +1757,9 @@ fn picture_geometry(
     let (x, y) = anchor
         .absolute
         .map_or((x, y), |(x, y)| (x as f32 / 9525.0, y as f32 / 9525.0));
-    let (row, col, x_offset, y_offset) = if anchor.absolute.is_some() {
+    let (x, y) = (x.max(0.0), y.max(0.0));
+    let (row, col, x_offset, y_offset) = if anchor.absolute.is_some()
+        || anchor.from.row_off < 0 || anchor.from.col_off < 0 {
         let row = drawing_axis_index(
             y,
             super::model::MAX_ROWS,
@@ -1830,6 +1867,11 @@ fn write_xlsx(book: &Book) -> Result<Vec<u8>, String> {
         ws.set_name(&sheet.name).map_err(|e| e.to_string())?;
         ws.set_active(index == book.active);
         ws.set_hidden(sheet.hidden);
+        if index == book.active {
+            ws.set_selection(book.selection.row, book.selection.col as u16,
+                book.selection.anchor_row, book.selection.anchor_col as u16)
+                .map_err(|error| error.to_string())?;
+        }
         if let Some(color) = sheet.tab_color {
             ws.set_tab_color(Color::RGB(rgb_number(color)));
         }
@@ -2762,8 +2804,8 @@ mod additional_xlsx_defect_tests {
     fn linked_chart_titles_do_not_expand_the_plot_data_range()->Result<(),String> {
         let mut book=Book::default();let id=book.active_id();let name=book.sheets[0].name.clone();
         book.set_cell(id,9,25,"Revenue")?;book.set_cell(id,0,0,"1")?;book.set_cell(id,1,0,"2")?;
-        let parts=BTreeMap::from([("xl/charts/chart1.xml".into(),
-            format!("<chartSpace><chart><title><strRef><f>'{}'!$Z$10</f></strRef></title><plotArea><barChart><ser><val><numRef><f>'{}'!$A$1:$A$2</f></numRef></val></ser></barChart></plotArea></chart></chartSpace>",esc(&name),esc(&name)).into_bytes())]);
+        let chart = format!("<chartSpace><chart><title><strRef><f>'{}'!$Z$10</f></strRef></title><plotArea><barChart><ser><val><numRef><f>'{}'!$A$1:$A$2</f></numRef></val></ser></barChart></plotArea></chart></chartSpace>",esc(&name),esc(&name));
+        let parts = chart_fixture_parts(&book, 0, "art/custom.xml", &chart);
         read_charts(&mut book,&parts)?;
         let chart=book.sheets[0].charts.first().ok_or("chart")?;
         assert_eq!(chart.title,"Revenue");assert_eq!(chart.range,super::super::model::Range::new(0,0,1,0));Ok(())
@@ -2811,13 +2853,18 @@ fn write_html_book(book:&Book,cell_limit:u64,byte_limit:usize)->Result<Vec<u8>,S
             html_push(&mut out,&format!("<tr style=\"height:{}px\">",sheet.row_heights.get(&row).copied().unwrap_or(26.0)),byte_limit)?;
             for col in (0..=cols).filter(|col|!sheet.hidden_cols.contains(col)) {
                 let merge=merged.get(&(row,col)).copied();
-                if merge.is_some_and(|range|(range.r0,range.c0)!=(row,col)) {continue;}
+                let display_anchor = merge.and_then(|range| {
+                    Some(((range.r0..=range.r1).find(|row| !sheet.hidden_rows.contains(row))?,
+                        (range.c0..=range.c1).find(|col| !sheet.hidden_cols.contains(col))?))
+                });
+                if merge.is_some() && display_anchor != Some((row, col)) { continue; }
+                let (source_row, source_col) = merge.map_or((row, col), |range| (range.r0, range.c0));
                 let span=merge.map(|range|format!(" rowspan=\"{}\" colspan=\"{}\"",
                     (range.r0..=range.r1).filter(|row|!sheet.hidden_rows.contains(row)).count(),
                     (range.c0..=range.c1).filter(|col|!sheet.hidden_cols.contains(col)).count())).unwrap_or_default();
-                let format=sheet.cell(row,col).map(|cell|cell.fmt.clone()).unwrap_or_default();
+                let format=sheet.cell(source_row,source_col).map(|cell|cell.fmt.clone()).unwrap_or_default();
                 let align=match format.align {Align::Left=>"left",Align::Center=>"center",Align::Right=>"right",
-                    Align::General=>if sheet.cell(row,col).is_some_and(|cell|matches!(cell.value,Value::Number(_))) {"right"}else{"left"}};
+                    Align::General=>if sheet.cell(source_row,source_col).is_some_and(|cell|matches!(cell.value,Value::Number(_))) {"right"}else{"left"}};
                 let decoration=format!("{}{}",if format.underline {"underline "}else{""},if format.strike {"line-through"}else{""});
                 let mut style=format!("color:#{:02X}{:02X}{:02X};font-family:{};font-size:{}pt;font-weight:{};font-style:{};text-decoration:{};text-align:{};white-space:{};border:{}",
                     format.color[0],format.color[1],format.color[2],html_font(&format.font),format.size,
@@ -2825,7 +2872,7 @@ fn write_html_book(book:&Book,cell_limit:u64,byte_limit:usize)->Result<Vec<u8>,S
                     if format.wrap {"pre-wrap"}else{"pre"},if format.border {"1px solid #666"}else{"none"});
                 if let Some(fill)=format.fill {style.push_str(&format!(";background:#{:02X}{:02X}{:02X}",fill[0],fill[1],fill[2]));}
                 html_push(&mut out,&format!("<td{span} style=\"{}\">{}</td>",
-                    crate::package::xml_escape(&style),crate::package::xml_escape(&sheet.display(row,col,book.locale_ru))),byte_limit)?;
+                    crate::package::xml_escape(&style),crate::package::xml_escape(&sheet.display(source_row,source_col,book.locale_ru))),byte_limit)?;
             }
             html_push(&mut out,"</tr>",byte_limit)?;
         }
@@ -2900,5 +2947,158 @@ mod next_csv_bom_tests {
     fn a_declared_utf8_csv_never_falls_back_to_windows1251() {
         assert!(super::decode_text(&[0xef,0xbb,0xbf,0xff]).is_err());
         assert_eq!(super::decode_text("Привет".as_bytes()),Ok("Привет".into()));
+    }
+}
+
+fn write_text_book(book: &Book, ext: &str, limit: usize) -> Result<Vec<u8>, String> {
+    let sheet = book.active_sheet().ok_or("Нет активного листа")?;
+    let (last_row, last_col) = sheet.extent();
+    let cells = (u64::from(last_row) + 1) * (u64::from(last_col) + 1);
+    if cells > MAX_RANGE_CELLS as u64 { return Err("Экспортируемый диапазон превышает100000 ячеек".into()); }
+    let mut output = String::new();
+    let push = |output: &mut String, text: &str| -> Result<(), String> {
+        if output.len().checked_add(text.len()).is_none_or(|bytes| bytes > limit) {
+            return Err("Текстовый экспорт превышает лимит размера файла".into());
+        }
+        output.push_str(text); Ok(())
+    };
+    if ext == "md" { push(&mut output, &format!("# {}\n\n", markdown_text(&sheet.name)))?; }
+    else { push(&mut output, "\u{feff}")?; }
+    let separator = if ext == "tsv" { '\t' } else { ';' };
+    for row in 0..=last_row {
+        if ext == "md" { push(&mut output, "| ")?; }
+        for col in 0..=last_col {
+            if col > 0 { push(&mut output, if ext == "md" { " | " } else if separator == '\t' { "\t" } else { ";" })?; }
+            let value = sheet.display(row, col, book.locale_ru);
+            let rendered = if ext == "md" { markdown_text(&value) }
+                else if value.contains([separator, '\n', '\r', '"']) || last_col == 0 && value.is_empty() {
+                    format!("\"{}\"", value.replace('"', "\"\""))
+                } else { value };
+            push(&mut output, &rendered)?;
+        }
+        if ext == "md" {
+            push(&mut output, " |\n")?;
+            if row == 0 {
+                push(&mut output, "|")?;
+                for _ in 0..=last_col { push(&mut output, " --- |")?; }
+                push(&mut output, "\n")?;
+            }
+        } else if row < last_row { push(&mut output, "\r\n")?; }
+    }
+    Ok(output.into_bytes())
+}
+#[cfg(test)]
+mod hundred_export_tests {
+    use super::*;
+    #[test]
+    fn xlsx_export_preserves_the_active_selection() -> Result<(), String> {
+        let mut book = Book::default();
+        book.selection = super::super::model::Selection { row: 4, col: 3, anchor_row: 2, anchor_col: 1 };
+        let decoded = read(&write(&book, "xlsx")?, "xlsx")?;
+        assert_eq!(decoded.selection, book.selection);
+        Ok(())
+    }
+    #[test]
+    fn style_xf_explicitly_disabled_components_are_not_inherited() -> Result<(), String> {
+        let xml = br#"<styleSheet><fonts count="2"><font/><font><b/><name val="Decorative"/></font></fonts>
+            <fills><fill/><fill><patternFill patternType="solid"><fgColor rgb="FFFF0000"/></patternFill></fill></fills>
+            <borders><border/><border><left style="thin"/></border></borders>
+            <cellStyleXfs><xf fontId="1" fillId="1" borderId="1" numFmtId="2"
+                applyFont="0" applyFill="0" applyBorder="0" applyNumberFormat="0" applyAlignment="0"><alignment horizontal="right"/></xf></cellStyleXfs>
+            <cellXfs><xf xfId="0"/></cellXfs></styleSheet>"#;
+        let formats = styles(xml)?;
+        assert_eq!(formats.first(), Some(&CellFormat::default()));
+        Ok(())
+    }
+    #[test]
+    fn csv_and_markdown_enforce_the_output_budget_during_serialization() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.set_cell(id, 0, 0, "'<<<<\"\"\"\"")?;
+        for ext in ["csv", "tsv", "md"] {
+            assert!(write_text_book(&book, ext, 8).is_err());
+            assert!(write_text_book(&book, ext, 1024).is_ok());
+        }
+        Ok(())
+    }
+    #[test]
+    fn html_merged_content_remains_visible_when_its_anchor_column_is_hidden() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.set_cell(id, 0, 0, "Visible merged title")?;
+        book.merge(id, super::super::model::Range::new(0, 0, 0, 1))?;
+        book.active_sheet_mut().ok_or("sheet")?.hidden_cols.insert(0);
+        let html = String::from_utf8(write(&book, "html")?).map_err(|error| error.to_string())?;
+        assert!(html.contains("Visible merged title"));
+        assert_eq!(html.matches("Visible merged title").count(), 1);
+        assert!(html.contains("colspan=\"1\""));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+fn chart_fixture_parts(book: &Book, owner: usize, chart_path: &str, chart: &str) -> BTreeMap<String, Vec<u8>> {
+    BTreeMap::from([
+        ("xl/workbook.xml".into(), format!(r#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="{}" r:id="s"/></sheets></workbook>"#, crate::package::xml_escape(&book.sheets[owner].name)).into_bytes()),
+        ("xl/_rels/workbook.xml.rels".into(), br#"<Relationships><Relationship Id="s" Type="worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#.to_vec()),
+        ("xl/worksheets/sheet1.xml".into(), br#"<worksheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><drawing r:id="d"/></worksheet>"#.to_vec()),
+        ("xl/worksheets/_rels/sheet1.xml.rels".into(), br#"<Relationships><Relationship Id="d" Type="office/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#.to_vec()),
+        ("xl/drawings/drawing1.xml".into(), br#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><xdr:oneCellAnchor><xdr:from><xdr:col>4</xdr:col><xdr:row>5</xdr:row></xdr:from><xdr:ext cx="1905000" cy="952500"/><xdr:graphicFrame><c:chart r:id="c"/></xdr:graphicFrame></xdr:oneCellAnchor></xdr:wsDr>"#.to_vec()),
+        ("xl/drawings/_rels/drawing1.xml.rels".into(), format!(r#"<Relationships><Relationship Id="c" Type="office/chart" Target="/{}"/></Relationships>"#, crate::package::xml_escape(chart_path)).into_bytes()),
+        (chart_path.into(), chart.as_bytes().to_vec()),
+    ])
+}
+#[cfg(test)]
+mod hundred_chart_picture_tests {
+    use super::*;
+    #[test]
+    fn linked_chart_parts_use_the_drawing_owner_and_geometry() -> Result<(), String> {
+        let mut book = Book::default();
+        let name = book.sheets[0].name.clone();
+        let chart = format!("<chartSpace><chart><plotArea><barChart><ser><val><numRef><f>'{name}'!A1:A2</f></numRef></val></ser></barChart></plotArea></chart></chartSpace>");
+        let parts = chart_fixture_parts(&book, 0, "art/quarterly.xml", &chart);
+        read_charts(&mut book, &parts)?;
+        let saved = book.sheets[0].charts.first().ok_or("chart")?;
+        assert_eq!((saved.row, saved.col, saved.width, saved.height), (5, 4, 200.0, 100.0));
+        book.add_sheet("Other")?;
+        let parts = chart_fixture_parts(&book, 1, "art/other.xml", &chart);
+        assert!(read_charts(&mut book, &parts).is_err());
+        Ok(())
+    }
+    #[test]
+    fn axis_titles_do_not_become_the_chart_title() -> Result<(), String> {
+        let mut book = Book::default();
+        let name = book.sheets[0].name.clone();
+        let chart = format!("<chartSpace><chart><title><tx><rich><t>Sales</t></rich></tx></title><plotArea><barChart><ser><val><numRef><f>'{name}'!A1:A2</f></numRef></val></ser></barChart><catAx><title><tx><rich><t>Year</t></rich></tx></title></catAx></plotArea></chart></chartSpace>");
+        read_charts(&mut book, &chart_fixture_parts(&Book::default(), 0, "art/title.xml", &chart))?;
+        assert_eq!(book.sheets[0].charts.first().ok_or("chart")?.title, "Sales");
+        Ok(())
+    }
+    #[test]
+    fn negative_drawing_offsets_are_normalized_into_the_previous_cell() -> Result<(), String> {
+        let xml = r#"<wsDr xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><oneCellAnchor><from><col>1</col><row>1</row><colOff>-95250</colOff><rowOff>-9525</rowOff></from><ext cx="95250" cy="95250"/><pic><blip r:embed="p"/></pic></oneCellAnchor></wsDr>"#;
+        let anchors = drawing_pictures(xml)?;
+        let anchor = anchors.first().ok_or("anchor")?;
+        let geometry = picture_geometry(&super::super::model::Sheet::default(), anchor);
+        assert_eq!(geometry, (0, 0, 86.0, 25.0, 10.0, 10.0));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod hundred_chart_unicode_tests {
+    use super::*;
+    #[test]
+    fn chart_sheet_references_resolve_cyrillic_case_insensitively() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        let name = book.sheets[0].name.to_uppercase();
+        book.set_cell(id, 9, 25, "Доход")?;
+        let chart = format!("<chartSpace><chart><title><strRef><f>'{name}'!Z10</f></strRef></title><plotArea><barChart><ser><val><numRef><f>'{name}'!A1:A2</f></numRef></val></ser></barChart></plotArea></chart></chartSpace>");
+        let parts = chart_fixture_parts(&book, 0, "art/unicode.xml", &chart);
+        read_charts(&mut book, &parts)?;
+        assert_eq!(book.sheets[0].charts.len(), 1);
+        assert_eq!(book.sheets[0].charts[0].title, "Доход");
+        Ok(())
     }
 }

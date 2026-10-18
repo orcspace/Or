@@ -1213,15 +1213,27 @@ impl<'a> Engine<'a> {
                 expr
             };
             let mut value = self.eval(expr, sheet, row, col);
-            if name == "SUBTOTAL"
-                && index > 0
-                && let (Ok(grid), Some((target, range))) = (&mut value, self.reference(expr, 0)?)
+            if matches!(name, "SUMIF" | "AVERAGEIF") && index == 2
+                && let Ok(grid) = &value
+                && let Some((target, r0, c0)) = grid.origin
+                && let Some(criteria) = evaluated.first()
+                && (grid.rows != criteria.rows || grid.cols != criteria.cols)
             {
-                let hidden = evaluated
-                    .first()
-                    .and_then(|code| code.number().ok())
+                let r1 = r0.checked_add(criteria.rows as u32 - 1).ok_or("#REF!")?;
+                let c1 = c0.checked_add(criteria.cols as u32 - 1).ok_or("#REF!")?;
+                let range = Range::new(r0, c0, r1, c1);
+                range.validate().map_err(|_| "#REF!")?;
+                let target = self.book.sheets.get(target).ok_or("#REF!")?.name.clone();
+                value = self.eval(&Expr::Reference(Some(target), range), sheet, row, col);
+            }
+            if name == "SUBTOTAL" && index > 0 && let Ok(grid) = &mut value
+                && let Some((target, r0, c0)) = grid.origin
+            {
+                let hidden = evaluated.first().and_then(|code| code.number().ok())
                     .is_some_and(|code| code >= 100.0);
-                self.skip_subtotal_cells(grid, target.as_deref(), &range, sheet, hidden);
+                let range = Range::new(r0, c0, r0 + grid.rows as u32 - 1, c0 + grid.cols as u32 - 1);
+                let target = self.book.sheets.get(target).ok_or("#REF!")?.name.clone();
+                self.skip_subtotal_cells(grid, Some(&target), &range, sheet, hidden);
             }
             evaluated.push(if name.starts_with("IS") || name == "TYPE" {
                 value.unwrap_or_else(|e| Grid::scalar(Value::Error(e)))
@@ -2065,15 +2077,7 @@ impl<'a> Engine<'a> {
                 } else if !needle.contains(['*','?','~']) {
                     literal_search(&chars[offset..],&needle)
                 } else {
-                    let pattern = needle.to_lowercase();
-                    (offset..=chars.len())
-                        .find(|i| {
-                            wildcard_prefix(
-                                &pattern,
-                                &chars[*i..].iter().collect::<String>().to_lowercase(),
-                            )
-                        })
-                        .map(|i| i - offset)
+                    wildcard_search(&needle, &chars[offset..], 1_000_000)?
                 };
                 num((offset + pos.ok_or("#VALUE!")? + 1) as f64)
             }
@@ -3615,6 +3619,7 @@ fn lookup_equal(value: &Value, needle: &Value, wildcards: bool) -> bool {
     }
     compare(value, needle).is_eq()
 }
+#[cfg(test)]
 fn wildcard_prefix(pattern: &str, text: &str) -> bool {
     let mut p: Vec<char> = pattern.chars().collect();
     if p.iter().rev().take_while(|ch|**ch=='~').count()%2==1 {p.push('~');}
@@ -4557,6 +4562,67 @@ mod hundred_parser_reference_tests {
         assert_eq!(engine.eval(&parse("=ROWS(A1:B2)")?, 0, 0, 0)?.first(), Value::Number(2.0));
         assert_eq!(engine.eval(&parse("=COLUMNS(A1:D2)")?, 0, 0, 0)?.first(), Value::Number(4.0));
         assert!(engine.cache.is_empty());
+        assert_eq!(evaluate(&book, id, "=ROWS('missing'!A1:B2)"), Value::Error("#REF!".into()));
+        assert_eq!(evaluate(&book, id, "=COLUMNS('missing'!A1:B2)"), Value::Error("#REF!".into()));
+        Ok(())
+    }
+}
+
+fn wildcard_search(pattern: &str, text: &[char], mut budget: usize) -> CalcResult<Option<usize>> {
+    let pattern: Vec<char> = pattern.to_lowercase().chars().collect();
+    let mut folded = Vec::new();
+    let mut starts = Vec::new();
+    for (index, ch) in text.iter().enumerate() {
+        starts.push((folded.len(), index));
+        folded.extend(ch.to_lowercase());
+    }
+    starts.push((folded.len(), text.len()));
+    for (start, original) in starts {
+        let source = &folded[start..];
+        let (mut pi, mut ti, mut star, mut mark) = (0usize, 0usize, None, 0usize);
+        loop {
+            if budget == 0 { return Err("#NUM!".into()); }
+            budget -= 1;
+            if pi == pattern.len() { return Ok(Some(original)); }
+            if pattern.get(pi) == Some(&'*') {
+                star = Some(pi); pi += 1; mark = ti; continue;
+            }
+            if ti == source.len() { break; }
+            let escaped = pattern.get(pi) == Some(&'~')
+                && pattern.get(pi+1).is_some_and(|ch| matches!(ch, '*' | '?' | '~'));
+            if escaped && pattern.get(pi+1) == source.get(ti) {
+                pi += 2; ti += 1;
+            } else if !escaped && (pattern.get(pi) == Some(&'?') || pattern.get(pi) == source.get(ti)) {
+                pi += 1; ti += 1;
+            } else if let Some(index) = star {
+                mark += 1;
+                if mark > source.len() { break; }
+                ti = mark; pi = index + 1;
+            } else { break; }
+        }
+    }
+    Ok(None)
+}
+#[cfg(test)]
+mod hundred_range_and_wildcard_tests {
+    use super::*;
+    #[test]
+    fn wildcard_search_reuses_one_folded_buffer_and_bounds_backtracking() {
+        let book = Book::default();
+        let query = format!("=SEARCH(\"?z\",\"{}\")", "a".repeat(32000));
+        assert_eq!(evaluate(&book, book.active_id(), &query), Value::Error("#VALUE!".into()));
+        assert_eq!(wildcard_search("*a*a*a*z", &"a".repeat(100).chars().collect::<Vec<_>>(), 10), Err("#NUM!".into()));
+        assert_eq!(wildcard_search("~?", &"a?b".chars().collect::<Vec<_>>(), 100), Ok(Some(1)));
+    }
+    #[test]
+    fn computed_reference_consumers_keep_projection_and_subtotal_visibility() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.set_cell(id, 0, 0, "1")?; book.set_cell(id, 1, 0, "1")?;
+        book.set_cell(id, 0, 1, "10")?; book.set_cell(id, 1, 1, "20")?;
+        assert_eq!(evaluate(&book, id, "=SUMIF(A1:A2,1,INDEX(B1:B2,1))"), Value::Number(30.0));
+        book.active_sheet_mut().ok_or("sheet")?.hidden_rows.insert(1);
+        assert_eq!(evaluate(&book, id, "=SUBTOTAL(109,INDEX(B1:B2,0))"), Value::Number(10.0));
         Ok(())
     }
 }
