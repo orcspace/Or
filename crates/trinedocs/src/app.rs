@@ -1407,6 +1407,12 @@ impl App {
                 }
             });
     }
+    fn queue_client_approval(&mut self,client:String)->Result<(),String> {
+        if !self.clients.contains(&client) && self.clients.len()>=128 {
+            return Err("too_large: уже ожидают128 клиентов MCP; завершите запросы доступа".into());
+        }
+        self.clients.insert(client);Ok(())
+    }
     fn mcp_requests(&mut self, ctx: &egui::Context) {
         for key in self.client_access.reap() {
             self.allowed.remove(&key);
@@ -1433,6 +1439,12 @@ impl App {
                 let _ = r.reply.send(Err("cancelled: ход чата остановлен".into()));
                 continue;
             }
+            if !crate::mcp::tools::names().contains(&r.tool.as_str()) {
+                let _=r.reply.send(Err("unsupported_feature: неизвестный инструмент MCP".into()));continue;
+            }
+            if let Err(error)=crate::mcp::tools::validate_args(&r.tool,&r.args) {
+                let _=r.reply.send(Err(error));continue;
+            }
             if r.tool == "request_access" {
                 let result = (|| -> Result<Value, String> {
                     let args = r
@@ -1452,13 +1464,16 @@ impl App {
                             json!({"client_access":null,"status":"allowed","expires_in_seconds":0}),
                         );
                     }
+                    if token.is_none() && self.clients.len()>=128 {
+                        return Err("too_large: уже ожидают128 клиентов MCP; завершите запросы доступа".into());
+                    }
                     let access = self.client_access.request(&r.client, token)?;
                     let status = if access.denied {
                         "denied"
                     } else if self.allowed.contains(&access.key) {
                         "allowed"
                     } else {
-                        self.clients.insert(access.key);
+                        self.queue_client_approval(access.key)?;
                         "pending"
                     };
                     Ok(
@@ -1491,10 +1506,9 @@ impl App {
                 }
             }
             if !self.allowed.contains(&r.client) && !self.chat.owns(&r.client) {
-                self.clients.insert(r.client);
-                let _ = r.reply.send(Err(
-                    "needs_confirmation: разрешите клиент в окне TrineDocs".into()
-                ));
+                let result=self.queue_client_approval(r.client).and_then(|_|Err(
+                    "needs_confirmation: разрешите клиент в окне TrineDocs".into()));
+                let _ = r.reply.send(result);
                 continue;
             }
             if !crate::mcp::tools::read_only(&r.tool)
@@ -1506,10 +1520,6 @@ impl App {
                     .send(Err("busy: подтвердите действие в интерфейсе".into()));
                 continue;
             }
-            if let Err(error) = crate::mcp::tools::validate_args(&r.tool, &r.args) {
-                let _ = r.reply.send(Err(error));
-                continue;
-            }
             if r.args
                 .get("mode")
                 .is_some_and(|v| !matches!(v.as_str(), Some("apply" | "dry_run")))
@@ -1518,12 +1528,6 @@ impl App {
                     .is_some_and(|v| v.as_u64().is_none())
             {
                 let _ = r.reply.send(Err("invalid_args: mode/base_version".into()));
-                continue;
-            }
-            if !crate::mcp::tools::names().contains(&r.tool.as_str()) {
-                let _ = r
-                    .reply
-                    .send(Err("unsupported_feature: неизвестный инструмент MCP".into()));
                 continue;
             }
             if matches!(
@@ -5029,6 +5033,29 @@ mod shell_input_tests {
         app.media_jobs.push(MediaJob{request:crate::mcp::BridgeRequest{tool:"export".into(),args:json!({"document_id":10}),client:"revoked".into(),reply,deadline:Instant::now()+std::time::Duration::from_secs(10)},result});
         let ctx=app.editor_ctx.clone();app.finish_media_jobs(&ctx);
         assert!(received.try_recv().map_err(|e|e.to_string())?.is_err());Ok(())
+    }
+
+    #[test]
+    fn invalid_unknown_client_requests_do_not_create_approval_prompts()->Result<(),String> {
+        let mut app=fixture()?;app.allowed.clear();app.clients.clear();
+        assert!(mcp_roundtrip_as(&mut app,"Unknown","no_such_tool",json!({})).is_err_and(|error|error.starts_with("unsupported_feature:")));
+        assert!(app.clients.is_empty());
+        assert!(mcp_roundtrip_as(&mut app,"Unknown","docs_insert_text",json!({"document_id":"bad"})).is_err_and(|error|error.starts_with("invalid_args:")));
+        assert!(app.clients.is_empty());
+        assert!(mcp_roundtrip_as(&mut app,"Unknown","list_documents",json!({})).is_err_and(|error|error.starts_with("needs_confirmation:")));
+        assert_eq!(app.clients.len(),1);Ok(())
+    }
+    #[test]
+    fn pending_client_approvals_are_bounded_and_existing_requests_can_retry()->Result<(),String> {
+        let mut app=fixture()?;app.allowed.clear();app.clients=(0..128).map(|index|format!("Pending{index}")).collect();
+        assert!(mcp_roundtrip_as(&mut app,"Overflow","list_documents",json!({})).is_err_and(|error|error.starts_with("too_large:")));
+        assert_eq!(app.clients.len(),128);
+        assert!(mcp_roundtrip_as(&mut app,"Pending0","list_documents",json!({})).is_err_and(|error|error.starts_with("needs_confirmation:")));
+        assert_eq!(app.clients.len(),128);
+        assert!(mcp_roundtrip_as(&mut app,"Stateless","request_access",json!({})).is_err_and(|error|error.starts_with("too_large:")));
+        app.clients.clear();
+        let access=mcp_roundtrip_as(&mut app,"Stateless","request_access",json!({}))?;
+        assert_eq!(access["status"],"pending");assert_eq!(app.clients.len(),1);Ok(())
     }
 
 }

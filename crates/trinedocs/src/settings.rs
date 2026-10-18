@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+const MAX_SETTINGS:usize=1024*1024;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -41,7 +42,7 @@ impl Settings {
         [path.to_path_buf(), path.with_extension("json.bak")]
             .iter()
             .find_map(|candidate| {
-                crate::util::read_limited(candidate, 1024 * 1024)
+                crate::util::read_limited(candidate, MAX_SETTINGS)
                     .ok()
                     .and_then(|bytes| serde_json::from_slice::<Self>(&bytes).ok())
                     .map(Self::normalized)
@@ -69,12 +70,14 @@ impl Settings {
         self.chat_efforts = self.chat_efforts.map(|e| crate::chat::clean_effort(&e));
         self
     }
+    fn encoded(&self)->Result<Vec<u8>,String> {
+        let bytes=serde_json::to_vec_pretty(self).map_err(|error|error.to_string())?;
+        if bytes.len()>MAX_SETTINGS {return Err("Настройки превышают1МиБ; сократите список длинных путей. Предыдущий файл сохранён.".into());}
+        Ok(bytes)
+    }
     pub fn save(&self) -> Result<(), String> {
-        crate::util::atomic_write(
-            &crate::util::app_dir().join("settings.json"),
-            &serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?,
-            true,
-        )
+        let bytes=self.encoded()?;
+        crate::util::atomic_write(&crate::util::app_dir().join("settings.json"),&bytes,true)
     }
     pub fn toggle_pin(&mut self, path: PathBuf) -> Result<(), String> {
         if self.pinned.contains(&path) {
@@ -174,5 +177,19 @@ mod recent_defect_tests {
         let settings=settings.normalized();
         assert_eq!(settings.recent,vec![PathBuf::from("C:/a.docx"),PathBuf::from("C:/b.docx")]);
         assert_eq!(settings.pinned.len(),1);
+    }
+}
+
+#[cfg(test)]
+mod two_hundred_settings_regressions {
+    use super::*;
+    #[test]
+    fn saved_settings_cannot_exceed_their_own_reload_budget()->Result<(),String> {
+        let mut settings=Settings::default();
+        settings.recent=(0..50).map(|index|PathBuf::from(format!("C:/{index}/{}.docx","x/".repeat(12000)))).collect();
+        assert!(settings.clone().normalized().encoded().is_err());
+        settings.recent.truncate(1);let bytes=settings.encoded()?;
+        assert!(bytes.len()<=MAX_SETTINGS);let decoded:Settings=serde_json::from_slice(&bytes).map_err(|error|error.to_string())?;
+        assert_eq!(decoded.normalized().recent,settings.recent);Ok(())
     }
 }

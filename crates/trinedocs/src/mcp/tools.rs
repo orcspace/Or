@@ -699,6 +699,7 @@ impl PatchModel for crate::docs::model::Paragraph {
         "keep_lines",
         "widow_control",
         "contextual_spacing",
+        "right_indent",
     ];
 }
 impl PatchModel for crate::docs::model::Table {

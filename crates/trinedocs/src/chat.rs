@@ -149,7 +149,7 @@ pub fn parse_codex_models(bytes: &[u8]) -> Vec<CodexModel> {
         .and_then(Value::as_array)
         .or_else(|| value.as_array());
     let mut models = Vec::new();
-    for model in list.into_iter().flatten().take(100) {
+    for model in list.into_iter().flatten() {
         let slug = clean_model(model.get("slug").and_then(Value::as_str).unwrap_or(""));
         let visible = model
             .get("visibility")
@@ -182,6 +182,7 @@ pub fn parse_codex_models(bytes: &[u8]) -> Vec<CodexModel> {
             label,
             efforts,
         });
+        if models.len()==100 {break;}
     }
     models
 }
@@ -210,6 +211,7 @@ type Probe = (Provider, Option<PathBuf>, Access, Vec<CodexModel>);
 pub struct Chat {
     pub provider: Provider,
     pub messages: Vec<Message>,
+    history_omitted: usize,
     input: String,
     turn: Option<Turn>,
     processes: Vec<Process>,
@@ -247,6 +249,7 @@ impl Chat {
         Self {
             provider: Provider::Claude,
             messages: Vec::new(),
+            history_omitted: 0,
             input: String::new(),
             turn: None,
             processes: Vec::new(),
@@ -400,6 +403,8 @@ impl Chat {
         if finished && let Some(turn) = self.turn.take() {
             push_text(&mut self.messages, turn.draft);
         }
+        self.history_omitted=self.history_omitted.saturating_add(
+            prune_history(&mut self.messages,MAX_CHAT_HISTORY,MAX_CHAT_MESSAGES));
     }
     pub fn stop(&mut self) {
         self.generation = self.generation.saturating_add(1);
@@ -423,15 +428,17 @@ impl Chat {
     }
     pub fn clear(&mut self) {
         self.stop();
-        self.messages.clear();
+        self.messages.clear();self.history_omitted=0;
         self.session = [None, None];
         self.input.clear();self.last_sent=None;self.needs_login=false;
     }
     fn send(&mut self, ctx: &egui::Context, document: Option<&Context>, mcp_enabled: bool) {
-        let text = self.input.trim().to_string();
-        if text.is_empty() || self.turn.is_some() {
+        if self.turn.is_some() || self.input.trim().is_empty() {return;}
+        if self.input.len()>MAX_CHAT_INPUT {
+            self.messages.push(Message{role:Role::Error,text:"Сообщение превышает1МиБ. Разделите его на несколько запросов.".into()});
             return;
         }
+        let text=self.input.clone();
         self.input.clear();
         self.needs_login = false;
         self.last_sent = Some(text.clone());
@@ -535,6 +542,13 @@ impl Chat {
         std::mem::take(&mut self.prefs_changed)
     }
     /// Model and effort pickers of the current provider.
+    fn choose_provider(&mut self,provider:Provider) {
+        if self.turn.is_some() || self.provider==provider {return;}
+        self.provider=provider;
+        // A resumed provider session cannot contain the other provider's turns.
+        // Start it with the shared bounded transcript when switching back.
+        self.session[provider.index()]=None;self.needs_login=false;
+    }
     fn model_row(&mut self, ui: &mut Ui) {
         let index = self.provider.index();
         let enabled = self.turn.is_none();
@@ -660,8 +674,7 @@ impl Chat {
                     });
                 ui.add_space(6.0);
                 if response.clicked() {
-                    self.provider = provider;
-                    self.needs_login = false;
+                    self.choose_provider(provider);
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -739,6 +752,7 @@ impl Chat {
             .stick_to_bottom(true)
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                if self.history_omitted>0 {ui.weak(format!("Ранние сообщения удалены из локальной истории: {}",self.history_omitted));}
                 if self.messages.is_empty() {
                     ui.add_space(20.0);
                     ui.vertical_centered(|ui| {
@@ -991,6 +1005,27 @@ impl Drop for Chat {
         }
     }
 }
+const MAX_CHAT_INPUT:usize=1024*1024;
+const MAX_CHAT_HISTORY:usize=32*1024*1024;
+const MAX_CHAT_MESSAGES:usize=2000;
+fn prune_history(messages:&mut Vec<Message>,byte_limit:usize,count_limit:usize)->usize {
+    if byte_limit==0 || count_limit==0 {let count=messages.len();messages.clear();return count;}
+    let mut bytes=messages.iter().fold(0usize,|total,message|total.saturating_add(message.text.len()));
+    let mut removed=0;
+    while messages.len().saturating_sub(removed)>1
+        && (messages.len()-removed>count_limit || bytes>byte_limit) {
+        bytes=bytes.saturating_sub(messages[removed].text.len());removed+=1;
+    }
+    if removed>0 {messages.drain(..removed);}
+    if let Some(message)=messages.last_mut() && message.text.len()>byte_limit {
+        let marker=if byte_limit>=6 {"[…]\n"}else{""};
+        let mut start=message.text.len().saturating_sub(byte_limit.saturating_sub(marker.len()));
+        while !message.text.is_char_boundary(start) {start+=1;}
+        message.text=format!("{marker}{}",&message.text[start..]);removed+=1;
+    }
+    removed
+}
+
 fn push_text(messages: &mut Vec<Message>, text: String) {
     if text.trim().is_empty() {
         return;
@@ -2471,5 +2506,52 @@ mod hundred_chat_content_tests {
         let mut chat=Chat::new();let (_sender,receiver)=channel();
         chat.probe=Some(receiver);
         chat.refresh(&egui::Context::default());assert!(chat.probe.is_some());
+    }
+}
+
+#[cfg(test)]
+mod two_hundred_chat_regressions {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn submitted_user_text_keeps_indentation_and_trailing_newlines() {
+        let mut chat=Chat::new();let text="    code()\n";chat.input=text.into();
+        chat.send(&egui::Context::default(),None,true);
+        assert_eq!(chat.messages.first().map(|message|message.text.as_str()),Some(text));
+        assert_eq!(chat.last_sent.as_deref(),Some(text));assert!(chat.input.is_empty());
+    }
+    #[test]
+    fn switching_provider_rebuilds_the_shared_conversation_context() {
+        let mut chat=Chat::new();chat.session[Provider::Claude.index()]=Some("old-claude".into());
+        chat.choose_provider(Provider::Codex);chat.messages.push(Message{role:Role::Assistant,text:"Codex's answer".into()});
+        chat.choose_provider(Provider::Claude);
+        assert!(chat.session[Provider::Claude.index()].is_none());
+        assert!(transcript(&chat.messages).contains("Codex's answer"));
+        chat.session[Provider::Claude.index()]=Some("current".into());chat.choose_provider(Provider::Claude);
+        assert_eq!(chat.session[Provider::Claude.index()].as_deref(),Some("current"));
+    }
+    #[test]
+    fn oversized_chat_input_is_rejected_before_consuming_the_draft() {
+        let mut chat=Chat::new();chat.input="x".repeat(MAX_CHAT_INPUT+1);chat.last_sent=Some("previous".into());
+        chat.send(&egui::Context::default(),None,true);
+        assert_eq!(chat.input.len(),MAX_CHAT_INPUT+1);assert_eq!(chat.last_sent.as_deref(),Some("previous"));
+        assert!(!chat.messages.iter().any(|message|message.role==Role::User));assert!(!chat.busy());
+    }
+    #[test]
+    fn session_history_is_bounded_and_unicode_tail_is_not_split() {
+        let mut chat=Chat::new();
+        chat.messages=(0..MAX_CHAT_MESSAGES+3).map(|index|Message{role:Role::Tool,text:format!("tool-{index}")}).collect();
+        chat.poll();assert_eq!(chat.messages.len(),MAX_CHAT_MESSAGES);assert!(chat.history_omitted>=3);
+        let mut messages=vec![Message{role:Role::User,text:"old".into()},Message{role:Role::Assistant,text:"🙂".repeat(20)}];
+        assert!(prune_history(&mut messages,32,5)>0);assert_eq!(messages.len(),1);
+        assert!(messages[0].text.len()<=32);assert!(messages[0].text.ends_with("🙂"));assert!(messages[0].text.starts_with("[…]"));
+        chat.clear();assert_eq!(chat.history_omitted,0);
+    }
+    #[test]
+    fn hidden_cache_entries_do_not_consume_the_visible_model_budget()->Result<(),String> {
+        let mut models:Vec<_>=(0..100).map(|index|json!({"slug":format!("old-{index}"),"visibility":"hide"})).collect();
+        models.push(json!({"slug":"visible-new","visibility":"list","display_name":"Visible"}));
+        let parsed=parse_codex_models(&serde_json::to_vec(&json!({"models":models})).map_err(|error|error.to_string())?);
+        assert_eq!(parsed.len(),1);assert_eq!(parsed[0].slug,"visible-new");Ok(())
     }
 }
