@@ -4685,3 +4685,39 @@ mod review04_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod formula_passport_contract_tests {
+    use super::*;
+    #[test]
+    fn passport_contract_requires_coordinates_and_keeps_read_only_documents_unchanged() -> Result<(),String> {
+        assert!(read_only("sheets_explain_formula"));
+        let tool=definitions().into_iter().find(|tool|tool.name=="sheets_explain_formula").ok_or("schema")?;
+        let schema=serde_json::to_value(tool).map_err(|e|e.to_string())?;
+        let required=schema["inputSchema"]["required"].as_array().ok_or("required")?;
+        for field in ["document_id","sheet_id","row","col"] {assert!(required.contains(&json!(field)));}
+        assert_eq!(schema["annotations"]["readOnlyHint"],true);
+        let mut book=crate::sheets::model::Book::default();
+        let sheet=book.active_id();
+        book.set_cell(sheet,0,0,"=1+2")?;
+        let original=Document::Sheets(book);
+        let mut tab=Tab::new(1,original.clone(),"Book".into(),None);
+        tab.read_only=true;
+        let mut tabs=vec![tab];
+        let mut next=2;
+        let result=dispatch(&mut tabs,&mut next,"sheets_explain_formula",
+            &json!({"document_id":1,"sheet_id":sheet,"row":0,"col":0}),"reader")?;
+        assert_eq!(result["display"],"3");
+        assert_eq!(result["version"],0);
+        for args in [
+            json!({"document_id":1,"sheet_id":sheet,"col":0}),
+            json!({"document_id":1,"sheet_id":sheet,"row":0,"col":16384}),
+            json!({"document_id":1,"sheet_id":9999,"row":0,"col":0}),
+        ] {assert!(dispatch(&mut tabs,&mut next,"sheets_explain_formula",&args,"reader").is_err());}
+        assert_eq!(tabs[0].document,original);
+        assert_eq!(tabs[0].version,0);
+        assert!(tabs[0].undo.is_empty() && tabs[0].redo.is_empty());
+        assert_eq!(next,2);
+        Ok(())
+    }
+}

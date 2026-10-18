@@ -2328,12 +2328,24 @@ fn paste_special(
     mode: PasteMode,
     transpose: bool,
 ) -> Result<(), String> {
-    let clipboard = ctx.data_mut(|data| data.get_temp::<SheetClipboard>(clipboard_id()))
+    let mut clipboard = ctx.data_mut(|data| data.get_temp::<SheetClipboard>(clipboard_id()))
         .ok_or("Сначала скопируйте ячейки в TrineDocs")?;
-    paste_cells_with(
-        book, book.active_id(), book.selection.row, book.selection.col,
-        &clipboard, mode, transpose,
-    )
+    let (sheet,row,col)=(book.active_id(),book.selection.row,book.selection.col);
+    paste_cells_with(book,sheet,row,col,&clipboard,mode,transpose)?;
+    if clipboard.cut && mode!=PasteMode::Formats {
+        clipboard.cut=false;
+        clipboard.row=row;
+        clipboard.col=col;
+        if transpose {
+            let rows=clipboard.cells.len();
+            let cols=clipboard.cells.first().map(Vec::len).unwrap_or(0);
+            clipboard.cells=(0..cols).map(|c|
+                (0..rows).map(|r|clipboard.cells[r][c].clone()).collect()
+            ).collect();
+        }
+        ctx.data_mut(|data|data.insert_temp(clipboard_id(),clipboard));
+    }
+    Ok(())
 }
 fn paste_clipboard(
     ctx: &egui::Context,

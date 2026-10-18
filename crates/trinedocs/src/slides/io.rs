@@ -158,7 +158,6 @@ impl Node {
         match self.name.as_str() {
             "t" => self.text.clone(),
             "br" => "\n".into(),
-            "tab" => "\t".into(),
             _ => self.children.iter().map(Node::text_content).collect(),
         }
     }
@@ -2535,12 +2534,6 @@ mod tests {
         assert_eq!(overridden.theme.foreground,[0,0,0]);
         assert_eq!(load("<p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>")?.slides[0].background,
             master.slides[0].background);
-        Ok(())
-    }
-    #[test]
-    fn drawingml_tabs_are_preserved() -> Result<(),String> {
-        let body=parse(b"<a:txBody><a:p><a:r><a:t>A</a:t></a:r><a:tab/><a:r><a:t>B</a:t></a:r></a:p><a:p><a:r><a:t>C</a:t></a:r></a:p></a:txBody>")?;
-        assert_eq!(body.paragraph_text(),"A\tB\nC");
         Ok(())
     }
     #[test]

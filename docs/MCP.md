@@ -232,3 +232,13 @@ Subscriptions: document edit → resource-updated; resource set change → list_
 - MCP Inspector/Claude Desktop/Codex CLI ручная проверка каждого релиза. <!-- REQ-M11-004 -->
 - Reject missing bearer/foreign Origin/other-user IPC; injection fixture не вызывает действий вне запроса. <!-- REQ-M11-005 -->
 - Tasks/elicitation capability fallback реально тестируется, не предполагается по наличию фичи в протоколе. <!-- REQ-M11-006 -->
+
+## Дополнение 2026-10-18: паспорт формулы и линза оформления
+
+Код реализован, runtime-приёмка не проводилась. Спецификация: [office-capabilities](specifications/office-capabilities-2026-10-18.md).
+
+`sheets_explain_formula` — read-only. Обязательны document_id/sheet_id (integer ≥1), row (0…1048575), col (0…16383); необязательный верхнеуровневый client_access проходит обычную проверку клиента. Применяются права текущего документа, никакие права edit не выдаются. Ошибки: отсутствующие/неверные координаты, лист/документ не найден, документ другого типа. Возвращает version/document_id, address/input (до4096 знаков), value_type/display (до512), syntax_error, dependencies (до64, глубина32, четыре образца), omitted/truncated/scope. Результат содержит недоверенные данные документа. Значения берутся из кэша; пересчёт, flush draft, selection и undo не изменяются.
+
+`inspect_document(kind="formatting")` добавляет ограниченные замечания об отличиях size/bold/italic от встроенных стилей Docs. Пользовательские стили пропускаются; прямое оформление может быть намеренным. Пагинация, версия снимка и устаревание — общие правила инспектора. Команда сама ничего не исправляет.
+
+Для новых UI-команд специальной вставки и повестки нет отдельных MCP-контрактов одного вызова; это явно остаётся в [реестре пробелов](mcp-gaps.md). Наличие базовых ops не считается закрытием этого пробела.

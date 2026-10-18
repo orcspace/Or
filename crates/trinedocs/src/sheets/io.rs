@@ -1030,6 +1030,7 @@ fn indexed_palette(bytes: &[u8]) -> Result<Vec<[u8; 3]>, String> {
     }
     Ok(palette)
 }
+#[cfg(test)]
 fn styles(bytes: &[u8]) -> Result<Vec<CellFormat>, String> {
     styles_with_theme(bytes,&[])
 }

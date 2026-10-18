@@ -1996,7 +1996,14 @@ fn markdown_run(run: &Run) -> String {
     if run.format.strike {out.push_str("~~");}
     out.push_str(emphasis);
     if let Some(link)=run.format.link.as_deref().filter(|link|safe_html_link(link)) {
-        let target=link.replace('\\',"\\\\").replace('(',"\\(").replace(')',"\\)");
+        let mut encoded=String::new();
+        for ch in link.chars() {
+            if ch.is_whitespace() || ch.is_control() || matches!(ch,'<'|'>') {
+                let mut bytes=[0u8;4];
+                for byte in ch.encode_utf8(&mut bytes).as_bytes() {encoded.push_str(&format!("%{byte:02X}"));}
+            } else {encoded.push(ch);}
+        }
+        let target=encoded.replace('\\',"\\\\").replace('(',"\\(").replace(')',"\\)");
         out.push_str(&format!("[{}]({target})",escape_markdown(core)));
     } else {out.push_str(&escape_markdown(core));}
     out.push_str(emphasis);
@@ -3926,6 +3933,18 @@ mod text_export_defect_tests {
         let md=write_markdown(&doc);
         assert!(md.contains(r"\<img\>\|a<br>b"));
         assert!(!md.contains("<img>"));
+        Ok(())
+    }
+    #[test]
+    fn markdown_link_destinations_encode_whitespace_and_controls() -> Result<(),String> {
+        let mut doc=Doc::from_text("link");
+        doc.paragraphs[0].runs[0].format.link=Some("https://example.org/a b\nc".into());
+        let md=write_markdown(&doc);
+        assert!(md.contains("[link](https://example.org/a%20b%0Ac)"));
+        let imported=read(md.as_bytes(),"md")?;
+        assert_eq!(imported.plain_text(),"link");
+        assert_eq!(imported.paragraphs[0].runs[0].format.link.as_deref(),
+            Some("https://example.org/a%20b%0Ac"));
         Ok(())
     }
     #[test]
