@@ -698,20 +698,26 @@ fn dimension_menu(ui: &mut egui::Ui, book: &mut Book, state: &mut State, changed
     ui.separator();
     visibility_menu(ui, book, state, changed);
 }
+fn hide_axis(book: &mut Book, row: u32, col: u32, rows: bool) -> bool {
+    let previous=(row,col);
+    let Some(sheet)=book.active_sheet_mut() else {return false;};
+    let (index,maximum,hidden)=if rows {(row,MAX_ROWS,&mut sheet.hidden_rows)} else {(col,MAX_COLS,&mut sheet.hidden_cols)};
+    if !hidden.insert(index) { return false; }
+    let next=visible_index(index,maximum,1,hidden).or_else(||visible_index(index,maximum,-1,hidden));
+    let Some(next)=next else { hidden.remove(&index);return false; };
+    let requested=if rows {(next,col)}else{(row,next)};
+    let (row,col)=jump_target(sheet,previous,requested);
+    book.selection=Selection{row,col,anchor_row:row,anchor_col:col};
+    true
+}
 fn visibility_menu(ui: &mut egui::Ui, book: &mut Book, state: &mut State, changed: &mut bool) {
     for (label, rows) in [("Скрыть строку", true), ("Скрыть столбец", false)]
     {
         if command_action(ui.button(label), book, state, changed) {
             let row = book.selection.row;
             let col = book.selection.col;
-            if let Some(sheet) = book.active_sheet_mut() {
-                if rows {
-                    sheet.hidden_rows.insert(row);
-                } else {
-                    sheet.hidden_cols.insert(col);
-                }
-                *changed = true;
-            }
+            *changed |= hide_axis(book, row, col, rows);
+            state.scroll_to_selection = true;
             ui.close();
         }
     }
@@ -1370,15 +1376,8 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                         )
                         .on_hover_cursor(egui::CursorIcon::ResizeNwSe);
                     if handle_response.dragged() {
-                        let size = (image_rect.size() + handle_response.drag_delta())
-                            .max(Vec2::splat(16.0));
-                        // Shift keeps the original proportions, as in Excel.
-                        let size = if ui.input(|i| i.modifiers.shift) {
-                            let ratio = image.height / image.width.max(1.0);
-                            Vec2::new(size.x, size.x * ratio)
-                        } else {
-                            size
-                        };
+                        let size = constrained_image_size(image_rect.size(),
+                            image_rect.size()+handle_response.drag_delta(),ui.input(|input|input.modifiers.shift));
                         image_edit = Some((image.id, Rect::from_min_size(image_rect.min, size)));
                     }
                 }
@@ -2002,11 +2001,8 @@ fn jump_target(sheet: &Sheet, previous: (u32, u32), requested: (u32, u32)) -> (u
         .iter()
         .find(|range| range.contains(row, col))
         .map_or((row, col), |range| (range.r0, range.c0));
-    if sheet.hidden_rows.contains(&target.0) || sheet.hidden_cols.contains(&target.1) {
-        previous
-    } else {
-        target
-    }
+    // A merged anchor remains the logical edit target when another part of its area is visible.
+    target
 }
 fn step_cell(sheet: &Sheet, row: u32, col: u32, dr: i8, dc: i8) -> (u32, u32) {
     let merge = sheet.merges.iter().find(|range| range.contains(row, col));
@@ -2442,6 +2438,12 @@ fn grid_size(sheet: &Sheet, rows: u32, cols: u32) -> (f32, f32) {
     }
     (width, height)
 }
+fn constrained_image_size(original: Vec2, requested: Vec2, keep_ratio: bool) -> Vec2 {
+    if !keep_ratio { return requested.clamp(Vec2::splat(16.0),Vec2::splat(8000.0)); }
+    let minimum=(1.0/original.x).max(1.0/original.y);
+    let maximum=(8000.0/original.x).min(8000.0/original.y);
+    original*(requested.x/original.x).clamp(minimum,maximum)
+}
 /// Moves/resizes a picture; `local` is its top-left corner relative to the grid origin.
 fn place_image(sheet: &mut Sheet, image: u64, local: Vec2, size: Vec2) {
     let x = (local.x - 48.0).max(0.0);
@@ -2641,8 +2643,8 @@ fn visible_cells(
         }
     }
     for merge in &sheet.merges {
-        if !sheet.hidden_rows.contains(&merge.r0)
-            && !sheet.hidden_cols.contains(&merge.c0)
+        if (merge.r0..=merge.r1).any(|row| !sheet.hidden_rows.contains(&row))
+            && (merge.c0..=merge.c1).any(|col| !sheet.hidden_cols.contains(&col))
             && cell_area(
                 sheet, origin, viewport, merge.r0, merge.c0, frozen.0, frozen.1,
             )
@@ -2681,6 +2683,13 @@ fn chart_fraction(value: f64, low: f64, high: f64) -> f32 {
     result as f32
 }
 
+fn pie_fractions(values: &[f64]) -> Vec<f32> {
+    let scale=values.iter().copied().filter(|value|value.is_finite()).fold(0.0,f64::max);
+    if scale<=0.0 { return vec![0.0;values.len()]; }
+    let scaled:Vec<_>=values.iter().map(|value|if value.is_finite(){value.max(0.0)/scale}else{0.0}).collect();
+    let total=scaled.iter().sum::<f64>();
+    scaled.into_iter().map(|value|(value/total) as f32).collect()
+}
 fn paint_chart(ui: &egui::Ui, sheet: &Sheet, chart: &super::model::Chart, rect: Rect) {
     let painter = ui.painter().with_clip_rect(rect);
     painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
@@ -2715,15 +2724,13 @@ fn paint_chart(ui: &egui::Ui, sheet: &Sheet, chart: &super::model::Chart, rect: 
     let (lo, hi) = chart_bounds(series.iter().flatten().copied(), true);
     let y = |v: f64| plot.bottom() - chart_fraction(v, lo, hi) * plot.height();
     if matches!(chart.kind, ChartKind::Pie | ChartKind::Doughnut) {
-        let total = first.iter().map(|v| v.max(0.0)).sum::<f64>();
-        if total <= 0.0 {
-            return;
-        }
+        let fractions=pie_fractions(first);
+        if fractions.iter().all(|value|*value==0.0) {return;}
         let radius = plot.height().min(plot.width()) / 2.0;
         let center = plot.center();
         let mut angle = -std::f32::consts::FRAC_PI_2;
-        for (i, v) in first.iter().enumerate() {
-            let end = angle + (*v).max(0.0) as f32 / total as f32 * std::f32::consts::TAU;
+        for (i, fraction) in fractions.iter().enumerate() {
+            let end = angle + fraction * std::f32::consts::TAU;
             let steps = ((end - angle) * 20.0).ceil().max(1.0) as usize;
             let mut points = vec![center];
             for n in 0..=steps {
@@ -4165,5 +4172,47 @@ mod hundred_merge_clipboard_tests {
         assert!(paste_cells_with(&mut book, id, 0, 1, &clipboard, PasteMode::All, false).is_err());
         assert_eq!(book, before);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod phase200_editor_defects {
+    use super::*;
+    #[test]
+    fn visible_merged_content_keeps_a_hidden_anchor_in_render_and_navigation() {
+        let mut sheet=Sheet::default();
+        sheet.merges.push(Range::new(0,0,1,1));
+        sheet.hidden_rows.insert(0);sheet.hidden_cols.insert(0);
+        let viewport=Rect::from_min_size(Pos2::ZERO,Vec2::new(400.0,300.0));
+        let cells=visible_cells(&sheet,Pos2::ZERO,viewport,0..5,0..5,(0,0),viewport);
+        assert!(cells.contains(&(0,0)));
+        assert_eq!(jump_target(&sheet,(5,5),(1,1)),(0,0));
+        sheet.hidden_rows.insert(1);
+        assert!(!visible_cells(&sheet,Pos2::ZERO,viewport,0..5,0..5,(0,0),viewport).contains(&(0,0)));
+    }
+    #[test]
+    fn hiding_an_active_axis_moves_focus_to_a_visible_cell() {
+        let mut book=Book::default();
+        assert!(hide_axis(&mut book,0,0,true));
+        assert_eq!((book.selection.row,book.selection.col),(1,0));
+        assert!(hide_axis(&mut book,1,0,false));
+        assert_eq!((book.selection.row,book.selection.col),(1,1));
+        assert_eq!(book.selection.range(),Range::new(1,1,1,1));
+    }
+    #[test]
+    fn pie_fractions_remain_finite_for_large_and_tiny_values() {
+        for values in [[1e308,1e308],[1e39,3e39],[1e-300,3e-300]] {
+            let fractions=pie_fractions(&values);
+            assert!(fractions.iter().all(|value|value.is_finite()));
+            assert!((fractions.iter().sum::<f32>()-1.0).abs()<1e-6);
+        }
+        assert_eq!(pie_fractions(&[0.0,-1.0]),vec![0.0,0.0]);
+    }
+    #[test]
+    fn proportional_image_resize_obeys_both_dimension_limits() {
+        assert_eq!(constrained_image_size(Vec2::new(4000.0,2000.0),Vec2::new(12000.0,6000.0),true),Vec2::new(8000.0,4000.0));
+        let tiny=constrained_image_size(Vec2::new(1.0,8000.0),Vec2::ZERO,true);
+        assert_eq!(tiny,Vec2::new(1.0,8000.0));
+        assert_eq!(constrained_image_size(Vec2::new(100.0,100.0),Vec2::new(9000.0,20.0),false),Vec2::new(8000.0,20.0));
     }
 }

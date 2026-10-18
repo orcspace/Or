@@ -4,7 +4,7 @@ use super::model::{
 use calamine::{Data, Reader as _, open_workbook_auto_from_rs};
 use quick_xml::{
     NsReader as Reader, Writer,
-    events::{BytesStart, BytesText, Event},
+    events::{BytesRef, BytesStart, BytesText, Event},
 };
 use rust_xlsxwriter::{
     Chart, ChartType, Color, Format, FormatAlign, FormatBorder, FormatUnderline, Formula, Image,
@@ -406,6 +406,13 @@ fn ods_preflight(bytes: &[u8]) -> Result<(), String> {
     }
     Ok(())
 }
+fn xml_reference(reference: &BytesRef<'_>) -> Result<char,String> {
+    if let Some(character)=reference.resolve_char_ref().map_err(|error|error.to_string())? {return Ok(character);}
+    match reference.as_ref() {
+        "amp"=>Ok('&'),"lt"=>Ok('<'),"gt"=>Ok('>'),"quot"=>Ok('"'),"apos"=>Ok('\''),
+        _=>Err("XLSX: неизвестная XML entity".into()),
+    }
+}
 fn xml_bounds(bytes: &[u8]) -> Result<Option<Vec<usize>>, String> {
     let mut reader = Reader::from_str(std::str::from_utf8(bytes).map_err(|e| e.to_string())?);
     let mut root = String::new();
@@ -481,7 +488,7 @@ fn xml_bounds(bytes: &[u8]) -> Result<Option<Vec<usize>>, String> {
             }
             Event::Text(t) if in_string => length = length.saturating_add(t.xml10_content().len()),
             Event::CData(t) if in_string => length = length.saturating_add(t.len()),
-            Event::GeneralRef(_) if in_string => length = length.saturating_add(8),
+            Event::GeneralRef(reference) if in_string => length = length.saturating_add(xml_reference(&reference)?.len_utf8()),
             Event::End(e) => {
                 depth = depth.saturating_sub(1);
                 if e.local_name().as_ref() == "si" && root == "sst" {
@@ -514,6 +521,7 @@ fn worksheet_bounds(bytes: &[u8], strings: &[usize]) -> Result<(u64, usize), Str
     let mut in_value = false;
     let mut in_text = false;
     let mut in_formula = false;
+    let mut inline_length = 0usize;
     let mut formula_length = 0usize;
     let mut shared_id = None;
     let mut shared_anchor = false;
@@ -577,6 +585,7 @@ fn worksheet_bounds(bytes: &[u8], strings: &[usize]) -> Result<(u64, usize), Str
                             return Err("Неверный индекс стиля XLSX".into());
                         }
                         cell_type = a.get("t").cloned().unwrap_or_default();
+                        inline_length = 0;
                         value.clear();
                     }
                     "v" => {
@@ -611,35 +620,39 @@ fn worksheet_bounds(bytes: &[u8], strings: &[usize]) -> Result<(u64, usize), Str
                 }
                 if in_text {
                     text_bytes = text_bytes.saturating_add(size);
+                    inline_length = inline_length.saturating_add(size);
                 }
                 if in_formula {
                     formula_length = formula_length.saturating_add(size);
                 }
             }
             Event::CData(t) => {
+                if in_value {
+                    if value.len().saturating_add(t.len())>32767 {return Err("XLSX: слишком длинное значение".into());}
+                    value.push_str(&t);
+                }
                 if in_text {
                     text_bytes = text_bytes.saturating_add(t.len());
+                    inline_length = inline_length.saturating_add(t.len());
                 }
                 if in_formula {
                     formula_length = formula_length.saturating_add(t.len());
                 }
             }
             Event::GeneralRef(r) => {
+                let ch=xml_reference(&r)?;
                 if in_value {
-                    let ch = r
-                        .resolve_char_ref()
-                        .map_err(|e| e.to_string())?
-                        .ok_or("XLSX: именованная entity в числовом поле")?;
                     value.push(ch);
                     if value.len() > 32767 {
                         return Err("XLSX: слишком длинное значение".into());
                     }
                 }
                 if in_text {
-                    text_bytes = text_bytes.saturating_add(8);
+                    text_bytes = text_bytes.saturating_add(ch.len_utf8());
+                    inline_length = inline_length.saturating_add(ch.len_utf8());
                 }
                 if in_formula {
-                    formula_length = formula_length.saturating_add(8);
+                    formula_length = formula_length.saturating_add(ch.len_utf8());
                 }
             }
             Event::End(e) => match e.local_name().as_ref() {
@@ -649,6 +662,7 @@ fn worksheet_bounds(bytes: &[u8], strings: &[usize]) -> Result<(u64, usize), Str
                 }
                 "v" => {
                     in_value = false;
+                    if cell_type == "str" { text_bytes=text_bytes.saturating_add(value.len()); }
                     if cell_type == "s" {
                         let index = value
                             .parse::<usize>()
@@ -678,7 +692,7 @@ fn worksheet_bounds(bytes: &[u8], strings: &[usize]) -> Result<(u64, usize), Str
             Event::Eof => break,
             _ => (),
         }
-        if formula_length > 32767 || text_bytes > 64 * 1024 * 1024 {
+        if formula_length > 32767 || inline_length > 32767 || text_bytes > 64 * 1024 * 1024 {
             return Err("XLSX: превышен предел распакованного текста/формул".into());
         }
     }
@@ -701,7 +715,7 @@ fn preflight(parts: &BTreeMap<String, Vec<u8>>) -> Result<(), String> {
     }
     let mut shared_strings = Vec::new();
     for (name, bytes) in parts {
-        if name.ends_with(".xml")
+        if name.to_ascii_lowercase().ends_with(".xml")
             && let Some(strings) = xml_bounds(bytes)?
         {
             if !shared_strings.is_empty() {
@@ -716,7 +730,7 @@ fn preflight(parts: &BTreeMap<String, Vec<u8>>) -> Result<(), String> {
         if name == "content.xml" {
             ods_preflight(bytes)?;
         }
-        if name.ends_with(".xml") && worksheet_root(bytes)? {
+        if name.to_ascii_lowercase().ends_with(".xml") && worksheet_root(bytes)? {
             let (area, text) = worksheet_bounds(bytes, &shared_strings)?;
             dense_total = dense_total
                 .checked_add(area)
@@ -3100,5 +3114,43 @@ mod hundred_chart_unicode_tests {
         assert_eq!(book.sheets[0].charts.len(), 1);
         assert_eq!(book.sheets[0].charts[0].title, "Доход");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod phase200_preflight_defects {
+    use super::*;
+    #[test]
+    fn xml_entity_budgets_use_decoded_utf8_lengths() -> Result<(),String> {
+        let xml=format!("<sst><si><t>{}</t></si></sst>","&amp;".repeat(10000));
+        assert_eq!(xml_bounds(xml.as_bytes())?,Some(vec![10000]));
+        let xml=format!("<worksheet><sheetData><row><c><f>\"{}\"</f></c></row></sheetData></worksheet>","&amp;".repeat(10000));
+        assert!(worksheet_bounds(xml.as_bytes(),&[]).is_ok());
+        let xml=br#"<worksheet><sheetData><row><c t="str"><v>A&amp;B&#x410;</v></c></row></sheetData></worksheet>"#;
+        assert_eq!(worksheet_bounds(xml,&[])?.1,5);
+        Ok(())
+    }
+    #[test]
+    fn formula_string_caches_are_charged_before_calamine_import() -> Result<(),String> {
+        let xml=br#"<worksheet><sheetData><row><c t="str"><f>1</f><v>cached text</v></c></row></sheetData></worksheet>"#;
+        assert_eq!(worksheet_bounds(xml,&[])?.1,258+"cached text".len());
+        let xml=br#"<worksheet><sheetData><row><c t="str"><v><![CDATA[cached text]]></v></c></row></sheetData></worksheet>"#;
+        assert_eq!(worksheet_bounds(xml,&[])?.1,"cached text".len());
+        Ok(())
+    }
+    #[test]
+    fn inline_rich_text_checks_the_combined_cell_length() {
+        let xml=format!("<worksheet><sheetData><row><c t=\"inlineStr\"><is><r><t>{}</t></r><r><t>{}</t></r></is></c></row></sheetData></worksheet>","a".repeat(20000),"b".repeat(20000));
+        assert!(worksheet_bounds(xml.as_bytes(),&[]).is_err());
+        let xml=xml.replace(&"b".repeat(20000),&"b".repeat(10000));
+        assert!(worksheet_bounds(xml.as_bytes(),&[]).is_ok());
+    }
+    #[test]
+    fn uppercase_xml_parts_receive_the_same_resource_preflight() {
+        let bytes=br#"<worksheet><dimension ref="A1:XFD1048576"/></worksheet>"#.to_vec();
+        let parts=BTreeMap::from([("custom/Sheet.XML".into(),bytes)]);
+        assert!(preflight(&parts).is_err());
+        let parts=BTreeMap::from([("custom/Strings.XML".into(),br#"<sst uniqueCount="1000001"/>"#.to_vec())]);
+        assert!(preflight(&parts).is_err());
     }
 }

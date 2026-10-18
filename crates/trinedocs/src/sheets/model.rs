@@ -373,6 +373,14 @@ impl Book {
             })
         })
     }
+    fn check_cell_growth(&self, removed: usize, added: usize, new_cells: usize, limit: usize) -> Result<(), String> {
+        let count=self.sheets.iter().map(|sheet|sheet.cells.len()).sum::<usize>();
+        if count.checked_add(new_cells).is_none_or(|count|count>1_000_000)
+            || self.text_bytes().saturating_sub(removed).checked_add(added).is_none_or(|bytes|bytes>limit) {
+            return Err("Правка превышает лимит ячеек или исходного текста книги".into());
+        }
+        Ok(())
+    }
     fn validate_text_budget(&self, limit: usize) -> Result<(), String> {
         if self.text_bytes() > limit {
             Err("Текст книги и метаданных превышает общий лимит".into())
@@ -447,6 +455,7 @@ impl Book {
                 return Err("Недопустимые размеры или закрепление листа".into());
             }
             validate_merges(&s.merges)?;
+            validate_merge_inputs(s)?;
             if let Some(f) = s.filter {
                 f.validate()?;
             }
@@ -669,6 +678,12 @@ impl Book {
         if normalized.len() > 32767 {
             return Err("Нормализованная формула превышает предел длины ячейки".into());
         }
+        let source = self.sheet_by_id(sheet).ok_or("Лист не найден")?;
+        if !normalized.is_empty() && source.merges.iter().any(|merge| {
+            merge.contains(row, col) && (row, col) != (merge.r0, merge.c0)
+        }) {
+            return Err("Нельзя записывать содержимое в скрытую часть объединённой ячейки".into());
+        }
         let key = address(row, col);
         let existing = self
             .sheet_by_id(sheet)
@@ -692,6 +707,9 @@ impl Book {
         col: u32,
         values: &[Vec<String>],
     ) -> Result<(), String> {
+        self.set_range_with_limit(sheet, row, col, values, MAX_BOOK_TEXT_BYTES)
+    }
+    fn set_range_with_limit(&mut self, sheet: u64, row: u32, col: u32, values: &[Vec<String>], limit: usize) -> Result<(), String> {
         if self.sheet_by_id(sheet).is_none() {
             return Err("Лист не найден".into());
         }
@@ -718,6 +736,19 @@ impl Book {
         }) {
             return Err("Вставка затрагивает объединённые ячейки: сначала разъедините их".into());
         }
+        let mut removed=0usize;
+        let mut added=0usize;
+        let mut new_cells=0usize;
+        for (r,line) in values.iter().enumerate() {
+            for (c,input) in line.iter().enumerate() {
+                let previous=source.cell(row+r as u32,col+c as u32);
+                if let Some(cell)=previous { removed=removed.saturating_add(cell.input.len()); }
+                else { new_cells+=1; }
+                added=added.saturating_add(super::formula::canonicalize(input).len());
+                if previous.is_none() { added=added.saturating_add(CellFormat::default().font.len()+CellFormat::default().number.len()); }
+            }
+        }
+        self.check_cell_growth(removed,added,new_cells,limit)?;
         for (r, line) in values.iter().enumerate() {
             for (c, input) in line.iter().enumerate() {
                 self.set_input(sheet, row + r as u32, col + c as u32, input)?;
@@ -746,11 +777,24 @@ impl Book {
             .collect())
     }
     pub fn set_format(&mut self, sheet: u64, range: Range, fmt: CellFormat) -> Result<(), String> {
+        self.set_format_with_limit(sheet,range,fmt,MAX_BOOK_TEXT_BYTES)
+    }
+    fn set_format_with_limit(&mut self, sheet: u64, range: Range, fmt: CellFormat, limit: usize) -> Result<(), String> {
         range.validate()?;
         fmt.validate()?;
-        if self.sheet_by_id(sheet).is_none() {
-            return Err("Лист не найден".into());
+        let source=self.sheet_by_id(sheet).ok_or("Лист не найден")?;
+        let mut removed=0usize;
+        let mut added=0usize;
+        let mut new_cells=0usize;
+        for r in range.r0..=range.r1 {
+            for c in range.c0..=range.c1 {
+                if let Some(cell)=source.cell(r,c) {
+                    removed=removed.saturating_add(cell.fmt.font.len()+cell.fmt.number.len());
+                } else { new_cells+=1; }
+                added=added.saturating_add(fmt.font.len()+fmt.number.len());
+            }
         }
+        self.check_cell_growth(removed,added,new_cells,limit)?;
         for r in range.r0..=range.r1 {
             for c in range.c0..=range.c1 {
                 if self.sheet_by_id(sheet).and_then(|s| s.cell(r, c)).is_none() {
@@ -872,7 +916,9 @@ impl Book {
     fn replace_all_with_limit(&mut self,sheet:u64,query:&str,replacement:&str,case_sensitive:bool,limit:usize)->Result<usize,String> {
         let s=self.sheet_by_id(sheet).ok_or("Лист не найден")?;
         if query.is_empty(){return Ok(0);}
-        let mut bytes=self.text_bytes();
+        let removed_total=s.cells.values().filter(|cell| !match_ranges(&cell.input,query,case_sensitive).is_empty())
+            .map(|cell|cell.input.len()).sum::<usize>();
+        let mut bytes=self.text_bytes().saturating_sub(removed_total);
         let mut changes=Vec::new();
         for (key,cell) in &s.cells {
             let ranges=match_ranges(&cell.input,query,case_sensitive);
@@ -881,8 +927,6 @@ impl Book {
             let length=ranges.len().checked_mul(replacement.len())
                 .and_then(|added|(cell.input.len()-removed).checked_add(added));
             let Some(length)=length.filter(|length|*length<=32767) else {return Err("Замена превышает предел длины ячейки".into());};
-            let projected=bytes.saturating_sub(cell.input.len()).checked_add(length)
-                .filter(|bytes|*bytes<=limit).ok_or("Замена превышает предел текста книги")?;
             let mut input=String::with_capacity(length);
             let mut offset=0;
             for (start,end) in ranges {
@@ -891,8 +935,8 @@ impl Book {
             input.push_str(&cell.input[offset..]);
             let input=super::formula::canonicalize(&input);
             if input.len()>32767{return Err("Нормализованная формула превышает предел длины ячейки".into());}
-            bytes=projected.saturating_sub(length).checked_add(input.len())
-                .filter(|bytes|*bytes<=limit).ok_or("Замена превышает предел текста книги")?;
+            bytes=bytes.checked_add(input.len()).filter(|bytes|*bytes<=limit)
+                .ok_or("Замена превышает предел текста книги")?;
             if input!=cell.input {changes.push((key.clone(),input));}
         }
         let count=changes.len();
@@ -910,6 +954,9 @@ impl Book {
         self.atomic_edit(|book| book.fill_inner(sheet, source, target))
     }
     fn fill_inner(&mut self, sheet: u64, source: Range, target: Range) -> Result<(), String> {
+        self.fill_with_limit(sheet, source, target, MAX_BOOK_TEXT_BYTES)
+    }
+    fn fill_with_limit(&mut self, sheet: u64, source: Range, target: Range, limit: usize) -> Result<(), String> {
         source.validate()?;
         target.validate()?;
         let s = self.sheet_by_id(sheet).ok_or("Лист не найден")?;
@@ -930,16 +977,20 @@ impl Book {
         let mut text_bytes = self.text_bytes();
         for r in target.r0..=target.r1 {
             for c in target.c0..=target.c1 {
-                let sr = source.r0+(r-target.r0)%(source.r1-source.r0+1);
-                let sc = source.c0+(c-target.c0)%(source.c1-source.c0+1);
                 if let Some(old) = s.cell(r,c) {
                     text_bytes = text_bytes.saturating_sub(old.input.len()+old.fmt.font.len()+old.fmt.number.len());
                 }
+            }
+        }
+        for r in target.r0..=target.r1 {
+            for c in target.c0..=target.c1 {
+                let sr = source.r0+(r-target.r0)%(source.r1-source.r0+1);
+                let sc = source.c0+(c-target.c0)%(source.c1-source.c0+1);
                 if let Some(original) = s.cell(sr,sc) {
                     let input = super::formula::shift_references(&original.input,i64::from(r)-i64::from(sr),i64::from(c)-i64::from(sc));
                     text_bytes = text_bytes.saturating_add(input.len()+original.fmt.font.len()+original.fmt.number.len());
                 }
-                if text_bytes > MAX_BOOK_TEXT_BYTES {
+                if text_bytes > limit {
                     return Err("Заполнение превысит лимит исходного текста книги 64 МиБ".into());
                 }
             }
@@ -1509,6 +1560,34 @@ pub fn parse_range(input: &str) -> Result<Range, String> {
     Ok(range)
 }
 
+fn validate_merge_inputs(sheet: &Sheet) -> Result<(), String> {
+    // Sweep rows, so native validation does not compare every cell with every merge.
+    let mut events=Vec::new();
+    for merge in &sheet.merges {
+        events.push((merge.r0,1u8,merge.c0,merge.c1));
+        events.push((merge.r1+1,0u8,merge.c0,merge.c1));
+    }
+    for (key,cell) in &sheet.cells {
+        if !cell.input.is_empty() && let Some((row,col))=parse_address(key) {
+            events.push((row,2u8,col,col));
+        }
+    }
+    events.sort_unstable();
+    let mut active=BTreeMap::new();
+    for (row,kind,col,end) in events {
+        match kind {
+            0 => { active.remove(&col); }
+            1 => { active.insert(col,(end,row)); }
+            _ => {
+                if let Some((&start,&(last,anchor_row)))=active.range(..=col).next_back()
+                    && col<=last && (row,col)!=(anchor_row,start) {
+                    return Err("Содержимое в скрытой части объединённой ячейки".into());
+                }
+            }
+        }
+    }
+    Ok(())
+}
 fn validate_merges(merges: &[Range]) -> Result<(), String> {
     let mut events = Vec::with_capacity(merges.len() * 2);
     for (id, m) in merges.iter().enumerate() {
@@ -1675,6 +1754,46 @@ mod hundred_book_budget_tests {
         book.add_chart(id, ChartKind::Column, Range::new(0, 0, 0, 1), &"x".repeat(128))?;
         assert!(book.validate_text_budget(before + 127).is_err());
         assert!(book.validate_text_budget(before + 128).is_ok());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod phase200_model_defects {
+    use super::*;
+    #[test]
+    fn covered_merge_inputs_are_rejected_by_mutation_and_native_validation() -> Result<(), String> {
+        let mut book=Book::default();let id=book.active_id();
+        book.merge(id,Range::new(0,0,0,1))?;
+        let before=book.clone();
+        assert!(book.set_cell(id,0,1,"hidden").is_err());
+        assert_eq!(book,before);
+        book.set_input(id,0,1,"")?;
+        book.sheet_by_id_mut(id).and_then(|sheet|sheet.cell_mut(0,1)).ok_or("cell")?.input="hidden".into();
+        assert!(book.validate().is_err());
+        Ok(())
+    }
+    #[test]
+    fn range_and_format_replication_check_final_budgets_before_mutation() -> Result<(), String> {
+        let mut book=Book::default();let id=book.active_id();let before=book.clone();
+        assert!(book.set_range_with_limit(id,0,0,&[vec!["x".repeat(50),"y".repeat(50)]],100).is_err());
+        assert_eq!(book,before);
+        let fmt=CellFormat{font:"f".repeat(50),number:"0".repeat(50),..CellFormat::default()};
+        assert!(book.set_format_with_limit(id,Range::new(0,0,0,1),fmt,100).is_err());
+        assert_eq!(book,before);
+        Ok(())
+    }
+    #[test]
+    fn budget_neutral_replacements_and_fills_do_not_fail_on_prefix_growth() -> Result<(), String> {
+        let mut book=Book::default();let id=book.active_id();
+        book.set_range(id,0,0,&[vec!["k".into(),"K".into()]])?;
+        let limit=book.text_bytes();
+        assert_eq!(book.replace_all_with_limit(id,"k","é",false,limit)?,2);
+        assert_eq!(book.text_bytes(),limit);
+        book.set_range(id,0,0,&[vec!["x".into(),"long-value".into(),"long-value".into(),"x".into()]])?;
+        let limit=book.text_bytes();
+        book.fill_with_limit(id,Range::new(0,2,0,3),Range::new(0,0,0,1),limit)?;
+        assert_eq!(book.text_bytes(),limit);
         Ok(())
     }
 }
