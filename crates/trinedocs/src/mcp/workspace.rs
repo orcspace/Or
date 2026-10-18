@@ -332,7 +332,7 @@ fn prepare_document(
             .ok_or("invalid_args: arguments должен быть объектом")?;
         map.insert("base_version".into(), json!(tabs[0].version));
         let result =
-            super::tools::dispatch(&mut tabs, &mut next_id, &operation.tool, &arguments, client)?;
+            super::tools::prepare_operation(&mut tabs, &mut next_id, &operation.tool, &arguments, client)?;
         if let Some(ids) = result.get("changed_ids").and_then(Value::as_array) {
             changed_ids.extend(ids.iter().filter_map(Value::as_u64));
         }
