@@ -234,6 +234,7 @@ pub fn read(bytes: &[u8], ext: &str) -> Result<Doc, String> {
         doc.losses
             .push("Макросы DOCM не исполняются и не сохраняются.".into());
     }
+    doc.losses.sort();doc.losses.dedup();
     doc.normalize();
     doc.validate()?;
     Ok(doc)
@@ -265,7 +266,7 @@ pub fn write(doc: &Doc, ext: &str) -> Result<Vec<u8>, String> {
             let encoded_bytes=doc.images.iter().fold(0usize,|total,image|
                 total.saturating_add(image.bytes.len().div_ceil(3).saturating_mul(4)));
             if encoded_bytes>XML_LIMIT {return Err("HTML превышает безопасный предел 32 МиБ".into());}
-            let html=write_html(doc);
+            let html=write_html_bounded(doc,XML_LIMIT)?;
             if html.len()>XML_LIMIT { return Err("HTML превышает безопасный предел 32 МиБ".into()); }
             Ok(html.into_bytes())
         }
@@ -419,7 +420,7 @@ fn apply_ppr(p: &mut Paragraph, node: &Node, num_formats: &BTreeMap<String, List
     if let Some(align) = node.child("jc").and_then(Node::value) {
         p.align = match align {
             "center" => Align::Center,
-            "right" => Align::Right,
+            "right" | "end" => Align::Right,
             "both" | "distribute" => Align::Justify,
             _ => Align::Left,
         };
@@ -441,26 +442,11 @@ fn apply_ppr(p: &mut Paragraph, node: &Node, num_formats: &BTreeMap<String, List
             None => p.list,
         };
     }
-    if let Some(n) = node.child("spacing") {
-        p.spacing_before = number(n.attr("before"), p.spacing_before * 20.0) / 20.0;
-        p.spacing_after = number(n.attr("after"), p.spacing_after * 20.0) / 20.0;
-        // lineRule defaults to "auto" (a multiple of single spacing) when absent.
-        if let Some(line) = n.attr("line") {
-            match n.attr("lineRule").unwrap_or("auto") {
-                "exact" | "atLeast" => {
-                    p.line_points = (number(Some(line), 240.0) / 20.0).clamp(0.0, 1584.0);
-                    p.line_exact = n.attr("lineRule") == Some("exact");
-                }
-                _ => {
-                    p.line_spacing = (number(Some(line), 240.0) / 240.0).clamp(0.5, 5.0);
-                    p.line_points = 0.0;
-                }
-            }
-        }
-    }
+    if let Some(n) = node.child("spacing") {apply_word_spacing(p,n);}
     // Attributes missing from `w:ind` keep the value inherited from the style.
     if let Some(n) = node.child("ind") {
         p.indent = number(n.attr("left").or_else(|| n.attr("start")), p.indent * 20.0) / 20.0;
+        p.right_indent = number(n.attr("right").or_else(||n.attr("end")),p.right_indent*20.0)/20.0;
         if n.attr("hanging").is_some() {
             p.first_indent = -number(n.attr("hanging"), 0.0) / 20.0;
         } else if n.attr("firstLine").is_some() {
@@ -482,6 +468,26 @@ fn apply_ppr(p: &mut Paragraph, node: &Node, num_formats: &BTreeMap<String, List
     if let Some(v) = bool_prop(node, "contextualSpacing") {
         p.contextual_spacing = v;
     }
+}
+fn apply_word_spacing(p:&mut Paragraph,n:&Node) {
+        p.spacing_before = number(n.attr("before"), p.spacing_before * 20.0) / 20.0;
+        p.spacing_after = number(n.attr("after"), p.spacing_after * 20.0) / 20.0;
+        // lineRule defaults to "auto" (a multiple of single spacing) when absent.
+        if let Some(line) = n.attr("line") {
+            match n.attr("lineRule").unwrap_or("auto") {
+                "exact" | "atLeast" => {
+                    p.line_points = (number(Some(line), 240.0) / 20.0).clamp(0.0, 1584.0);
+                    p.line_exact = n.attr("lineRule") == Some("exact");
+                }
+                _ => {
+                    p.line_spacing = (number(Some(line), 240.0) / 240.0).clamp(0.5, 5.0);
+                    p.line_points = 0.0;
+                }
+            }
+        }
+}
+fn merge_word_spacing(spacing:&mut Node,ppr:&Node) {
+    if let Some(node)=ppr.child("spacing") {spacing.attrs.extend(node.attrs.clone());}
 }
 /// Body-level blocks with content controls (`w:sdt`) and custom XML unwrapped: their
 /// paragraphs and tables are ordinary document content.
@@ -526,6 +532,9 @@ struct Defaults<'a> {
     format: &'a TextFormat,
     hidden: bool,
     paragraph: &'a Paragraph,
+    spacing: &'a Node,
+    number_starts: &'a BTreeMap<String,u32>,
+    number_counters: &'a std::cell::RefCell<BTreeMap<String,[Option<u32>;9]>>,
     /// `styleId` of the default paragraph style (`a` in Russian Word, `Normal` in English).
     normal: &'a str,
 }
@@ -569,6 +578,7 @@ fn paragraph(
     };
     let mut format = default_format.clone();
     let mut hidden=defaults.hidden;
+    let mut spacing=defaults.spacing.clone();
     let style = node
         .child("pPr")
         .and_then(|n| n.child("pStyle"))
@@ -579,19 +589,44 @@ fn paragraph(
     let mut chain = table_style.to_vec();
     let effective=if styles.contains_key(style) {style}else{defaults.normal};
     style_chain(styles,effective,&mut chain)?;
-    for n in chain {
+    for n in &chain {
         if let Some(rpr) = n.child("rPr") {
             if bool_prop(rpr,"vanish")==Some(true) {hidden=!hidden;}
             apply_style_rpr(&mut format, rpr);
         }
         if let Some(ppr) = n.child("pPr") {
+            merge_word_spacing(&mut spacing,ppr);
             apply_ppr(&mut p, ppr, nums);
         }
     }
     if let Some(n) = node.child("pPr") {
+        merge_word_spacing(&mut spacing,n);
         apply_ppr(&mut p, n, nums);
     }
+    apply_word_spacing(&mut p,&spacing);
     p.style = canonical_style(styles, style);
+    let outline=chain.iter().filter_map(|style|style.child("pPr"))
+        .chain(node.child("pPr"))
+        .filter_map(|properties|properties.child("outlineLvl").and_then(Node::value))
+        .last().and_then(|value|value.parse::<u8>().ok());
+    match outline {
+        Some(level @ 0..=5)=>p.style=format!("Heading{}",level+1),
+        Some(9) if heading_level(&p.style).is_some()=>p.style="Normal".into(),
+        Some(6..=8)=>doc.losses.push("Уровни структуры DOCX 7–9 пока не отображаются в оглавлении.".into()),
+        _=>{}
+    }
+    if p.list==List::Number {
+        let num_id=chain.iter().filter_map(|style|style.child("pPr")).chain(node.child("pPr"))
+            .filter_map(|properties|properties.child("numPr").and_then(|node|node.child("numId")).and_then(Node::value)).last();
+        if let Some(id)=num_id {
+            let level=usize::from(p.list_level.min(8));
+            let first=defaults.number_starts.get(&format!("{id}:{level}")).copied().unwrap_or(1);
+            let mut counters=defaults.number_counters.borrow_mut();
+            let levels=counters.entry(id.into()).or_insert([None;9]);
+            let value=levels[level].map(|value|value.saturating_add(1).min(999_999_999)).unwrap_or(first);
+            p.list_start=Some(value);levels[level]=Some(value);levels[level+1..].fill(None);
+        }
+    }
     let mut nodes = Vec::new();
     collect_runs(node, rels, None, &mut nodes);
     for (run, link) in nodes {
@@ -616,26 +651,8 @@ fn paragraph(
             doc.losses.push("Скрытый текст DOCX не отображается и не сохраняется.".into());
             continue;
         }
-        let mut text = String::new();
-        for n in &run.children {
-            match n.name.as_str() {
-                "t" => text.push_str(&n.text_content()),
-                "tab" => text.push('\t'),
-                "noBreakHyphen" => text.push('\u{2011}'),
-                "softHyphen" => text.push('\u{00ad}'),
-                "br" | "cr" => {
-                    if n.attr("type") == Some("page") {
-                        text.push('\u{000c}');
-                    } else {
-                        text.push('\u{000b}');
-                    }
-                }
-                _ => {}
-            }
-        }
-        if !text.is_empty() {
-            p.runs.push(Run { text, format: fmt });
-        }
+        word_run_content(&run.children,&fmt,doc,&mut p.runs);
+
     }
     if p.runs.is_empty() {
         // An empty paragraph keeps the size of its paragraph mark, so blank lines keep their height.
@@ -649,8 +666,52 @@ fn paragraph(
         });
     }
     p.normalize();
+    let format=p.runs.iter().map(|run|&run.format).max_by(|a,b|a.size.total_cmp(&b.size)).cloned().unwrap_or(format);
+    let height=paragraph_line_height(&p,&format,format.size);
+    if let Some(lines)=spacing.attr("beforeLines") {p.spacing_before=(number(Some(lines),0.0)/100.0*height).clamp(0.0,1000.0);}
+    if let Some(lines)=spacing.attr("afterLines") {p.spacing_after=(number(Some(lines),0.0)/100.0*height).clamp(0.0,1000.0);}
     Ok(p)
 }
+
+fn word_run_content(nodes:&[Node],format:&TextFormat,doc:&mut Doc,out:&mut Vec<Run>) {
+    for node in nodes {
+        let text=match node.name.as_str() {
+            "t"=>Some(node.text_content()),
+            "tab"=>Some("\t".into()),
+            "noBreakHyphen"=>Some("\u{2011}".into()),
+            "softHyphen"=>Some("\u{00ad}".into()),
+            "br"|"cr"=>{
+                if node.attr("type")==Some("column") {doc.losses.push("Разрыв колонки DOCX представлен разрывом страницы в одноколоночном макете.".into());}
+                Some(if matches!(node.attr("type"),Some("page"|"column")) {"\u{000c}"}else{"\u{000b}"}.into())
+            },
+            "sym"=>{
+                if let Some(ch)=node.attr("char").and_then(|value|u32::from_str_radix(value,16).ok()).and_then(char::from_u32)
+                    .filter(|ch|*ch>=' ') {
+                    let mut symbol=format.clone();
+                    if let Some(font)=node.attr("font").filter(|font|!font.is_empty()) {symbol.font=font.into();}
+                    out.push(Run{text:ch.to_string(),format:symbol});
+                }else{doc.losses.push("Некорректный символ w:sym DOCX пропущен.".into());}
+                None
+            }
+            "ruby"=>{
+                if let Some(base)=node.child("rubyBase") {word_run_content(&base.children,format,doc,out);}
+                doc.losses.push("Фонетические подсказки DOCX сведены к базовому тексту.".into());
+                None
+            }
+            "r"=>{
+                let mut nested=format.clone();
+                if let Some(properties)=node.child("rPr") {
+                    if bool_prop(properties,"vanish")==Some(true) {continue;}
+                    apply_rpr(&mut nested,properties);
+                }
+                word_run_content(&node.children,&nested,doc,out);None
+            }
+            _=>None,
+        };
+        if let Some(text)=text.filter(|text|!text.is_empty()) {out.push(Run{text,format:format.clone()});}
+    }
+}
+
 /// `Some(true)` when any edge of a `tblBorders`/`tcBorders` element is drawn.
 fn borders_visible(node: Option<&Node>) -> Option<bool> {
     let node = node?;
@@ -675,6 +736,38 @@ fn visible_drawings<'a>(node: &'a Node, out: &mut Vec<&'a Node>) {
             _ => visible_drawings(child, out),
         }
     }
+}
+
+
+fn word_cropped_image(bytes:&[u8],drawing:&Node,losses:&mut Vec<String>)->Result<Vec<u8>,String> {
+    let Some(crop)=drawing.descendant("srcRect") else{return Ok(bytes.to_vec());};
+    let mut sides=[0.0f64;4];
+    for (side,name) in sides.iter_mut().zip(["l","t","r","b"]) {
+        let Some(raw)=crop.attr(name) else{continue;};
+        *side=if let Some(percent)=raw.strip_suffix('%') {
+            percent.parse::<f64>().ok().map(|value|value/100.0)
+        }else{raw.parse::<f64>().ok().map(|value|value/100000.0)}
+            .filter(|value|value.is_finite()).ok_or("Некорректная обрезка рисунка DOCX")?;
+    }
+    if sides.iter().all(|value|*value==0.0) {return Ok(bytes.to_vec());}
+    if sides.iter().any(|value|*value<0.0) {
+        losses.push("Внешние отступы обрезки рисунка DOCX не поддерживаются; оставлен исходный рисунок.".into());
+        return Ok(bytes.to_vec());
+    }
+    if sides[0]+sides[2]>=1.0 || sides[1]+sides[3]>=1.0 {
+        return Err("Обрезка DOCX не оставляет видимой области рисунка".into());
+    }
+    let image=crate::util::decode_image(bytes).map_err(|error|format!("Обрезка DOCX: {error}"))?;
+    let (width,height)=(image.width(),image.height());
+    let x=(f64::from(width)*sides[0]).round().clamp(0.0,f64::from(width.saturating_sub(1))) as u32;
+    let y=(f64::from(height)*sides[1]).round().clamp(0.0,f64::from(height.saturating_sub(1))) as u32;
+    let right=(f64::from(width)*(1.0-sides[2])).round().clamp(f64::from(x+1),f64::from(width)) as u32;
+    let bottom=(f64::from(height)*(1.0-sides[3])).round().clamp(f64::from(y+1),f64::from(height)) as u32;
+    let mut png=std::io::Cursor::new(Vec::new());
+    image.crop_imm(x,y,right-x,bottom-y).write_to(&mut png,image::ImageFormat::Png).map_err(|error|error.to_string())?;
+    let bytes=png.into_inner();
+    if bytes.len()>XML_LIMIT {return Err("Обрезанный рисунок DOCX превышает 32 МБ".into());}
+    Ok(bytes)
 }
 
 fn collect_runs<'a>(
@@ -758,6 +851,7 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
         ..TextFormat::default()
     };
     let mut default_hidden=false;
+    let mut default_spacing=Node::default();
     let mut default_paragraph = Paragraph {
         spacing_before: 0.0,
         spacing_after: 0.0,
@@ -772,6 +866,7 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
             default_hidden=bool_prop(n,"vanish").unwrap_or(false);
         }
         if let Some(n) = node.descendant("pPrDefault").and_then(|n| n.child("pPr")) {
+            merge_word_spacing(&mut default_spacing,n);
             apply_ppr(&mut default_paragraph, n, &BTreeMap::new());
         }
         for n in &node.children {
@@ -783,9 +878,12 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
         }
     }
     let mut nums = BTreeMap::new();
+    let mut number_starts=BTreeMap::new();
+    let number_counters=std::cell::RefCell::new(BTreeMap::new());
     if let Some(bytes) = parts.get("word/numbering.xml") {
         let node = xml(bytes)?;
         let mut abstracts = BTreeMap::new();
+        let mut abstract_starts=BTreeMap::new();
         for n in &node.children {
             if n.name == "abstractNum"
                 && let Some(id) = n.attr("abstractNumId")
@@ -800,6 +898,11 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
                         Some((index, kind))
                     })
                     .collect::<BTreeMap<_, _>>();
+                let starts=n.children.iter().filter(|node|node.name=="lvl").filter_map(|level|
+                    Some((level.attr("ilvl")?.parse::<u8>().ok()?,
+                        level.child("start").and_then(Node::value).and_then(|value|value.parse::<u32>().ok()).unwrap_or(1).min(999_999_999))))
+                    .collect::<BTreeMap<_,_>>();
+                abstract_starts.insert(id.to_string(),starts);
                 abstracts.insert(id.to_string(), levels);
             }
         }
@@ -813,7 +916,13 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
                     .and_then(|id| abstracts.get(id))
                     .cloned()
                     .unwrap_or_default();
+                let mut starts=n.child("abstractNumId").and_then(Node::value).and_then(|id|abstract_starts.get(id)).cloned().unwrap_or_default();
                 for override_node in n.children.iter().filter(|n| n.name == "lvlOverride") {
+                    if let Some(level)=override_node.attr("ilvl").and_then(|value|value.parse::<u8>().ok())
+                        && let Some(start)=override_node.child("startOverride").or_else(||override_node.child("lvl").and_then(|node|node.child("start")))
+                            .and_then(Node::value).and_then(|value|value.parse::<u32>().ok()).filter(|value|*value<=999_999_999) {
+                        starts.insert(level,start);
+                    }
                     if let Some(level) = override_node.child("lvl")
                         && let Some(index) = override_node
                             .attr("ilvl")
@@ -826,6 +935,7 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
                         );
                     }
                 }
+                for (level,start) in starts {number_starts.insert(format!("{id}:{level}"),start);}
                 nums.insert(
                     id.to_string(),
                     levels.get(&0).copied().unwrap_or(List::Bullet),
@@ -851,6 +961,9 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
         format: &default_format,
         hidden: default_hidden,
         paragraph: &default_paragraph,
+        spacing: &default_spacing,
+        number_starts: &number_starts,
+        number_counters: &number_counters,
         normal: &normal,
     };
     let mut blocks = Vec::new();
@@ -890,14 +1003,14 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
                             number(extent.and_then(|n| n.attr("cy")), 1_905_000.0) / 12_700.0;
                         let alt = drawing
                             .descendant("docPr")
-                            .and_then(|n| n.attr("descr"))
+                            .and_then(|n| n.attr("descr").filter(|value|!value.is_empty()).or_else(||n.attr("title")))
                             .unwrap_or_default()
                             .to_string();
                         let image_id = doc.alloc_id();
                         doc.images.push(AnchoredImage {
                             id: image_id,
                             after_paragraph_id: id,
-                            bytes: bytes.clone(),
+                            bytes: word_cropped_image(bytes,drawing,&mut doc.losses)?,
                             width,
                             height,
                             alt,
@@ -1017,7 +1130,7 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
                         g.children
                             .iter()
                             .filter(|n| n.name == "gridCol")
-                            .map(|n| (number(n.attr("w"), 1440.0) / 20.0).clamp(1.0, 2000.0))
+                            .map(|n| (number(n.attr("w"), 1440.0) / 20.0).clamp(0.05, 10000.0))
                             .collect()
                     })
                     .unwrap_or_default();
@@ -1033,7 +1146,7 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
                                 .and_then(|n|n.attr("w")).and_then(|v|v.parse::<f32>().ok())
                                 .filter(|v|v.is_finite() && *v>0.0) {
                                 for slot in inferred.iter_mut().skip(column).take(cell.span()) {
-                                    if slot.is_none() {*slot=Some((width/20.0/cell.span() as f32).clamp(1.0,2000.0));}
+                                    if slot.is_none() {*slot=Some((width/20.0/cell.span() as f32).clamp(0.05,10000.0));}
                                 }
                             }
                             column+=cell.span();
@@ -1041,8 +1154,33 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
                     }
                     if inferred.iter().any(Option::is_some) {
                         let fallback=(doc.page.width-doc.page.margin_left-doc.page.margin_right)/columns.max(1) as f32;
-                        widths=inferred.into_iter().map(|width|width.unwrap_or(fallback).clamp(1.0,2000.0)).collect();
+                        widths=inferred.into_iter().map(|width|width.unwrap_or(fallback).clamp(0.05,10000.0)).collect();
                     }
+                }
+                for ((row,nodes),tr) in rows.iter_mut().zip(&cell_nodes_by_row).zip(&row_nodes) {
+                    let placeholder=usize::from(word_grid_before(tr)?>0);
+                    let original=std::mem::take(row);
+                    let mut merged:Vec<Cell>=Vec::with_capacity(original.len());let mut head=None;
+                    for (index,mut cell) in original.into_iter().enumerate() {
+                        let marker=index.checked_sub(placeholder).and_then(|index|nodes.get(index))
+                            .and_then(|node|node.child("tcPr")).and_then(|properties|properties.child("hMerge"));
+                        if marker.is_some_and(|node|node.value()!=Some("restart")) {
+                            if let Some(owner)=head.and_then(|index:usize|merged.get_mut(index)) {
+                                let span=owner.span()+cell.span();
+                                if span>256 {return Err("Горизонтальное объединение DOCX превышает 256 столбцов".into());}
+                                owner.span=span as u16;
+                                if cell.paragraphs.iter().any(|paragraph|!paragraph.is_empty()) {
+                                    owner.paragraphs.append(&mut cell.paragraphs);
+                                    doc.losses.push("Текст продолжения hMerge DOCX сохранён в объединённой ячейке.".into());
+                                }
+                                continue;
+                            }
+                            doc.losses.push("Продолжение hMerge DOCX без начальной ячейки оставлено отдельной ячейкой.".into());
+                        }
+                        head=marker.filter(|node|node.value()==Some("restart")).map(|_|merged.len());
+                        merged.push(cell);
+                    }
+                    *row=merged;
                 }
                 // Borders come from the table itself, its style, or the cells; Word's plain
                 // table has none, so a table without any of them stays borderless.
@@ -1110,7 +1248,7 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
                 .push("Несколько разделов приведены к единым параметрам страницы.".into());
         }
     }
-    if let Some(core) = parts.get("docProps/core.xml") {
+    if let Some(core) = parts.get("docprops/core.xml") {
         let node = xml(core)?;
         doc.title = node
             .child("title")
@@ -1356,15 +1494,16 @@ impl ExportNumbering {
                     current = None;
                 }
                 List::Number => {
-                    if current.is_none() || level < start_level {
+                    if current.is_none() || level < start_level || paragraph.list_start.is_some() {
                         let mut starts = counters.map(|value| value + 1);
                         starts[level + 1..].fill(1);
+                        if let Some(start)=paragraph.list_start {starts[level]=start as usize;}
                         let id = self.starts.len() + 2;
                         self.starts.push(starts);
                         current = Some(id);
                         start_level = level;
                     }
-                    counters[level] += 1;
+                    counters[level]=paragraph.list_start.map(|start|start as usize).unwrap_or_else(||counters[level].saturating_add(1));
                     counters[level + 1..].fill(0);
                     if let Some(id) = current {
                         self.paragraphs.insert(paragraph.id, id);
@@ -1440,10 +1579,11 @@ fn p_xml(p: &Paragraph, links: &mut Vec<(String, String)>, numbering: &ExportNum
         ));
     }
     properties.push_str(&format!(
-        "<w:spacing w:before=\"{}\" w:after=\"{}\" {line}/><w:ind w:left=\"{}\" {first_indent}/>{}<w:jc w:val=\"{}\"/>",
+        "<w:spacing w:before=\"{}\" w:after=\"{}\" {line}/><w:ind w:left=\"{}\" w:right=\"{}\" {first_indent}/>{}<w:jc w:val=\"{}\"/>",
         (p.spacing_before * 20.0).round() as u32,
         (p.spacing_after * 20.0).round() as u32,
         (p.indent * 20.0).round() as i32,
+        (p.right_indent * 20.0).round() as i32,
         if p.contextual_spacing {
             "<w:contextualSpacing/>"
         } else {
@@ -1489,7 +1629,7 @@ fn table_xml(
                 .get(i)
                 .copied()
                 .unwrap_or(usable_width / columns as f32)
-                .max(1.0);
+                .max(0.05);
             (pt * 20.0).round() as u32
         })
         .collect();
@@ -1811,8 +1951,8 @@ fn inline_md(text: &str, inherited: &TextFormat) -> Vec<Run> {
             }
             if ch == '&'
                 && let Some(end) = rest.bytes().take(33).position(|ch| ch == b';')
-                && let Ok(decoded) = quick_xml::escape::unescape(&rest[..=end])
-                && decoded.as_ref() != &rest[..=end]
+                && let Some(decoded) = markdown_entity(&rest[..=end])
+                && decoded.as_str() != &rest[..=end]
             {
                 plain.push_str(&decoded);
                 offset += end + 1;
@@ -1842,10 +1982,12 @@ fn inline_md(text: &str, inherited: &TextFormat) -> Vec<Run> {
                 if let Some(end)=end {
                     let target=&rest[1..end];
                     if !target.chars().any(char::is_whitespace)
-                        && (target.starts_with("https://") || target.starts_with("http://") || target.starts_with("mailto:")) {
+                        && (target.to_ascii_lowercase().starts_with("https://") || target.to_ascii_lowercase().starts_with("http://") || target.to_ascii_lowercase().starts_with("mailto:") || markdown_email(target)) {
                         if !plain.is_empty(){out.push(Run{text:std::mem::take(&mut plain),format:inherited.clone()});}
-                        let mut format=inherited.clone();format.link=Some(target.into());
-                        out.push(Run{text:target.strip_prefix("mailto:").unwrap_or(target).into(),format});
+                        let mut format=inherited.clone();
+                        format.link=Some(if markdown_email(target) {format!("mailto:{target}")}else{target.into()});
+                        let display=if target.get(..7).is_some_and(|prefix|prefix.eq_ignore_ascii_case("mailto:")) {&target[7..]}else{target};
+                        out.push(Run{text:display.into(),format});
                         offset+=end+1;continue;
                     }
                 }
@@ -2025,7 +2167,25 @@ fn md_code_paragraph(doc:&mut Doc,lines:&[String]) {
         text:lines.join("\u{000b}"),format:TextFormat{font:"Consolas".into(),..Default::default()}
     }],..Default::default()});
 }
-fn read_markdown(text:&str)->Doc {
+fn read_markdown(text:&str)->Doc {read_markdown_depth(text,0)}
+fn markdown_quote_line(line:&str)->Option<&str> {
+    let text=line.trim_start_matches(' ');if line.len()-text.len()>3 {return None;}
+    let text=text.strip_prefix('>')?;
+    Some(text.strip_prefix([' ','\t']).unwrap_or(text))
+}
+fn append_markdown_doc(target:&mut Doc,mut imported:Doc) {
+    let mut ids=BTreeMap::new();
+    for paragraph in &mut imported.paragraphs {let old=paragraph.id;paragraph.id=target.alloc_id();ids.insert(old,paragraph.id);}
+    for table in &mut imported.tables {
+        table.id=target.alloc_id();table.after_paragraph_id=ids.get(&table.after_paragraph_id).copied().unwrap_or_default();
+        for cell in table.rows.iter_mut().flatten() {
+            cell.id=target.alloc_id();for paragraph in &mut cell.paragraphs {paragraph.id=target.alloc_id();}
+        }
+    }
+    for image in &mut imported.images {image.id=target.alloc_id();image.after_paragraph_id=ids.get(&image.after_paragraph_id).copied().unwrap_or_default();}
+    target.paragraphs.extend(imported.paragraphs);target.tables.extend(imported.tables);target.images.extend(imported.images);target.losses.extend(imported.losses);
+}
+fn read_markdown_depth(text:&str,depth:usize)->Doc {
     let mut doc=Doc::default();doc.paragraphs.clear();
     let normalized=text.replace("\r\n","\n").replace('\r',"\n");
     let versioned=normalized.starts_with(MD_PARAGRAPHS);
@@ -2036,6 +2196,20 @@ fn read_markdown(text:&str)->Doc {
     while index<lines.len() {
         let line=lines[index];index+=1;
         if line.trim().is_empty(){continue;}
+        if depth<16 && let Some(first)=markdown_quote_line(line) {
+            let mut content=vec![first.to_string()];
+            while index<lines.len() {
+                if let Some(next)=markdown_quote_line(lines[index]) {content.push(next.into());index+=1;}
+                else if !versioned && !content.last().is_none_or(|line|line.trim().is_empty())
+                    && !md_starts_block(lines[index]) {content.push(lines[index].into());index+=1;}
+                else{break;}
+            }
+            let mut quoted=read_markdown_depth(&content.join("\n"),depth+1);
+            for paragraph in &mut quoted.paragraphs {if paragraph.style=="Normal" {paragraph.style="Quote".into();for run in &mut paragraph.runs {run.format.italic=true;}}}
+            if depth>0 {quoted.losses.push("Вложенные блоки цитат Markdown сведены к доступному стилю цитаты.".into());}
+            append_markdown_doc(&mut doc,quoted);list_indents.clear();continue;
+        }
+        if depth>=16 && markdown_quote_line(line).is_some() {doc.losses.push("Markdown: превышена глубина вложенных цитат; оставлен текст.".into());}
         if let Some((marker,count))=md_fence(line) {
             let indent=line.len()-line.trim_start_matches(' ').len();
             let mut content=Vec::new();
@@ -2070,10 +2244,10 @@ fn read_markdown(text:&str)->Doc {
             let mut source=vec![header];
             while index<lines.len() && source.len()<10000
                 && (source.len()+1).saturating_mul(alignments.len())<=100000 {
-                let Some(row)=markdown_table_row(lines[index]) else{break;};
+                let Some(row)=markdown_body_table_row(lines[index]) else{break;};
                 source.push(row);index+=1;
             }
-            if index<lines.len() && markdown_table_row(lines[index]).is_some()
+            if index<lines.len() && markdown_body_table_row(lines[index]).is_some()
                 && (source.len()>=10000 || (source.len()+1).saturating_mul(alignments.len())>100000) {
                 doc.losses.push("Markdown: таблица превышает лимит строк/ячеек; остаток импортируется как текст.".into());
             }
@@ -2122,6 +2296,15 @@ fn read_markdown(text:&str)->Doc {
                 if list_indents.last()!=Some(&indent) {list_indents.push(indent);}
                 list_indents.len().saturating_sub(1).min(8) as u8
             };
+            if list==List::Number {
+                let continuing=doc.paragraphs.iter().rev().take_while(|previous|previous.list!=List::None)
+                    .find(|previous|previous.list_level<=paragraph.list_level)
+                    .is_some_and(|previous|previous.list==List::Number && previous.list_level==paragraph.list_level);
+                if versioned || !continuing {
+                    let digits=trimmed.bytes().take_while(u8::is_ascii_digit).count();
+                    paragraph.list_start=trimmed[..digits].parse::<u32>().ok();
+                }
+            }
             content=rest;
         }else{list_indents.clear();}
         if let Some((level,rest))=md_atx(content) {
@@ -2174,8 +2357,8 @@ fn markdown_run(run: &Run) -> String {
             } else {encoded.push(ch);}
         }
         let target=encoded.replace('\\',"\\\\").replace('(',"\\(").replace(')',"\\)");
-        out.push_str(&format!("[{}]({target})",escape_markdown(core)));
-    } else {out.push_str(&escape_markdown(core));}
+        out.push_str(&format!("[{}]({target})",markdown_core(core,&run.format)));
+    } else {out.push_str(&markdown_core(core,&run.format));}
     out.push_str(emphasis);
     if run.format.strike {out.push_str("~~");}
     out.push_str(&escape_markdown(&text[end..]));
@@ -2191,7 +2374,9 @@ fn write_markdown(doc: &Doc) -> String {
         && doc.paragraphs[0].style=="Normal" && doc.paragraphs[0].list==List::None
         && doc.tables.is_empty() && doc.images.is_empty() {return "\n".into();}
     let mut out=format!("{MD_PARAGRAPHS}\n");
+    let mut numbers=[0usize;9];
     for p in &doc.paragraphs {
+        let marker=list_marker(p,&mut numbers);
         if p.style=="Code" {
             let text=p.text().replace('\u{000b}',"\n");
             let length=text.split(|ch|ch!='`').map(str::len).max().unwrap_or(0).max(2)+1;
@@ -2199,7 +2384,7 @@ fn write_markdown(doc: &Doc) -> String {
             out.push_str(&format!("{fence}\n{text}\n{fence}\n\n"));
         }else{
         if p.list!=List::None {out.push_str(&"    ".repeat(usize::from(p.list_level)));}
-        match p.list {List::Bullet=>out.push_str("- "),List::Number=>out.push_str("1. "),List::None=>{}}
+        match p.list {List::Bullet=>out.push_str("- "),List::Number=>out.push_str(&format!("{marker} ")),List::None=>{}}
         if let Some(level)=heading_level(&p.style) {
             out.push_str(&"#".repeat(usize::from(level)));out.push(' ');
         } else if p.style=="Quote" {out.push_str("> ");}
@@ -2218,12 +2403,21 @@ fn write_markdown(doc: &Doc) -> String {
                 out.push('|');
                 let mut written=0;
                 for cell in row {
-                    out.push_str(&markdown_cell(cell));out.push('|');written+=1;
+                    if row_index==0 || !cell.merged {out.push_str(&markdown_cell(cell));}
+                    out.push('|');written+=1;
                     for _ in 1..cell.span() {out.push('|');written+=1;}
                 }
                 for _ in written..columns {out.push('|');}
                 out.push('\n');
-                if row_index==0 {out.push('|');out.push_str(&"---|".repeat(columns));out.push('\n');}
+                if row_index==0 {
+                    out.push('|');let mut aligned=0;
+                    for cell in row {
+                        let align=cell.paragraphs.first().map(|paragraph|paragraph.align).unwrap_or_default();
+                        let marker=match align {Align::Center=>":---:",Align::Right=>"---:",_=>"---"};
+                        for _ in 0..cell.span() {out.push_str(marker);out.push('|');aligned+=1;}
+                    }
+                    for _ in aligned..columns {out.push_str("---|");}out.push('\n');
+                }
             }
             out.push('\n');
         }
@@ -2256,36 +2450,44 @@ fn safe_html_link(value: &str) -> bool {
         )
     })
 }
-fn write_html(doc: &Doc) -> String {
+fn html_extend(out:&mut String,text:&str,limit:usize)->Result<(),String> {
+    if text.len()>limit.saturating_sub(out.len()) {return Err("HTML превышает безопасный предел размера".into());}
+    out.push_str(text);Ok(())
+}
+fn html_close_lists(out:&mut String,lists:&mut Vec<List>,depth:usize,limit:usize)->Result<(),String> {
+    while lists.len()>depth {
+        if let Some(kind)=lists.pop() {html_extend(out,if kind==List::Number {"</li></ol>"}else{"</li></ul>"},limit)?;}
+    }
+    Ok(())
+}
+#[cfg(test)]
+fn write_html(doc:&Doc)->String {
+    match write_html_bounded(doc,XML_LIMIT) {Ok(html)=>html,Err(error)=>panic!("{error}")}
+}
+fn write_html_bounded(doc: &Doc,limit:usize) -> Result<String,String> {
     let mut out = format!(
         "<!DOCTYPE html><html lang=\"ru\"><head><meta charset=\"utf-8\"/><meta name=\"author\" content=\"{}\"/><title>{}</title></head><body>",
         esc(&doc.author),esc(&doc.title)
     );
-    let mut list = List::None;
-    let mut numbered = false;
-    let mut ordinal = 0;
+    if out.len()>limit {return Err("HTML превышает безопасный предел размера".into());}
+    let mut lists=Vec::<List>::new();
+    let mut numbers=[0usize;9];
     for p in &doc.paragraphs {
-        ordinal = if p.list == List::Number {
-            if numbered { ordinal + 1 } else { 1 }
-        } else {
-            0
-        };
-        numbered = p.list == List::Number;
-        if list != p.list {
-            if list != List::None {
-                out.push_str(if list == List::Number {
-                    "</ol>"
-                } else {
-                    "</ul>"
-                });
-            }
-            list = p.list;
-            if list != List::None {
-                if list == List::Number {
-                    out.push_str(&format!("<ol start=\"{ordinal}\">"));
-                } else {
-                    out.push_str("<ul>");
-                }
+        let depth=usize::from(p.list_level.min(8))+1;
+        if p.list==List::None {
+            html_close_lists(&mut out,&mut lists,0,limit)?;numbers.fill(0);
+        }else{
+            let number=if p.list==List::Number {p.list_start.map(|start|start as usize).unwrap_or_else(||numbers[depth-1].saturating_add(1))}else{0};
+            numbers[depth-1]=number;for value in &mut numbers[depth..] {*value=0;}
+            if lists.len()>depth {html_close_lists(&mut out,&mut lists,depth,limit)?;}
+            if lists.len()==depth && (lists.last()!=Some(&p.list) || p.list==List::Number && p.list_start.is_some()) {
+                html_close_lists(&mut out,&mut lists,depth-1,limit)?;
+            }else if lists.len()==depth {html_extend(&mut out,"</li>",limit)?;}
+            while lists.len()<depth {
+                let kind=if lists.len()+1==depth {p.list}else{List::Bullet};
+                let open=if kind==List::Number {format!("<ol start=\"{number}\">")}else{"<ul>".into()};
+                html_extend(&mut out,&open,limit)?;lists.push(kind);
+                if lists.len()<depth {html_extend(&mut out,"<li data-trinedocs-list-container=\"true\" style=\"list-style:none\">",limit)?;}
             }
         }
         let tag = match (p.list, p.style.as_str()) {
@@ -2300,25 +2502,25 @@ fn write_html(doc: &Doc) -> String {
             (_, "Code") => "pre",
             _ => "p",
         };
-        out.push_str(&html_paragraph(p,tag));
+        let mut paragraph=html_paragraph_bounded(p,tag,limit)?;
+        if p.list!=List::None {paragraph.truncate(paragraph.len().saturating_sub(5));}
+        html_extend(&mut out,&paragraph,limit)?;
 
         for table in doc.tables.iter().filter(|t| t.after_paragraph_id == p.id) {
-            if list != List::None {
-                out.push_str(if list == List::Number {
-                    "</ol>"
-                } else {
-                    "</ul>"
-                });
-                list = List::None;
-            }
-            out.push_str("<table style=\"border-collapse:collapse;table-layout:fixed\">");
+            html_close_lists(&mut out,&mut lists,0,limit)?;
+            html_extend(&mut out,&format!("<table data-trinedocs-header-rows=\"{}\" style=\"border-collapse:collapse;table-layout:fixed\">",table.header_rows),limit)?;
             if !table.column_widths.is_empty() {
-                out.push_str("<colgroup>");
-                for width in &table.column_widths { out.push_str(&format!("<col style=\"width:{width}pt\"/>")); }
-                out.push_str("</colgroup>");
+                html_extend(&mut out,"<colgroup>",limit)?;
+                for width in &table.column_widths { html_extend(&mut out,&format!("<col style=\"width:{width}pt\"/>"),limit)?; }
+                html_extend(&mut out,"</colgroup>",limit)?;
             }
+            let grouped=table.header_rows>0 && table.header_rows<table.rows.len()
+                && !table.rows[table.header_rows].iter().any(|cell|cell.merged);
+            if grouped {html_extend(&mut out,"<thead>",limit)?;}
             for (ri,row) in table.rows.iter().enumerate() {
-                out.push_str("<tr>");
+                if grouped && ri==table.header_rows {html_extend(&mut out,"</thead><tbody>",limit)?;}
+                let cell_tag=if ri<table.header_rows {"th"}else{"td"};
+                html_extend(&mut out,"<tr>",limit)?;
                 let starts=table.grid_starts(ri);
                 for (ci,cell) in row.iter().enumerate() {
                     if cell.merged && ri>0 { continue; }
@@ -2336,44 +2538,38 @@ fn write_html(doc: &Doc) -> String {
                     let padding=table.cell_margin.map(|v| format!("{v}pt")).join(" ");
                     let align=match cell.v_align { VAlign::Top=>"top",VAlign::Center=>"middle",VAlign::Bottom=>"bottom" };
                     let height=table.row_heights.get(ri).copied().unwrap_or(0.0);
-                    out.push_str(&format!(
-                        "<td colspan=\"{}\" rowspan=\"{rowspan}\" style=\"vertical-align:{align};height:{height}pt;padding:{padding};border:{border};background:#{}\">",
+                    html_extend(&mut out,&format!(
+                        "<{cell_tag} colspan=\"{}\" rowspan=\"{rowspan}\" style=\"vertical-align:{align};height:{height}pt;padding:{padding};border:{border};background:#{}\">",
                         cell.span(),hex(cell.fill)
-                    ));
-                    for paragraph in &cell.paragraphs { out.push_str(&html_paragraph(paragraph,"p")); }
-                    out.push_str("</td>");
+                    ),limit)?;
+                    for paragraph in &cell.paragraphs { html_extend(&mut out,&html_paragraph_bounded(paragraph,"p",limit)?,limit)?; }
+                    html_extend(&mut out,&format!("</{cell_tag}>"),limit)?;
                 }
-                out.push_str("</tr>");
+                html_extend(&mut out,"</tr>",limit)?;
             }
-            out.push_str("</table>");
+            if grouped {html_extend(&mut out,"</tbody>",limit)?;}
+            html_extend(&mut out,"</table>",limit)?;
         }
         for image in doc.images.iter().filter(|image| image.after_paragraph_id==p.id) {
-            if list!=List::None {
-                out.push_str(if list==List::Number {"</ol>"}else{"</ul>"});
-                list=List::None;
-            }
+            html_close_lists(&mut out,&mut lists,0,limit)?;
+            let encoded=image.bytes.len().div_ceil(3).saturating_mul(4);
+            if encoded>limit.saturating_sub(out.len()) {return Err("HTML превышает безопасный предел размера".into());}
             let mime=if image.bytes.starts_with(b"\x89PNG") { "image/png" } else { "image/jpeg" };
-            out.push_str(&format!(
+            html_extend(&mut out,&format!(
                 "<img src=\"data:{mime};base64,{}\" alt=\"{}\" style=\"width:{}pt;height:{}pt\" data-trinedocs-width=\"{}\" data-trinedocs-height=\"{}\"/>",
                 encode_image_base64(&image.bytes),esc(&image.alt),image.width,image.height,image.width,image.height
-            ));
+            ),limit)?;
         }
     }
-    if list != List::None {
-        out.push_str(if list == List::Number {
-            "</ol>"
-        } else {
-            "</ul>"
-        });
-    }
-    out.push_str("</body></html>");
-    out
+    html_close_lists(&mut out,&mut lists,0,limit)?;
+    html_extend(&mut out,"</body></html>",limit)?;
+    Ok(out)
 }
 fn fallback_html_text(text: &str) -> String {
     let lower = text.to_ascii_lowercase();
     let mut plain = String::new();
     let mut offset = 0;
-    let mut hidden: Option<&str> = None;
+    let mut hidden=Vec::<&str>::new();
     while offset < text.len() {
         let rest = &text[offset..];
         if rest.starts_with('<') {
@@ -2385,17 +2581,17 @@ fn fallback_html_text(text: &str) -> String {
                 .split(|c: char| c.is_ascii_whitespace() || c == '/')
                 .next()
                 .unwrap_or("");
-            if closing && hidden == Some(name) {
-                hidden = None;
-            } else if !closing && hidden.is_none() && matches!(name, "script" | "style" | "head") {
-                hidden = Some(name);
-            } else if hidden.is_none() && matches!(name, "br" | "p" | "div" | "li" | "tr") {
+            if closing && let Some(index)=hidden.iter().rposition(|open|*open==name) {
+                hidden.truncate(index);
+            } else if !closing && matches!(name, "script" | "style" | "head" | "template") {
+                hidden.push(name);
+            } else if hidden.is_empty() && matches!(name, "br" | "p" | "div" | "li" | "tr") {
                 plain.push('\n');
             }
             offset += end + 1;
         } else {
             let end = rest.find('<').unwrap_or(rest.len());
-            if hidden.is_none() {
+            if hidden.is_empty() {
                 plain.push_str(&rest[..end]);
             }
             offset += end;
@@ -2403,19 +2599,9 @@ fn fallback_html_text(text: &str) -> String {
     }
     plain
 }
-fn html_hidden(node: &Node) -> bool {
-    node.attrs.contains_key("hidden")
-        || node.attr("style").is_some_and(|css| {
-            css.split(';')
-                .filter_map(|part| part.split_once(':'))
-                .any(|(key, value)| {
-                    key.trim().eq_ignore_ascii_case("display")
-                        && value
-                            .split('!')
-                            .next()
-                            .is_some_and(|v| v.trim().eq_ignore_ascii_case("none"))
-                })
-        })
+fn html_hidden(node:&Node)->bool {
+    node.attrs.contains_key("hidden") || node.attr("style").is_some_and(|css|
+        css_declarations(css).iter().any(|(key,value)|key=="display" && value.trim().eq_ignore_ascii_case("none")))
 }
 fn normalize_html_names(node: &mut Node) {
     node.name.make_ascii_lowercase();
@@ -2434,7 +2620,7 @@ fn read_html(text:&str)->Result<Doc,String> {
 fn read_html_with_limit(text:&str,limit:usize)->Result<Doc,String> {
     if text.len()>limit {return Err("HTML превышает безопасный лимит размера".into());}
     // HTML is imported as data only; scripts, CSS imports and network images are never executed.
-    let mut clean=normalize_html_voids(&normalize_html_entities(text));
+    let mut clean=normalize_html_optional_tags(&normalize_html_voids(&normalize_html_attributes(&normalize_html_entities(text))));
     if let Some(start) = clean.to_ascii_lowercase().find("<!doctype")
         && let Some(end) = clean.get(start..).and_then(|s| s.find('>'))
     {
@@ -2458,7 +2644,7 @@ fn read_html_with_limit(text:&str,limit:usize)->Result<Doc,String> {
     let mut doc = Doc::default();
     doc.paragraphs.clear();
     fn walk(node: &Node, doc: &mut Doc, inherited_css: &str, list: Option<(List,u8)>)->Result<(),String> {
-        if html_hidden(node) || matches!(node.name.as_str(), "script" | "style" | "head") {
+        if html_hidden(node) || matches!(node.name.as_str(), "script" | "style" | "head" | "template") {
             return Ok(());
         }
         if node.name=="img" {
@@ -2485,6 +2671,23 @@ fn read_html_with_limit(text:&str,limit:usize)->Result<Doc,String> {
                 list.map(|(_,depth)|depth.saturating_add(1).min(8)).unwrap_or(0))),
             _=>list,
         };
+        if node.name=="li" && node.attr("data-trinedocs-list-container")==Some("true") {
+            for child in &node.children {walk(child,doc,&css,list)?;}return Ok(());
+        }
+        if node.name=="ol" {
+            let reversed=node.attrs.contains_key("reversed");
+            let mut ordinal=node.attr("start").and_then(|value|value.parse::<u32>().ok()).filter(|value|*value<=999_999_999)
+                .unwrap_or_else(||if reversed {node.children.iter().filter(|child|child.name=="li").count() as u32}else{1});
+            for child in &node.children {
+                if child.name=="li" {
+                    if let Some(value)=child.attr("value").and_then(|value|value.parse::<u32>().ok()).filter(|value|*value<=999_999_999) {ordinal=value;}
+                    let start=doc.paragraphs.len();walk(child,doc,&css,list)?;
+                    if let Some(paragraph)=doc.paragraphs.iter_mut().skip(start).find(|paragraph|paragraph.list==List::Number && Some(paragraph.list_level)==list.map(|(_,level)|level)) {paragraph.list_start=Some(ordinal);}
+                    ordinal=if reversed {ordinal.saturating_sub(1)}else{ordinal.saturating_add(1).min(999_999_999)};
+                }else{walk(child,doc,&css,list)?;}
+            }
+            return Ok(());
+        }
         if node.name=="table" {html_import_table(node,doc,&css,walk)?;return Ok(());}
         if node.name=="li" && node.children.iter().any(|child|matches!(child.name.as_str(),"p"|"div"|"pre"|"h1"|"h2"|"h3"|"h4"|"h5"|"h6"|"blockquote")) {
             html_import_list_item(node,doc,&css,list,walk)?;return Ok(());
@@ -2501,17 +2704,27 @@ fn read_html_with_limit(text:&str,limit:usize)->Result<Doc,String> {
                 ..Paragraph::default()
             };
             fn runs(n: &Node, f: &TextFormat, out: &mut Vec<Run>, preserve: bool, pending: &mut Option<TextFormat>) {
-                if html_hidden(n) || matches!(n.name.as_str(), "script" | "style" | "ul" | "ol") {
+                if html_hidden(n) || matches!(n.name.as_str(), "script" | "style" | "template" | "ul" | "ol") {
                     return;
                 }
                 let mut fmt = f.clone();
                 let mut preserve=preserve || n.name=="pre";
                 match n.name.as_str() {
-                    "pre" | "code" | "kbd" | "samp" => fmt.font="Consolas".into(),
+                    "pre" | "code" | "kbd" | "samp" | "tt" => fmt.font="Consolas".into(),
+                    "mark"=>fmt.highlight=Some([255,255,0]),
+                    "small"=>fmt.size=(fmt.size*0.8333333).max(4.0),
+                    "big"=>fmt.size=(fmt.size*1.2).min(144.0),
+                    "font"=>{
+                        if let Some(color)=n.attr("color").and_then(css_color) {fmt.color=color;}
+                        if let Some(font)=n.attr("face").and_then(css_font_family) {fmt.font=font;}
+                        if let Some(size)=n.attr("size").and_then(|size|size.parse::<usize>().ok()).filter(|size|(1..=7).contains(size)) {
+                            fmt.size=[8.0,10.0,12.0,14.0,18.0,24.0,36.0][size-1];
+                        }
+                    }
                     "b" | "strong" => fmt.bold = true,
                     "i" | "em" => fmt.italic = true,
-                    "u" => fmt.underline = true,
-                    "s" | "del" => fmt.strike = true,
+                    "u" | "ins" => fmt.underline = true,
+                    "s" | "del" | "strike" => fmt.strike = true,
                     "sup" => fmt.script = 1,
                     "sub" => fmt.script = -1,
                     "a" => fmt.link = n.attr("href").map(str::to_string),
@@ -2531,7 +2744,7 @@ fn read_html_with_limit(text:&str,limit:usize)->Result<Doc,String> {
                                         fmt.color = c;
                                     }
                                 }
-                                "background-color" => {
+                                "background-color" | "background" => {
                                     if lower.trim()=="transparent" || lower.trim()=="initial" {fmt.highlight=None;}
                                     else if let Some(color)=css_color(&value) {fmt.highlight=Some(color);}
                                 }
@@ -2553,6 +2766,7 @@ fn read_html_with_limit(text:&str,limit:usize)->Result<Doc,String> {
                 }
                 if !n.text.is_empty() {html_inline_text(&n.text,&fmt,preserve,out,pending);}
                 for c in &n.children {
+                    if html_hidden(c) {continue;}
                     if c.name == "br" {
                         *pending=None;
                         out.push(Run {
@@ -2603,6 +2817,7 @@ fn read_html_with_limit(text:&str,limit:usize)->Result<Doc,String> {
                         "margin-top" => p.spacing_before=css_points(&value,0.0),
                         "margin-bottom" => p.spacing_after=css_points(&value,0.0),
                         "text-indent" => p.first_indent=css_points(&value,0.0),
+                        "margin-right" => p.right_indent=css_points(&value,0.0),
                         "break-before" | "page-break-before" => p.page_break_before=lower.trim()=="page" || lower.trim()=="always",
                         "break-after" | "page-break-after" => p.keep_next=lower.trim()=="avoid",
                         "break-inside" | "page-break-inside" => p.keep_lines=lower.trim()=="avoid",
@@ -2633,7 +2848,7 @@ fn read_html_with_limit(text:&str,limit:usize)->Result<Doc,String> {
             p.normalize();
             doc.paragraphs.push(p);
             fn inline_images(node: &Node,doc: &mut Doc,css: &str,list: Option<(List,u8)>)->Result<(),String> {
-                if html_hidden(node) || matches!(node.name.as_str(),"script"|"style"|"ul"|"ol") {return Ok(());}
+                if html_hidden(node) || matches!(node.name.as_str(),"script"|"style"|"template"|"ul"|"ol") {return Ok(());}
                 if node.name=="img" {walk(node,doc,css,list)?;}
                 else {for child in &node.children {inline_images(child,doc,css,list)?;}}
                 Ok(())
@@ -3957,38 +4172,39 @@ fn css_font(font: &str) -> String {
     let font=font.replace('\\',"\\\\").replace('\'',"\\'");
     esc(&format!("'{font}'"))
 }
-fn html_paragraph(p: &Paragraph,tag: &str) -> String {
+fn html_paragraph_bounded(p: &Paragraph,tag: &str,limit:usize) -> Result<String,String> {
     let align=match p.align { Align::Left=>"left",Align::Center=>"center",Align::Right=>"right",Align::Justify=>"justify" };
     let line=if p.line_points>0.0 { format!("{}pt",p.line_points) } else { p.line_spacing.to_string() };
     let mut out=format!(
-        "<{tag} data-trinedocs-list-level=\"{}\" data-trinedocs-line-spacing=\"{}\" data-trinedocs-line-exact=\"{}\" style=\"white-space:pre-wrap;text-align:{align};margin-left:{}pt;text-indent:{}pt;margin-top:{}pt;margin-bottom:{}pt;line-height:{line};break-before:{};break-after:{};break-inside:{};widows:{};orphans:{}\">",
+        "<{tag} data-trinedocs-list-level=\"{}\" data-trinedocs-line-spacing=\"{}\" data-trinedocs-line-exact=\"{}\" style=\"white-space:pre-wrap;text-align:{align};margin-left:{}pt;margin-right:{}pt;text-indent:{}pt;margin-top:{}pt;margin-bottom:{}pt;line-height:{line};break-before:{};break-after:{};break-inside:{};widows:{};orphans:{}\">",
         p.list_level,p.line_spacing,p.line_exact,
         p.indent+if p.list!=List::None { f32::from(p.list_level)*18.0 } else {0.0},
-        p.first_indent,p.spacing_before,p.spacing_after,
+        p.right_indent,p.first_indent,p.spacing_before,p.spacing_after,
         if p.page_break_before {"page"}else{"auto"},
         if p.keep_next {"avoid"}else{"auto"},
         if p.keep_lines {"avoid"}else{"auto"},
         if p.widow_control {2}else{1},if p.widow_control {2}else{1}
     );
+    if out.len()>limit {return Err("HTML превышает безопасный предел размера".into());}
     for r in &p.runs {
         let f=&r.format;
-        out.push_str(&format!(
+        html_extend(&mut out,&format!(
             "<span style=\"font-family:{};font-size:{}pt;color:#{};font-weight:{};font-style:{};text-decoration:{}{};{}\">",
             css_font(&f.font),f.size,hex(f.color),if f.bold{"bold"}else{"normal"},
             if f.italic{"italic"}else{"normal"},if f.underline{"underline "}else{""},
             if f.strike{"line-through"}else{""},
             f.highlight.map(|c|format!("background-color:#{}",hex(c))).unwrap_or_default()
-        ));
+        ),limit)?;
         let link=f.link.as_deref().filter(|link|safe_html_link(link));
-        if let Some(link)=link { out.push_str(&format!("<a href=\"{}\">",esc(link))); }
-        if f.script!=0 { out.push_str(if f.script>0 {"<sup>"}else{"<sub>"}); }
-        out.push_str(&esc(&r.text).replace(['\u{000b}','\n'],"<br/>"));
-        if f.script!=0 { out.push_str(if f.script>0 {"</sup>"}else{"</sub>"}); }
-        if link.is_some() { out.push_str("</a>"); }
-        out.push_str("</span>");
+        if let Some(link)=link { html_extend(&mut out,&format!("<a href=\"{}\">",esc(link)),limit)?; }
+        if f.script!=0 { html_extend(&mut out,if f.script>0 {"<sup>"}else{"<sub>"},limit)?; }
+        html_extend(&mut out,&esc(&r.text).replace(['\u{000b}','\n'],"<br/>"),limit)?;
+        if f.script!=0 { html_extend(&mut out,if f.script>0 {"</sup>"}else{"</sub>"},limit)?; }
+        if link.is_some() { html_extend(&mut out,"</a>",limit)?; }
+        html_extend(&mut out,"</span>",limit)?;
     }
-    out.push_str(&format!("</{tag}>"));
-    out
+    html_extend(&mut out,&format!("</{tag}>"),limit)?;
+    Ok(out)
 }
 fn encode_image_base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8;64]=b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -4003,24 +4219,32 @@ fn encode_image_base64(bytes: &[u8]) -> String {
     out
 }
 fn decode_html_image(source: &str) -> Option<Vec<u8>> {
+    let source=source.split('#').next()?;
     let (prefix,data)=source.split_once(',')?;
-    if !matches!(prefix,"data:image/png;base64"|"data:image/jpeg;base64")
-        || data.len()>32*1024*1024 || !data.len().is_multiple_of(4) { return None; }
-    let digit=|ch:u8| -> Option<u32> {
-        Some(match ch { b'A'..=b'Z'=>u32::from(ch-b'A'),b'a'..=b'z'=>u32::from(ch-b'a'+26),
-            b'0'..=b'9'=>u32::from(ch-b'0'+52),b'+'=>62,b'/'=>63,_=>return None })
-    };
-    let mut bytes=Vec::new();
-    let count=data.len()/4;
-    for (index,part) in data.as_bytes().chunks_exact(4).enumerate() {
-        let pad=usize::from(part[2]==b'=')+usize::from(part[3]==b'=');
-        if pad>0 && index+1!=count || part[2]==b'=' && part[3]!=b'=' { return None; }
-        let number=(digit(part[0])?<<18)|(digit(part[1])?<<12)
-            |(if part[2]==b'=' {0}else{digit(part[2])?}<<6)
-            |(if part[3]==b'=' {0}else{digit(part[3])?});
-        bytes.push((number>>16) as u8);
-        if pad<2 {bytes.push((number>>8) as u8);}
-        if pad<1 {bytes.push(number as u8);}
+    let prefix=prefix.trim().to_ascii_lowercase();
+    let media=prefix.strip_prefix("data:")?;
+    let (mime,parameters)=media.split_once(';')?;
+    if !matches!(mime.trim(),"image/png"|"image/jpeg") || !parameters.trim_end().ends_with("base64")
+        || parameters.rsplit_once(';').map(|(_,tail)|tail).unwrap_or(parameters).trim()!="base64"
+        || data.len()>XML_LIMIT {return None;}
+    let mut decoded=Vec::with_capacity(data.len());let mut input=data.as_bytes().iter().copied();
+    while let Some(ch)=input.next() {
+        let ch=if ch==b'%' {
+            let high=char::from(input.next()?).to_digit(16)?;
+            let low=char::from(input.next()?).to_digit(16)?;
+            (high*16+low) as u8
+        }else{ch};
+        if !matches!(ch,b'\t'|b'\n'|b'\x0c'|b'\r'|b' ') {decoded.push(ch);}
+    }
+    if decoded.len().is_multiple_of(4) {
+        for _ in 0..2 {if decoded.last()==Some(&b'=') {decoded.pop();}else{break;}}
+    }
+    if decoded.len()%4==1 {return None;}
+    let mut bytes=Vec::with_capacity(decoded.len()*3/4);let(mut bits,mut buffer)=(0u32,0u32);
+    for ch in decoded {
+        let digit=match ch {b'A'..=b'Z'=>ch-b'A',b'a'..=b'z'=>ch-b'a'+26,b'0'..=b'9'=>ch-b'0'+52,b'+'=>62,b'/'=>63,_=>return None};
+        buffer=(buffer<<6)|u32::from(digit);bits+=6;
+        if bits>=8 {bits-=8;bytes.push((buffer>>bits) as u8);buffer&=(1<<bits)-1;}
     }
     Some(bytes)
 }
@@ -4070,7 +4294,7 @@ mod text_export_defect_tests {
         p.runs[0].format.bold=true;
         let html=String::from_utf8(write(&doc,"html")?).map_err(|e|e.to_string())?;
         assert!(html.contains("colspan=\"2\" rowspan=\"2\""));
-        assert_eq!(html.matches("<td ").count(),3);
+        assert_eq!(html.matches("<td ").count()+html.matches("<th ").count(),3);
         assert!(html.contains("vertical-align:bottom;height:24pt;padding:1pt 2pt 3pt 4pt;border:none"));
         assert!(html.contains("font-weight:bold"));
         assert!(html.contains("bold &amp; cell"));
@@ -4175,6 +4399,53 @@ mod text_export_defect_tests {
     }
 }
 
+fn css_font_shorthand(value:&str)->Option<Vec<(String,String)>> {
+    let mut tokens=Vec::new();let(mut start,mut quote,mut escaped)=(None,None,false);
+    for (index,ch) in value.char_indices() {
+        if start.is_none() && !ch.is_ascii_whitespace() {start=Some(index);}
+        if escaped {escaped=false;continue;}
+        if ch=='\\' {escaped=true;continue;}
+        if let Some(open)=quote {if ch==open {quote=None;}continue;}
+        if matches!(ch,'\''|'"') {quote=Some(ch);}
+        else if ch.is_ascii_whitespace() && let Some(begin)=start.take() {tokens.push((begin,index));}
+    }
+    if let Some(begin)=start {tokens.push((begin,value.len()));}
+    let mut style="normal".to_string();let mut weight="normal".to_string();
+    for (index,(start,end)) in tokens.iter().copied().enumerate() {
+        let token=&value[start..end];let lower=token.to_ascii_lowercase();
+        let size=lower.split('/').next()?;
+        let size_value=size.trim_end_matches(|ch:char|ch.is_ascii_alphabetic() || ch=='%');
+        let is_size=matches!(size,"xx-small"|"x-small"|"small"|"medium"|"large"|"x-large"|"xx-large"|"smaller"|"larger")
+            || size_value.parse::<f32>().ok().is_some_and(|value|value.is_finite() && value>0.0) && size_value.len()<size.len();
+        if is_size {
+            let mut family_start=end;let mut line="normal".to_string();
+            if let Some((_,height))=token.split_once('/') {
+                if height.is_empty() {let (begin,end)=tokens.get(index+1).copied()?;line=value[begin..end].into();family_start=end;}
+                else{line=height.into();}
+            }
+            else if let Some((next_start,next_end))=tokens.get(index+1).copied() {
+                let next=&value[next_start..next_end];
+                if let Some(height)=next.strip_prefix('/') {
+                    if height.is_empty() {
+                        let (_,height_end)=tokens.get(index+2).copied()?;line=value[next_end..height_end].trim().into();family_start=height_end;
+                    }else{line=height.into();family_start=next_end;}
+                }
+            }
+            let family=value[family_start..].trim();
+            if family.is_empty() {return None;}
+            return Some(vec![("font-style".into(),style),("font-weight".into(),weight),
+                ("font-size".into(),size.into()),("line-height".into(),line),("font-family".into(),family.into())]);
+        }
+        match lower.as_str() {
+            "italic"|"oblique"=>style=lower,
+            "bold"|"bolder"|"lighter"=>weight=lower,
+            "normal"|"small-caps"=>{},
+            value if value.parse::<u16>().ok().is_some_and(|value|(1..=1000).contains(&value))=>weight=value.into(),
+            _=>return None,
+        }
+    }
+    None
+}
 fn css_declarations(css: &str) -> Vec<(String,String)> {
     let mut chunks=Vec::new();
     let (mut start,mut quote,mut escape)=(0,None,false);
@@ -4194,9 +4465,12 @@ fn css_declarations(css: &str) -> Vec<(String,String)> {
             Some((value,tail)) if tail.trim().eq_ignore_ascii_case("important")=>(value.trim(),true),
             _=>(value.trim(),false),
         };
-        if let Some((_,old,priority))=result.iter_mut().find(|(name,_,_)|*name==key) {
-            if !*priority || important {*old=value.into();*priority=important;}
-        } else {result.push((key,value.into(),important));}
+        let declarations=if key=="font" {css_font_shorthand(value).unwrap_or_default()}else{vec![(key,value.into())]};
+        for (key,value) in declarations {
+            if let Some((_,old,priority))=result.iter_mut().find(|(name,_,_)|*name==key) {
+                if !*priority || important {*old=value;*priority=important;}
+            } else {result.push((key,value,important));}
+        }
     }
     result.into_iter().map(|(key,value,_)|(key,value)).collect()
 }
@@ -4498,6 +4772,13 @@ fn normalize_docx_parts(parts: &mut BTreeMap<String,Vec<u8>>) -> Result<(),Strin
         .unwrap_or_else(||"word/document.xml".into());
     let rels=parts.get(&docx_rels_path(&main)).map(|bytes|xml(bytes)).transpose()?;
     let mut aliases=Vec::new();
+    if let Some(core)=root_rels.as_ref().and_then(|node|node.children.iter().find(|node|
+        node.attr("Type").is_some_and(|kind|kind.ends_with("/metadata/core-properties"))
+            && node.attr("TargetMode")!=Some("External")))
+        .and_then(|node|node.attr("Target")).and_then(|target|docx_part("",target))
+        .and_then(|path|parts.get(&path)) {
+        aliases.push(("docprops/core.xml".into(),core.clone()));
+    }
     if main!="word/document.xml" && let Some(bytes)=parts.get(&main) {aliases.push(("word/document.xml".into(),bytes.clone()));}
     let mut normalized=String::from("<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">");
     if let Some(rels)=rels {
@@ -5144,6 +5425,7 @@ fn html_import_table(node:&Node,doc:&mut Doc,css:&str,walk:HtmlWalker)->Result<(
     }
     widths.resize(columns,fallback);widths.truncate(columns);
     if row_heights.iter().all(|height|*height==0.0){row_heights.clear();}
+    if let Some(count)=node.attr("data-trinedocs-header-rows").and_then(|value|value.parse::<usize>().ok()).filter(|count|*count<=rows.len()) {header_rows=count;}
     let id=doc.alloc_id();
     doc.tables.push(Table{id,after_paragraph_id:anchor,rows,column_widths:widths,border_color,borderless,cell_margin:margin,row_heights,header_rows});
     Ok(())
@@ -5365,5 +5647,366 @@ mod hundred_docs_io_regressions {
         let mut doc=Doc::from_text("placeholder");doc.paragraphs[0].runs[0].text="one\ntwo".into();
         let imported=read(&write(&doc,"md")?,"md")?;
         assert_eq!(imported.paragraphs.len(),1);assert_eq!(imported.paragraphs[0].text(),"one\u{000b}two");Ok(())
+    }
+}
+
+fn markdown_body_table_row(line:&str)->Option<Vec<String>> {
+    markdown_table_row(line).or_else(|| {
+        (!md_starts_block(line) && !line.trim().is_empty()).then(||vec![line.trim().into()])
+    })
+}
+fn markdown_core(text:&str,format:&TextFormat)->String {
+    let monospace=matches!(format.font.to_ascii_lowercase().as_str(),"consolas"|"courier new"|"lucida console"|"cascadia code"|"monospace");
+    if monospace && !text.contains(['\n','\r','\u{000b}','\u{000c}']) {
+        let length=text.split(|ch|ch!='`').map(str::len).max().unwrap_or(0)+1;
+        let fence="`".repeat(length);
+        let pad=text.starts_with('`') || text.ends_with('`') || text.starts_with(' ') && text.ends_with(' ') && !text.chars().all(|ch|ch==' ');
+        if pad {format!("{fence} {text} {fence}")}else{format!("{fence}{text}{fence}")}
+    }else{escape_markdown(text)}
+}
+fn markdown_email(text:&str)->bool {
+    let Some((local,domain))=text.split_once('@') else{return false;};
+    !local.is_empty() && local.chars().all(|ch|ch.is_ascii_alphanumeric() || ".!#$%&'*+/=?^_`{|}~-".contains(ch))
+        && !domain.is_empty() && domain.split('.').all(|label|!label.is_empty() && label.len()<=63
+            && label.starts_with(|ch:char|ch.is_ascii_alphanumeric()) && label.ends_with(|ch:char|ch.is_ascii_alphanumeric())
+            && label.chars().all(|ch|ch.is_ascii_alphanumeric() || ch=='-'))
+}
+fn markdown_entity(text:&str)->Option<String> {
+    let normalized=normalize_html_entities(text);
+    quick_xml::escape::unescape(&normalized).ok().map(|value|value.into_owned())
+}
+
+fn normalize_html_attributes(text:&str)->String {
+    let mut out=String::with_capacity(text.len());let mut offset=0;
+    while offset<text.len() {
+        let rest=&text[offset..];
+        if !rest.starts_with('<') {
+            let length=rest.find('<').unwrap_or(rest.len());out.push_str(&rest[..length]);offset+=length;continue;
+        }
+        if rest.starts_with("<!--") || rest.starts_with("<![CDATA[") {
+            let close=if rest.starts_with("<!--") {"-->"}else{"]]>"};
+            let length=rest.find(close).map(|end|end+close.len()).unwrap_or(rest.len());
+            out.push_str(&rest[..length]);offset+=length;continue;
+        }
+        let mut quote=None;let mut end=None;
+        for (index,ch) in rest.char_indices().skip(1) {
+            if let Some(open)=quote {if ch==open {quote=None;}continue;}
+            if matches!(ch,'\''|'"') {quote=Some(ch);}else if ch=='>' {end=Some(index);break;}
+        }
+        let Some(end)=end else{out.push_str(rest);break;};
+        let tag=&rest[..=end];
+        if tag.starts_with("</") || tag.starts_with("<!") || tag.starts_with("<?") {out.push_str(tag);offset+=tag.len();continue;}
+        let body=&tag[1..tag.len()-1];
+        let name_end=body.find(|ch:char|ch.is_ascii_whitespace() || ch=='/').unwrap_or(body.len());
+        out.push('<');out.push_str(&body[..name_end]);let mut position=name_end;
+        while position<body.len() {
+            while body.as_bytes().get(position).is_some_and(u8::is_ascii_whitespace) {position+=1;}
+            if position>=body.len(){break;}
+            if body[position..].trim()=="/" {out.push('/');break;}
+            let start=position;
+            while position<body.len() && !body.as_bytes()[position].is_ascii_whitespace() && !matches!(body.as_bytes()[position],b'='|b'/') {position+=1;}
+            let name=&body[start..position];if name.is_empty(){out.push_str(&body[position..]);break;}
+            out.push(' ');out.push_str(name);
+            while body.as_bytes().get(position).is_some_and(u8::is_ascii_whitespace){position+=1;}
+            if body.as_bytes().get(position)!=Some(&b'=') {out.push_str("=\"\"");continue;}
+            position+=1;
+            while body.as_bytes().get(position).is_some_and(u8::is_ascii_whitespace){position+=1;}
+            out.push('=');
+            if body.as_bytes().get(position).is_some_and(|ch|matches!(*ch,b'\''|b'"')) {
+                let delimiter=body.as_bytes()[position];let start=position;position+=1;
+                while position<body.len() && body.as_bytes()[position]!=delimiter {position+=1;}
+                if position<body.len(){position+=1;}
+                out.push_str(&body[start..position]);
+            }else{
+                let start=position;
+                while position<body.len() && !body.as_bytes()[position].is_ascii_whitespace(){position+=1;}
+                out.push('"');out.push_str(&body[start..position]);out.push('"');
+            }
+        }
+        out.push('>');offset+=tag.len();
+    }
+    out
+}
+
+fn normalize_html_optional_tags(text:&str)->String {
+    fn close(out:&mut String,stack:&mut Vec<String>,at:usize) {
+        while stack.len()>at {if let Some(name)=stack.pop() {out.push_str("</");out.push_str(&name);out.push('>');}}
+    }
+    let mut out=String::with_capacity(text.len());let mut stack=Vec::<String>::new();let mut offset=0;
+    while offset<text.len() {
+        let rest=&text[offset..];
+        if !rest.starts_with('<') {let length=rest.find('<').unwrap_or(rest.len());out.push_str(&rest[..length]);offset+=length;continue;}
+        if rest.starts_with("<!--") || rest.starts_with("<![CDATA[") {
+            let marker=if rest.starts_with("<!--") {"-->"}else{"]]>"};
+            let length=rest.find(marker).map(|end|end+marker.len()).unwrap_or(rest.len());out.push_str(&rest[..length]);offset+=length;continue;
+        }
+        let(mut quote,mut end)=(None,None);
+        for (index,ch) in rest.char_indices().skip(1) {
+            if let Some(open)=quote {if ch==open {quote=None;}continue;}
+            if matches!(ch,'\''|'"') {quote=Some(ch);}else if ch=='>' {end=Some(index);break;}
+        }
+        let Some(end)=end else{out.push_str(rest);break;};
+        let tag=&rest[..=end];
+        if tag.starts_with("<!") || tag.starts_with("<?") {out.push_str(tag);offset+=tag.len();continue;}
+        let closing=tag.starts_with("</");let begin=if closing {2}else{1};
+        let name_end=tag[begin..].find(|ch:char|!ch.is_ascii_alphanumeric() && ch!='-' && ch!=':').map(|end|begin+end).unwrap_or(tag.len()-1);
+        if begin==name_end {out.push_str("&lt;");offset+=1;continue;}
+        let name=tag[begin..name_end].to_ascii_lowercase();
+        if closing {
+            if let Some(at)=stack.iter().rposition(|open|*open==name) {close(&mut out,&mut stack,at);}
+            offset+=tag.len();continue;
+        }
+        if matches!(name.as_str(),"p"|"div"|"section"|"article"|"pre"|"blockquote"|"ul"|"ol"|"table"|"h1"|"h2"|"h3"|"h4"|"h5"|"h6")
+            && let Some(at)=stack.iter().rposition(|open|open=="p") {close(&mut out,&mut stack,at);}
+        let boundary=match name.as_str() {"li"=>Some(("li",&["ul","ol"][..])),"dt"|"dd"=>Some(("dt",&["dl"][..])),
+            "tr"=>Some(("tr",&["table"][..])),"td"|"th"=>Some(("td",&["tr"][..])),
+            "thead"|"tbody"|"tfoot"=>Some(("tbody",&["table"][..])),_=>None};
+        if let Some((kind,parents))=boundary {
+            let floor=stack.iter().rposition(|open|parents.contains(&open.as_str())).map(|at|at+1).unwrap_or(0);
+            if let Some(at)=stack.iter().enumerate().skip(floor).rfind(|(_,open)|match kind {
+                "dt"=>matches!(open.as_str(),"dt"|"dd"),"td"=>matches!(open.as_str(),"td"|"th"),
+                "tbody"=>matches!(open.as_str(),"thead"|"tbody"|"tfoot"),_=>open.as_str()==kind
+            }).map(|(at,_)|at) {close(&mut out,&mut stack,at);}
+        }
+        out.push('<');out.push_str(&name);out.push_str(&tag[name_end..]);offset+=tag.len();
+        if !tag.trim_end().ends_with("/>") && !matches!(name.as_str(),"area"|"base"|"br"|"col"|"embed"|"hr"|"img"|"input"|"link"|"meta"|"param"|"source"|"track"|"wbr") {
+            stack.push(name);
+        }
+    }
+    close(&mut out,&mut stack,0);out
+}
+
+#[cfg(test)]
+mod two_hundred_docs_io_regressions {
+    use super::*;
+    fn html(source:&str)->Result<Doc,String>{read(source.as_bytes(),"html")}
+    fn md(source:&str)->Result<Doc,String>{read(source.as_bytes(),"md")}
+    fn word(body:&str,styles:&str,numbering:&str)->Result<Doc,String> {
+        let ns=r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#;
+        let mut parts=vec![("word/document.xml".into(),format!("<w:document {ns}><w:body>{body}</w:body></w:document>").into_bytes())];
+        if !styles.is_empty(){parts.push(("word/styles.xml".into(),format!("<w:styles {ns}>{styles}</w:styles>").into_bytes()));}
+        if !numbering.is_empty(){parts.push(("word/numbering.xml".into(),format!("<w:numbering {ns}>{numbering}</w:numbering>").into_bytes()));}
+        read(&write_zip(parts)?,"docx")
+    }
+    fn image_bytes()->Result<Vec<u8>,String> {
+        let mut image=image::RgbaImage::from_pixel(2,1,image::Rgba([255,0,0,255]));image.put_pixel(1,0,image::Rgba([0,0,255,255]));
+        let mut bytes=std::io::Cursor::new(Vec::new());image::DynamicImage::ImageRgba8(image).write_to(&mut bytes,image::ImageFormat::Png).map_err(|error|error.to_string())?;Ok(bytes.into_inner())
+    }
+    fn image_word(properties:&str,crop:&str)->Result<Doc,String> {
+        let document=format!(r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="1" name="image" {properties}/><a:graphic><a:graphicData><a:blipFill><a:blip r:embed="image1"/>{crop}</a:blipFill></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:body></w:document>"#);
+        read(&write_zip(vec![("word/document.xml".into(),document.into_bytes()),
+            ("word/_rels/document.xml.rels".into(),br#"<Relationships><Relationship Id="image1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image.png"/></Relationships>"#.to_vec()),
+            ("word/media/image.png".into(),image_bytes()?)])?,"docx")
+    }
+    #[test]
+    fn html_unquoted_and_boolean_attributes_keep_formatting_and_hidden_content_out()->Result<(),String> {
+        let doc=html("<p class=plain style=color:red>red<b hidden>secret</b><input disabled/><br hidden/>ok</p>")?;
+        assert_eq!(doc.plain_text(),"redok");assert!(doc.paragraphs[0].runs.iter().all(|run|run.format.color==[255,0,0]));
+        let doc=html("<p hidden/><p style=font-weight:bold>kept</p>")?;assert_eq!(doc.plain_text(),"kept");assert!(doc.paragraphs[0].runs[0].format.bold);Ok(())
+    }
+    #[test]
+    fn gfm_table_body_rows_without_a_pipe_keep_their_first_column_and_padding()->Result<(),String> {
+        let doc=md("|a|b|\n|---|---|\nsolo\nx|y\n\nend")?;let table=&doc.tables[0];
+        assert_eq!(table.rows.len(),3);assert_eq!(cell_text(&table.rows[1][0]),"solo");assert!(cell_text(&table.rows[1][1]).is_empty());
+        assert_eq!(cell_text(&table.rows[2][0]),"x");assert_eq!(cell_text(&table.rows[2][1]),"y");assert!(doc.plain_text().ends_with("end"));Ok(())
+    }
+    #[test]
+    fn markdown_table_column_alignment_survives_export_and_reimport()->Result<(),String> {
+        let mut doc=Doc::from_text("anchor");doc.add_table(doc.paragraphs[0].id,2,3)?;
+        for (cell,align) in doc.tables[0].rows[0].iter_mut().zip([Align::Center,Align::Right,Align::Left]) {cell.paragraphs[0].align=align;}
+        let text=write_markdown(&doc);assert!(text.contains("|:---:|---:|---|"));
+        let imported=md(&text)?;assert_eq!(imported.tables[0].rows[0].iter().map(|cell|cell.paragraphs[0].align).collect::<Vec<_>>(),vec![Align::Center,Align::Right,Align::Left]);Ok(())
+    }
+    #[test]
+    fn markdown_table_export_does_not_leak_vertical_merge_continuation_text()->Result<(),String> {
+        let mut doc=Doc::from_text("anchor");doc.add_table(doc.paragraphs[0].id,2,1)?;
+        doc.tables[0].rows[0][0].paragraphs[0].runs[0].text="visible".into();doc.tables[0].rows[1][0].merged=true;
+        doc.tables[0].rows[1][0].paragraphs[0].runs[0].text="hidden continuation".into();
+        let text=write_markdown(&doc);assert!(text.contains("visible"));assert!(!text.contains("hidden continuation"));
+        let imported=md(&text)?;assert_eq!(imported.tables[0].rows.len(),2);assert!(cell_text(&imported.tables[0].rows[1][0]).is_empty());Ok(())
+    }
+    #[test]
+    fn markdown_export_keeps_single_line_inline_code_and_literal_backticks()->Result<(),String> {
+        let mut doc=Doc::from_text("`x` & *y*");doc.paragraphs[0].runs[0].format.font="Consolas".into();
+        let text=write_markdown(&doc);assert!(text.contains("`` `x` & *y* ``"));let imported=md(&text)?;
+        assert_eq!(imported.plain_text(),doc.plain_text());assert_eq!(imported.paragraphs[0].runs[0].format.font,"Consolas");Ok(())
+    }
+    #[test]
+    fn markdown_email_autolinks_use_mailto_without_visible_angle_brackets()->Result<(),String> {
+        let doc=md("<user.name+tag@example.org>")?;assert_eq!(doc.plain_text(),"user.name+tag@example.org");
+        assert_eq!(doc.paragraphs[0].runs[0].format.link.as_deref(),Some("mailto:user.name+tag@example.org"));Ok(())
+    }
+    #[test]
+    fn markdown_autolink_schemes_are_ascii_case_insensitive()->Result<(),String> {
+        let doc=md("<HTTPS://example.org/A> <MAILTO:User@example.org>")?;
+        assert_eq!(doc.plain_text(),"HTTPS://example.org/A User@example.org");
+        let links=doc.paragraphs[0].runs.iter().filter_map(|run|run.format.link.as_deref()).collect::<Vec<_>>();
+        assert_eq!(links,vec!["HTTPS://example.org/A","MAILTO:User@example.org"]);Ok(())
+    }
+    #[test]
+    fn markdown_supported_named_entities_decode_without_interpreting_markup()->Result<(),String> {
+        let doc=md("&copy; &nbsp; &mdash; &lt;b&gt; &unknown;")?;
+        assert_eq!(doc.plain_text(),"© \u{00a0} — <b> &unknown;");assert!(!doc.paragraphs[0].runs[0].format.bold);Ok(())
+    }
+    #[test]
+    fn markdown_quote_blocks_keep_paragraphs_and_lists()->Result<(),String> {
+        let doc=md("> first\n> second\n>\n> - **item**\n>\n> ```\n> code\n> ```\n\noutside")?;
+        assert_eq!(doc.paragraphs[0].text(),"first second");assert_eq!(doc.paragraphs[0].style,"Quote");
+        assert_eq!(doc.paragraphs[1].list,List::Bullet);assert_eq!(doc.paragraphs[1].text(),"item");assert!(doc.paragraphs[1].runs[0].format.bold);
+        assert_eq!(doc.paragraphs[2].style,"Code");assert_eq!(doc.paragraphs[2].text(),"code");
+        assert_eq!(doc.paragraphs[3].text(),"outside");
+        let ids=doc.paragraphs.iter().map(|paragraph|paragraph.id).collect::<std::collections::BTreeSet<_>>();assert_eq!(ids.len(),doc.paragraphs.len());doc.validate()?;Ok(())
+    }
+    #[test]
+    fn html_optional_end_tags_preserve_structure()->Result<(),String> {
+        let doc=html("<P style=color:red>one<p>two<ul><li><b>three</b><li>four</ul><table><tr><td>A<td>B<tr><td>C<td>D</table>")?;
+        assert_eq!(doc.paragraphs.iter().map(Paragraph::text).collect::<Vec<_>>(),vec!["one","two","three","four"]);
+        assert_eq!(doc.paragraphs[0].runs[0].format.color,[255,0,0]);assert!(doc.paragraphs[2].runs[0].format.bold);
+        assert_eq!(doc.tables[0].rows.len(),2);assert_eq!(cell_text(&doc.tables[0].rows[1][1]),"D");Ok(())
+    }
+    #[test]
+    fn html_hidden_detection_uses_real_css_declarations_instead_of_quoted_fragments()->Result<(),String> {
+        let doc=html(r#"<p style="font-family:'Keep;display:none'">visible</p><p style="display: none !important">secret</p>"#)?;
+        assert_eq!(doc.plain_text(),"visible");assert_eq!(doc.paragraphs[0].runs[0].format.font,"Keep;display:none");Ok(())
+    }
+    #[test]
+    fn html_hidden_break_elements_do_not_insert_visible_line_breaks()->Result<(),String> {
+        let doc=html(r#"<p>a<br hidden/>b<br style="display:none!important"/>c<br/>d</p>"#)?;
+        assert_eq!(doc.plain_text(),"abc\u{000b}d");Ok(())
+    }
+    #[test]
+    fn html_template_contents_remain_inert_and_do_not_enter_document_text()->Result<(),String> {
+        let doc=html("<p>before<template><p>secret</p><template>inner</template>outer secret</template>after</p>")?;
+        assert!(!doc.plain_text().contains("secret"));assert!(!doc.plain_text().contains("inner"));assert!(doc.plain_text().contains("before") && doc.plain_text().contains("after"));
+        let fallback=fallback_html_text("before<template>secret<template>inner</template>outer secret</template>after");
+        assert_eq!(fallback,"beforeafter");Ok(())
+    }
+    #[test]
+    fn html_semantic_and_legacy_text_tags_map_to_existing_text_format_fields()->Result<(),String> {
+        let doc=html(r#"<p><font color="red" face="'Georgia',serif" size="5"><ins>u</ins><strike>s</strike></font><mark>m</mark><small>x</small><big>y</big><kbd>k</kbd><samp>sample</samp><tt>t</tt></p>"#)?;
+        let runs=&doc.paragraphs[0].runs;let u=runs.iter().find(|run|run.text=="u").ok_or("u")?;
+        assert!(u.format.underline);assert_eq!((u.format.font.as_str(),u.format.size,u.format.color),("Georgia",18.0,[255,0,0]));
+        assert!(runs.iter().find(|run|run.text=="s").is_some_and(|run|run.format.strike));
+        assert!(runs.iter().find(|run|run.text=="m").is_some_and(|run|run.format.highlight==Some([255,255,0])));
+        assert!(runs.iter().find(|run|run.text=="x").is_some_and(|run|run.format.size<11.0));
+        assert!(runs.iter().find(|run|run.text=="y").is_some_and(|run|run.format.size>11.0));
+        assert!(runs.iter().filter(|run|run.text.contains('k') || run.text.contains("sample") || run.text=="t").all(|run|run.format.font=="Consolas"));Ok(())
+    }
+    #[test]
+    fn html_single_color_background_shorthand_keeps_text_highlighting()->Result<(),String> {
+        let doc=html(r#"<p><span style="background:#123">hex</span><span style="background: rgb(255,0,0)">rgb</span></p>"#)?;
+        assert_eq!(doc.paragraphs[0].runs[0].format.highlight,Some([17,34,51]));
+        assert!(doc.paragraphs[0].runs.iter().any(|run|run.text=="rgb" && run.format.highlight==Some([255,0,0])));Ok(())
+    }
+    #[test]
+    fn html_font_shorthand_respects_cascade()->Result<(),String> {
+        let doc=html(r#"<p style="font:italic bold 16px/1.5 'Georgia'">first</p><p style="font-weight:normal!important;font:bold 18pt 'Arial'">second</p>"#)?;
+        let first=&doc.paragraphs[0];assert_eq!(first.runs[0].format.font,"Georgia");assert_eq!(first.runs[0].format.size,12.0);
+        assert!(first.runs[0].format.bold && first.runs[0].format.italic);assert_eq!(first.line_spacing,1.5);
+        let second=&doc.paragraphs[1].runs[0].format;assert_eq!(second.font,"Arial");assert_eq!(second.size,18.0);assert!(!second.bold && !second.italic);Ok(())
+    }
+    #[test]
+    fn html_data_url_normalization()->Result<(),String> {
+        assert_eq!(decode_html_image("DATA:IMAGE/PNG; charset=utf-8; BASE64,QQ%3D%3D"),Some(vec![65]));
+        assert_eq!(decode_html_image("data:image/jpeg;base64, Q Q \n"),Some(vec![65]));
+        assert!(decode_html_image("data:image/png;base64,AA=A").is_none());assert!(decode_html_image("data:image/png;base64,Q").is_none());
+        let bytes=image_bytes()?;let encoded=encode_image_base64(&bytes).replace('=',"%3D");
+        let doc=html(&format!("<p>image</p><img src=\"DATA:IMAGE/PNG;BASE64,{encoded}\"/>"))?;assert_eq!(doc.images.len(),1);assert_eq!(doc.images[0].bytes,bytes);Ok(())
+    }
+    #[test]
+    fn html_export_stops_at_output_budget()->Result<(),String> {
+        let mut doc=Doc::from_text("text");let exact=write_html_bounded(&doc,XML_LIMIT)?;
+        assert_eq!(write_html_bounded(&doc,exact.len())?,exact);assert!(write_html_bounded(&doc,exact.len()-1).is_err());
+        doc.paragraphs[0].runs=(0..100).map(|index|Run{text:"x".into(),format:TextFormat{bold:index%2==0,link:Some(format!("https://example.org/{}","a".repeat(1000))),..Default::default()}}).collect();
+        assert!(write_html_bounded(&doc,1024).is_err());assert!(html_paragraph_bounded(&doc.paragraphs[0],"p",1024).is_err());Ok(())
+    }
+    #[test]
+    fn word_symbols_keep_order_and_font()->Result<(),String> {
+        let doc=word(r#"<w:p><w:r><w:t>A</w:t><w:sym w:font="Segoe UI Symbol" w:char="263A"/><w:t>B</w:t></w:r></w:p>"#,"","")?;
+        assert_eq!(doc.plain_text(),"A☺B");assert!(doc.paragraphs[0].runs.iter().any(|run|run.text=="☺" && run.format.font=="Segoe UI Symbol"));Ok(())
+    }
+    #[test]
+    fn word_ruby_keeps_base_without_annotation()->Result<(),String> {
+        let doc=word(r#"<w:p><w:r><w:t>A</w:t><w:ruby><w:rt><w:r><w:t>reading</w:t></w:r></w:rt><w:rubyBase><w:r><w:rPr><w:b/></w:rPr><w:t>漢</w:t></w:r></w:rubyBase></w:ruby><w:t>B</w:t></w:r></w:p>"#,"","")?;
+        assert_eq!(doc.plain_text(),"A漢B");assert!(doc.paragraphs[0].runs.iter().any(|run|run.text=="漢" && run.format.bold));
+        assert!(doc.losses.iter().any(|loss|loss.contains("Фонетические")));Ok(())
+    }
+    #[test]
+    fn word_column_break_advances_page()->Result<(),String> {
+        let doc=word(r#"<w:p><w:r><w:t>before</w:t><w:br w:type="column"/><w:t>after</w:t></w:r></w:p>"#,"","")?;
+        assert_eq!(doc.plain_text(),"before\u{000c}after");assert_eq!(doc.layout().pages.len(),2);Ok(())
+    }
+    #[test]
+    fn word_relocated_core_properties()->Result<(),String> {
+        let parts=vec![("word/document.xml".into(),br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p/></w:body></w:document>"#.to_vec()),
+            ("_rels/.rels".into(),br#"<Relationships><Relationship Id="core" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="custom/metadata.xml"/></Relationships>"#.to_vec()),
+            ("custom/metadata.xml".into(),br#"<cp:coreProperties xmlns:cp="urn:core" xmlns:dc="urn:dc"><dc:title>Selected title</dc:title><dc:creator>Selected author</dc:creator></cp:coreProperties>"#.to_vec())];
+        let doc=read(&write_zip(parts)?,"docx")?;assert_eq!(doc.title,"Selected title");assert_eq!(doc.author,"Selected author");
+        let reopened=read(&write(&doc,"docx")?,"docx")?;assert_eq!(reopened.title,doc.title);assert_eq!(reopened.author,doc.author);Ok(())
+    }
+    #[test]
+    fn word_logical_end_alignment()->Result<(),String> {
+        let doc=word(r#"<w:p><w:pPr><w:jc w:val="end"/></w:pPr><w:r><w:t>right edge</w:t></w:r></w:p>"#,"","")?;
+        assert_eq!(doc.paragraphs[0].align,Align::Right);let row=&doc.layout().rows[0];
+        assert!(row.x>doc.page.margin_left+100.0);Ok(())
+    }
+    #[test]
+    fn word_spacing_attributes_inherit_independently()->Result<(),String> {
+        let styles=r#"<w:style w:type="paragraph" w:styleId="Base"><w:pPr><w:spacing w:line="480" w:lineRule="exact"/></w:pPr></w:style><w:style w:type="paragraph" w:styleId="Child"><w:basedOn w:val="Base"/><w:pPr><w:spacing w:line="600"/></w:pPr></w:style>"#;
+        let doc=word(r#"<w:p><w:pPr><w:pStyle w:val="Child"/><w:spacing w:lineRule="atLeast"/></w:pPr><w:r><w:t>first</w:t></w:r></w:p><w:p><w:pPr><w:pStyle w:val="Base"/><w:spacing w:lineRule="auto"/></w:pPr><w:r><w:t>second</w:t></w:r></w:p>"#,styles,"")?;
+        assert_eq!(doc.paragraphs[0].line_points,30.0);assert!(!doc.paragraphs[0].line_exact);
+        assert_eq!(doc.paragraphs[1].line_points,0.0);assert_eq!(doc.paragraphs[1].line_spacing,2.0);Ok(())
+    }
+    #[test]
+    fn word_line_unit_paragraph_spacing()->Result<(),String> {
+        let doc=word(r#"<w:p><w:pPr><w:spacing w:before="999" w:after="999" w:beforeLines="150" w:afterLines="50" w:line="400" w:lineRule="exact"/></w:pPr><w:r><w:t>text</w:t></w:r></w:p>"#,"","")?;
+        assert_eq!(doc.paragraphs[0].spacing_before,30.0);assert_eq!(doc.paragraphs[0].spacing_after,10.0);Ok(())
+    }
+    #[test]
+    fn word_legacy_horizontal_merges()->Result<(),String> {
+        let doc=word(r#"<w:tbl><w:tblGrid><w:gridCol w:w="200"/><w:gridCol w:w="400"/><w:gridCol w:w="600"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:hMerge w:val="restart"/></w:tcPr><w:p><w:r><w:t>A</w:t></w:r></w:p></w:tc><w:tc><w:tcPr><w:hMerge/></w:tcPr><w:p/></w:tc><w:tc><w:p><w:r><w:t>C</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:tcPr><w:hMerge w:val="restart"/></w:tcPr><w:p><w:r><w:t>D</w:t></w:r></w:p></w:tc><w:tc><w:tcPr><w:hMerge/></w:tcPr><w:p><w:r><w:t>E</w:t></w:r></w:p></w:tc><w:tc><w:p/></w:tc></w:tr></w:tbl>"#,"","")?;
+        let table=&doc.tables[0];assert_eq!(table.rows[0].len(),2);assert_eq!(table.rows[0][0].span(),2);assert_eq!(table.column_widths,vec![10.0,20.0,30.0]);
+        assert_eq!(cell_text(&table.rows[0][0]),"A");assert_eq!(cell_text(&table.rows[1][0]),"D\nE");assert!(doc.losses.iter().any(|loss|loss.contains("hMerge")));Ok(())
+    }
+    #[test]
+    fn word_image_crop_keeps_visible_pixels()->Result<(),String> {
+        let doc=image_word("",r#"<a:srcRect r="50000"/>"#)?;let image=&doc.images[0];assert_eq!((image.width,image.height),(72.0,36.0));
+        let decoded=crate::util::decode_image(&image.bytes)?;assert_eq!((decoded.width(),decoded.height()),(1,1));assert_eq!(decoded.to_rgba8().get_pixel(0,0).0,[255,0,0,255]);Ok(())
+    }
+    #[test]
+    fn word_image_title_is_alt_fallback()->Result<(),String> {
+        assert_eq!(image_word(r#"title="Accessible title""#,"")?.images[0].alt,"Accessible title");
+        assert_eq!(image_word(r#"title="Title" descr="Description""#,"")?.images[0].alt,"Description");
+        assert_eq!(image_word(r#"title="Title" descr="""#,"")?.images[0].alt,"Title");Ok(())
+    }
+    #[test]
+    fn word_custom_outline_levels()->Result<(),String> {
+        let styles=r#"<w:style w:type="paragraph" w:styleId="Custom"><w:name w:val="Section"/><w:pPr><w:outlineLvl w:val="2"/></w:pPr><w:rPr><w:sz w:val="48"/></w:rPr></w:style>"#;
+        let doc=word(r#"<w:p><w:pPr><w:pStyle w:val="Custom"/></w:pPr><w:r><w:t>heading</w:t></w:r></w:p><w:p><w:pPr><w:pStyle w:val="Custom"/><w:outlineLvl w:val="9"/></w:pPr><w:r><w:t>body</w:t></w:r></w:p>"#,styles,"")?;
+        assert_eq!(doc.paragraphs[0].style,"Heading3");assert_eq!(doc.paragraphs[0].runs[0].format.size,24.0);assert_eq!(doc.paragraphs[1].style,"Normal");Ok(())
+    }
+    #[test]
+    fn word_table_column_width_precision()->Result<(),String> {
+        let mut doc=Doc::from_text("anchor");doc.add_table(doc.paragraphs[0].id,1,2)?;doc.tables[0].column_widths=vec![2500.0,0.25];
+        let reopened=read(&write(&doc,"docx")?,"docx")?;assert_eq!(reopened.tables[0].column_widths,vec![2500.0,0.25]);
+        let layout=reopened.layout();let ratio=layout.cells[0].w/layout.cells[1].w;assert!((ratio-10000.0).abs()<2.0,"{ratio}");Ok(())
+    }
+    #[test]
+    fn html_nested_lists_are_structural()->Result<(),String> {
+        let mut doc=Doc::from_text("parent\nchild\nother\nparent two\ndeep");
+        for (paragraph,(kind,level)) in doc.paragraphs.iter_mut().zip([(List::Number,0),(List::Bullet,1),(List::Number,1),(List::Number,0),(List::Number,3)]) {paragraph.list=kind;paragraph.list_level=level;}
+        let exported=write(&doc,"html")?;let text=std::str::from_utf8(&exported).map_err(|error|error.to_string())?;
+        let root=xml(text.trim_start_matches("<!DOCTYPE html>").as_bytes())?;let list=root.descendant("ol").ok_or("ol")?;
+        assert!(list.child("li").and_then(|node|node.child("ul")).is_some());
+        let imported=read(&exported,"html")?;assert_eq!(imported.plain_text(),doc.plain_text());
+        assert_eq!(imported.paragraphs.iter().map(|paragraph|(paragraph.list,paragraph.list_level)).collect::<Vec<_>>(),doc.paragraphs.iter().map(|paragraph|(paragraph.list,paragraph.list_level)).collect::<Vec<_>>());Ok(())
+    }
+    #[test]
+    fn html_table_headers_roundtrip()->Result<(),String> {
+        let mut doc=Doc::from_text("anchor");doc.add_table(doc.paragraphs[0].id,3,1)?;doc.tables[0].header_rows=2;
+        let exported=write(&doc,"html")?;let text=String::from_utf8_lossy(&exported);assert!(text.contains("<thead>") && text.contains("<tbody>"));assert_eq!(text.matches("<th ").count(),2);
+        assert_eq!(read(&exported,"html")?.tables[0].header_rows,2);
+        doc.tables[0].header_rows=1;doc.tables[0].rows[1][0].merged=true;
+        let imported=read(&write(&doc,"html")?,"html")?;assert_eq!(imported.tables[0].header_rows,1);assert!(imported.tables[0].rows[1][0].merged);Ok(())
     }
 }

@@ -129,7 +129,7 @@ impl EditorState {
                 self.scroll_to_cursor = true;
                 true
             }
-            Err(_) => false,
+            Err(error) => {self.message=Some(error);false},
         }
     }
     fn apply_format(&mut self, doc: &mut Doc, apply: impl Fn(&mut TextFormat)) {
@@ -585,18 +585,11 @@ pub fn show_with_edits(ui: &mut egui::Ui, doc: &mut Doc, edits: Option<&[TextEdi
                             paragraph: pos.paragraph,
                             offset: 0,
                         };
-                        state.cursor = Position {
-                            paragraph: pos.paragraph,
-                            offset: doc
-                                .paragraphs
-                                .get(pos.paragraph)
-                                .map(Paragraph::len)
-                                .unwrap_or_default(),
-                        };
+                        let end=Position{paragraph:pos.paragraph,offset:doc.paragraphs.get(pos.paragraph).map(Paragraph::len).unwrap_or_default()};
+                        let anchor=state.anchor;mouse_selection(doc,&mut state,anchor,end);
                     } else if response.double_clicked() {
                         let (a, b) = word_range(doc, pos);
-                        state.anchor = a;
-                        state.cursor = b;
+                        mouse_selection(doc,&mut state,a,b);
                     } else {
                         state.move_to(doc, pos, shift);
                     }
@@ -606,7 +599,8 @@ pub fn show_with_edits(ui: &mut egui::Ui, doc: &mut Doc, edits: Option<&[TextEdi
                 && state.table_cell.is_none()
                 && let Some(pointer) = response.interact_pointer_pos()
             {
-                state.cursor = hit_test(&layout, pointer, page_origin, scale, page_height, gap);
+                let cursor=hit_test(&layout,pointer,page_origin,scale,page_height,gap);
+                let anchor=state.anchor;mouse_selection(doc,&mut state,anchor,cursor);
                 state.scroll_to_cursor = false;
                 state.preferred_x = None;
             }
@@ -1027,9 +1021,11 @@ fn step_cell(doc: &mut Doc, state: &mut EditorState, forward: bool) {
         if let Some(target) = target {
             state.table_cell = Some(*target);
         } else if forward {
-            table_command(doc, state, TableCommand::RowBelow);
-            if let Some(cursor) = &mut state.table_cell {
-                cursor.column = 0;
+            let at=table.rows.len();
+            match doc.edit_table(cursor.table,TableEdit::InsertRow(at)) {
+                Ok(true)=>state.table_cell=canonical_cell(doc,TableCursor{row:at,column:0,..cursor}),
+                Ok(false)=>state.table_cell=None,
+                Err(error)=>state.message=Some(error),
             }
         }
     }
@@ -1232,9 +1228,7 @@ fn home_tab(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id
             .unwrap_or_else(|| "Normal".into());
         ui.vertical(|ui| {
             ui.add_enabled_ui(state.table_cell.is_none(), |ui| {
-                for style in [
-                    "Normal", "Title", "Heading1", "Heading2", "Heading3", "Quote",
-                ] {
+                for &style in DOCS_STYLE_CHOICES {
                     if style_card(ui, style, current == style).clicked() {
                         apply_style(doc, state, style);
                         refocus(ui, doc, state, canvas_id);
@@ -1958,9 +1952,10 @@ fn paragraph_controls(ui: &mut egui::Ui, doc: &mut Doc, state: &EditorState, ind
     };
     if indent {
         ui.horizontal(|ui| {
-            for (label, old, first) in [
-                ("Отступ слева", p.indent, false),
-                ("Первая строка", p.first_indent, true),
+            for (label, old, side) in [
+                ("Отступ слева", p.indent, 0),
+                ("Отступ справа",p.right_indent,1),
+                ("Первая строка", p.first_indent, 2),
             ] {
                 let mut value = old;
                 ui.label(label);
@@ -1973,11 +1968,7 @@ fn paragraph_controls(ui: &mut egui::Ui, doc: &mut Doc, state: &EditorState, ind
                     .changed()
                 {
                     selected_paragraphs(doc, state, |p| {
-                        if first {
-                            p.first_indent = value
-                        } else {
-                            p.indent = value
-                        }
+                        match side {0=>p.indent=value,1=>p.right_indent=value,_=>p.first_indent=value}
                     });
                 }
             }
@@ -2260,7 +2251,7 @@ fn find_bar(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id
         .show(ui,|ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.strong("Найти");
-                if ui.add(egui::TextEdit::singleline(&mut state.search).id(query_id)
+                if ui.add(egui::TextEdit::singleline(&mut state.search).char_limit(32767).id(query_id)
                     .desired_width(170.0).hint_text("Текст документа")).changed() {
                     state.match_index=0;state.find_notice.clear();
                 }
@@ -2272,11 +2263,11 @@ fn find_bar(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id
                     ui.memory_mut(|memory|memory.request_focus(canvas_id));
                 }
             });
-            let matches=doc.find(&state.search,state.case_sensitive);
+            let (matches,truncated)=find_panel_matches(doc,&state.search,state.case_sensitive);
             if let Some(backwards)=navigation {navigate_find_matches(doc,state,&matches,backwards);}
             ui.horizontal_wrapped(|ui| {
                 ui.label("Заменить на");
-                ui.add(egui::TextEdit::singleline(&mut state.replacement).id(replacement_id)
+                ui.add(egui::TextEdit::singleline(&mut state.replacement).char_limit(32767).id(replacement_id)
                     .desired_width(170.0).hint_text("Новый текст"));
                 if ui.add_enabled(matches.contains(&state.range()),egui::Button::new("Заменить")).clicked() {
                     replace_current_match(doc,state);
@@ -2296,6 +2287,7 @@ fn find_bar(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState, canvas_id
                     ui.small(format!("Совпадение {} из {}",index+1,matches.len()));
                 }else{ui.small(format!("Совпадений: {}",matches.len()));}
                 if !state.find_notice.is_empty(){ui.separator();ui.small(&state.find_notice);}
+                if truncated {ui.separator();ui.small("Показаны первые100000 совпадений; уточните запрос.");}
                 ui.separator();ui.small("Поиск в основном тексте документа.");
             });
         });
@@ -2321,7 +2313,7 @@ fn select_match(doc: &Doc, state: &mut EditorState, start: Position, end: Positi
 fn replace_current_match(doc: &mut Doc, state: &mut EditorState) -> bool {
     if !state.selected()
         || !doc
-            .find(&state.search, state.case_sensitive)
+            .find_bounded(&state.search, state.case_sensitive,DOCS_UI_FIND_LIMIT+1)
             .contains(&state.range())
     {
         return false;
@@ -2331,11 +2323,11 @@ fn replace_current_match(doc: &mut Doc, state: &mut EditorState) -> bool {
         Ok(position) => {
             state.move_to(doc, position, false);
             state.match_index = doc
-                .find(&state.search, state.case_sensitive)
+                .find_bounded(&state.search, state.case_sensitive,DOCS_UI_FIND_LIMIT+1)
                 .partition_point(|(start, _)| *start < position);
             true
         }
-        Err(_) => false,
+        Err(error) => {state.message=Some(error);false},
     }
 }
 fn object_panels(ui: &mut egui::Ui, doc: &mut Doc, state: &mut EditorState) {
@@ -2448,12 +2440,9 @@ fn cell_editor(
     };
     let id = cell_editor_id(canvas_id, doc, state);
     if ui.is_enabled() && ui.memory(|m| m.has_focus(id)) {
-        let (forward, back, escape) = ui.input_mut(|i| {
-            (
-                i.consume_key(egui::Modifiers::NONE, Key::Tab),
-                i.consume_key(egui::Modifiers::SHIFT, Key::Tab),
-                i.consume_key(egui::Modifiers::NONE, Key::Escape),
-            )
+        let (forward, back, escape) = ui.input_mut(|input| {
+            let direction=cell_tab_direction(input);
+            (direction==Some(true),direction==Some(false),input.consume_key(egui::Modifiers::NONE,Key::Escape))
         });
         for (key, which) in [(Key::B, 0), (Key::I, 1), (Key::U, 2)] {
             if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, key)) {
@@ -2504,6 +2493,7 @@ fn cell_editor(
         ui.ctx().request_repaint();
         return;
     };
+    let padding=doc.tables.iter().find(|table|table.id==cursor.table).map(|table|table.cell_margin).unwrap_or([5.0;4]);
     let Some(cell) = active_cell(doc, Some(cursor)) else {
         state.table_cell = None;
         return;
@@ -2523,15 +2513,15 @@ fn cell_editor(
     } else {
         crate::fonts::egui_family(ui.ctx(), &format.font, format.bold, format.italic)
     };
-    let margin = (5.0 * scale).clamp(1.0, 100.0) as i8;
+    let content_rect=cell_content_rect(rect,padding,scale);
     let editor = egui::TextEdit::multiline(&mut text)
         .id(id)
         .frame(egui::Frame::NONE)
-        .margin(egui::Margin::same(margin))
+        .margin(egui::Margin::ZERO)
         .font(FontId::new((format.size * scale).max(4.0), family))
         .text_color(rgb(format.color))
         .lock_focus(true)
-        .desired_width(rect.width())
+        .desired_width(content_rect.width())
         .desired_rows(1)
         .horizontal_align(match align {
             Align::Center => egui::Align::Center,
@@ -2546,7 +2536,7 @@ fn cell_editor(
             visuals.text_cursor.stroke = Stroke::new((1.5 * scale).clamp(1.0, 3.0), caret);
             visuals.selection.bg_fill = Color32::from_rgba_unmultiplied(70, 130, 230, 90);
             visuals.selection.stroke = Stroke::new(1.0, caret);
-            ui.put(rect, editor)
+            ui.put(content_rect, editor)
         })
         .inner;
     if state.focus_cell {
@@ -2603,7 +2593,8 @@ fn handle_event(
                 .ctx()
                 .data_mut(|d| d.get_temp::<Clipboard>(clipboard_id()))
                 .filter(|c| c.text == text);
-            let (a, _) = state.range();
+            let (a,b)=state.range();
+            let keeps_suffix=doc.paragraphs.get(b.paragraph).is_some_and(|paragraph|b.offset<paragraph.len());
             if !state.insert(doc, &text) {
                 return;
             }
@@ -2612,6 +2603,7 @@ fn handle_event(
                     let pi = a.paragraph + i;
                     if copy.complete.get(i) == Some(&true)
                         && (i > 0 || a.offset == 0)
+                        && !(keeps_suffix && i+1==copy.paragraphs.len())
                         && let Some(target) = doc.paragraphs.get_mut(pi)
                     {
                         let id = target.id;
@@ -2685,14 +2677,8 @@ fn handle_event(
             before_chars,
             after_chars,
         }) => {
-            let mut a = state.cursor;
-            let mut b = state.cursor;
-            for _ in 0..before_chars {
-                a = previous(doc, a, false);
-            }
-            for _ in 0..after_chars {
-                b = next(doc, b, false);
-            }
+            let a=surrounding_position(doc,state.cursor,before_chars,false);
+            let b=surrounding_position(doc,state.cursor,after_chars,true);
             state.anchor = a;
             state.cursor = b;
             state.insert(doc, "");
@@ -4670,5 +4656,130 @@ mod next_body_navigation_tests {
         select_match(&doc,&mut state,Position{paragraph:0,offset:5},Position{paragraph:0,offset:11});
         assert!(state.table_cell.is_none());assert!(state.table_page.is_none());assert!(!state.focus_cell);
         assert_eq!(state.cursor.offset,11);Ok(())
+    }
+}
+
+const DOCS_UI_FIND_LIMIT:usize=100000;
+fn mouse_selection(doc:&Doc,state:&mut EditorState,start:Position,end:Position) {
+    state.move_to(doc,end,false);state.anchor=doc.clamp_position(start);
+}
+fn surrounding_position(doc:&Doc,start:Position,mut distance:usize,forward:bool)->Position {
+    let mut position=doc.clamp_position(start);
+    loop {
+        let length=doc.paragraphs.get(position.paragraph).map(Paragraph::len).unwrap_or_default();
+        let available=if forward {length.saturating_sub(position.offset)}else{position.offset};
+        if distance<=available {
+            position.offset=if forward {position.offset+distance}else{position.offset-distance};
+            return position;
+        }
+        distance-=available;
+        if forward {
+            if position.paragraph+1>=doc.paragraphs.len(){position.offset=length;return position;}
+            position.paragraph+=1;position.offset=0;
+        }else{
+            if position.paragraph==0{position.offset=0;return position;}
+            position.paragraph-=1;position.offset=doc.paragraphs[position.paragraph].len();
+        }
+        distance=distance.saturating_sub(1);
+    }
+}
+
+fn cell_content_rect(rect:Rect,padding:[f32;4],scale:f32)->Rect {
+    let left=(padding[3]*scale).max(0.0).min((rect.width()-1.0).max(0.0));
+    let right=(padding[1]*scale).max(0.0).min((rect.width()-left-1.0).max(0.0));
+    let top=(padding[0]*scale).max(0.0).min((rect.height()-1.0).max(0.0));
+    let bottom=(padding[2]*scale).max(0.0).min((rect.height()-top-1.0).max(0.0));
+    Rect::from_min_max(rect.min+egui::vec2(left,top),rect.max-egui::vec2(right,bottom))
+}
+
+fn cell_tab_direction(input:&mut egui::InputState)->Option<bool> {
+    if input.consume_key(egui::Modifiers::SHIFT,Key::Tab) {Some(false)}
+    else if input.consume_key(egui::Modifiers::NONE,Key::Tab) {Some(true)}else{None}
+}
+const DOCS_STYLE_CHOICES:&[&str]=&["Normal","Title","Heading1","Heading2","Heading3","Heading4","Heading5","Heading6","Quote","Code"];
+
+fn find_panel_matches(doc:&Doc,query:&str,case_sensitive:bool)->(Vec<(Position,Position)>,bool) {
+    let mut matches=doc.find_bounded(query,case_sensitive,DOCS_UI_FIND_LIMIT+1);
+    let truncated=matches.len()>DOCS_UI_FIND_LIMIT;matches.truncate(DOCS_UI_FIND_LIMIT);(matches,truncated)
+}
+
+#[cfg(test)]
+mod two_hundred_docs_editor_regressions {
+    use super::*;
+    #[test]
+    fn shift_tab_from_a_table_cell_chooses_the_previous_visible_cell()->Result<(),String> {
+        let mut doc=Doc::from_text("anchor");let table=doc.add_table(doc.paragraphs[0].id,1,2)?;
+        let mut state=EditorState{table_cell:Some(TableCursor{table,row:0,column:1}),..Default::default()};
+        let ctx=egui::Context::default();let modifiers=egui::Modifiers::SHIFT;
+        let _=ctx.run_ui(egui::RawInput{events:vec![Event::ModifiersChanged(modifiers),Event::Key{key:Key::Tab,physical_key:None,pressed:true,repeat:false,modifiers}],..Default::default()},|ui| {
+            let direction=ui.input_mut(cell_tab_direction);assert_eq!(direction,Some(false));
+            if let Some(forward)=direction {step_cell(&mut doc,&mut state,forward);}
+        });
+        assert_eq!(state.table_cell,Some(TableCursor{table,row:0,column:0}));assert_eq!(doc.tables[0].rows.len(),1);Ok(())
+    }
+    #[test]
+    fn ime_surrounding_deletion_jumps_offsets_without_scanning_for_each_character() {
+        let doc=Doc::from_text("αβ\n猫犬");
+        assert_eq!(surrounding_position(&doc,Position{paragraph:1,offset:1},3,false),Position{paragraph:0,offset:1});
+        assert_eq!(surrounding_position(&doc,Position{paragraph:0,offset:1},3,true),Position{paragraph:1,offset:1});
+        assert_eq!(surrounding_position(&doc,Position{paragraph:0,offset:1},usize::MAX,true),Position{paragraph:1,offset:2});
+        assert_eq!(surrounding_position(&doc,Position{paragraph:1,offset:1},usize::MAX,false),Position::default());
+        let long=Doc::from_text(&"界".repeat(100000));
+        assert_eq!(surrounding_position(&long,Position::default(),100000,true).offset,100000);
+    }
+    #[test]
+    fn mouse_selection_updates_the_typing_format_before_replacing_text() {
+        let mut doc=Doc::from_text("old\nnew");doc.paragraphs[1].runs[0].format.bold=true;
+        let mut state=EditorState{preedit:"composition".into(),typing:TextFormat{bold:false,..Default::default()},..Default::default()};
+        mouse_selection(&doc,&mut state,Position{paragraph:1,offset:0},Position{paragraph:1,offset:3});
+        assert!(state.typing.bold);assert!(state.preedit.is_empty());assert!(state.insert(&mut doc,"replacement"));
+        assert_eq!(doc.paragraphs[1].text(),"replacement");assert!(doc.paragraphs[1].runs.iter().all(|run|run.format.bold));
+    }
+    #[test]
+    fn native_code_style_and_all_supported_headings_are_available_to_the_editor() {
+        let mut doc=Doc::from_text("code");let mut state=EditorState::default();
+        for style in ["Heading4","Heading5","Heading6","Code"] {assert!(DOCS_STYLE_CHOICES.contains(&style));}
+        apply_style(&mut doc,&mut state,"Code");assert_eq!(doc.paragraphs[0].style,"Code");
+        assert_eq!(doc.paragraphs[0].runs[0].format.font,"Consolas");assert_eq!(state.typing.font,"Consolas");
+        apply_style(&mut doc,&mut state,"Normal");assert_eq!(state.typing.font,"Calibri");
+    }
+    #[test]
+    fn table_cell_editor_insets_follow_all_four_model_margins_at_zoom() {
+        let rect=Rect::from_min_max(egui::pos2(10.0,20.0),egui::pos2(210.0,120.0));
+        let inner=cell_content_rect(rect,[2.0,4.0,6.0,8.0],1.5);
+        assert_eq!(inner.min,egui::pos2(22.0,23.0));assert_eq!(inner.max,egui::pos2(204.0,111.0));
+        let tiny=cell_content_rect(Rect::from_min_size(Pos2::ZERO,egui::vec2(2.0,2.0)),[100.0;4],2.0);
+        assert!(tiny.width()>=1.0 && tiny.height()>=1.0);
+    }
+    #[test]
+    fn find_panel_caps_dense_matches_and_reports_that_the_list_is_truncated() {
+        let doc=Doc::from_text(&format!("{}\n{}","a".repeat(60000),"a".repeat(60000)));
+        let (matches,truncated)=find_panel_matches(&doc,"a",true);
+        assert_eq!(matches.len(),DOCS_UI_FIND_LIMIT);assert!(truncated);
+        assert_eq!(matches.last().map(|(_,end)|*end),Some(Position{paragraph:1,offset:40000}));
+        let (matches,truncated)=find_panel_matches(&Doc::from_text("a a"),"a",true);assert_eq!(matches.len(),2);assert!(!truncated);
+    }
+    #[test]
+    fn tab_from_the_last_merged_cell_appends_after_the_whole_table()->Result<(),String> {
+        let mut doc=Doc::from_text("anchor");let table=doc.add_table(doc.paragraphs[0].id,3,1)?;
+        doc.tables[0].rows[1][0].merged=true;doc.tables[0].rows[2][0].merged=true;
+        let mut state=EditorState{table_cell:Some(TableCursor{table,row:0,column:0}),..Default::default()};
+        step_cell(&mut doc,&mut state,true);
+        assert_eq!(doc.tables[0].rows.len(),4);assert_eq!(state.table_cell,Some(TableCursor{table,row:3,column:0}));
+        assert!(doc.tables[0].rows[1][0].merged && doc.tables[0].rows[2][0].merged);assert!(!doc.tables[0].rows[3][0].merged);doc.validate()?;Ok(())
+    }
+    #[test]
+    fn rich_text_paste_before_a_surviving_suffix_preserves_target_paragraph_properties() {
+        let ctx=egui::Context::default();let mut source=Doc::from_text("copied");source.paragraphs[0].set_style("Heading1");
+        ctx.data_mut(|data|data.insert_temp(clipboard_id(),Clipboard{text:"copied".into(),paragraphs:source.paragraphs,complete:vec![true]}));
+        let mut target=Doc::from_text("suffix");target.paragraphs[0].align=Align::Right;target.paragraphs[0].right_indent=18.0;
+        let mut state=EditorState::default();let layout=target.layout();
+        let _=ctx.run_ui(egui::RawInput::default(),|ui| {
+            let canvas=ui.id().with("suffix-paste");ui.memory_mut(|memory|memory.request_focus(canvas));
+            handle_event(ui,&mut target,&layout,&mut state,canvas,Event::Paste("copied".into()));
+        });
+        assert_eq!(target.plain_text(),"copiedsuffix");assert_eq!(target.paragraphs[0].style,"Normal");
+        assert_eq!(target.paragraphs[0].align,Align::Right);assert_eq!(target.paragraphs[0].right_indent,18.0);
+        assert!(target.paragraphs[0].runs[0].format.bold);assert!(!target.paragraphs[0].runs.last().is_some_and(|run|run.format.bold));
     }
 }
