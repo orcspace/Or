@@ -71,9 +71,9 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
     let bare = outside_quotes(&lower);
     if bare
         .chars()
-        .any(|c| matches!(c, 'y' | 'm' | 'd' | 'h' | 's'))
+        .any(|c| matches!(c, 'y' | 'm' | 'd' | 'h' | 's')) || bare.contains("a/p")
     {
-        return date_display(numeric, &section);
+        return date_display(numeric, &section,ru);
     }
     if bare.contains('/') && bare.contains('?') {
         let (left, right) = bare.split_once('/').unwrap_or(("", ""));
@@ -509,12 +509,18 @@ fn strip_brackets(code: &str) -> String {
     }
     out
 }
-fn date_display(serial: f64, code: &str) -> String {
-    if !(0.0..=2958465.99999).contains(&serial) {
+fn date_display(serial: f64, code: &str, ru: bool) -> String {
+    if !(0.0..2958466.0).contains(&serial) {
         return "#NUM!".into();
     }
-    let seconds = (serial.fract() * 86400.0).round() as u32;
     let date_tokens = outside_quotes(&code.to_ascii_lowercase());
+    let fraction_digits=["s.","s]."].iter().filter_map(|pattern| {
+        date_tokens.split_once(pattern).map(|(_,tail)| tail.chars().take_while(|c|*c=='0').count().min(9))
+    }).max().unwrap_or(0);
+    let scale=10f64.powi(fraction_digits as i32);
+    let units=(serial.fract()*86400.0*scale).round();
+    let seconds=(units/scale).floor() as u32;
+    let fraction=(units-f64::from(seconds)*scale).round() as u64;
     let has_time = date_tokens.chars().any(|c| c == 'h' || c == 's');
     let has_date = date_tokens.chars().any(|c| c == 'y' || c == 'd');
     let date_serial = serial.floor()
@@ -534,7 +540,7 @@ fn date_display(serial: f64, code: &str) -> String {
     let mut i = 0;
     let mut out = String::new();
     let mut quote = false;
-    let ampm = outside_quotes(&code.to_ascii_lowercase()).contains("am/pm");
+    let ampm = date_tokens.contains("am/pm") || date_tokens.contains("a/p");
     let mut previous = ' ';
     while i < chars.len() {
         let c = chars[i];
@@ -553,6 +559,11 @@ fn date_display(serial: f64, code: &str) -> String {
         if quote {
             out.push(c);
             i += 1;
+            continue;
+        }
+        if chars[i..].iter().take(3).collect::<String>().eq_ignore_ascii_case("A/P") {
+            out.push(if hour<12 {'A'}else{'P'});
+            i+=3;
             continue;
         }
         let remaining = chars[i..].iter().take(5).collect::<String>();
@@ -578,6 +589,9 @@ fn date_display(serial: f64, code: &str) -> String {
                 out.push_str(&format!("{total:0width$.0}", width = lower.len()));
                 previous = lower.chars().next().unwrap_or(' ');
                 i += rest.chars().count() + 2;
+                if lower.starts_with('s') {
+                    append_time_fraction(&mut out,&chars,&mut i,fraction,fraction_digits,ru);
+                }
                 continue;
             }
         }
@@ -640,7 +654,12 @@ fn date_display(serial: f64, code: &str) -> String {
                         "Saturday",
                     ]
                 };
-                out.push_str(names.get(weekday).copied().unwrap_or(""));
+                let russian=if count==3 {
+                    ["вс","пн","вт","ср","чт","пт","сб"]
+                } else {
+                    ["воскресенье","понедельник","вторник","среда","четверг","пятница","суббота"]
+                };
+                out.push_str(if ru {russian.get(weekday).copied().unwrap_or("")} else {names.get(weekday).copied().unwrap_or("")});
             } else if token == 'm' && !minutes && count >= 3 {
                 let names = if count == 3 {
                     [
@@ -663,7 +682,16 @@ fn date_display(serial: f64, code: &str) -> String {
                         "December",
                     ]
                 };
-                let name = names.get((m - 1) as usize).copied().unwrap_or("");
+                let day_number=date_tokens.split(|c|c!='d').any(|run| !run.is_empty() && run.len()<=2);
+                let russian=if count==3 {
+                    ["янв","фев","мар","апр","май","июн","июл","авг","сен","окт","ноя","дек"]
+                } else if day_number {
+                    ["января","февраля","марта","апреля","мая","июня","июля","августа","сентября","октября","ноября","декабря"]
+                } else {
+                    ["январь","февраль","март","апрель","май","июнь","июль","август","сентябрь","октябрь","ноябрь","декабрь"]
+                };
+                let name = if ru {russian.get((m-1) as usize).copied().unwrap_or("")}
+                    else {names.get((m - 1) as usize).copied().unwrap_or("")};
                 if count == 5 {
                     out.extend(name.chars().take(1));
                 } else {
@@ -676,6 +704,9 @@ fn date_display(serial: f64, code: &str) -> String {
                 ));
             } else {
                 out.push_str(&n.to_string());
+            }
+            if token=='s' {
+                append_time_fraction(&mut out,&chars,&mut i,fraction,fraction_digits,ru);
             }
             previous = token;
         } else {
@@ -880,5 +911,39 @@ mod tests {
             display(&Value::Number(0.75), "h:mm AM/PM", false),
             "6:00 PM"
         );
+    }
+}
+
+fn append_time_fraction(out: &mut String,chars: &[char],index: &mut usize,fraction: u64,precision: usize,ru: bool) {
+    if chars.get(*index)!=Some(&'.') {return;}
+    let digits=chars[*index+1..].iter().take_while(|c|**c=='0').count().min(9);
+    if digits==0 {return;}
+    let value=if precision>=digits {fraction/10u64.pow((precision-digits) as u32)}
+        else {fraction*10u64.pow((digits-precision) as u32)};
+    out.push(if ru {','}else{'.'});
+    out.push_str(&format!("{value:0width$}",width=digits));
+    *index+=digits+1;
+}
+#[cfg(test)]
+mod format_defect_tests {
+    use super::*;
+    #[test]
+    fn short_am_pm_format_is_a_clock_token() {
+        assert_eq!(display(&Value::Number(0.75),"h:mm A/P",false),"6:00 P");
+        assert_eq!(display(&Value::Number(0.25),"A/P",false),"A");
+    }
+    #[test]
+    fn fractional_seconds_are_formatted_and_carried_at_the_requested_precision() {
+        assert_eq!(display(&Value::Number(56.789/86400.0),"ss.000",false),"56.789");
+        assert_eq!(display(&Value::Number(59.96/86400.0),"mm:ss.0",false),"01:00.0");
+        assert_eq!(display(&Value::Number(1.0+0.125/86400.0),"[s].000",false),"86400.125");
+    }
+    #[test]
+    fn russian_calendar_tokens_follow_the_workbook_locale() {
+        let date=super::super::formula::date_serial(2024,1,1);
+        assert_eq!(display(&Value::Number(date),"dddd",true),"понедельник");
+        assert_eq!(display(&Value::Number(date),"d mmmm yyyy",true),"1 января 2024");
+        assert_eq!(display(&Value::Number(date),"mmmm",false),"January");
+        assert_eq!(display(&Value::Number(2958465.999999),"yyyy-mm-dd",false),"9999-12-31");
     }
 }

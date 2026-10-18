@@ -173,7 +173,7 @@ pub fn decode_text(bytes: &[u8]) -> Result<String, String> {
     }
 }
 pub fn detect_separator(text: &str) -> char {
-    ['\t', ';', ',']
+    ['|', '\t', ';', ',']
         .into_iter()
         .max_by_key(|sep| {
             let mut quoted = false;
@@ -260,7 +260,7 @@ pub fn to_csv(rows: &[Vec<String>], separator: char) -> String {
         .map(|row| {
             row.iter()
                 .map(|s| {
-                    if s.contains([separator, '\n', '\r', '"']) {
+                    if s.contains([separator, '\n', '\r', '"']) || row.len() == 1 && s.is_empty() {
                         format!("\"{}\"", s.replace('"', "\"\""))
                     } else {
                         s.clone()
@@ -929,6 +929,17 @@ fn rgb(a: &BTreeMap<String, String>) -> Option<[u8; 3]> {
     rgb_with_palette(a, &[])
 }
 fn rgb_with_palette(a: &BTreeMap<String, String>, palette: &[[u8; 3]]) -> Option<[u8; 3]> {
+    rgb_with_theme(a,palette,&[])
+}
+fn rgb_with_theme(a: &BTreeMap<String,String>, palette: &[[u8;3]], theme: &[[u8;3]]) -> Option<[u8;3]> {
+    let base = rgb_base(a,palette,theme)?;
+    let tint = a.get("tint").and_then(|value| value.parse::<f64>().ok()).unwrap_or(0.0);
+    Some(if tint.is_finite() && (-1.0..=1.0).contains(&tint) { tint_color(base,tint) } else { base })
+}
+fn rgb_base(a: &BTreeMap<String,String>, palette: &[[u8;3]], theme: &[[u8;3]]) -> Option<[u8;3]> {
+    if let Some(index)=a.get("theme").and_then(|value| value.parse::<usize>().ok()) {
+        return theme.get(index).copied();
+    }
     if let Some(index) = a.get("indexed").and_then(|v| v.parse::<usize>().ok()) {
         const DEFAULT: [u32; 64] = [
             0x000000, 0xFFFFFF, 0xFF0000, 0x00FF00, 0x0000FF, 0xFFFF00, 0xFF00FF, 0x00FFFF,
@@ -1020,6 +1031,9 @@ fn indexed_palette(bytes: &[u8]) -> Result<Vec<[u8; 3]>, String> {
     Ok(palette)
 }
 fn styles(bytes: &[u8]) -> Result<Vec<CellFormat>, String> {
+    styles_with_theme(bytes,&[])
+}
+fn styles_with_theme(bytes: &[u8], theme: &[[u8;3]]) -> Result<Vec<CellFormat>, String> {
     let palette = indexed_palette(bytes)?;
     let mut reader = Reader::from_str(std::str::from_utf8(bytes).map_err(|e| e.to_string())?);
     let mut section = String::new();
@@ -1100,7 +1114,7 @@ fn styles(bytes: &[u8]) -> Result<Vec<CellFormat>, String> {
                         }
                         "strike" => current_font.strike = xml_bool(a.get("val"), true),
                         "color" => {
-                            if let Some(color) = rgb_with_palette(&a, &palette) {
+                            if let Some(color) = rgb_with_theme(&a, &palette,theme) {
                                 current_font.color = color;
                             }
                         }
@@ -1108,7 +1122,7 @@ fn styles(bytes: &[u8]) -> Result<Vec<CellFormat>, String> {
                     }
                 }
                 if section == "fills" && tag == "fgColor" && current_fill_active {
-                    current_fill = rgb_with_palette(&a, &palette);
+                    current_fill = rgb_with_theme(&a, &palette,theme);
                 }
                 if tag == "numFmt"
                     && let (Some(id), Some(code)) = (
@@ -1201,9 +1215,11 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
         .map(|bytes| indexed_palette(bytes))
         .transpose()?
         .unwrap_or_default();
+    let theme_path=workbook_rels.values().find(|(kind,_)| kind.ends_with("/theme")).map(|(_,path)| path.as_str());
+    let theme=theme_path.and_then(|path| parts.get(path)).map(|bytes| theme_colors(bytes)).transpose()?.unwrap_or_default();
     let formats = parts
         .get(style_path)
-        .map(|b| styles(b))
+        .map(|b| styles_with_theme(b,&theme))
         .transpose()?
         .unwrap_or_default();
     let mut targets = BTreeMap::new();
@@ -1252,13 +1268,31 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
         let Some(bytes) = parts.get(&path) else {
             continue;
         };
+        let mut row_styles=BTreeMap::new();
+        let mut col_styles=BTreeMap::new();
+        let (mut current_row,mut next_row,mut next_col)=(0u32,0u32,0u32);
         each_tag(bytes, |tag, a| {
-            if tag == "c"
-                && let Some((r, c)) = a.get("r").and_then(|s| parse_address(s))
-            {
+            if tag == "row" {
+                current_row=match a.get("r") {
+                    Some(value) => value.parse::<u32>().ok().and_then(|v| v.checked_sub(1)).ok_or("Неверный номер строки")?,
+                    None => next_row,
+                };
+                if current_row >= super::model::MAX_ROWS { return Err("Неверный номер строки".into()); }
+                next_row=current_row+1;
+                next_col=0;
+            }
+            if tag == "c" {
+                let (r,c)=match a.get("r") {
+                    Some(value) => parse_address(value).ok_or("Неверный адрес ячейки")?,
+                    None => (current_row,next_col),
+                };
+                if c >= super::model::MAX_COLS { return Err("Неверный столбец ячейки".into()); }
+                next_col=c+1;
                 let index = a
                     .get("s")
                     .and_then(|s| s.parse::<usize>().ok())
+                    .or_else(|| row_styles.get(&r).copied())
+                    .or_else(|| col_styles.get(&c).copied())
                     .unwrap_or(0);
                 if let Some(fmt) = formats.get(index) {
                     if book.sheet_by_id(id).and_then(|s| s.cell(r, c)).is_none() {
@@ -1286,6 +1320,9 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
                         return Err("Неверный диапазон столбцов".into());
                     }
                     for c in min..=max {
+                        if let Some(style)=a.get("style").and_then(|value| value.parse::<usize>().ok()) {
+                            col_styles.insert(c,style);
+                        }
                         if let Some(w) = a
                             .get("width")
                             .and_then(|v| v.parse::<f32>().ok())
@@ -1302,13 +1339,10 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
                     }
                 }
                 "row" => {
-                    let r = a
-                        .get("r")
-                        .and_then(|v| v.parse::<u32>().ok())
-                        .unwrap_or(1)
-                        .saturating_sub(1);
-                    if r >= super::model::MAX_ROWS {
-                        return Err("Неверный номер строки".into());
+                    let r=current_row;
+                    if xml_bool(a.get("customFormat"),a.contains_key("s"))
+                        && let Some(style)=a.get("s").and_then(|value| value.parse::<usize>().ok()) {
+                        row_styles.insert(r,style);
                     }
                     if let Some(h) = a
                         .get("ht")
@@ -1338,7 +1372,7 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
                             .unwrap_or(0.0) as u32;
                     }
                 }
-                "tabColor" => s.tab_color = rgb_with_palette(a, &palette),
+                "tabColor" => s.tab_color = rgb_with_theme(a, &palette,&theme),
                 "autoFilter" => s.filter = a.get("ref").and_then(|v| parse_range(v).ok()),
                 _ => (),
             }
@@ -2563,5 +2597,120 @@ mod tests {
         xml.push_str("</sheetData></worksheet>");
         assert!(worksheet_bounds(xml.as_bytes(), &[32767]).is_err());
         assert!(worksheet_bounds(b"<worksheet><sheetData><row><c><f t=\"shared\" si=\"0\"/></c></row></sheetData></worksheet>",&[]).is_err());
+    }
+}
+
+fn tint_color(color: [u8;3], tint: f64) -> [u8;3] {
+    if tint == 0.0 { return color; }
+    let [r,g,b]=color.map(|v| f64::from(v)/255.0);
+    let max=r.max(g).max(b);
+    let min=r.min(g).min(b);
+    let delta=max-min;
+    let light=(max+min)/2.0;
+    let saturation=if delta == 0.0 { 0.0 } else { delta/(1.0-(2.0*light-1.0).abs()) };
+    let hue=if delta == 0.0 { 0.0 } else if max == r { ((g-b)/delta).rem_euclid(6.0) }
+        else if max == g { (b-r)/delta+2.0 } else { (r-g)/delta+4.0 };
+    let light=if tint < 0.0 { light*(1.0+tint) } else { light*(1.0-tint)+tint };
+    let chroma=(1.0-(2.0*light-1.0).abs())*saturation;
+    let x=chroma*(1.0-(hue.rem_euclid(2.0)-1.0).abs());
+    let offset=light-chroma/2.0;
+    let rgb=match hue as u32 {
+        0 => [chroma,x,0.0],1 => [x,chroma,0.0],2 => [0.0,chroma,x],
+        3 => [0.0,x,chroma],4 => [x,0.0,chroma],_ => [chroma,0.0,x],
+    };
+    rgb.map(|v| ((v+offset)*255.0).round().clamp(0.0,255.0) as u8)
+}
+fn theme_colors(bytes: &[u8]) -> Result<Vec<[u8;3]>,String> {
+    let slots=["lt1","dk1","lt2","dk2","accent1","accent2","accent3","accent4","accent5","accent6","hlink","folHlink"];
+    let mut colors=vec![[255;3],[0;3],[238,236,225],[31,73,125],[79,129,189],[192,80,77],
+        [155,187,89],[128,100,162],[75,172,198],[247,150,70],[0,0,255],[128,0,128]];
+    let mut reader=Reader::from_str(std::str::from_utf8(bytes).map_err(|e| e.to_string())?);
+    let mut inside=false;
+    let mut slot=None;
+    loop {
+        match reader.read_event().map_err(|e| e.to_string())? {
+            Event::Start(e)|Event::Empty(e) => {
+                let tag=local(&e);
+                if tag == "clrScheme" { inside=true; }
+                else if inside {
+                    if let Some(index)=slots.iter().position(|name| *name==tag) { slot=Some(index); }
+                    else if matches!(tag.as_str(),"srgbClr"|"sysClr") {
+                        let a=attrs(&e,&reader)?;
+                        let value=a.get(if tag=="sysClr" { "lastClr" } else { "val" });
+                        if let (Some(index),Some(value))=(slot,value) {
+                            let attributes=BTreeMap::from([("rgb".into(),value.clone())]);
+                            if let Some(color)=rgb(&attributes) { colors[index]=color; }
+                        }
+                    }
+                }
+            }
+            Event::End(e) if e.local_name().as_ref()=="clrScheme" => { inside=false; slot=None; }
+            Event::DocType(_) => return Err("DTD запрещён".into()),
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(colors)
+}
+
+#[cfg(test)]
+mod metadata_defect_tests {
+    use super::*;
+    fn metadata(styles: &str,sheet: &str) -> Result<Book,String> {
+        let mut book=Book::default();
+        let name=crate::package::xml_escape(&book.sheets[0].name);
+        let parts=BTreeMap::from([
+            ("xl/workbook.xml".into(),format!("<workbook xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets><sheet name=\"{name}\" r:id=\"s1\"/></sheets></workbook>").into_bytes()),
+            ("xl/_rels/workbook.xml.rels".into(),b"<Relationships><Relationship Id=\"s1\" Type=\"http://x/worksheet\" Target=\"worksheets/sheet1.xml\"/><Relationship Id=\"style\" Type=\"http://x/styles\" Target=\"styles.xml\"/><Relationship Id=\"theme\" Type=\"http://x/theme\" Target=\"theme/theme1.xml\"/></Relationships>".to_vec()),
+            ("xl/styles.xml".into(),styles.as_bytes().to_vec()),
+            ("xl/worksheets/sheet1.xml".into(),sheet.as_bytes().to_vec()),
+            ("xl/theme/theme1.xml".into(),b"<theme><clrScheme><accent1><srgbClr val=\"FF0000\"/></accent1></clrScheme></theme>".to_vec()),
+        ]);
+        read_metadata(&mut book,&parts)?;
+        Ok(book)
+    }
+    fn formats() -> &'static str {
+        r#"<styleSheet><fonts><font/><font><b/></font><font><i/></font></fonts><cellXfs><xf fontId="0"/><xf fontId="1"/><xf fontId="2"/></cellXfs></styleSheet>"#
+    }
+    #[test]
+    fn xlsx_theme_and_tint_colors() -> Result<(),String> {
+        let styles=r#"<styleSheet><fonts><font><color theme="4"/></font></fonts><fills><fill><patternFill patternType="solid"><fgColor theme="4" tint="0.5"/></patternFill></fill></fills><cellXfs><xf fontId="0" fillId="0"/></cellXfs></styleSheet>"#;
+        let book=metadata(styles,r#"<worksheet><sheetPr><tabColor theme="4"/></sheetPr><sheetData><row r="1"><c r="A1"/></row></sheetData></worksheet>"#)?;
+        let cell=book.sheets[0].cell(0,0).ok_or("cell")?;
+        assert_eq!(cell.fmt.color,[255,0,0]);
+        assert_eq!(cell.fmt.fill,Some([255,128,128]));
+        assert_eq!(book.sheets[0].tab_color,Some([255,0,0]));
+        assert_eq!(tint_color([0,0,0],0.5),[128,128,128]);
+        Ok(())
+    }
+    #[test]
+    fn xlsx_row_and_column_format_inheritance() -> Result<(),String> {
+        let book=metadata(formats(),r#"<worksheet><cols><col min="1" max="2" style="1"/></cols><sheetData><row r="1"><c r="A1"/></row><row r="2" s="2" customFormat="1"><c r="A2"/><c r="B2" s="0"/></row></sheetData></worksheet>"#)?;
+        assert!(book.sheets[0].cell(0,0).ok_or("A1")?.fmt.bold);
+        assert!(book.sheets[0].cell(1,0).ok_or("A2")?.fmt.italic);
+        assert!(!book.sheets[0].cell(1,0).ok_or("A2")?.fmt.bold);
+        assert!(!book.sheets[0].cell(1,1).ok_or("B2")?.fmt.italic);
+        Ok(())
+    }
+    #[test]
+    fn xlsx_implicit_metadata_coordinates() -> Result<(),String> {
+        let book=metadata(formats(),r#"<worksheet><sheetData><row ht="15" hidden="1"><c s="1"/></row><row ht="30"><c s="0"/><c s="1"/></row><row r="4"><c r="C4" s="1"/><c s="1"/></row></sheetData></worksheet>"#)?;
+        let sheet=&book.sheets[0];
+        assert_eq!(sheet.row_heights.get(&0),Some(&20.0));
+        assert_eq!(sheet.row_heights.get(&1),Some(&40.0));
+        assert_eq!(sheet.hidden_rows.iter().copied().collect::<Vec<_>>(),vec![0]);
+        assert!(sheet.cell(0,0).ok_or("A1")?.fmt.bold);
+        assert!(sheet.cell(1,1).ok_or("B2")?.fmt.bold);
+        assert!(sheet.cell(3,3).ok_or("D4")?.fmt.bold);
+        Ok(())
+    }
+    #[test]
+    fn pipe_separator_and_empty_field_roundtrip() -> Result<(),String> {
+        assert_eq!(detect_separator("one|two"),'|');
+        assert_eq!(detect_separator("single"),',');
+        let rows=vec![vec!["a".into()],vec!["".into()]];
+        assert_eq!(parse_csv(&to_csv(&rows,','),',')?,rows);
+        assert_eq!(parse_csv(&to_csv(&[vec!["".into()]],','),',')?,vec![vec!["".to_string()]]);
+        Ok(())
     }
 }

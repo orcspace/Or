@@ -7,6 +7,7 @@ type PageCells<'a> = BTreeMap<(u32, u32), Vec<(u32, u32, &'a Cell)>>;
 pub const MAX_ROWS: u32 = 1_048_576;
 pub const MAX_COLS: u32 = 16_384;
 pub const MAX_RANGE_CELLS: usize = 100_000;
+const MAX_BOOK_TEXT_BYTES: usize = 64*1024*1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 pub enum Value {
@@ -362,7 +363,18 @@ impl Book {
         *self = candidate;
         Ok(result)
     }
+    fn text_bytes(&self) -> usize {
+        let names = self.names.iter().fold(0usize, |total,(name,value)| total.saturating_add(name.len()).saturating_add(value.len()));
+        self.sheets.iter().fold(names, |total,sheet| {
+            sheet.cells.values().fold(total.saturating_add(sheet.name.len()), |total,cell| {
+                total.saturating_add(cell.input.len()).saturating_add(cell.fmt.font.len()).saturating_add(cell.fmt.number.len())
+            })
+        })
+    }
     pub fn validate(&self) -> Result<(), String> {
+        if self.text_bytes() > MAX_BOOK_TEXT_BYTES {
+            return Err("Исходный текст книги превышает 64 МиБ".into());
+        }
         if self.sheets.is_empty()
             || self.sheets.len() > 1024
             || self.sheets.iter().all(|sheet| sheet.hidden)
@@ -380,6 +392,7 @@ impl Book {
         }
         let mut ids = BTreeSet::new();
         let mut count = 0usize;
+        let mut image_bytes = 0usize;
         let mut names = BTreeSet::new();
         let mut take = |id: u64| -> Result<(), String> {
             if id == 0 || id == u64::MAX || !ids.insert(id) {
@@ -450,6 +463,10 @@ impl Book {
                 return Err("Слишком много рисунков на листе".into());
             }
             for image in &s.images {
+                image_bytes = image_bytes.saturating_add(image.bytes.len());
+                if image_bytes > 64*1024*1024 {
+                    return Err("Изображения книги превышают 64 МиБ".into());
+                }
                 take(image.id)?;
                 if image.row >= MAX_ROWS
                     || image.col >= MAX_COLS
@@ -465,6 +482,12 @@ impl Book {
                     || image.alt.len() > 32767
                 {
                     return Err("Недопустимый рисунок".into());
+                }
+                let reader=image::ImageReader::new(std::io::Cursor::new(&image.bytes))
+                    .with_guessed_format().map_err(|e| e.to_string())?;
+                let (width,height)=reader.into_dimensions().map_err(|e| e.to_string())?;
+                if width == 0 || height == 0 || u64::from(width)*u64::from(height)>32_000_000 {
+                    return Err("Изображение превышает 32 млн пикселей".into());
                 }
             }
             for rule in &s.conditional {
@@ -482,9 +505,11 @@ impl Book {
         {
             return Err("Недопустимый счётчик ID".into());
         }
+        let mut defined_names = BTreeSet::new();
         if self.names.len() > 10000
             || self.names.iter().any(|(name, value)| {
-                name.is_empty() || name.chars().count() > 255 || value.len() > 32767
+                !valid_defined_name(name) || !defined_names.insert(name.to_lowercase())
+                    || value.len() > 32767
             })
         {
             return Err("Недопустимое имя диапазона".into());
@@ -895,6 +920,24 @@ impl Book {
             return Err(
                 "Заполнение затрагивает объединённые ячейки: сначала разъедините их".into(),
             );
+        }
+        // Predict input/format replication before cloning a large source cell repeatedly.
+        let mut text_bytes = self.text_bytes();
+        for r in target.r0..=target.r1 {
+            for c in target.c0..=target.c1 {
+                let sr = source.r0+(r-target.r0)%(source.r1-source.r0+1);
+                let sc = source.c0+(c-target.c0)%(source.c1-source.c0+1);
+                if let Some(old) = s.cell(r,c) {
+                    text_bytes = text_bytes.saturating_sub(old.input.len()+old.fmt.font.len()+old.fmt.number.len());
+                }
+                if let Some(original) = s.cell(sr,sc) {
+                    let input = super::formula::shift_references(&original.input,i64::from(r)-i64::from(sr),i64::from(c)-i64::from(sc));
+                    text_bytes = text_bytes.saturating_add(input.len()+original.fmt.font.len()+original.fmt.number.len());
+                }
+                if text_bytes > MAX_BOOK_TEXT_BYTES {
+                    return Err("Заполнение превысит лимит исходного текста книги 64 МиБ".into());
+                }
+            }
         }
         let snapshot = s.clone();
         for r in target.r0..=target.r1 {
@@ -1420,9 +1463,11 @@ pub fn address(row: u32, col: u32) -> String {
     format!("{}{}", chars.into_iter().collect::<String>(), row + 1)
 }
 pub fn parse_address(input: &str) -> Option<(u32, u32)> {
-    let s = input.trim().replace('$', "");
-    let split = s.find(|c: char| c.is_ascii_digit())?;
-    let (letters, digits) = s.split_at(split);
+    let s = input.trim();
+    let s = s.strip_prefix('$').unwrap_or(s);
+    let split = s.find(|c: char| !c.is_ascii_alphabetic())?;
+    let (letters, tail) = s.split_at(split);
+    let digits = tail.strip_prefix('$').unwrap_or(tail);
     if letters.is_empty()
         || !letters.chars().all(|c| c.is_ascii_alphabetic())
         || !digits.chars().all(|c| c.is_ascii_digit())
@@ -1483,4 +1528,85 @@ fn validate_merges(merges: &[Range]) -> Result<(), String> {
         active.insert((c0, c1, id));
     }
     Ok(())
+}
+pub fn valid_defined_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if rust_xlsxwriter::utility::check_name(name).is_err()
+        || name.chars().count() > 255
+        || !(first.is_alphabetic() || matches!(first, '_' | '\\'))
+        || !chars.all(|c| c.is_alphanumeric() || matches!(c, '_' | '.'))
+        || matches!(name, "R" | "r" | "C" | "c")
+        || parse_address(name).is_some()
+    {
+        return false;
+    }
+    let upper = name.to_ascii_uppercase();
+    let r1c1 = upper
+        .strip_prefix('R')
+        .and_then(|tail| tail.split_once('C'))
+        .is_some_and(|(r, c)| {
+            !r.is_empty()
+                && !c.is_empty()
+                && r.bytes().all(|b| b.is_ascii_digit())
+                && c.bytes().all(|b| b.is_ascii_digit())
+        });
+    !r1c1
+}
+
+
+#[cfg(test)]
+mod model_defect_tests {
+    use super::*;
+    #[test]
+    fn addresses_reject_misplaced_absolute_markers() {
+        for bad in ["A$$1","A1$","$$A1","A$B1"] { assert_eq!(parse_address(bad),None,"{bad}"); }
+        for valid in ["A1","$A1","A$1","$A$1"] { assert_eq!(parse_address(valid),Some((0,0))); }
+    }
+    #[test]
+    fn native_defined_names_follow_the_same_rules_as_mcp() {
+        for name in ["A1","bad name","R1C1","R"] {
+            let mut book=Book::default();
+            book.names.insert(name.into(),"=1".into());
+            assert!(book.validate().is_err(),"{name}");
+        }
+        let mut book=Book::default();
+        book.names.insert("Tax".into(),"=1".into());
+        book.names.insert("tax".into(),"=2".into());
+        assert!(book.validate().is_err());
+    }
+    #[test]
+    fn fill_rejects_excessive_text_before_replication() -> Result<(),String> {
+        let mut book=Book::default();
+        let id=book.active_id();
+        book.set_input(id,0,0,&"x".repeat(32000))?;
+        let before=book.clone();
+        assert!(book.fill(id,Range::new(0,0,0,0),Range::new(0,0,99999,0)).is_err());
+        assert_eq!(book,before);
+        Ok(())
+    }
+    fn picture(id: u64,bytes: Vec<u8>) -> SheetImage {
+        SheetImage { id,row:0,col:0,x_offset:0.0,y_offset:0.0,width:10.0,height:10.0,bytes,alt:String::new() }
+    }
+    #[test]
+    fn native_sheet_images_require_a_decodable_header() {
+        let mut book=Book::default();
+        book.sheets[0].images.push(picture(2,vec![1,2,3]));
+        book.next_id=3;
+        assert!(book.validate().is_err());
+    }
+    #[test]
+    fn workbook_image_budget_is_aggregate() -> Result<(),String> {
+        let mut png=std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(1,1).write_to(&mut png,image::ImageFormat::Png).map_err(|e| e.to_string())?;
+        let mut bytes=png.into_inner();
+        bytes.resize(22*1024*1024,0);
+        let mut book=Book::default();
+        for id in 2..=4 { book.sheets[0].images.push(picture(id,bytes.clone())); }
+        book.next_id=5;
+        assert!(book.validate().err().is_some_and(|error| error.contains("64 МиБ")));
+        Ok(())
+    }
 }

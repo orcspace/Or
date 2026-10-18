@@ -650,30 +650,7 @@ fn range(a: &Value) -> Result<crate::sheets::model::Range, String> {
 }
 
 fn valid_defined_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    if rust_xlsxwriter::utility::check_name(name).is_err()
-        || name.chars().count() > 255
-        || !(first.is_alphabetic() || matches!(first, '_' | '\\'))
-        || !chars.all(|c| c.is_alphanumeric() || matches!(c, '_' | '.'))
-        || matches!(name, "R" | "r" | "C" | "c")
-        || crate::sheets::model::parse_address(name).is_some()
-    {
-        return false;
-    }
-    let upper = name.to_ascii_uppercase();
-    let r1c1 = upper
-        .strip_prefix('R')
-        .and_then(|tail| tail.split_once('C'))
-        .is_some_and(|(r, c)| {
-            !r.is_empty()
-                && !c.is_empty()
-                && r.bytes().all(|b| b.is_ascii_digit())
-                && c.bytes().all(|b| b.is_ascii_digit())
-        });
-    !r1c1
+    crate::sheets::model::valid_defined_name(name)
 }
 
 fn creation_size(a: &Value, width: &mut f32, height: &mut f32, preserve_ratio: bool) {
