@@ -1209,7 +1209,7 @@ impl<'a> Engine<'a> {
         let n = |i: usize| -> CalcResult<f64> { a.get(i).ok_or("#VALUE!")?.number() };
         let default_n = |i: usize, v: f64| -> CalcResult<f64> {
             if let Some(g) = a.get(i) {
-                if g.first() == Value::Empty {
+                if g.first() == Value::Empty && !g.reference {
                     Ok(v)
                 } else {
                     g.number()
@@ -1518,6 +1518,7 @@ impl<'a> Engine<'a> {
                     } else {
                         String::new()
                     }),
+                    _ if a[0].rows > 1 || a[0].cols > 1 => num(64.0),
                     _ => num(match value {
                         Value::Number(_) | Value::Empty => 1.0,
                         Value::Text(_) => 2.0,
@@ -1912,11 +1913,12 @@ impl<'a> Engine<'a> {
                 arity(2, 2)?;
                 let s = text(0)?;
                 let count = n(1)?.trunc();
-                if count < 0.0 || count > 32767.0 || s.len().saturating_mul(count as usize) > 32767
+                if count < 0.0 || (!s.is_empty() && count > 32767.0) || s.len().saturating_mul(count as usize) > 32767
                 {
                     return Err("#VALUE!".into());
                 }
-                string(s.repeat(count as usize))
+                if s.is_empty() { string(String::new()) }
+                else { string(s.repeat(count as usize)) }
             }
             "EXACT" => {
                 arity(2, 2)?;
@@ -2134,15 +2136,25 @@ impl<'a> Engine<'a> {
             "INDEX" => {
                 arity(2, 3)?;
                 let mut r = n(1)?.trunc();
-                let mut c = default_n(2, 1.0)?.trunc();
+                let mut c = if a.len() == 2 && a[0].rows > 1 && a[0].cols > 1 {
+                    0.0
+                } else {
+                    if a.len() > 2 { n(2)?.trunc() } else { 1.0 }
+                };
                 // In a single row the only index counts columns: INDEX(A1:C1,2) is B1.
                 if a.len() == 2 && a[0].rows == 1 {
                     (r, c) = (1.0, r);
                 }
-                if r < 1.0 || c < 1.0 {
+                if r < 0.0 || c < 0.0 || r > a[0].rows as f64 || c > a[0].cols as f64 {
                     return Err("#REF!".into());
                 }
-                Ok(Grid::scalar(a[0].at(r as usize - 1, c as usize - 1)?))
+                let (r0, r1) = if r == 0.0 { (0, a[0].rows) } else { (r as usize-1, r as usize) };
+                let (c0, c1) = if c == 0.0 { (0, a[0].cols) } else { (c as usize-1, c as usize) };
+                let mut values = Vec::new();
+                for row in r0..r1 {
+                    for col in c0..c1 { values.push(a[0].at(row,col)?); }
+                }
+                Ok(Grid { values, rows:r1-r0, cols:c1-c0, reference:a[0].reference })
             }
             "MATCH" | "XMATCH" => {
                 arity(2, if name == "MATCH" { 3 } else { 4 })?;
@@ -2155,13 +2167,16 @@ impl<'a> Engine<'a> {
                 if a[1].rows > 1 && a[1].cols > 1
                     || !matches!(mode_value, -1.0 | 0.0 | 1.0 | 2.0)
                     || name == "MATCH" && mode_value == 2.0
-                    || !matches!(search_value, -1.0 | 1.0)
+                    || !matches!(search_value, -2.0 | -1.0 | 1.0 | 2.0)
                 {
                     return Err("#VALUE!".into());
                 }
                 let mode = mode_value as i32;
                 let search = search_value as i32;
                 let vals = &a[1].values;
+                if name == "XMATCH" && search.abs() == 2 && mode != 2 {
+                    return num(binary_lookup(vals, &needle, mode, search).ok_or("#N/A")? as f64+1.0);
+                }
                 let mut best = None;
                 let mut indices: Vec<_> = (0..vals.len()).collect();
                 if search < 0 {
@@ -2214,7 +2229,8 @@ impl<'a> Engine<'a> {
                 let index = n(2)?.trunc();
                 let vertical = name == "VLOOKUP";
                 let table = &a[1];
-                if index < 1.0 || index > if vertical { table.cols } else { table.rows } as f64 {
+                if index < 1.0 { return Err("#VALUE!".into()); }
+                if index > if vertical { table.cols } else { table.rows } as f64 {
                     return Err("#REF!".into());
                 }
                 let approximate = a.get(3).map(Grid::boolean).transpose()?.unwrap_or(true);
@@ -2247,16 +2263,14 @@ impl<'a> Engine<'a> {
             }
             "XLOOKUP" => {
                 arity(3, 6)?;
-                if a[1].values.len() != a[2].values.len() {
-                    return Err("#VALUE!".into());
-                }
+                let vertical = a[1].cols == 1 && a[1].rows == a[2].rows;
+                let horizontal = a[1].rows == 1 && a[1].cols == a[2].cols;
+                if !vertical && !horizontal { return Err("#VALUE!".into()); }
                 let mode_value = default_n(4, 0.0)?;
                 let search_value = default_n(5, 1.0)?;
                 if a[1].rows > 1 && a[1].cols > 1
-                    || a[1].rows != a[2].rows
-                    || a[1].cols != a[2].cols
                     || !matches!(mode_value, -1.0 | 0.0 | 1.0 | 2.0)
-                    || !matches!(search_value, -1.0 | 1.0)
+                    || !matches!(search_value, -2.0 | -1.0 | 1.0 | 2.0)
                 {
                     return Err("#VALUE!".into());
                 }
@@ -2266,6 +2280,15 @@ impl<'a> Engine<'a> {
                 if let Value::Error(error) = &needle {
                     return Err(error.clone());
                 }
+                if search.abs() == 2 && mode != 2 {
+                    if let Some(i) = binary_lookup(&a[1].values, &needle, mode, search) {
+                        return lookup_result(&a[2], i, vertical);
+                    }
+                    return if let Some(fallback) = args.get(3)
+                        .filter(|expr| !matches!(expr, Expr::Literal(Value::Empty))) {
+                        self.eval(fallback, sheet, row, col)
+                    } else { Err("#N/A".into()) };
+                }
                 let mut indices: Vec<_> = (0..a[1].values.len()).collect();
                 if search < 0 {
                     indices.reverse();
@@ -2274,7 +2297,7 @@ impl<'a> Engine<'a> {
                 for i in indices {
                     let v = &a[1].values[i];
                     if lookup_equal(v, &needle, mode == 2) {
-                        return Ok(Grid::scalar(a[2].values[i].clone()));
+                        return lookup_result(&a[2], i, vertical);
                     }
                     let eligible = lookup_kind(v, &needle)
                         && ((mode == -1 && compare(v, &needle).is_le())
@@ -2292,7 +2315,7 @@ impl<'a> Engine<'a> {
                     }
                 }
                 if let Some(i) = best {
-                    Ok(Grid::scalar(a[2].values[i].clone()))
+                    lookup_result(&a[2], i, vertical)
                 } else if let Some(fallback) = args
                     .get(3)
                     .filter(|expr| !matches!(expr, Expr::Literal(Value::Empty)))
@@ -2342,11 +2365,12 @@ impl<'a> Engine<'a> {
             "YEAR" | "MONTH" | "DAY" | "HOUR" | "MINUTE" | "SECOND" => {
                 arity(1, 1)?;
                 let serial = n(0)?;
-                if !(0.0..=2958465.99999).contains(&serial) {
+                if !(0.0..2958466.0).contains(&serial) {
                     return Err("#NUM!".into());
                 }
                 let (y, m, d) = serial_date(serial);
-                let sec = (serial.fract() * 86400.0).round() as i64;
+                let tolerance = (serial.abs()*f64::EPSILON*86400.0*2.0).min(1e-4);
+                let sec = (serial.fract()*86400.0+tolerance).floor().min(86399.0) as i64;
                 num(match name {
                     "YEAR" => y as f64,
                     "MONTH" => m as f64,
@@ -2389,7 +2413,7 @@ impl<'a> Engine<'a> {
             }
             "EDATE" | "EOMONTH" => {
                 arity(2, 2)?;
-                let serial = n(0)?;
+                let serial = n(0)?.floor();
                 let offset = n(1)?.trunc();
                 if !(0.0..=2958465.0).contains(&serial) || offset.abs() > 120000.0 {
                     return Err("#NUM!".into());
@@ -2732,11 +2756,12 @@ impl<'a> Engine<'a> {
                         continue;
                     }
                     match value {
-                        Value::Number(x) => {
+                        Value::Number(_) | Value::Empty => {
+                            let x = if let Value::Number(x) = value { *x } else { 0.0 };
                             best = Some(match best {
-                                Some(b) if name == "MAXIFS" => b.max(*x),
-                                Some(b) => b.min(*x),
-                                None => *x,
+                                Some(b) if name == "MAXIFS" => b.max(x),
+                                Some(b) => b.min(x),
+                                None => x,
                             });
                         }
                         Value::Error(e) => return Err(e.clone()),
@@ -2761,7 +2786,10 @@ impl<'a> Engine<'a> {
                 vals.sort_by(f64::total_cmp);
                 let trim = (vals.len() as f64 * percent).floor() as usize / 2;
                 let kept = &vals[trim..vals.len() - trim];
-                num(kept.iter().sum::<f64>() / kept.len() as f64)
+                let scale = kept.iter().copied().map(f64::abs).fold(0.0,f64::max);
+                num(if scale == 0.0 { 0.0 } else {
+                    kept.iter().map(|value| value/scale).sum::<f64>()/kept.len() as f64*scale
+                })
             }
             "SKEW" | "KURT" => {
                 arity(1, 255)?;
@@ -2771,6 +2799,9 @@ impl<'a> Engine<'a> {
                 if count < minimum {
                     return Err("#DIV/0!".into());
                 }
+                let scale = vals.iter().copied().map(f64::abs).fold(0.0,f64::max);
+                if scale == 0.0 { return Err("#DIV/0!".into()); }
+                let vals: Vec<_> = vals.iter().map(|value| value/scale).collect();
                 let mean = vals.iter().sum::<f64>() / count;
                 let sd =
                     (vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (count - 1.0)).sqrt();
@@ -2834,6 +2865,9 @@ impl<'a> Engine<'a> {
                         correlation
                     });
                 }
+                let scale_y = pairs.iter().map(|p| p.0.abs()).fold(0.0,f64::max).max(f64::MIN_POSITIVE);
+                let scale_x = pairs.iter().map(|p| p.1.abs()).fold(0.0,f64::max).max(f64::MIN_POSITIVE);
+                let pairs: Vec<_> = pairs.iter().map(|(y,x)| (y/scale_y,x/scale_x)).collect();
                 let mean_y = pairs.iter().map(|p| p.0).sum::<f64>() / count;
                 let mean_x = pairs.iter().map(|p| p.1).sum::<f64>() / count;
                 let sxy = pairs
@@ -2843,23 +2877,26 @@ impl<'a> Engine<'a> {
                 let sxx = pairs.iter().map(|p| (p.1 - mean_x).powi(2)).sum::<f64>();
                 let syy = pairs.iter().map(|p| (p.0 - mean_y).powi(2)).sum::<f64>();
                 match name {
-                    "COVAR" | "COVARIANCE.P" => num(sxy / count),
+                    "COVAR" | "COVARIANCE.P" => num(scaled_product(sxy/count,scale_y,scale_x)),
                     "COVARIANCE.S" => {
                         if pairs.len() < 2 {
                             Err("#DIV/0!".into())
                         } else {
-                            num(sxy / (count - 1.0))
+                            num(scaled_product(sxy/(count-1.0),scale_y,scale_x))
                         }
                     }
                     "SLOPE" | "INTERCEPT" => {
                         if sxx == 0.0 {
                             return Err("#DIV/0!".into());
                         }
-                        let slope = sxy / sxx;
+                        let normalized_slope = sxy/sxx;
                         num(if name == "SLOPE" {
-                            slope
+                            let ratio=scale_y/scale_x;
+                            if normalized_slope == 0.0 { 0.0 }
+                            else if ratio.is_finite() && ratio != 0.0 { normalized_slope*ratio }
+                            else { (normalized_slope*scale_y)/scale_x }
                         } else {
-                            mean_y - slope * mean_x
+                            (mean_y-normalized_slope*mean_x)*scale_y
                         })
                     }
                     _ => {
@@ -2902,7 +2939,9 @@ impl<'a> Engine<'a> {
                 let needle: Vec<char> = delimiter.chars().map(fold).collect();
                 let mut found: Vec<(usize, usize)> = Vec::new();
                 if needle.is_empty() {
-                    found.push(if instance > 0.0 { (0, 0) } else { (len, len) });
+                    return string(if (name == "TEXTBEFORE") == (instance > 0.0) {
+                        String::new()
+                    } else { chars.iter().collect() });
                 } else {
                     if instance > 0.0 {
                         let mut i = 0;
@@ -3154,6 +3193,12 @@ fn ansi_encoding(ru: bool) -> &'static encoding_rs::Encoding {
     }
 }
 fn time_text_serial(source: &str) -> CalcResult<f64> {
+    if let Some((date,time)) = split_date_time(source.trim()) {
+        date_text_serial(date,false).or_else(|_| date_text_serial(date,true))?;
+        clock_text_serial(time)
+    } else { clock_text_serial(source) }
+}
+fn clock_text_serial(source: &str) -> CalcResult<f64> {
     let input = source.trim().to_ascii_uppercase();
     let (clock, afternoon) = if let Some(clock) = input.strip_suffix("AM") {
         (clock.trim(), Some(false))
@@ -3164,25 +3209,33 @@ fn time_text_serial(source: &str) -> CalcResult<f64> {
     };
     let vals = clock
         .split(':')
-        .map(|part| part.trim().parse::<u32>().map_err(|_| "#VALUE!"))
+        .map(|part| part.trim().parse::<f64>().map_err(|_| "#VALUE!"))
         .collect::<Result<Vec<_>, _>>()?;
     if !(if afternoon.is_some() { 1 } else { 2 }..=3).contains(&vals.len()) {
         return Err("#VALUE!".into());
     }
     let mut hour = vals[0];
-    let minute = vals.get(1).copied().unwrap_or(0);
-    let second = vals.get(2).copied().unwrap_or(0);
-    if hour > if afternoon.is_some() { 12 } else { 23 } || minute > 59 || second > 59 {
+    let minute = vals.get(1).copied().unwrap_or(0.0);
+    let second = vals.get(2).copied().unwrap_or(0.0);
+    if vals.iter().any(|v| !v.is_finite() || *v < 0.0)
+        || hour.fract() != 0.0 || minute.fract() != 0.0
+        || hour > if afternoon.is_some() { 12.0 } else { 23.0 }
+        || minute >= 60.0 || second >= 60.0 {
         return Err("#VALUE!".into());
     }
     if let Some(afternoon) = afternoon {
-        hour = hour % 12 + if afternoon { 12 } else { 0 };
+        hour = hour % 12.0 + if afternoon { 12.0 } else { 0.0 };
     }
-    Ok(f64::from(hour * 3600 + minute * 60 + second) / 86400.0)
+    Ok((hour*3600.0+minute*60.0+second)/86400.0)
 }
 fn value_text(source: &str, ru: bool) -> CalcResult<f64> {
     let text = source.trim();
-    if let Ok(date) = date_text_serial(text, ru) {
+    if let Some((date,time)) = split_date_time(text)
+        && let (Ok(date),Ok(time)) = (date_text_serial(date,ru),clock_text_serial(time)) {
+        return Ok(date+time);
+    }
+    let numeric = text.trim_end_matches('%').replace(',',".").parse::<f64>().is_ok();
+    if !numeric && let Ok(date) = date_text_serial(text, ru) {
         return Ok(date);
     }
     if let Ok(time) = time_text_serial(text) {
@@ -3289,30 +3342,68 @@ fn interpolate(low: f64, high: f64, fraction: f64) -> f64 {
         low * (1.0 - fraction) + high * fraction
     }
 }
+fn split_date_time(source: &str) -> Option<(&str,&str)> {
+    for (offset,ch) in source.char_indices() {
+        if ch != 'T' && !ch.is_whitespace() { continue; }
+        let time = source[offset+ch.len_utf8()..].trim();
+        let token = time.split_whitespace().next().unwrap_or("");
+        if token.contains(':') {
+            return Some((source[..offset].trim(),time));
+        }
+    }
+    None
+}
 fn date_text_serial(source: &str, locale_ru: bool) -> CalcResult<f64> {
-    let pieces: Vec<_> = source.trim().split(['-', '/', '.']).collect();
-    if pieces.len() != 3 {
-        return Err("#VALUE!".into());
-    }
-    let values: Vec<i64> = pieces
-        .iter()
-        .map(|part| part.parse::<i64>().map_err(|_| "#VALUE!".to_string()))
-        .collect::<CalcResult<_>>()?;
-    let (year, month, day) = if pieces[0].len() == 4 {
-        (values[0], values[1], values[2])
-    } else if locale_ru {
-        (values[2], values[1], values[0])
-    } else {
-        (values[2], values[0], values[1])
+    let source = source.trim();
+    let date = if let Some((date,time)) = split_date_time(source) {
+        clock_text_serial(time)?;
+        date
+    } else { source };
+    if date.starts_with('-') { return Err("#VALUE!".into()); }
+    let pieces: Vec<_> = date.split(['-', '/', '.', ' ']).filter(|piece| !piece.is_empty()).collect();
+    if !(2..=3).contains(&pieces.len()) { return Err("#VALUE!".into()); }
+    let month_name = |source: &str| -> Option<i64> {
+        Some(match source.to_lowercase().as_str() {
+            "jan"|"january"|"янв"|"январь"|"января" => 1,
+            "feb"|"february"|"фев"|"февраль"|"февраля" => 2,
+            "mar"|"march"|"мар"|"март"|"марта" => 3,
+            "apr"|"april"|"апр"|"апрель"|"апреля" => 4,
+            "may"|"май"|"мая" => 5,
+            "jun"|"june"|"июн"|"июнь"|"июня" => 6,
+            "jul"|"july"|"июл"|"июль"|"июля" => 7,
+            "aug"|"august"|"авг"|"август"|"августа" => 8,
+            "sep"|"sept"|"september"|"сен"|"сентябрь"|"сентября" => 9,
+            "oct"|"october"|"окт"|"октябрь"|"октября" => 10,
+            "nov"|"november"|"ноя"|"ноябрь"|"ноября" => 11,
+            "dec"|"december"|"дек"|"декабрь"|"декабря" => 12,
+            _ => return None,
+        })
     };
-    if !(1900..=9999).contains(&year)
-        || !(1..=12).contains(&month)
-        || day < 1
-        || day > days_in_month(year, month)
-    {
+    let integer = |piece: &str| piece.parse::<i64>().map_err(|_| "#VALUE!".to_string());
+    let explicit_year = pieces.get(2).copied();
+    let year_token = if pieces[0].len() == 4 && pieces.len() == 3 { Some(pieces[0]) } else { explicit_year };
+    let (mut year,month,day) = if pieces[0].len() == 4 && pieces.len() == 3 {
+        (integer(pieces[0])?,integer(pieces[1])?,integer(pieces[2])?)
+    } else {
+        let year = explicit_year.map(integer).transpose()?.unwrap_or_else(|| i64::from(chrono::Local::now().year()));
+        if let Some(month) = month_name(pieces[0]) {
+            (year,month,integer(pieces[1])?)
+        } else if let Some(month) = month_name(pieces[1]) {
+            (year,month,integer(pieces[0])?)
+        } else if locale_ru {
+            (year,integer(pieces[1])?,integer(pieces[0])?)
+        } else {
+            (year,integer(pieces[0])?,integer(pieces[1])?)
+        }
+    };
+    if year_token.is_some_and(|piece| piece.len() <= 2) && (0..100).contains(&year) {
+        year += if year <= 29 { 2000 } else { 1900 };
+    }
+    if !(1900..=9999).contains(&year) || !(1..=12).contains(&month)
+        || day < 1 || day > days_in_month(year,month) {
         return Err("#VALUE!".into());
     }
-    Ok(date_serial(year, month, day))
+    Ok(date_serial(year,month,day))
 }
 
 fn contains_subtotal(expr: &Expr) -> bool {
@@ -3497,6 +3588,10 @@ fn criterion(value: &Value, criteria: &Value) -> bool {
         return if op == "=" { empty } else { !empty };
     }
     let target = literal(rest);
+    let blank_zero = Value::Number(0.0);
+    let value = if matches!(value, Value::Empty) && matches!(target, Value::Number(_)) {
+        &blank_zero
+    } else { value };
     // A criterion only matches values of its own kind: ">5" skips text and blanks, while
     // numbers stored as text still count as numbers.
     let coerced;
@@ -3912,6 +4007,222 @@ mod passport_tests {
         assert_eq!(report["dependencies"][1]["status"], "already_visited");
         assert_eq!(report["dependencies"][2]["error"], "#REF!");
         assert!(report.to_string().len() < 4096);
+        Ok(())
+    }
+}
+
+fn lookup_result(grid: &Grid, index: usize, vertical: bool) -> CalcResult<Grid> {
+    let (rows, cols) = if vertical { (1,grid.cols) } else { (grid.rows,1) };
+    let mut values = Vec::new();
+    for row in 0..rows {
+        for col in 0..cols {
+            values.push(if vertical { grid.at(index,col)? } else { grid.at(row,index)? });
+        }
+    }
+    Ok(Grid { values, rows, cols, reference:grid.reference })
+}
+fn binary_lookup(values: &[Value], needle: &Value, mode: i32, search: i32) -> Option<usize> {
+    let (mut low, mut high) = (0,values.len());
+    while low < high {
+        let middle = low+(high-low)/2;
+        let order = compare(&values[middle],needle);
+        let order = if search < 0 { order.reverse() } else { order };
+        if order.is_eq() { return Some(middle); }
+        if order.is_lt() { low=middle+1; } else { high=middle; }
+    }
+    let index = match (mode, search < 0) {
+        (-1,false) | (1,true) => low.checked_sub(1)?,
+        (1,false) | (-1,true) => low,
+        _ => return None,
+    };
+    values.get(index).filter(|value| lookup_kind(value,needle)).map(|_| index)
+}
+
+#[cfg(test)]
+mod defect_batch_one {
+    use super::*;
+    fn book() -> Result<Book,String> {
+        let mut book = Book::default();
+        let id=book.active_id();
+        for row in 0..3 {
+            book.set_input(id,row,0,&(row+1).to_string())?;
+            book.set_input(id,row,1,&((row+1)*10).to_string())?;
+            book.set_input(id,row,2,&((row+1)*100).to_string())?;
+        }
+        Ok(book)
+    }
+    #[test]
+    fn index_arrays_and_reference_identity() -> Result<(),String> {
+        let mut book=book()?;
+        let id=book.active_id();
+        assert_eq!(evaluate(&book,id,"=SUM(INDEX(A1:B2,0,2))"),Value::Number(30.0));
+        assert_eq!(evaluate(&book,id,"=SUM(INDEX(A1:B2,2))"),Value::Number(22.0));
+        assert_eq!(evaluate(&book,id,"=SUM(INDEX(A1:B2,2,0))"),Value::Number(22.0));
+        book.set_input(id,0,0,"'3")?;
+        assert_eq!(evaluate(&book,id,"=SUM(INDEX(A1:A2,1))"),Value::Number(0.0));
+        Ok(())
+    }
+    #[test]
+    fn lookup_index_error_and_array_return() -> Result<(),String> {
+        let book=book()?;
+        let id=book.active_id();
+        assert_eq!(evaluate(&book,id,"=VLOOKUP(1,A1:B2,0,FALSE)"),Value::Error("#VALUE!".into()));
+        assert_eq!(evaluate(&book,id,"=HLOOKUP(1,A1:B2,0,FALSE)"),Value::Error("#VALUE!".into()));
+        assert_eq!(evaluate(&book,id,"=SUM(XLOOKUP(2,A1:A2,B1:C2))"),Value::Number(220.0));
+        assert_eq!(evaluate(&book,id,"=SUM(XLOOKUP(10,A1:C1,A2:C3))"),Value::Number(50.0));
+        Ok(())
+    }
+    #[test]
+    fn type_arrays_and_empty_repetition() -> Result<(),String> {
+        let book=book()?;
+        let id=book.active_id();
+        assert_eq!(evaluate(&book,id,"=TYPE(A1:B2)"),Value::Number(64.0));
+        assert_eq!(evaluate(&book,id,"=REPT(\"\",40000)"),Value::Text(String::new()));
+        Ok(())
+    }
+    #[test]
+    fn empty_delimiter_and_blank_criteria() -> Result<(),String> {
+        let mut book=Book::default();
+        let id=book.active_id();
+        book.set_input(id,1,0,"1")?;
+        assert_eq!(evaluate(&book,id,"=COUNTIF(A1:A2,0)"),Value::Number(1.0));
+        assert_eq!(evaluate(&book,id,"=TEXTBEFORE(\"abc\",\"\",2)"),Value::Text(String::new()));
+        assert_eq!(evaluate(&book,id,"=TEXTAFTER(\"abc\",\"\",-2)"),Value::Text(String::new()));
+        Ok(())
+    }
+    #[test]
+    fn minifs_treats_matched_blanks_as_zero() -> Result<(),String> {
+        let mut book=Book::default();
+        let id=book.active_id();
+        book.set_input(id,1,0,"10")?;
+        book.set_input(id,0,1,"1")?;
+        book.set_input(id,1,1,"1")?;
+        assert_eq!(evaluate(&book,id,"=MINIFS(A1:A2,B1:B2,1)"),Value::Number(0.0));
+        book.set_input(id,1,0,"-10")?;
+        assert_eq!(evaluate(&book,id,"=MAXIFS(A1:A2,B1:B2,1)"),Value::Number(0.0));
+        Ok(())
+    }
+    #[test]
+    fn binary_lookup_modes() -> Result<(),String> {
+        let mut book=Book::default();
+        let id=book.active_id();
+        for (row,value) in [1,3,5].into_iter().enumerate() {
+            book.set_input(id,row as u32,0,&value.to_string())?;
+            book.set_input(id,row as u32,1,&(value*10).to_string())?;
+        }
+        for (row,value) in [5,3,1].into_iter().enumerate() {
+            book.set_input(id,row as u32,2,&value.to_string())?;
+        }
+        assert_eq!(evaluate(&book,id,"=XMATCH(3,A1:A3,0,2)"),Value::Number(2.0));
+        assert_eq!(evaluate(&book,id,"=XLOOKUP(4,A1:A3,B1:B3,,-1,2)"),Value::Number(30.0));
+        assert_eq!(evaluate(&book,id,"=XMATCH(4,C1:C3,-1,-2)"),Value::Number(2.0));
+        assert_eq!(evaluate(&book,id,"=XMATCH(1,C1:C3,0,-2)"),Value::Number(3.0));
+        Ok(())
+    }
+}
+
+fn scaled_product(coefficient: f64, first: f64, second: f64) -> f64 {
+    if coefficient == 0.0 { return 0.0; }
+    let product=first*second;
+    if product.is_finite() && product != 0.0 { coefficient*product }
+    else if first.abs() >= second.abs() { (coefficient*first)*second }
+    else { (coefficient*second)*first }
+}
+#[cfg(test)]
+mod defect_batch_two {
+    use super::*;
+    #[test]
+    fn optional_blank_references_and_averagea_text() {
+        let book=Book::default();
+        let id=book.active_id();
+        assert_eq!(evaluate(&book,id,"=LOG(100,A1)"),Value::Error("#NUM!".into()));
+        assert_eq!(evaluate(&book,id,"=LOG(100)"),Value::Number(2.0));
+        assert_eq!(evaluate(&book,id,"=VALUE(\"1.2\")"),Value::Number(1.2));
+    }
+    #[test]
+    fn clock_fraction_and_last_day() {
+        let book=Book::default();
+        let id=book.active_id();
+        for (input,expected) in [
+            ("=SECOND(59.9/86400)",59.0),("=MINUTE(59.9/86400)",0.0),
+            ("=HOUR(86399.9/86400)",23.0),("=YEAR(2958465.999999)",9999.0),
+            ("=EDATE(2958465.5,0)",2958465.0)
+        ] { assert_eq!(evaluate(&book,id,input),Value::Number(expected),"{input}"); }
+    }
+    fn number(book: &Book,input: &str) -> Result<f64,String> {
+        match evaluate(book,book.active_id(),input) {
+            Value::Number(value) => Ok(value),
+            value => Err(format!("{input}: {value:?}")),
+        }
+    }
+    #[test]
+    fn large_statistics_remain_finite() -> Result<(),String> {
+        let mut book=Book::default();
+        let id=book.active_id();
+        for (row,value) in [1.0,2.0,4.0,8.0].into_iter().enumerate() {
+            book.set_input(id,row as u32,0,&value.to_string())?;
+            book.set_input(id,row as u32,1,&(value*1e200).to_string())?;
+        }
+        for function in ["SKEW","KURT"] {
+            let normal=number(&book,&format!("={function}(A1:A4)"))?;
+            let large=number(&book,&format!("={function}(B1:B4)"))?;
+            assert!((normal-large).abs()<1e-12);
+        }
+        book.set_input(id,0,2,"1e308")?;
+        book.set_input(id,1,2,"1e308")?;
+        assert_eq!(number(&book,"=TRIMMEAN(C1:C2,0)")?,1e308);
+        Ok(())
+    }
+    #[test]
+    fn normalized_regression_statistics() -> Result<(),String> {
+        let mut book=Book::default();
+        let id=book.active_id();
+        for (row,value) in [1e200,2e200,3e200].into_iter().enumerate() {
+            book.set_input(id,row as u32,0,&value.to_string())?;
+            book.set_input(id,row as u32,1,&value.to_string())?;
+        }
+        assert!((number(&book,"=SLOPE(A1:A3,B1:B3)")?-1.0).abs()<1e-12);
+        assert_eq!(number(&book,"=INTERCEPT(A1:A3,B1:B3)")?,0.0);
+        for (row,value) in [1e154,2e154,3e154].into_iter().enumerate() {
+            book.set_input(id,row as u32,0,&value.to_string())?;
+        }
+        let covariance=number(&book,"=COVARIANCE.P(A1:A3,A1:A3)")?;
+        assert!((covariance/1e307-6.666666666666667).abs()<1e-12);
+        Ok(())
+    }
+    #[test]
+    fn mixed_date_time_text_preserves_each_contract() -> Result<(),String> {
+        let book=Book::default();
+        let id=book.active_id();
+        let date=date_serial(2024,1,15);
+        assert_eq!(number(&book,"=DATEVALUE(\"2024-01-15 12:30\")")?,date);
+        assert!((number(&book,"=TIMEVALUE(\"2024-01-15 12:30\")")?-12.5/24.0).abs()<1e-12);
+        assert!((number(&book,"=VALUE(\"2024-01-15 12:30\")")?-(date+12.5/24.0)).abs()<1e-10);
+        Ok(())
+    }
+    #[test]
+    fn named_months_and_short_years() -> Result<(),String> {
+        let mut book=Book::default();
+        book.locale_ru=false;
+        assert_eq!(number(&book,"=DAYS(\"15-MAR-2021\",\"1-FEB-2021\")")?,42.0);
+        assert_eq!(number(&book,"=DATEVALUE(\"1/15/24\")")?,date_serial(2024,1,15));
+        assert_eq!(number(&book,"=DATEVALUE(\"1/15/30\")")?,date_serial(1930,1,15));
+        book.locale_ru=true;
+        assert_eq!(number(&book,"=DATEVALUE(\"15 января 2024\")")?,date_serial(2024,1,15));
+        Ok(())
+    }
+    #[test]
+    fn date_without_year_uses_current_year() -> Result<(),String> {
+        let book=Book::default();
+        let expected=date_serial(i64::from(chrono::Local::now().year()),3,15);
+        assert_eq!(number(&book,"=DATEVALUE(\"15-MAR\")")?,expected);
+        Ok(())
+    }
+    #[test]
+    fn timevalue_keeps_fractional_seconds() -> Result<(),String> {
+        let book=Book::default();
+        assert!((number(&book,"=TIMEVALUE(\"12:34:56.5\")")?-45296.5/86400.0).abs()<1e-12);
+        assert_eq!(evaluate(&book,book.active_id(),"=TIMEVALUE(\"12:34:NaN\")"),Value::Error("#VALUE!".into()));
         Ok(())
     }
 }
