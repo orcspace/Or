@@ -2502,7 +2502,7 @@ fn read_html_with_limit(text:&str,limit:usize)->Result<Doc,String> {
             };
             fn runs(n: &Node, f: &TextFormat, out: &mut Vec<Run>, preserve: bool, pending: &mut Option<TextFormat>) {
                 if html_hidden(n) || matches!(n.name.as_str(), "script" | "style" | "ul" | "ol") {
-                    return Ok(());
+                    return;
                 }
                 let mut fmt = f.clone();
                 let mut preserve=preserve || n.name=="pre";
@@ -4935,7 +4935,9 @@ fn html_computed_css(parent:&str,child:&str)->String {
     let size=css_declarations(&merged).into_iter().find(|(key,_)|key=="font-size")
         .map(|(_,value)|html_font_size(&value,parent_size)).unwrap_or(parent_size);
     // Store computed relative lengths so inheritance does not apply the percentage twice.
-    let mut computed=merge_html_css(&merged,&format!("font-size:{size}pt"));
+    let mut computed=if css_declarations(&merged).iter().any(|(key,_)|key=="font-size") {
+        merge_html_css(&merged,&format!("font-size:{size}pt"))
+    }else{merged.clone()};
     if let Some(value)=css_declarations(&merged).into_iter().find(|(key,_)|key=="line-height").map(|(_,value)|value.to_ascii_lowercase()) {
         let relative=value.trim().strip_suffix('%').map(|number|(number,0.01))
             .or_else(||value.trim().strip_suffix("em").map(|number|(number,1.0)));
@@ -4960,14 +4962,16 @@ fn html_image_geometry(node:&Node,intrinsic_width:f32,intrinsic_height:f32)->(f3
     }
     if let Some(value)=node.attr("data-trinedocs-width").and_then(|value|value.parse::<f32>().ok()).filter(|value|value.is_finite() && *value>0.0) {width=Some(value);}
     if let Some(value)=node.attr("data-trinedocs-height").and_then(|value|value.parse::<f32>().ok()).filter(|value|value.is_finite() && *value>0.0) {height=Some(value);}
-    let (width,height)=match (width,height) {
+    let intrinsic_width=f64::from(intrinsic_width).max(f64::from(f32::MIN_POSITIVE));
+    let intrinsic_height=f64::from(intrinsic_height).max(f64::from(f32::MIN_POSITIVE));
+    let (width,height)=match (width.map(f64::from),height.map(f64::from)) {
         (Some(width),Some(height))=>(width,height),
-        (Some(width),None)=>(width,width*intrinsic_height/intrinsic_width.max(f32::MIN_POSITIVE)),
-        (None,Some(height))=>(height*intrinsic_width/intrinsic_height.max(f32::MIN_POSITIVE),height),
+        (Some(width),None)=>(width,width*intrinsic_height/intrinsic_width),
+        (None,Some(height))=>(height*intrinsic_width/intrinsic_height,height),
         (None,None)=>(intrinsic_width,intrinsic_height),
     };
     let fit=(10000.0/width).min(10000.0/height).min(1.0);
-    ((width*fit).max(0.001),(height*fit).max(0.001))
+    ((width*fit).max(0.001) as f32,(height*fit).max(0.001) as f32)
 }
 
 fn word_grid_before(row:&Node)->Result<usize,String> {
@@ -5193,7 +5197,8 @@ mod hundred_docs_io_regressions {
         assert!(String::from_utf8_lossy(&exported).contains("<pre "));
         let imported=read(&exported,"html")?;
         assert_eq!(imported.paragraphs[0].style,"Code");
-        assert_eq!(imported.paragraphs[0].text(),"a  b");Ok(())
+        assert_eq!(imported.paragraphs[0].text(),"a  b");
+        let heading=html("<h1>Heading</h1>")?;assert_eq!(heading.paragraphs[0].runs[0].format.size,22.0);Ok(())
     }
     #[test]
     fn html_relative_font_sizes_use_the_parent_size_once()->Result<(),String> {
