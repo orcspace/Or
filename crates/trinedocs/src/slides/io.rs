@@ -34,7 +34,7 @@ pub fn write(deck: &Deck, ext: &str) -> Result<Vec<u8>, String> {
         "pptx" => write_pptx(deck),
         "trineslide" => crate::native::encode(&crate::native::Document::Slides(deck.clone())),
         "json" => serde_json::to_vec_pretty(deck).map_err(|e| e.to_string()),
-        "md" => Ok(markdown_deck(deck).into_bytes()),
+        "md" => linear_export(deck,"md",crate::package::MAX_FILE),
         "txt" => Ok(deck
             .slides
             .iter()
@@ -53,21 +53,7 @@ pub fn write(deck: &Deck, ext: &str) -> Result<Vec<u8>, String> {
             .collect::<Vec<_>>()
             .join("\n\n")
             .into_bytes()),
-        "html" => {
-            let body = deck
-                .slides
-                .iter()
-                .map(|s| {
-                    format!(
-                        "<section><h1>{}</h1>{}<aside>{}</aside></section>",
-                        xml_escape(&s.title),
-                        s.elements.iter().map(element_html).collect::<String>(),
-                        xml_escape(&s.notes)
-                    )
-                })
-                .collect::<String>();
-            Ok(format!("<!doctype html><html lang=\"ru\"><meta charset=\"utf-8\"><title>TrineDocs Slides</title><style>section{{min-height:80vh;padding:4rem;break-after:page}}p,td,aside{{white-space:pre-wrap}}table{{border-collapse:collapse}}td{{border:1px solid #ccc;padding:.5rem}}aside{{color:#666}}</style><body>{body}</body></html>").into_bytes())
-        }
+        "html" => linear_export(deck,"html",crate::package::MAX_FILE),
         _ => Err(format!("Экспорт .{ext} ещё не поддерживается")),
     }
 }
@@ -123,19 +109,64 @@ fn markdown_literal(text:&str)->String {
     }
     out.replace("\r\n","\n").replace('\r',"\n").replace('\n',"  \n")
 }
-fn markdown_deck(deck:&Deck)->String {
-    deck.slides.iter().map(|slide| {
-        let title=markdown_literal(&slide.title.replace(['\r','\n']," "));
-        let body=slide.elements.iter().map(|element| {
-            if let ElementKind::Image{bytes}=&element.kind {
-                format!("![{}]({})",markdown_literal(&element.text),image_data_uri(bytes))
-            }else {markdown_literal(&element_text(element))}
-        }).collect::<Vec<_>>().join("\n\n");
-        format!("# {title}\n\n{body}\n\n{}",markdown_literal(&slide.notes))
-    }).collect::<Vec<_>>().join("\n\n---\n\n")
+fn export_push(out:&mut String,text:&str,limit:usize)->Result<(),String> {
+    if out.len().checked_add(text.len()).is_none_or(|length|length>limit) {
+        return Err("Экспорт Slides превышает безопасный размер".into());
+    }
+    out.push_str(text);Ok(())
+}
+fn image_export_budget(element:&Element,remaining:usize)->Result<(),String> {
+    if let ElementKind::Image{bytes}=&element.kind
+        && bytes.len().div_ceil(3).saturating_mul(4)>remaining {
+        return Err("Изображения Slides превышают безопасный размер экспорта".into());
+    }
+    Ok(())
+}
+fn linear_export(deck:&Deck,format:&str,limit:usize)->Result<Vec<u8>,String> {
+    // Preflight the aggregate encoded binary payload before allocating any data URI.
+    let encoded=deck.slides.iter().flat_map(|slide|&slide.elements).fold(0usize,|total,element|
+        if let ElementKind::Image{bytes}=&element.kind {total.saturating_add(bytes.len().div_ceil(3).saturating_mul(4))}else{total});
+    if encoded>limit {return Err("Изображения Slides превышают общий размер экспорта".into());}
+    let mut out=String::new();
+    if format=="html" {
+        export_push(&mut out,"<!doctype html><html lang=\"ru\"><meta charset=\"utf-8\"><title>TrineDocs Slides</title><style>section{min-height:80vh;padding:4rem;break-after:page}p,td,aside{white-space:pre-wrap}table{border-collapse:collapse}td{border:1px solid #ccc;padding:.5rem}aside{color:#666}</style><body>",limit)?;
+    }
+    for (index,slide) in deck.slides.iter().enumerate() {
+        if format=="html" {
+            export_push(&mut out,&format!("<section><h1>{}</h1>",xml_escape(&slide.title)),limit)?;
+            for element in &slide.elements {
+                image_export_budget(element,limit.saturating_sub(out.len()))?;
+                export_push(&mut out,&element_html(element),limit)?;
+            }
+            export_push(&mut out,&format!("<aside>{}</aside></section>",xml_escape(&slide.notes)),limit)?;
+        }else{
+            if index>0 {export_push(&mut out,"\n\n---\n\n",limit)?;}
+            let title=markdown_literal(&slide.title.replace(['\r','\n']," "));
+            export_push(&mut out,&format!("# {title}\n\n"),limit)?;
+            for (element_index,element) in slide.elements.iter().enumerate() {
+                if element_index>0 {export_push(&mut out,"\n\n",limit)?;}
+                image_export_budget(element,limit.saturating_sub(out.len()))?;
+                let text=if let ElementKind::Image{bytes}=&element.kind {
+                    format!("![{}]({})",markdown_literal(&element.text),image_data_uri(bytes))
+                }else{markdown_literal(&element_text(element))};
+                export_push(&mut out,&text,limit)?;
+            }
+            export_push(&mut out,&format!("\n\n{}",markdown_literal(&slide.notes)),limit)?;
+        }
+    }
+    if format=="html" {export_push(&mut out,"</body></html>",limit)?;}
+    if out.len()>limit {return Err("Экспорт Slides превышает безопасный размер".into());}
+    Ok(out.into_bytes())
+}
+fn css_quoted_font(value:&str)->String {
+    let mut out=String::new();
+    for ch in value.chars() {
+        match ch {'\\'=>out.push_str("\\\\"),'\''=>out.push_str("\\'"),'\r'|'\n'=>out.push_str("\\A "),_=>out.push(ch)}
+    }
+    out
 }
 fn element_html(element: &Element) -> String {
-    let font=element.font.replace('\\',"\\\\").replace('\'',"\\'");
+    let font=css_quoted_font(&element.font);
     let style=format!("font-family:'{font}';font-size:{}pt;font-weight:{};font-style:{};color:#{}",
         element.font_size,if element.bold {"bold"}else{"normal"},if element.italic {"italic"}else{"normal"},hex(element.color));
     format!("<div style=\"{}\">{}</div>",xml_escape(&style),element_html_content(element))
@@ -2964,14 +2995,19 @@ mod hundred_slide_io_tests {
     fn html_slides_include_image_payloads()->Result<(),String> {
         let mut deck=blank_deck();deck.add_element(deck.slides[0].id,ElementKind::Image{bytes:png()?})?;
         let html=String::from_utf8(write(&deck,"html")?).map_err(|e|e.to_string())?;
-        assert!(html.contains("<img src=\"data:image/png;base64,iVBOR"));Ok(())
+        assert!(html.contains("<img src=\"data:image/png;base64,iVBOR"));
+        let ElementKind::Image{bytes}=&deck.slides[0].elements[0].kind else{return Err("image".into());};
+        assert!(linear_export(&deck,"md",bytes.len()).err().unwrap_or_default().contains("общий"));
+        assert!(linear_export(&deck,"html",html.len()-1).is_err());
+        assert_eq!(linear_export(&deck,"html",html.len())?,html.into_bytes());Ok(())
     }
     #[test]
     fn html_slides_keep_supported_text_style() {
-        let e=Element{text:"<literal>".into(),font:"A'B\"C".into(),bold:true,italic:true,font_size:19.0,color:[1,2,3],..Element::default()};
+        let e=Element{text:"<literal>".into(),font:"A'B\"C\nD\rE".into(),bold:true,italic:true,font_size:19.0,color:[1,2,3],..Element::default()};
         let html=element_html(&e);assert!(html.contains("font-size:19pt"));assert!(html.contains("font-weight:bold"));
         assert!(html.contains("font-style:italic"));assert!(html.contains("color:#010203"));assert!(html.contains("&lt;literal&gt;"));
         assert!(html.contains("&quot;"));assert!(!html.contains("font-family:'A'B"));
+        assert!(html.contains("\\A "));assert!(!html.contains('\r'));assert!(!html.contains('\n'));
     }
     #[test]
     fn markdown_slides_escape_literal_content()->Result<(),String> {
@@ -2979,7 +3015,8 @@ mod hundred_slide_io_tests {
         let id=deck.add_element(deck.slides[0].id,ElementKind::Text)?;
         deck.slides[0].element_mut(id).ok_or("text")?.text="<tag> *literal*\n[next](url)".into();
         let md=String::from_utf8(write(&deck,"md")?).map_err(|e|e.to_string())?;
-        assert!(md.contains("# \\# title second"));assert!(md.contains("\\<tag\\> \\*literal\\*  \n\\[next\\]\\(url\\)"));Ok(())
+        assert!(md.contains("# \\# title second"));assert!(md.contains("\\<tag\\> \\*literal\\*  \n\\[next\\]\\(url\\)"));
+        assert!(linear_export(&deck,"md",md.len()-1).is_err());assert_eq!(linear_export(&deck,"md",md.len())?,md.into_bytes());Ok(())
     }
     #[test]
     fn pptx_sections_survive_without_native_metadata()->Result<(),String> {
