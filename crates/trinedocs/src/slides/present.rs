@@ -8,6 +8,9 @@ pub struct Presentation {
     previous: Option<u64>,
     slide_id: Option<u64>,
     slide_started: f64,
+    animation_bias: f32,
+    previous_time: f32,
+    previous_click_times: Vec<f32>,
     started: f64,
     clicks: usize,
     click_times: Vec<f32>,
@@ -52,6 +55,7 @@ impl Presentation {
         self.started = ctx.input(|i| i.time);
         self.slide_started = self.started;
         self.previous = None;
+        self.animation_bias=0.0;self.previous_time=0.0;self.previous_click_times.clear();
         self.clicks = 0;
         self.click_times.clear();
         self.clear_ink();
@@ -66,6 +70,9 @@ impl Presentation {
     }
     fn move_to(&mut self, deck: &Deck, index: usize, time: f64) {
         self.previous = deck.slides.get(self.index).map(|slide| slide.id);
+        self.previous_time=(time-self.slide_started).max(0.0) as f32+self.animation_bias;
+        self.previous_click_times.clone_from(&self.click_times);
+        self.animation_bias=0.0;
         self.index = index;
         self.slide_id = deck.slides.get(index).map(|slide| slide.id);
         self.slide_started = time;
@@ -109,7 +116,7 @@ impl Presentation {
         let count = Self::click_steps(deck, self.index);
         if self.clicks < count {
             self.clicks += 1;
-            self.click_times.push((time - self.slide_started) as f32);
+            self.click_times.push((time - self.slide_started) as f32+self.animation_bias);
             return;
         }
         if let Some(index) = deck
@@ -130,7 +137,7 @@ impl Presentation {
             // Back from the end screen (or a blanked screen) shows the slide again.
             if self.ended {
                 self.slide_started = time;
-                self.click_times.fill(-1.0e6);
+                self.reveal_completed(deck);
             }
             self.ended = false;
             self.set_blank(0, time);
@@ -154,8 +161,13 @@ impl Presentation {
             self.move_to(deck, index, time);
             // The previous slide comes back fully built, with its animations already shown.
             self.clicks = Self::click_steps(deck, index);
-            self.click_times = vec![-1.0e6; self.clicks];
+            self.reveal_completed(deck);
         }
+    }
+    fn reveal_completed(&mut self,deck:&Deck) {
+        self.clicks=Self::click_steps(deck,self.index);
+        self.click_times=vec![0.0;self.clicks];
+        self.animation_bias=deck.slides.get(self.index).map(|slide|super::editor::animation_end(slide,&self.click_times)).unwrap_or(0.0);
     }
     fn advance_timed(&mut self, deck: &Deck, time: f64) -> bool {
         if self.ended
@@ -168,7 +180,7 @@ impl Presentation {
                         slide.transition.duration
                     };
                     let effects =
-                        super::editor::animation_end(slide, &self.click_times).max(transition);
+                        (super::editor::animation_end(slide, &self.click_times)-self.animation_bias).max(transition);
                     time - self.slide_started >= f64::from(effects + seconds)
                 })
             })
@@ -240,47 +252,19 @@ pub fn show(ui: &mut egui::Ui, deck: &Deck, state: &mut Presentation) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
         return;
     }
-    let shortcuts=presentation_shortcuts_allowed(&ctx,state);
-    let mut manual_navigation=shortcuts && ctx.input(|input|[
-        egui::Key::ArrowRight,egui::Key::ArrowDown,egui::Key::PageDown,egui::Key::Space,
-        egui::Key::ArrowLeft,egui::Key::ArrowUp,egui::Key::PageUp,egui::Key::Home,egui::Key::End
-    ].iter().any(|key|input.key_pressed(*key)));
-    if shortcuts {
-    if ctx.input(|i| {
-        i.key_pressed(egui::Key::ArrowRight)
-            || i.key_pressed(egui::Key::ArrowDown)
-            || i.key_pressed(egui::Key::PageDown)
-            || i.key_pressed(egui::Key::Space)
-    }) {
-        state.next(deck, time);
-    }
-    if ctx.input(|i| {
-        i.key_pressed(egui::Key::ArrowLeft)
-            || i.key_pressed(egui::Key::ArrowUp)
-            || i.key_pressed(egui::Key::PageUp)
-    }) {
-        state.previous(deck, time);
-    }
-    if ctx.input(|i| i.key_pressed(egui::Key::Home))
-        && let Some(index) = deck.slides.iter().position(|s| !s.hidden)
-    {
-        state.move_to(deck, index, time);
-    }
-    if ctx.input(|i| i.key_pressed(egui::Key::End))
-        && let Some(index) = deck.slides.iter().rposition(|s| !s.hidden)
-    {
-        state.move_to(deck, index, time);
-    }
-    if ctx.input(|i| i.key_pressed(egui::Key::B)) {
-        state.set_blank(if state.blank == 1 { 0 } else { 1 }, time);
-    }
-    if ctx.input(|i| i.key_pressed(egui::Key::W)) {
-        state.set_blank(if state.blank == 2 { 0 } else { 2 }, time);
-    }
-    if ctx.input(|i| i.key_pressed(egui::Key::P)) {
-        state.notes = !state.notes;
-    }
-    }
+    let pressed=|key|presentation_key_allowed(&ctx,state,key)&&ctx.input(|input|input.key_pressed(key));
+    let forward=[egui::Key::ArrowRight,egui::Key::ArrowDown,egui::Key::PageDown,egui::Key::Space].into_iter().any(pressed);
+    let backward=[egui::Key::ArrowLeft,egui::Key::ArrowUp,egui::Key::PageUp].into_iter().any(pressed);
+    let home=pressed(egui::Key::Home);let end=pressed(egui::Key::End);
+    let black=pressed(egui::Key::B);let white=pressed(egui::Key::W);let notes=pressed(egui::Key::P);
+    let mut manual_navigation=forward||backward||home||end;
+    if forward {state.next(deck,time);}
+    if backward {state.previous(deck,time);}
+    if home && let Some(index)=deck.slides.iter().position(|slide|!slide.hidden){state.move_to(deck,index,time);}
+    if end && let Some(index)=deck.slides.iter().rposition(|slide|!slide.hidden){state.move_to(deck,index,time);}
+    if black {state.set_blank(if state.blank==1{0}else{1},time);}
+    if white {state.set_blank(if state.blank==2{0}else{2},time);}
+    if notes {state.notes=!state.notes;}
     state.control_ids.clear();
     let screen = ctx.content_rect();
     egui::Area::new(egui::Id::new("slides_presentation_overlay"))
@@ -322,9 +306,10 @@ pub fn show(ui: &mut egui::Ui, deck: &Deck, state: &mut Presentation) {
                     if progress < 1.0
                         && let Some(previous) = state.previous.and_then(|id| deck.slide(id))
                     {
-                        paint_slide(&ctx, &painter, rect, deck, previous, None);
+                        let previous_rect=outgoing_transition_rect(rect,&slide.transition.effect,progress);
+                        paint_slide(&ctx,&painter.with_clip_rect(rect),previous_rect,deck,previous,Some((state.previous_time,&state.previous_click_times)));
                     }
-                    let animation_time = elapsed;
+                    let animation_time = elapsed+state.animation_bias;
                     match slide.transition.effect.as_str() {
                         "fade" if progress < 1.0 => {
                             let mut p = painter.clone();
@@ -374,7 +359,9 @@ pub fn show(ui: &mut egui::Ui, deck: &Deck, state: &mut Presentation) {
                         ),
                     }
                     for points in &state.strokes {
-                        if points.len() > 1 {
+                        if let [point]=points.as_slice() {
+                            painter.with_clip_rect(rect).circle_filled(ink_to_screen(rect,*point),1.25,Color32::from_rgb(235,50,50));
+                        } else if points.len() > 1 {
                             painter.with_clip_rect(rect).add(egui::Shape::line(
                                 points.iter().map(|point|ink_to_screen(rect,*point)).collect(),
                                 Stroke::new(2.5, Color32::from_rgb(235, 50, 50)),
@@ -391,19 +378,8 @@ pub fn show(ui: &mut egui::Ui, deck: &Deck, state: &mut Presentation) {
             if response.clicked() && presentation_click_allowed(state) {
                 state.next(deck,time);manual_navigation=true;
             }
-            if response.drag_started() {
-                state.inking=false;
-                if state.ink && state.blank==0
-                    && let Some(point)=ctx.pointer_interact_pos().and_then(|pos|ink_from_screen(rect,pos)) {
-                    state.inking=append_ink(state,point,true,100000,1000);
-                }
-            }
-            if !state.ink || state.blank!=0 || response.drag_stopped() {state.inking=false;}
-            if state.inking && response.dragged()
-                && let Some(point)=ctx.pointer_interact_pos().and_then(|pos|ink_from_screen(rect,pos))
-            {
-                append_ink(state,point,false,100000,1000);
-            }
+            let point=ctx.pointer_interact_pos().and_then(|pos|ink_from_screen(rect,pos));
+            update_ink(state,point,response.clicked(),response.drag_started(),response.dragged(),response.drag_stopped());
             let controls = Rect::from_min_size(
                 outer.min + Vec2::new(12.0, 10.0),
                 Vec2::new((outer.width() - 24.0).clamp(1.0, 660.0), 36.0),
@@ -739,8 +715,8 @@ fn ink_from_screen(rect:Rect,position:Pos2)->Option<Pos2> {
 fn ink_to_screen(rect:Rect,position:Pos2)->Pos2 {
     Pos2::new(rect.left()+position.x*rect.width(),rect.top()+position.y*rect.height())
 }
-fn presentation_shortcuts_allowed(ctx:&egui::Context,state:&Presentation)->bool {
-    !ctx.memory(|memory|memory.focused().is_some_and(|id|state.control_ids.contains(&id)))
+fn presentation_key_allowed(ctx:&egui::Context,state:&Presentation,key:egui::Key)->bool {
+    key!=egui::Key::Space || !ctx.memory(|memory|memory.focused().is_some_and(|id|state.control_ids.contains(&id)))
 }
 fn present_button(ui:&mut egui::Ui,state:&mut Presentation,label:&str)->egui::Response {
     let response=ui.button(label);state.control_ids.push(response.id);response
@@ -762,9 +738,9 @@ mod additional_presenter_tests {
         let ctx=egui::Context::default();let id=egui::Id::new("presenter-control");
         let state=Presentation{control_ids:vec![id],..Default::default()};
         ctx.memory_mut(|memory|memory.request_focus(id));
-        assert!(!presentation_shortcuts_allowed(&ctx,&state));
+        assert!(!presentation_key_allowed(&ctx,&state,egui::Key::Space));
         ctx.memory_mut(|memory|memory.surrender_focus(id));
-        assert!(presentation_shortcuts_allowed(&ctx,&state));
+        assert!(presentation_key_allowed(&ctx,&state,egui::Key::Space));
     }
 }
 
@@ -775,6 +751,7 @@ fn advance_after_controls(state:&mut Presentation,deck:&Deck,time:f64,manual:boo
     state.active && !manual && state.advance_timed(deck,time)
 }
 fn append_ink(state:&mut Presentation,point:Pos2,start:bool,point_limit:usize,stroke_limit:usize)->bool {
+    if !start && state.strokes.last().and_then(|points|points.last()).is_some_and(|last|*last==point){return true;}
     if state.ink_points>=point_limit || start && state.strokes.len()>=stroke_limit {
         state.ink_full=true;return false;
     }
@@ -811,5 +788,85 @@ mod next_presenter_defects {
         state.clear_ink();assert_eq!(state.ink_points,0);assert!(!state.ink_full);
         assert!(append_ink(&mut state,Pos2::ZERO,true,10,1));
         assert!(!append_ink(&mut state,Pos2::ZERO,true,10,1));
+    }
+}
+
+fn outgoing_transition_rect(rect:Rect,effect:&str,progress:f32)->Rect {
+    if effect=="push"{rect.translate(Vec2::new(-progress*rect.width(),0.0))}else{rect}
+}
+fn update_ink(state:&mut Presentation,point:Option<Pos2>,clicked:bool,started:bool,dragged:bool,stopped:bool) {
+    if !state.ink || state.blank!=0 || state.ended {state.inking=false;return;}
+    if clicked && let Some(point)=point {append_ink(state,point,true,100000,1000);}
+    if started {state.inking=false;}
+    if started||dragged||stopped {
+        if let Some(point)=point {
+            if started||dragged||state.inking {
+                let new_stroke=!state.inking;
+                state.inking=append_ink(state,point,new_stroke,100000,1000);
+            }
+        }else{state.inking=false;}
+    }
+    if stopped {state.inking=false;}
+}
+#[cfg(test)]
+mod phase200_presenter_tests {
+    use super::*;
+    #[test]
+    fn focused_controls_keep_navigation_blanking_and_notes_shortcuts() {
+        let ctx=egui::Context::default();let id=egui::Id::new("focused-presenter");
+        let state=Presentation{control_ids:vec![id],..Default::default()};ctx.memory_mut(|memory|memory.request_focus(id));
+        assert!(!presentation_key_allowed(&ctx,&state,egui::Key::Space));
+        for key in [egui::Key::ArrowRight,egui::Key::B,egui::Key::W,egui::Key::P]{assert!(presentation_key_allowed(&ctx,&state,key));}
+    }
+    #[test]
+    fn pen_taps_are_saved_as_visible_single_point_strokes() {
+        let mut state=Presentation{ink:true,..Default::default()};
+        update_ink(&mut state,Some(Pos2::new(0.5,0.5)),true,false,false,false);
+        assert_eq!(state.strokes,vec![vec![Pos2::new(0.5,0.5)]]);assert_eq!(state.ink_points,1);
+    }
+    #[test]
+    fn leaving_the_slide_breaks_ink_instead_of_drawing_a_reentry_bridge() {
+        let mut state=Presentation{ink:true,..Default::default()};
+        update_ink(&mut state,Some(Pos2::new(0.1,0.1)),false,true,true,false);
+        update_ink(&mut state,None,false,false,true,false);
+        update_ink(&mut state,Some(Pos2::new(0.9,0.9)),false,false,true,false);
+        assert_eq!(state.strokes.len(),2);assert_eq!(state.strokes[0].len(),1);assert_eq!(state.strokes[1].len(),1);
+    }
+    #[test]
+    fn a_stationary_pen_does_not_consume_the_point_budget() {
+        let mut state=Presentation::default();assert!(append_ink(&mut state,Pos2::ZERO,true,2,2));
+        for _ in 0..100 {assert!(append_ink(&mut state,Pos2::ZERO,false,2,2));}
+        assert_eq!(state.ink_points,1);assert!(!state.ink_full);
+        assert!(append_ink(&mut state,Pos2::new(0.1,0.1),false,2,2));assert_eq!(state.ink_points,2);
+    }
+    #[test]
+    fn pen_release_keeps_the_final_sample_before_ending_the_stroke() {
+        let mut state=Presentation{ink:true,..Default::default()};
+        update_ink(&mut state,Some(Pos2::ZERO),false,true,true,false);
+        update_ink(&mut state,Some(Pos2::new(0.8,0.7)),false,false,false,true);
+        assert_eq!(state.strokes[0],vec![Pos2::ZERO,Pos2::new(0.8,0.7)]);assert!(!state.inking);
+    }
+    #[test]
+    fn returning_to_a_slide_completes_automatic_builds_without_skipping_its_timer()->Result<(),String> {
+        let mut deck=Deck::default();deck.add_slide("blank");
+        let slide=deck.slides.first_mut().ok_or("slide")?;slide.transition.advance_after=Some(2.0);
+        slide.elements[0].animation=super::super::model::Animation{effect:"fade".into(),trigger:"with_previous".into(),duration:300.0,..Default::default()};
+        let mut state=Presentation{active:true,..Default::default()};state.move_to(&deck,1,400.0);state.previous(&deck,500.0);
+        assert_eq!(state.index,0);assert_eq!(state.animation_bias,300.0);assert!(!state.advance_timed(&deck,501.0));assert!(state.advance_timed(&deck,502.0));Ok(())
+    }
+    #[test]
+    fn push_transition_moves_both_frames_in_the_same_direction() {
+        let rect=Rect::from_min_size(Pos2::ZERO,Vec2::new(800.0,450.0));
+        let previous=outgoing_transition_rect(rect,"push",0.25);
+        let next=rect.translate(Vec2::new((1.0-0.25)*rect.width(),0.0));
+        assert_eq!(previous.left(),-200.0);assert_eq!(previous.right(),next.left());
+        assert_eq!(outgoing_transition_rect(rect,"fade",0.25),rect);
+    }
+    #[test]
+    fn outgoing_transition_captures_the_departing_animation_clock_and_clicks() {
+        let mut deck=Deck::default();deck.add_slide("blank");
+        let mut state=Presentation{active:true,..Default::default()};state.move_to(&deck,0,10.0);
+        state.click_times=vec![2.0];state.animation_bias=5.0;state.move_to(&deck,1,14.0);
+        assert_eq!(state.previous_time,9.0);assert_eq!(state.previous_click_times,vec![2.0]);assert_eq!(state.animation_bias,0.0);
     }
 }

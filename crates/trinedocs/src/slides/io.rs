@@ -33,7 +33,7 @@ pub fn write(deck: &Deck, ext: &str) -> Result<Vec<u8>, String> {
     match ext.trim_start_matches('.').to_ascii_lowercase().as_str() {
         "pptx" => write_pptx(deck),
         "trineslide" => crate::native::encode(&crate::native::Document::Slides(deck.clone())),
-        "json" => serde_json::to_vec_pretty(deck).map_err(|e| e.to_string()),
+        "json" => deck_json(deck,true,crate::package::MAX_FILE),
         "md" => linear_export(deck,"md",crate::package::MAX_FILE),
         "txt" => Ok(deck
             .slides
@@ -56,6 +56,22 @@ pub fn write(deck: &Deck, ext: &str) -> Result<Vec<u8>, String> {
         "html" => linear_export(deck,"html",crate::package::MAX_FILE),
         _ => Err(format!("Экспорт .{ext} ещё не поддерживается")),
     }
+}
+struct LimitedJson {bytes:Vec<u8>,limit:usize}
+impl std::io::Write for LimitedJson {
+    fn write(&mut self,bytes:&[u8])->std::io::Result<usize> {
+        if self.bytes.len().checked_add(bytes.len()).is_none_or(|length|length>self.limit) {
+            return Err(std::io::Error::other("JSON Slides превышает безопасный размер"));
+        }
+        self.bytes.extend_from_slice(bytes);Ok(bytes.len())
+    }
+    fn flush(&mut self)->std::io::Result<()> {Ok(())}
+}
+fn deck_json(deck:&Deck,pretty:bool,limit:usize)->Result<Vec<u8>,String> {
+    let mut output=LimitedJson{bytes:Vec::new(),limit};
+    if pretty {serde_json::to_writer_pretty(&mut output,deck)}else{serde_json::to_writer(&mut output,deck)}
+        .map_err(|error|error.to_string())?;
+    Ok(output.bytes)
 }
 pub(crate) fn element_text(element: &Element) -> String {
     let content = match &element.kind {
@@ -676,13 +692,21 @@ fn selected_run_properties(body: &Node) -> (Vec<&Node>, bool) {
     if !has_text && let Some(props)=paragraph.and_then(|p|p.child("endParaRPr")) {layers.push(props);}
     (layers,has_text)
 }
+fn style_theme_font<'a>(style:Option<&Node>,look:&'a Look)->Option<&'a str> {
+    let font=match style?.child("fontRef")?.attr("idx") {"major"=>&look.major,"minor"=>&look.minor,_=>return None};
+    (!font.is_empty()).then_some(font.as_str())
+}
+fn shape_fill_visible(props:Option<&Node>,style:Option<&Node>)->bool {
+    if let Some(fill)=props.and_then(|props|props.children.iter().find(|node|matches!(node.name.as_str(),"solidFill"|"gradFill"|"pattFill"|"noFill"))) {return fill.name!="noFill";}
+    !style.and_then(|node|node.child("fillRef")).is_some_and(|node|matches!(node.attr("idx"),"0"|"1000"))
+}
 fn apply_text_look(
     body:&Node,element:&mut Element,look:&Look,style:Option<&Node>,default_size:f32,title:bool,
 ) {
     let (layers,_)=selected_run_properties(body);
     element.font_size=default_size;
-    let theme_face=if title {&look.major}else{&look.minor};
-    if !theme_face.is_empty() {element.font.clone_from(theme_face);}
+    let theme_face=style_theme_font(style,look).unwrap_or_else(||if title {&look.major}else{&look.minor});
+    if !theme_face.is_empty() {element.font=theme_face.to_owned();}
     element.color=color(style.and_then(|n|n.child("fontRef")),look,element.color);
     for props in layers {apply_run_properties(props,element,look);}
 }
@@ -692,7 +716,7 @@ fn apply_inherited_text_look(
 ) {
     apply_text_look(body,element,look,style,default_size,title);
     let own_layers=selected_run_properties(body).0;
-    let own_font=own_layers.iter().any(|props|props.child("latin").and_then(|n|look.font(n.attr("typeface"))).is_some());
+    let own_font=style_theme_font(style,look).is_some()||own_layers.iter().any(|props|props.child("latin").and_then(|n|look.font(n.attr("typeface"))).is_some());
     let own_color=own_layers.iter().any(|props|props.child("solidFill").is_some())
         ||style.and_then(|n|n.child("fontRef")).is_some();
     let level=paragraph_level(first_text_paragraph(body));
@@ -1129,7 +1153,7 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
                         element.kind=ElementKind::Text;
                     }
                     if matches!(element.kind,ElementKind::Rect|ElementKind::Ellipse) {
-                        element.fill_visible=props.and_then(|node|node.child("noFill")).is_none();
+                        element.fill_visible=shape_fill_visible(props,style);
                     }
                 }
                 if let Some(body) = shape.child("txBody") {
@@ -1523,7 +1547,7 @@ fn text_body(e: &Element) -> String {
         ""
     };
     format!(
-        "<p:txBody><a:bodyPr wrap=\"square\">{fit}</a:bodyPr><a:lstStyle/>{paragraphs}</p:txBody>"
+        "<p:txBody><a:bodyPr wrap=\"square\" lIns=\"63500\" tIns=\"63500\" rIns=\"63500\" bIns=\"63500\">{fit}</a:bodyPr><a:lstStyle/>{paragraphs}</p:txBody>"
     )
 }
 fn shape_xml(e: &Element, id: usize) -> String {
@@ -1577,11 +1601,12 @@ fn table_xml(e: &Element, id: usize, cells: &[Vec<String>]) -> Result<String,Str
     let grid = (0..cols)
         .map(|_| format!("<a:gridCol w=\"{}\"/>", emu(e.w / cols as f32)))
         .collect::<String>();
+    let cell_font=e.font_size.min(e.h/cells.len().max(1) as f32*0.7).clamp(1.0,300.0);
     let paragraphs = |text: &str| {
         text.replace("\r\n", "\n").replace('\r', "\n").split('\n')
             .map(|line| format!(
                 "<a:p><a:r><a:rPr lang=\"ru-RU\" sz=\"{}\" b=\"{}\" i=\"{}\"><a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill><a:latin typeface=\"{}\"/></a:rPr><a:t xml:space=\"preserve\">{}</a:t></a:r></a:p>",
-                (e.font_size * 100.0) as u32, u8::from(e.bold), u8::from(e.italic), hex(e.color), xml_escape(&e.font), xml_escape(line)
+                (cell_font * 100.0).round() as u32, u8::from(e.bold), u8::from(e.italic), hex(e.color), xml_escape(&e.font), xml_escape(line)
             )).collect::<String>()
     };
     let line = if e.stroke_width <= 0.0 {
@@ -1603,7 +1628,7 @@ fn table_xml(e: &Element, id: usize, cells: &[Vec<String>]) -> Result<String,Str
             let values = (0..cols)
                 .map(|col| {
                     format!(
-                        "<a:tc><a:txBody><a:bodyPr/><a:lstStyle/>{}</a:txBody><a:tcPr>{borders}<a:solidFill><a:srgbClr val=\"{fill}\"/></a:solidFill></a:tcPr></a:tc>",
+                        "<a:tc><a:txBody><a:bodyPr lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"/><a:lstStyle/>{}</a:txBody><a:tcPr marL=\"63500\" marT=\"63500\" marR=\"63500\" marB=\"63500\">{borders}<a:solidFill><a:srgbClr val=\"{fill}\"/></a:solidFill></a:tcPr></a:tc>",
                         paragraphs(row.get(col).map(String::as_str).unwrap_or(""))
                     )
                 })
@@ -2108,7 +2133,7 @@ fn write_pptx(deck: &Deck) -> Result<Vec<u8>, String> {
         ("ppt/slideLayouts/slideLayout1.xml".into(),layout.into_bytes()),("ppt/slideLayouts/_rels/slideLayout1.xml.rels".into(),rels(&rel("rIdMaster","slideMaster","../slideMasters/slideMaster1.xml")).into_bytes()),
         ("ppt/theme/theme1.xml".into(),theme_xml(deck).into_bytes()),("ppt/notesMasters/notesMaster1.xml".into(),wrap("notesMaster","",&format!("<p:cSld><p:spTree>{GROUP}</p:spTree></p:cSld>{color_map}<p:notesStyle/>")).into_bytes()),("ppt/notesMasters/_rels/notesMaster1.xml.rels".into(),rels(&rel("rIdTheme","theme","../theme/theme1.xml")).into_bytes()),
         ("docProps/core.xml".into(),format!("{XML}<cp:coreProperties xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><dc:creator>TrineDocs</dc:creator><dc:title>{}</dc:title></cp:coreProperties>",xml_escape(deck.slides.first().map(|s| s.title.as_str()).unwrap_or("Презентация"))).into_bytes()),
-        ("customXml/trinedocs-deck.json".into(),serde_json::to_vec(deck).map_err(|e| e.to_string())?),
+        ("customXml/trinedocs-deck.json".into(),deck_json(deck,false,crate::package::MAX_FILE)?),
     ]);
     let manifest: BTreeMap<String, u64> = parts
         .iter()
@@ -3200,6 +3225,58 @@ mod phase200_io_tests {
         let mut slide=timing_slide();let ids=BTreeMap::from([("2".into(),0)]);
         assert_eq!(read_timing(&timing,&ids,&mut slide,(960.0,540.0)),0);
         assert_eq!(slide.elements[0].animation.delay,1.0);Ok(())
+    }
+
+    #[test]
+    fn explicit_font_reference_selects_major_or_minor_before_run_overrides()->Result<(),String> {
+        let look=Look{major:"Georgia".into(),minor:"Arial".into(),..Look::default()};
+        let body=parse(br#"<txBody><p><r><t>A</t></r></p></txBody>"#)?;let shape=parse(b"<sp/>")?;
+        for (idx,title,expected) in [("major",false,"Georgia"),("minor",true,"Arial")] {
+            let style=parse(format!("<style><fontRef idx=\"{idx}\"/></style>").as_bytes())?;
+            let mut element=Element::default();
+            apply_inherited_text_look(&shape,&body,&[],&mut element,&look,Some(&style),18.0,title);assert_eq!(element.font,expected);
+        }
+        let style=parse(br#"<style><fontRef idx="major"/></style>"#)?;
+        let body=parse(br#"<txBody><p><r><rPr><latin typeface="Verdana"/></rPr><t>A</t></r></p></txBody>"#)?;
+        let mut element=Element::default();apply_inherited_text_look(&shape,&body,&[],&mut element,&look,Some(&style),18.0,false);
+        assert_eq!(element.font,"Verdana");Ok(())
+    }
+    #[test]
+    fn fill_reference_zero_and_one_thousand_mean_no_fill()->Result<(),String> {
+        for idx in ["0","1000"] {
+            let style=parse(format!("<style><fillRef idx=\"{idx}\"><srgbClr val=\"FF0000\"/></fillRef></style>").as_bytes())?;
+            assert!(!shape_fill_visible(None,Some(&style)));
+            let explicit=parse(br#"<spPr><solidFill><srgbClr val="00FF00"/></solidFill></spPr>"#)?;
+            assert!(shape_fill_visible(Some(&explicit),Some(&style)));
+        }
+        let style=parse(br#"<style><fillRef idx="1"/></style>"#)?;assert!(shape_fill_visible(None,Some(&style)));Ok(())
+    }
+    #[test]
+    fn pptx_text_and_table_exports_use_the_native_five_point_inset()->Result<(),String> {
+        let element=Element{text:"A".into(),..Element::default()};
+        let text=parse(text_body(&element).as_bytes())?;let body=text.child("bodyPr").ok_or("body")?;
+        for key in ["lIns","tIns","rIns","bIns"] {assert_eq!(body.attr(key),"63500");}
+        let table=parse(table_xml(&element,2,&[vec!["A".into()]])?.as_bytes())?;
+        let cell=table.descend("tcPr").ok_or("cell")?;
+        for key in ["marL","marT","marR","marB"] {assert_eq!(cell.attr(key),"63500");}Ok(())
+    }
+    #[test]
+    fn pptx_table_font_matches_the_native_effective_row_font()->Result<(),String> {
+        let element=Element{h:200.0,font_size:28.0,..Element::default()};
+        let cells=vec![vec!["A".into()];20];let table=parse(table_xml(&element,2,&cells)?.as_bytes())?;
+        assert_eq!(table.descend("rPr").ok_or("font")?.attr("sz"),"700");Ok(())
+    }
+    #[test]
+    fn json_serialization_stops_at_the_output_limit()->Result<(),String> {
+        let deck=Deck::default();
+        for pretty in [true,false] {
+            let expected=if pretty {serde_json::to_vec_pretty(&deck)}else{serde_json::to_vec(&deck)}.map_err(|error|error.to_string())?;
+            assert_eq!(deck_json(&deck,pretty,expected.len())?,expected);
+            assert!(deck_json(&deck,pretty,expected.len()-1).is_err());
+        }
+        let mut output=LimitedJson{bytes:Vec::new(),limit:3};
+        assert!(std::io::Write::write_all(&mut output,b"123").is_ok());
+        assert!(std::io::Write::write_all(&mut output,b"4").is_err());assert_eq!(output.bytes,b"123");Ok(())
     }
 
 }
