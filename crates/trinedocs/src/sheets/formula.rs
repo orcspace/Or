@@ -2087,7 +2087,7 @@ impl<'a> Engine<'a> {
                 if name == "VALUE" {
                     return num(value_text(&raw, self.book.locale_ru)?);
                 }
-                let mut s = raw.chars().filter(|c| !matches!(*c, ' ' | '\u{a0}')).collect::<String>();
+                let mut s = raw.trim().chars().filter(|c| !matches!(*c, ' ' | '\u{a0}')).collect::<String>();
                 let mut percent = 0usize;
                 while s.ends_with('%') {
                     s.pop();
@@ -4516,7 +4516,8 @@ mod hundred_numeric_tests {
     #[test]
     fn numbervalue_ignores_spaces_between_percent_marks() {
         let book = Book::default();
-        assert_eq!(evaluate(&book, book.active_id(), "=NUMBERVALUE(\"9% %\")"), Value::Number(0.0009));
+        let Value::Number(value) = evaluate(&book, book.active_id(), "=NUMBERVALUE(\"9% %\")") else { panic!("number"); };
+        assert!((value - 0.0009).abs() < 1e-15);
     }
     #[test]
     fn numbervalue_applies_many_percent_marks_without_an_infinite_divisor() {

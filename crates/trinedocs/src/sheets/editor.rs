@@ -2095,6 +2095,7 @@ fn clipboard_id() -> egui::Id {
 }
 fn capture_clipboard(book: &Book, cut: bool) -> Result<SheetClipboard, String> {
     let mut range = book.selection.range();
+    let selected_range = range;
     let id = book.active_id();
     let sheet = book.sheet_by_id(id).ok_or("Лист не найден")?;
     loop {
@@ -2107,6 +2108,9 @@ fn capture_clipboard(book: &Book, cut: bool) -> Result<SheetClipboard, String> {
         }
         range.validate()?;
         if range == old { break; }
+    }
+    if cut && range != selected_range {
+        return Err("Для вырезания выделите объединённые области полностью".into());
     }
     let rows = book.read_range(id, range.r0, range.c0, range.r1, range.c1)?;
     let merges = sheet.merges.iter().filter(|merge| range.contains(merge.r0, merge.c0)
@@ -2163,7 +2167,10 @@ fn paste_cells_with(
     let source_rows = clipboard.cells.len();
     let source_cols = clipboard.cells.first().map(Vec::len).unwrap_or(0);
     if source_rows == 0 || source_cols == 0 { return Ok(()); }
-    if clipboard.cells.iter().any(|line| line.len() != source_cols) {
+    if clipboard.cells.iter().any(|line| line.len() != source_cols)
+        || clipboard.merges.iter().any(|merge| merge.r0 > merge.r1 || merge.c0 > merge.c1
+            || merge.r1 >= source_rows as u32 || merge.c1 >= source_cols as u32)
+    {
         return Err("Недопустимый внутренний буфер".into());
     }
     let (rows, cols) = if transpose { (source_cols, source_rows) } else { (source_rows, source_cols) };
@@ -2201,12 +2208,15 @@ fn paste_cells_with(
         values.push(line);
     }
     let mut candidate = book.clone();
-    if mode == PasteMode::All {
+    if mode == PasteMode::All && !clipboard.merges.is_empty() {
         let destination = Range::new(row, col, row+rows as u32-1, col+cols as u32-1);
+        let incoming: Vec<Range> = clipboard.merges.iter().map(|merge| {
+            let local = if transpose { Range::new(merge.c0, merge.r0, merge.c1, merge.r1) } else { *merge };
+            Range::new(row+local.r0, col+local.c0, row+local.r1, col+local.c1)
+        }).collect();
         if target.merges.iter().any(|merge| merge.r0 <= destination.r1 && destination.r0 <= merge.r1
-            && merge.c0 <= destination.c1 && destination.c0 <= merge.c1
-            && (!destination.contains(merge.r0, merge.c0) || !destination.contains(merge.r1, merge.c1))) {
-            return Err("Вставка пересекает часть объединённой области".into());
+            && merge.c0 <= destination.c1 && destination.c0 <= merge.c1 && !incoming.contains(merge)) {
+            return Err("Вставка пересекает несовпадающую объединённую область".into());
         }
         candidate.unmerge(sheet, destination)?;
     }
@@ -4061,9 +4071,9 @@ fn current_region(sheet: &Sheet, row: u32, col: u32) -> Option<Range> {
     loop {
         let old = range;
         let row_has = |r, range: &Range| by_row.get(&r)
-            .is_some_and(|cols| cols.range(range.c0..=range.c1).next().is_some());
+            .is_some_and(|cols| cols.range(range.c0.saturating_sub(1)..=(range.c1+1).min(MAX_COLS-1)).next().is_some());
         let col_has = |c, range: &Range| by_col.get(&c)
-            .is_some_and(|rows| rows.range(range.r0..=range.r1).next().is_some());
+            .is_some_and(|rows| rows.range(range.r0.saturating_sub(1)..=(range.r1+1).min(MAX_ROWS-1)).next().is_some());
         if range.r0 > 0 && row_has(range.r0 - 1, &range) { range.r0 -= 1; }
         if range.r1 + 1 < MAX_ROWS && row_has(range.r1 + 1, &range) { range.r1 += 1; }
         if range.c0 > 0 && col_has(range.c0 - 1, &range) { range.c0 -= 1; }
@@ -4125,6 +4135,11 @@ mod hundred_cell_ui_tests {
         assert_eq!(book.selection.range(), Range::new(1, 1, 2, 2));
         select_current_region(&mut book);
         assert_eq!(book.selection.range(), Range::new(0, 0, MAX_ROWS - 1, MAX_COLS - 1));
+        let mut diagonal = Book::default();
+        let id = diagonal.active_id();
+        diagonal.set_input(id, 10, 10, "a")?;
+        diagonal.set_input(id, 11, 11, "b")?;
+        assert_eq!(current_region(diagonal.active_sheet().ok_or("sheet")?, 10, 10), Some(Range::new(10, 10, 11, 11)));
         Ok(())
     }
 }
@@ -4140,8 +4155,10 @@ mod hundred_merge_clipboard_tests {
         book.merge(id, Range::new(0, 0, 0, 1))?;
         let clipboard = capture_clipboard(&book, false)?;
         assert_eq!(clipboard.merges, vec![Range::new(0, 0, 0, 1)]);
+        assert!(capture_clipboard(&book, true).is_err());
         paste_cells_with(&mut book, id, 3, 3, &clipboard, PasteMode::All, true)?;
         assert!(book.active_sheet().ok_or("sheet")?.merges.contains(&Range::new(3, 3, 4, 3)));
+        paste_cells_with(&mut book, id, 3, 3, &clipboard, PasteMode::All, true)?;
         assert_eq!(book.active_sheet().and_then(|sheet| sheet.cell(3, 3)).map(|cell| cell.value.clone()),
             Some(Value::Text("Title".into())));
         let before = book.clone();
