@@ -1034,6 +1034,7 @@ fn indexed_palette(bytes: &[u8]) -> Result<Vec<[u8; 3]>, String> {
 fn styles(bytes: &[u8]) -> Result<Vec<CellFormat>, String> {
     styles_with_theme(bytes,&[])
 }
+#[cfg(test)]
 fn styles_with_theme(bytes: &[u8],theme:&[[u8;3]])->Result<Vec<CellFormat>,String> {
     styles_with_theme_fonts(bytes,theme,&BTreeMap::new())
 }
