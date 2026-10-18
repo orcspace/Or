@@ -1252,8 +1252,12 @@ fn inline(ui: &Ui, text: &str) -> egui::text::LayoutJob {
             }else{bold=!bold;}
             rest=after;
         } else if let Some(after)=marker.strip_prefix('\\') {
-            let length=after.chars().next().map_or(0,char::len_utf8);
-            job.append(&marker[..1+length],0.0,egui::TextFormat{font_id:body.clone(),color,..Default::default()});
+            let next=after.chars().next();let length=next.map_or(0,char::len_utf8);
+            let piece=if next.is_some_and(|ch|ch.is_ascii_punctuation()){&after[..length]}else{&marker[..1+length]};
+            job.append(piece,0.0,egui::TextFormat{
+                font_id:if bold {egui::FontId::new(body.size,egui::FontFamily::Name("bold".into()))}else{body.clone()},
+                color:if bold {strong}else{color},..Default::default()
+            });
             rest=&marker[1+length..];
         } else {
             rest = "";
@@ -2435,7 +2439,7 @@ mod hundred_chat_content_tests {
     #[test]
     fn incomplete_and_escaped_chat_markers_remain_literal()->Result<(),String> {
         let ctx=egui::Context::default();crate::fonts::install(&ctx)?;
-        for (source,expected) in [("an unmatched `code","an unmatched `code"),("literal **","literal **"),(r"\**literal\**","**literal**")] {
+        for (source,expected) in [("an unmatched `code","an unmatched `code"),("literal **","literal **"),(r"\**literal\**","**literal**"),(r"prefix \*star\*","prefix *star*"),(r"path \folder","path \folder")] {
             let mut output=String::new();
             let _=ctx.run_ui(egui::RawInput::default(),|ui|{output=inline(ui,source).text;});
             assert_eq!(output,expected);

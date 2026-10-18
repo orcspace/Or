@@ -905,7 +905,8 @@ pub fn file_stem(title: &str) -> String {
     } else {
         stem
     };
-    let stem=stem.trim().trim_end_matches(['.',' ']).to_string();
+    let stem=stem.trim().trim_end_matches(['.',' ']);
+    let stem=if stem.is_empty() {"Документ".to_string()}else{stem.to_string()};
     let upper=stem.split('.').next().unwrap_or_default().trim_end_matches(' ').to_ascii_uppercase();
     let device=upper.strip_prefix("COM").or_else(||upper.strip_prefix("LPT"));
     let reserved=matches!(upper.as_str(),"CON"|"PRN"|"AUX"|"NUL")
@@ -1145,6 +1146,7 @@ mod hundred_media_preservation_tests {
             assert!(file_stem(title).starts_with('_'),"{title}");
         }
         assert_eq!(file_stem("COM0.docx"),"COM0");
+        assert_eq!(file_stem("..docx"),"Документ");
     }
     #[test]
     fn export_stems_remove_all_supported_source_file_extensions() {

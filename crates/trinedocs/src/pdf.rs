@@ -57,7 +57,7 @@ pub fn write(pages: &[Page]) -> Result<Vec<u8>, String> {
     let mut faces: BTreeMap<FontKey, (Arc<Vec<u8>>, u32)> = BTreeMap::new();
     let mut keys = Vec::new();
     for item in pages.iter().flat_map(|p| p.items.iter()) {
-        let Some(t) = text(item) else {
+        let Some(t) = text(item).filter(|value|!value.is_empty()) else {
             keys.push((String::new(), 0));
             continue;
         };
