@@ -2,7 +2,67 @@ use crate::render::{Page, Primitive};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-type PageCells<'a> = BTreeMap<(u32, u32), Vec<(u32, u32, &'a Cell)>>;
+type PageCells<'a> = BTreeMap<(u32,u32),Vec<PrintCell<'a>>>;
+struct PrintCell<'a> {row:u32,col:u32,cell:Option<&'a Cell>,merge:Option<Range>}
+struct PrintAxis {
+    base:f64, maximum:u32, hidden:Vec<u32>, adjustments:Vec<(u32,f64)>,
+}
+impl PrintAxis {
+    fn new(base:f32,sizes:&BTreeMap<u32,f32>,hidden:&BTreeSet<u32>,maximum:u32)->Self {
+        let mut sum=0.0;
+        let adjustments=sizes.iter().filter(|(index,_)|!hidden.contains(index)).map(|(index,size)| {
+            sum+=f64::from(*size)-f64::from(base);(*index,sum)
+        }).collect();
+        Self{base:f64::from(base),maximum,hidden:hidden.iter().copied().collect(),adjustments}
+    }
+    fn visible(&self,index:u32)->u32 {index-self.hidden.partition_point(|hidden|*hidden<index) as u32}
+    fn position(&self,index:u32)->f64 {
+        let offset=self.adjustments.partition_point(|(position,_)|*position<index);
+        f64::from(self.visible(index))*self.base+offset.checked_sub(1).map(|index|self.adjustments[index].1).unwrap_or(0.0)
+    }
+    fn original(&self,visible:u32)->u32 {
+        let (mut low,mut high)=(0,self.maximum);
+        while low<high {
+            let middle=low+(high-low)/2;
+            if self.visible(middle+1)<=visible {low=middle+1;}else{high=middle;}
+        }
+        low
+    }
+}
+fn print_blocks(sheet:&Sheet)->PageCells<'_> {
+    let rows=PrintAxis::new(sheet.default_row_height,&sheet.row_heights,&sheet.hidden_rows,MAX_ROWS);
+    let cols=PrintAxis::new(sheet.default_col_width,&sheet.widths,&sheet.hidden_cols,MAX_COLS);
+    let mut positions:BTreeMap<_,_>=sheet.cells.iter().filter_map(|(key,cell)|parse_address(key).map(|position|(position,Some(cell)))).collect();
+    for merge in &sheet.merges {positions.entry((merge.r0,merge.c0)).or_insert(None);}
+    let positions:Vec<_>=positions.into_iter().collect();
+    let mut events=Vec::new();
+    for (index,merge) in sheet.merges.iter().enumerate() {
+        events.push((merge.r0,1u8,merge.c0,index));events.push((merge.r1+1,0u8,merge.c0,index));
+    }
+    for (index,((row,col),_)) in positions.iter().enumerate() {events.push((*row,2u8,*col,index));}
+    events.sort_unstable();
+    let mut active:BTreeMap<u32,Range>=BTreeMap::new();
+    let mut blocks:PageCells<'_>=BTreeMap::new();
+    for (row,kind,col,index) in events {
+        match kind {
+            0=>{active.remove(&col);}
+            1=>{active.insert(col,sheet.merges[index]);}
+            _=>{
+                let merge=active.range(..=col).next_back().map(|(_,range)|*range).filter(|range|range.c1>=col);
+                if let Some(merge)=merge {
+                    if (row,col)!=(merge.r0,merge.c0)
+                        || rows.visible(merge.r1+1)==rows.visible(merge.r0)
+                        || cols.visible(merge.c1+1)==cols.visible(merge.c0) {continue;}
+                } else if sheet.hidden_rows.contains(&row)||sheet.hidden_cols.contains(&col) {continue;}
+                blocks.entry((rows.visible(row)/38,cols.visible(col)/8)).or_default()
+                    .push(PrintCell{row,col,cell:positions[index].1,merge});
+            }
+        }
+    }
+    for image in &sheet.images {blocks.entry((rows.visible(image.row)/38,cols.visible(image.col)/8)).or_default();}
+    if blocks.is_empty(){blocks.entry((0,0)).or_default();}
+    blocks
+}
 
 pub const MAX_ROWS: u32 = 1_048_576;
 pub const MAX_COLS: u32 = 16_384;
@@ -215,6 +275,8 @@ pub struct Sheet {
     pub id: u64,
     pub name: String,
     pub cells: BTreeMap<String, Cell>,
+    pub default_col_width: f32,
+    pub default_row_height: f32,
     pub widths: BTreeMap<u32, f32>,
     pub row_heights: BTreeMap<u32, f32>,
     pub hidden_rows: BTreeSet<u32>,
@@ -235,6 +297,8 @@ impl Default for Sheet {
             id: 1,
             name: "Лист1".into(),
             cells: BTreeMap::new(),
+            default_col_width: 96.0,
+            default_row_height: 26.0,
             widths: BTreeMap::new(),
             row_heights: BTreeMap::new(),
             hidden_rows: BTreeSet::new(),
@@ -323,6 +387,13 @@ impl Sheet {
         } else {
             (row, target)
         }
+    }
+    pub fn conditional_fill(&self,row:u32,col:u32,value:&Value)->Option<[u8;3]> {
+        let value=value.number().ok()?;
+        self.conditional.iter().find(|rule|rule.range.contains(row,col)&&match rule.operator.as_str() {
+            ">"=>value>rule.threshold,"<"=>value<rule.threshold,"="=>value==rule.threshold,
+            ">="=>value>=rule.threshold,"<="=>value<=rule.threshold,_=>false,
+        }).map(|rule|rule.fill)
     }
     pub fn display(&self, row: u32, col: u32, locale_ru: bool) -> String {
         self.cell(row, col)
@@ -441,7 +512,9 @@ impl Book {
                     return Err("Недопустимая ячейка или формат".into());
                 }
             }
-            if s.widths
+            if !s.default_col_width.is_finite() || !(1.0..=1800.0).contains(&s.default_col_width)
+                || !s.default_row_height.is_finite() || !(1.0..=600.0).contains(&s.default_row_height)
+                || s.widths
                 .iter()
                 .any(|(k, v)| *k >= MAX_COLS || !v.is_finite() || *v < 1.0 || *v > 1800.0)
                 || s.row_heights
@@ -1388,120 +1461,79 @@ impl Book {
         Ok(())
     }
     pub fn print_page_count(&self) -> usize {
-        let mut keys = BTreeSet::new();
-        for sheet in self.sheets.iter().filter(|s| !s.hidden) {
-            let mut visible = false;
-            for key in sheet.cells.keys() {
-                if let Some((r, c)) = parse_address(key)
-                    && !sheet.hidden_rows.contains(&r)
-                    && !sheet.hidden_cols.contains(&c)
-                {
-                    visible = true;
-                    keys.insert((sheet.id, r / 38, c / 8));
-                }
-            }
-            if !visible {
-                keys.insert((sheet.id, 0, 0));
-            }
-        }
-        keys.len()
+        self.sheets.iter().filter(|sheet|!sheet.hidden)
+            .map(|sheet|print_blocks(sheet).len()).sum()
     }
     pub fn pages(&self) -> Vec<Page> {
-        let mut pages = Vec::new();
-        for s in self.sheets.iter().filter(|s| !s.hidden) {
-            let mut blocks: PageCells<'_> = BTreeMap::new();
-            for (key, cell) in &s.cells {
-                if let Some((r, c)) = parse_address(key)
-                    && !s.hidden_rows.contains(&r)
-                    && !s.hidden_cols.contains(&c)
-                {
-                    blocks
-                        .entry((r / 38, c / 8))
-                        .or_default()
-                        .push((r, c, cell));
+        let mut pages=Vec::new();
+        for sheet in self.sheets.iter().filter(|sheet|!sheet.hidden) {
+            let rows=PrintAxis::new(sheet.default_row_height,&sheet.row_heights,&sheet.hidden_rows,MAX_ROWS);
+            let cols=PrintAxis::new(sheet.default_col_width,&sheet.widths,&sheet.hidden_cols,MAX_COLS);
+            for ((row_block,col_block),cells) in print_blocks(sheet) {
+                let top=rows.original(row_block*38);
+                let left=cols.original(col_block*8);
+                let origin_x=cols.position(left);
+                let origin_y=rows.position(top);
+                let cell_rect=|cell:&PrintCell<'_>| {
+                    let range=cell.merge.unwrap_or(Range::new(cell.row,cell.col,cell.row,cell.col));
+                    let x=(cols.position(range.c0)-origin_x)*0.75;
+                    let y=(rows.position(range.r0)-origin_y)*0.75;
+                    let width=(cols.position(range.c1+1)-cols.position(range.c0))*0.75;
+                    let height=(rows.position(range.r1+1)-rows.position(range.r0))*0.75;
+                    (x,y,width,height)
+                };
+                let images:Vec<_>=sheet.images.iter().filter(|image|
+                    (rows.visible(image.row)/38,cols.visible(image.col)/8)==(row_block,col_block)).collect();
+                let mut width=(cols.position(cols.original((col_block+1)*8))-origin_x)*0.75;
+                let mut height=(rows.position(rows.original((row_block+1)*38))-origin_y)*0.75;
+                for cell in &cells {let (x,y,w,h)=cell_rect(cell);width=width.max(x+w);height=height.max(y+h);}
+                for image in &images {
+                    width=width.max((cols.position(image.col)-origin_x+f64::from(image.x_offset+image.width))*0.75);
+                    height=height.max((rows.position(image.row)-origin_y+f64::from(image.y_offset+image.height))*0.75);
                 }
-            }
-            if blocks.is_empty() {
-                blocks.entry((0, 0)).or_default();
-            }
-            for ((row_block, col_block), cells) in blocks {
-                let top = row_block * 38;
-                let left = col_block * 8;
-                let mut items = vec![Primitive::Text {
-                    x: 36.0,
-                    y: 26.0,
-                    text: format!(
-                        "{} · {}:{}",
-                        s.name,
-                        address(top, left),
-                        address((top + 37).min(MAX_ROWS - 1), (left + 7).min(MAX_COLS - 1))
-                    ),
-                    size: 12.0,
-                    color: [28, 32, 38],
-                }];
-                for (row, col, cell) in cells {
-                    let x = 36.0 + (col - left) as f32 * 65.0;
-                    let y = 54.0 + (row - top) as f32 * 18.0;
-                    if let Some(color) = cell.fmt.fill {
-                        items.push(Primitive::Rect {
-                            x,
-                            y,
-                            w: 65.0,
-                            h: 18.0,
-                            color,
-                        });
+                let scale=(523.0/width.max(1.0)).min(752.0/height.max(1.0)).min(1.0) as f32;
+                let mut items=vec![Primitive::Text{x:36.0,y:26.0,
+                    text:format!("{} · {}:{}",sheet.name,address(top,left),
+                        address(rows.original((row_block+1)*38).saturating_sub(1).min(MAX_ROWS-1),
+                            cols.original((col_block+1)*8).saturating_sub(1).min(MAX_COLS-1))),
+                    size:12.0,color:[28,32,38]}];
+                for printed in cells {
+                    let (x,y,w,h)=cell_rect(&printed);
+                    let (x,y,w,h)=(36.0+x as f32*scale,54.0+y as f32*scale,w as f32*scale,h as f32*scale);
+                    let fmt=printed.cell.map(|cell|cell.fmt.clone()).unwrap_or_default();
+                    let value=printed.cell.map(|cell|&cell.value).unwrap_or(&Value::Empty);
+                    if let Some(fill)=sheet.conditional_fill(printed.row,printed.col,value).or(fmt.fill) {
+                        items.push(Primitive::Rect{x,y,w,h,color:fill});
                     }
-                    let text =
-                        super::format::display(&cell.value, &cell.fmt.number, self.locale_ru);
-                    items.push(Primitive::TextStyled {
-                        x: x + 3.0,
-                        y: y + 3.0,
-                        text,
-                        size: cell.fmt.size.min(14.0),
-                        color: cell.fmt.color,
-                        bold: cell.fmt.bold,
-                        italic: cell.fmt.italic,
-                        font: cell.fmt.font.clone(),
-                    });
-                    for offset in [
-                        cell.fmt.underline.then_some(15.0),
-                        cell.fmt.strike.then_some(8.0),
-                    ]
-                    .into_iter()
-                    .flatten()
-                    {
-                        let yy = y + offset;
-                        items.push(Primitive::Line {
-                            x1: x + 3.0,
-                            y1: yy,
-                            x2: x + 62.0,
-                            y2: yy,
-                            width: 0.5,
-                            color: cell.fmt.color,
-                        });
+                    let text=super::format::display(value,&fmt.number,self.locale_ru);
+                    let text_color=super::format::color(value,&fmt.number).unwrap_or(fmt.color);
+                    let size=fmt.size*scale;
+                    items.push(Primitive::TextStyled{x:x+3.0*scale,y:y+3.0*scale,text,
+                        size,color:text_color,bold:fmt.bold,italic:fmt.italic,font:fmt.font.clone()});
+                    for offset in [fmt.underline.then_some(size+2.0*scale),fmt.strike.then_some(size*0.55)]
+                        .into_iter().flatten() {
+                        items.push(Primitive::Line{x1:x+3.0*scale,y1:y+offset,x2:x+w-3.0*scale,y2:y+offset,
+                            width:0.5,color:text_color});
                     }
-                    items.push(Primitive::Line {
-                        x1: x,
-                        y1: y + 18.0,
-                        x2: x + 65.0,
-                        y2: y + 18.0,
-                        width: 0.4,
-                        color: [210, 214, 220],
-                    });
-                    items.push(Primitive::Line {
-                        x1: x + 65.0,
-                        y1: y,
-                        x2: x + 65.0,
-                        y2: y + 18.0,
-                        width: 0.4,
-                        color: [210, 214, 220],
+                    let color=if fmt.border {[70,70,70]}else{[210,214,220]};
+                    let stroke=if fmt.border {0.75}else{0.4}*scale;
+                    for (x1,y1,x2,y2) in [(x,y+h,x+w,y+h),(x+w,y,x+w,y+h)] {
+                        items.push(Primitive::Line{x1,y1,x2,y2,width:stroke,color});
+                    }
+                    if fmt.border {
+                        for (x1,y1,x2,y2) in [(x,y,x+w,y),(x,y,x,y+h)] {
+                            items.push(Primitive::Line{x1,y1,x2,y2,width:stroke,color});
+                        }
+                    }
+                }
+                for image in images {
+                    items.push(Primitive::Image{
+                        x:36.0+((cols.position(image.col)-origin_x+f64::from(image.x_offset))*0.75) as f32*scale,
+                        y:54.0+((rows.position(image.row)-origin_y+f64::from(image.y_offset))*0.75) as f32*scale,
+                        w:image.width*0.75*scale,h:image.height*0.75*scale,bytes:image.bytes.clone(),
                     });
                 }
-                pages.push(Page {
-                    width: 595.0,
-                    height: 842.0,
-                    items,
-                });
+                pages.push(Page{width:595.0,height:842.0,items});
             }
         }
         pages
@@ -1794,6 +1826,91 @@ mod phase200_model_defects {
         let limit=book.text_bytes();
         book.fill_with_limit(id,Range::new(0,2,0,3),Range::new(0,0,0,1),limit)?;
         assert_eq!(book.text_bytes(),limit);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod phase200_print_defects {
+    use super::*;
+    fn fill(book:&mut Book,row:u32,col:u32,color:[u8;3])->Result<(),String> {
+        let id=book.active_id();book.set_format(id,Range::new(row,col,row,col),CellFormat{fill:Some(color),..CellFormat::default()})
+    }
+    fn rect_width(pages:&[Page],color:[u8;3])->Result<f32,String> {
+        pages.iter().flat_map(|page|&page.items).find_map(|item|match item {
+            Primitive::Rect{w,color:actual,..} if *actual==color=>Some(*w),_=>None,
+        }).ok_or("rectangle".into())
+    }
+    #[test]
+    fn print_geometry_preserves_custom_width_and_height_ratios() -> Result<(),String> {
+        let mut book=Book::default();let id=book.active_id();
+        book.set_cell(id,0,0,"first")?;book.set_cell(id,0,1,"second")?;
+        fill(&mut book,0,0,[1,2,3])?;fill(&mut book,0,1,[4,5,6])?;
+        book.sheets[0].widths.insert(0,200.0);book.sheets[0].widths.insert(1,100.0);
+        let pages=book.pages();
+        assert!((rect_width(&pages,[1,2,3])?/rect_width(&pages,[4,5,6])?-2.0).abs()<1e-5);
+        Ok(())
+    }
+    #[test]
+    fn print_compacts_hidden_axes_before_assigning_pages() -> Result<(),String> {
+        let mut book=Book::default();let id=book.active_id();
+        book.set_cell(id,0,0,"first")?;book.set_cell(id,39,0,"last")?;
+        book.sheets[0].hidden_rows.extend(1..39);
+        assert_eq!(book.print_page_count(),1);
+        assert_eq!(book.pages().len(),1);
+        let axis=PrintAxis::new(26.0,&BTreeMap::new(),&book.sheets[0].hidden_rows,MAX_ROWS);
+        assert_eq!(axis.original(1),39);
+        assert_eq!(axis.position(39),26.0);
+        Ok(())
+    }
+    #[test]
+    fn print_merges_use_one_rectangle_and_retain_hidden_anchor_text() -> Result<(),String> {
+        let mut book=Book::default();let id=book.active_id();
+        book.set_cell(id,0,0,"merged")?;book.merge(id,Range::new(0,0,1,1))?;
+        fill(&mut book,0,0,[1,2,3])?;fill(&mut book,0,1,[7,8,9])?;fill(&mut book,2,0,[4,5,6])?;
+        let pages=book.pages();
+        assert!((rect_width(&pages,[1,2,3])?/rect_width(&pages,[4,5,6])?-2.0).abs()<1e-5);
+        assert!(rect_width(&pages,[7,8,9]).is_err());
+        book.sheets[0].hidden_cols.insert(0);
+        assert!(book.pages().iter().flat_map(|page|&page.items).any(|item|matches!(item,Primitive::TextStyled{text,..} if text=="merged")));
+        Ok(())
+    }
+    #[test]
+    fn print_keeps_font_sizes_above_fourteen_points() -> Result<(),String> {
+        let mut book=Book::default();let id=book.active_id();book.set_cell(id,0,0,"Large")?;
+        book.sheets[0].cell_mut(0,0).ok_or("cell")?.fmt.size=36.0;
+        let size=book.pages().iter().flat_map(|page|&page.items).find_map(|item|match item {
+            Primitive::TextStyled{text,size,..} if text=="Large"=>Some(*size),_=>None,
+        }).ok_or("text")?;
+        assert!(size>30.0);
+        Ok(())
+    }
+    #[test]
+    fn print_cell_borders_draw_all_four_sides() -> Result<(),String> {
+        let mut book=Book::default();let id=book.active_id();book.set_cell(id,0,0,"Border")?;
+        book.sheets[0].cell_mut(0,0).ok_or("cell")?.fmt.border=true;
+        let count=book.pages().iter().flat_map(|page|&page.items).filter(|item|matches!(item,
+            Primitive::Line{color:[70,70,70],..})).count();
+        assert_eq!(count,4);
+        Ok(())
+    }
+    #[test]
+    fn print_applies_the_first_matching_conditional_fill() -> Result<(),String> {
+        let mut book=Book::default();let id=book.active_id();book.set_cell(id,0,0,"20")?;
+        book.sheets[0].conditional.push(ConditionalRule{range:Range::new(0,0,0,0),operator:">".into(),threshold:10.0,fill:[9,8,7]});
+        assert!(rect_width(&book.pages(),[9,8,7]).is_ok());
+        Ok(())
+    }
+    #[test]
+    fn print_includes_pictures_and_counts_their_anchor_pages() -> Result<(),String> {
+        let mut png=std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(2,2).write_to(&mut png,image::ImageFormat::Png).map_err(|error|error.to_string())?;
+        let mut book=Book::default();let id=book.active_id();book.set_cell(id,0,0,"first")?;
+        book.add_image(id,100,20,png.into_inner())?;
+        let pages=book.pages();
+        assert_eq!(book.print_page_count(),pages.len());
+        assert_eq!(pages.len(),2);
+        assert_eq!(pages.iter().flat_map(|page|&page.items).filter(|item|matches!(item,Primitive::Image{..})).count(),1);
         Ok(())
     }
 }

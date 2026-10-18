@@ -582,13 +582,11 @@ fn toolbar(
                     let col = book.selection.col;
                     let mut width = book
                         .active_sheet()
-                        .and_then(|sheet| sheet.widths.get(&col))
-                        .copied()
+                        .map(|sheet|sheet.widths.get(&col).copied().unwrap_or(sheet.default_col_width))
                         .unwrap_or(96.0);
                     let mut height = book
                         .active_sheet()
-                        .and_then(|sheet| sheet.row_heights.get(&row))
-                        .copied()
+                        .map(|sheet|sheet.row_heights.get(&row).copied().unwrap_or(sheet.default_row_height))
                         .unwrap_or(26.0);
                     ui.horizontal(|ui| {
                         ui.label("Ширина столбца");
@@ -1201,22 +1199,19 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
             let c0 = axis_index(
                 (viewport.min.x - 48.0).max(0.0),
                 cols,
-                96.0,
-                &sheet.widths,
+                sheet.default_col_width, &sheet.widths,
                 &sheet.hidden_cols,
             );
             let r0 = axis_index(
                 (viewport.min.y - 28.0).max(0.0),
                 rows,
-                26.0,
-                &sheet.row_heights,
+                sheet.default_row_height, &sheet.row_heights,
                 &sheet.hidden_rows,
             );
             let c1 = axis_index(
                 viewport.max.x,
                 cols,
-                96.0,
-                &sheet.widths,
+                sheet.default_col_width, &sheet.widths,
                 &sheet.hidden_cols,
             )
             .saturating_add(2)
@@ -1224,8 +1219,7 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
             let r1 = axis_index(
                 viewport.max.y,
                 rows,
-                26.0,
-                &sheet.row_heights,
+                sheet.default_row_height, &sheet.row_heights,
                 &sheet.hidden_rows,
             )
             .saturating_add(2)
@@ -1331,12 +1325,11 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                 let image_rect = Rect::from_min_size(
                     origin
                         + Vec2::new(
-                            48.0 + axis_pos(image.col, 96.0, &sheet.widths, &sheet.hidden_cols)
+                            48.0 + axis_pos(image.col, sheet.default_col_width, &sheet.widths, &sheet.hidden_cols)
                                 + image.x_offset,
                             28.0 + axis_pos(
                                 image.row,
-                                26.0,
-                                &sheet.row_heights,
+                                sheet.default_row_height, &sheet.row_heights,
                                 &sheet.hidden_rows,
                             ) + image.y_offset,
                         ),
@@ -1400,7 +1393,7 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                     (
                         c,
                         cell_rect(sheet, origin, viewport, 0, c, frozen_r, frozen_c).left(),
-                        sheet.widths.get(&c).copied().unwrap_or(96.0),
+                        sheet.widths.get(&c).copied().unwrap_or(sheet.default_col_width),
                     )
                 })
                 .collect();
@@ -1431,7 +1424,7 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                 if res.dragged()
                     && let Some(s) = book.active_sheet_mut()
                 {
-                    let old = s.widths.get(&c).copied().unwrap_or(96.0);
+                    let old = s.widths.get(&c).copied().unwrap_or(s.default_col_width);
                     s.widths
                         .insert(c, (old + res.drag_delta().x).clamp(24.0, 1000.0));
                     changed = true;
@@ -1445,7 +1438,7 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                     continue;
                 }
                 let y = cell_rect(sheet, origin, viewport, r, 0, frozen_r, frozen_c).top();
-                let h = sheet.row_heights.get(&r).copied().unwrap_or(26.0);
+                let h = sheet.row_heights.get(&r).copied().unwrap_or(sheet.default_row_height);
                 let header = Rect::from_min_size(
                     Pos2::new(origin.x + viewport.min.x, y),
                     Vec2::new(48.0, h),
@@ -1476,40 +1469,36 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                     let r = axis_index(
                         local.y - 28.0,
                         rows,
-                        26.0,
-                        &sheet.row_heights,
+                        sheet.default_row_height, &sheet.row_heights,
                         &sheet.hidden_rows,
                     )
                     .min(rows - 1);
                     let c = axis_index(
                         local.x - 48.0,
                         cols,
-                        96.0,
-                        &sheet.widths,
+                        sheet.default_col_width, &sheet.widths,
                         &sheet.hidden_cols,
                     )
                     .min(cols - 1);
                     let r = if local.y - viewport.min.y
-                        < 28.0 + axis_pos(frozen_r, 26.0, &sheet.row_heights, &sheet.hidden_rows)
+                        < 28.0 + axis_pos(frozen_r, sheet.default_row_height, &sheet.row_heights, &sheet.hidden_rows)
                     {
                         axis_index(
                             local.y - viewport.min.y - 28.0,
                             rows,
-                            26.0,
-                            &sheet.row_heights,
+                            sheet.default_row_height, &sheet.row_heights,
                             &sheet.hidden_rows,
                         )
                     } else {
                         r
                     };
                     let c = if local.x - viewport.min.x
-                        < 48.0 + axis_pos(frozen_c, 96.0, &sheet.widths, &sheet.hidden_cols)
+                        < 48.0 + axis_pos(frozen_c, sheet.default_col_width, &sheet.widths, &sheet.hidden_cols)
                     {
                         axis_index(
                             local.x - viewport.min.x - 48.0,
                             cols,
-                            96.0,
-                            &sheet.widths,
+                            sheet.default_col_width, &sheet.widths,
                             &sheet.hidden_cols,
                         )
                     } else {
@@ -2416,22 +2405,21 @@ fn grid_size(sheet: &Sheet, rows: u32, cols: u32) -> (f32, f32) {
         .map(|merge| merge.c1.saturating_add(1))
         .max()
         .unwrap_or(0);
-    let mut width = axis_pos(cols.max(col_end), 96.0, &sheet.widths, &sheet.hidden_cols) + 48.0;
+    let mut width = axis_pos(cols.max(col_end), sheet.default_col_width, &sheet.widths, &sheet.hidden_cols) + 48.0;
     let mut height = axis_pos(
         rows.max(row_end),
-        26.0,
-        &sheet.row_heights,
+        sheet.default_row_height, &sheet.row_heights,
         &sheet.hidden_rows,
     ) + 28.0;
     for image in &sheet.images {
         width = width.max(
-            48.0 + axis_pos(image.col, 96.0, &sheet.widths, &sheet.hidden_cols)
+            48.0 + axis_pos(image.col, sheet.default_col_width, &sheet.widths, &sheet.hidden_cols)
                 + image.x_offset
                 + image.width
                 + 16.0,
         );
         height = height.max(
-            28.0 + axis_pos(image.row, 26.0, &sheet.row_heights, &sheet.hidden_rows)
+            28.0 + axis_pos(image.row, sheet.default_row_height, &sheet.row_heights, &sheet.hidden_rows)
                 + image.y_offset
                 + image.height
                 + 16.0,
@@ -2449,11 +2437,11 @@ fn constrained_image_size(original: Vec2, requested: Vec2, keep_ratio: bool) -> 
 fn place_image(sheet: &mut Sheet, image: u64, local: Vec2, size: Vec2) {
     let x = (local.x - 48.0).max(0.0);
     let y = (local.y - 28.0).max(0.0);
-    let col = axis_index(x, MAX_COLS, 96.0, &sheet.widths, &sheet.hidden_cols);
-    let row = axis_index(y, MAX_ROWS, 26.0, &sheet.row_heights, &sheet.hidden_rows);
-    let x_offset = (x - axis_pos(col, 96.0, &sheet.widths, &sheet.hidden_cols)).clamp(0.0, 4000.0);
+    let col = axis_index(x, MAX_COLS, sheet.default_col_width, &sheet.widths, &sheet.hidden_cols);
+    let row = axis_index(y, MAX_ROWS, sheet.default_row_height, &sheet.row_heights, &sheet.hidden_rows);
+    let x_offset = (x - axis_pos(col, sheet.default_col_width, &sheet.widths, &sheet.hidden_cols)).clamp(0.0, 4000.0);
     let y_offset =
-        (y - axis_pos(row, 26.0, &sheet.row_heights, &sheet.hidden_rows)).clamp(0.0, 4000.0);
+        (y - axis_pos(row, sheet.default_row_height, &sheet.row_heights, &sheet.hidden_rows)).clamp(0.0, 4000.0);
     if let Some(picture) = sheet.images.iter_mut().find(|i| i.id == image) {
         picture.row = row;
         picture.col = col;
@@ -2573,14 +2561,14 @@ fn cell_rect(
     frozen_cols: u32,
 ) -> Rect {
     let x = 48.0
-        + axis_pos(col, 96.0, &sheet.widths, &sheet.hidden_cols)
+        + axis_pos(col, sheet.default_col_width, &sheet.widths, &sheet.hidden_cols)
         + if col < frozen_cols {
             viewport.min.x
         } else {
             0.0
         };
     let y = 28.0
-        + axis_pos(row, 26.0, &sheet.row_heights, &sheet.hidden_rows)
+        + axis_pos(row, sheet.default_row_height, &sheet.row_heights, &sheet.hidden_rows)
         + if row < frozen_rows {
             viewport.min.y
         } else {
@@ -2589,8 +2577,8 @@ fn cell_rect(
     Rect::from_min_size(
         origin + Vec2::new(x, y),
         Vec2::new(
-            sheet.widths.get(&col).copied().unwrap_or(96.0),
-            sheet.row_heights.get(&row).copied().unwrap_or(26.0),
+            sheet.widths.get(&col).copied().unwrap_or(sheet.default_col_width),
+            sheet.row_heights.get(&row).copied().unwrap_or(sheet.default_row_height),
         ),
     )
 }
@@ -2615,11 +2603,11 @@ fn cell_area(
         .iter()
         .find(|merge| merge.r0 == row && merge.c0 == col)
     {
-        rect.max.x = rect.min.x + axis_pos(merge.c1 + 1, 96.0, &sheet.widths, &sheet.hidden_cols)
-            - axis_pos(merge.c0, 96.0, &sheet.widths, &sheet.hidden_cols);
+        rect.max.x = rect.min.x + axis_pos(merge.c1 + 1, sheet.default_col_width, &sheet.widths, &sheet.hidden_cols)
+            - axis_pos(merge.c0, sheet.default_col_width, &sheet.widths, &sheet.hidden_cols);
         rect.max.y = rect.min.y
-            + axis_pos(merge.r1 + 1, 26.0, &sheet.row_heights, &sheet.hidden_rows)
-            - axis_pos(merge.r0, 26.0, &sheet.row_heights, &sheet.hidden_rows);
+            + axis_pos(merge.r1 + 1, sheet.default_row_height, &sheet.row_heights, &sheet.hidden_rows)
+            - axis_pos(merge.r0, sheet.default_row_height, &sheet.row_heights, &sheet.hidden_rows);
     }
     rect
 }

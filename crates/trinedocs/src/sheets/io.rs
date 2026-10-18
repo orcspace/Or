@@ -1369,6 +1369,22 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
             }
             let s = book.sheet_by_id_mut(id).ok_or("Лист не найден")?;
             match tag {
+                "sheetFormatPr" => {
+                    if let Some(raw)=a.get("defaultColWidth") {
+                        let width=raw.parse::<f64>().ok().filter(|value|value.is_finite()&&*value>0.0)
+                            .ok_or("Недопустимая defaultColWidth")?;
+                        let pixels=((256.0*width+18.0)/256.0*7.0).trunc();
+                        if !(1.0..=1800.0).contains(&pixels) {return Err("defaultColWidth вне поддерживаемых пределов".into());}
+                        s.default_col_width=pixels as f32;
+                    }
+                    if let Some(raw)=a.get("defaultRowHeight") {
+                        let points=raw.parse::<f64>().ok().filter(|value|value.is_finite()&&*value>0.0)
+                            .ok_or("Недопустимая defaultRowHeight")?;
+                        let pixels=points*4.0/3.0;
+                        if !(1.0..=600.0).contains(&pixels) {return Err("defaultRowHeight вне поддерживаемых пределов".into());}
+                        s.default_row_height=pixels as f32;
+                    }
+                }
                 "col" => {
                     let min = a
                         .get("min")
@@ -1874,11 +1890,11 @@ fn picture_geometry(
     sheet: &super::model::Sheet,
     anchor: &PictureAnchor,
 ) -> (u32, u32, f32, f32, f32, f32) {
-    let x = drawing_axis_position(anchor.from.col, 96.0, &sheet.widths, &sheet.hidden_cols)
+    let x = drawing_axis_position(anchor.from.col, sheet.default_col_width, &sheet.widths, &sheet.hidden_cols)
         + anchor.from.col_off as f32 / 9525.0;
     let y = drawing_axis_position(
         anchor.from.row,
-        26.0,
+        sheet.default_row_height,
         &sheet.row_heights,
         &sheet.hidden_rows,
     ) + anchor.from.row_off as f32 / 9525.0;
@@ -1891,22 +1907,22 @@ fn picture_geometry(
         let row = drawing_axis_index(
             y,
             super::model::MAX_ROWS,
-            26.0,
+            sheet.default_row_height,
             &sheet.row_heights,
             &sheet.hidden_rows,
         );
         let col = drawing_axis_index(
             x,
             super::model::MAX_COLS,
-            96.0,
+            sheet.default_col_width,
             &sheet.widths,
             &sheet.hidden_cols,
         );
         (
             row,
             col,
-            x - drawing_axis_position(col, 96.0, &sheet.widths, &sheet.hidden_cols),
-            y - drawing_axis_position(row, 26.0, &sheet.row_heights, &sheet.hidden_rows),
+            x - drawing_axis_position(col, sheet.default_col_width, &sheet.widths, &sheet.hidden_cols),
+            y - drawing_axis_position(row, sheet.default_row_height, &sheet.row_heights, &sheet.hidden_rows),
         )
     } else {
         (
@@ -1921,10 +1937,10 @@ fn picture_geometry(
         .as_ref()
         .map(|end| {
             (
-                drawing_axis_position(end.col, 96.0, &sheet.widths, &sheet.hidden_cols)
+                drawing_axis_position(end.col, sheet.default_col_width, &sheet.widths, &sheet.hidden_cols)
                     + end.col_off as f32 / 9525.0
                     - x,
-                drawing_axis_position(end.row, 26.0, &sheet.row_heights, &sheet.hidden_rows)
+                drawing_axis_position(end.row, sheet.default_row_height, &sheet.row_heights, &sheet.hidden_rows)
                     + end.row_off as f32 / 9525.0
                     - y,
             )
@@ -1980,6 +1996,16 @@ fn xlsx_format(fmt: &CellFormat) -> Format {
 fn rgb_number(v: [u8; 3]) -> u32 {
     u32::from(v[0]) * 65536 + u32::from(v[1]) * 256 + u32::from(v[2])
 }
+fn pin_drawing_columns(ws:&mut rust_xlsxwriter::Worksheet,sheet:&super::model::Sheet,col:u32,offset:f32,width:f32)->Result<(),String> {
+    let end=drawing_axis_index(drawing_axis_position(col,sheet.default_col_width,&sheet.widths,&sheet.hidden_cols)+offset+width,
+        super::model::MAX_COLS,sheet.default_col_width,&sheet.widths,&sheet.hidden_cols);
+    for column in col..=end {
+        if !sheet.widths.contains_key(&column)&&!sheet.hidden_cols.contains(&column) {
+            ws.set_column_width_pixels(column as u16,sheet.default_col_width.round() as u32).map_err(|error|error.to_string())?;
+        }
+    }
+    Ok(())
+}
 fn write_xlsx(book: &Book) -> Result<Vec<u8>, String> {
     if book.sheets.is_empty() {
         return Err("Книга не содержит листов".into());
@@ -1995,6 +2021,7 @@ fn write_xlsx(book: &Book) -> Result<Vec<u8>, String> {
         ws.set_name(&sheet.name).map_err(|e| e.to_string())?;
         ws.set_active(index == book.active);
         ws.set_hidden(sheet.hidden);
+        ws.set_default_row_height(f64::from(sheet.default_row_height)*0.75);
         if index == book.active {
             ws.set_selection(book.selection.row, book.selection.col as u16,
                 book.selection.anchor_row, book.selection.anchor_col as u16)
@@ -2099,6 +2126,7 @@ fn write_xlsx(book: &Book) -> Result<Vec<u8>, String> {
                 .map_err(|error|error.to_string())?;
         }
         for model in &sheet.charts {
+            pin_drawing_columns(ws,sheet,model.col,0.0,model.width)?;
             let mut chart = Chart::new(match model.kind {
                 ChartKind::Column => ChartType::Column,
                 ChartKind::Bar => ChartType::Bar,
@@ -2146,32 +2174,7 @@ fn write_xlsx(book: &Book) -> Result<Vec<u8>, String> {
             if !model.alt.is_empty() {
                 image = image.set_alt_text(&model.alt);
             }
-            // The app's default cell is 96x26 px, Excel's is 64x20: pin the spanned
-            // cells so the two-cell anchor written for the picture reads back unchanged.
-            let spanned_cols = ((model.x_offset.max(0.0) + model.width) / 96.0).ceil() as u32 + 1;
-            let spanned_rows = ((model.y_offset.max(0.0) + model.height) / 26.0).ceil() as u32 + 1;
-            for col in model.col
-                ..model
-                    .col
-                    .saturating_add(spanned_cols)
-                    .min(super::model::MAX_COLS)
-            {
-                if !sheet.widths.contains_key(&col) && !sheet.hidden_cols.contains(&col) {
-                    ws.set_column_width_pixels(col as u16, 96)
-                        .map_err(|e| e.to_string())?;
-                }
-            }
-            for row in model.row
-                ..model
-                    .row
-                    .saturating_add(spanned_rows)
-                    .min(super::model::MAX_ROWS)
-            {
-                if !sheet.row_heights.contains_key(&row) && !sheet.hidden_rows.contains(&row) {
-                    ws.set_row_height(row, 26.0 * 72.0 / 96.0)
-                        .map_err(|e| e.to_string())?;
-                }
-            }
+            pin_drawing_columns(ws,sheet,model.col,model.x_offset,model.width)?;
             ws.insert_image_with_offset(
                 model.row,
                 model.col as u16,
@@ -2217,6 +2220,19 @@ fn typed_formula_strings(xml: &[u8], sheet: &super::model::Sheet) -> Result<Vec<
     loop {
         let event = reader.read_event().map_err(|error| error.to_string())?;
         match event {
+            Event::Empty(e) if e.local_name().as_ref()=="sheetFormatPr" => {
+                let values=attrs(&e,&reader)?;
+                let mut element=e.into_owned();element.clear_attributes();
+                for (key,value) in values.iter().filter(|(key,_)|!matches!(key.as_str(),"defaultColWidth"|"defaultRowHeight"|"customHeight")) {
+                    element.push_attribute((key.as_str(),value.as_str()));
+                }
+                let width=((f64::from(sheet.default_col_width.round())+0.5)/7.0-18.0/256.0).to_string();
+                let height=(f64::from(sheet.default_row_height)*0.75).to_string();
+                element.push_attribute(("defaultColWidth",width.as_str()));
+                element.push_attribute(("defaultRowHeight",height.as_str()));
+                element.push_attribute(("customHeight","1"));
+                writer.write_event(Event::Empty(element)).map_err(|error|error.to_string())?;
+            }
             Event::Start(e) if e.local_name().as_ref() == "c" => {
                 let values = attrs(&e, &reader)?;
                 result = values
@@ -2298,7 +2314,7 @@ fn exact_row_height(
     Ok(element)
 }
 fn sheet_needs_patch(sheet: &super::model::Sheet) -> bool {
-    sheet
+    sheet.default_col_width != 64.0 || sheet.default_row_height != 20.0 || sheet
         .row_heights
         .values()
         .any(|height| height.fract() != 0.0)
@@ -2989,11 +3005,11 @@ fn write_html_book(book:&Book,cell_limit:u64,byte_limit:usize)->Result<Vec<u8>,S
         }
         html_push(&mut out,&format!("<section><h2>{}</h2><table><colgroup>",crate::package::xml_escape(&sheet.name)),byte_limit)?;
         for col in (0..=cols).filter(|col|!sheet.hidden_cols.contains(col)) {
-            html_push(&mut out,&format!("<col style=\"width:{}px\">",sheet.widths.get(&col).copied().unwrap_or(96.0)),byte_limit)?;
+            html_push(&mut out,&format!("<col style=\"width:{}px\">",sheet.widths.get(&col).copied().unwrap_or(sheet.default_col_width)),byte_limit)?;
         }
         html_push(&mut out,"</colgroup>",byte_limit)?;
         for row in (0..=rows).filter(|row|!sheet.hidden_rows.contains(row)) {
-            html_push(&mut out,&format!("<tr style=\"height:{}px\">",sheet.row_heights.get(&row).copied().unwrap_or(26.0)),byte_limit)?;
+            html_push(&mut out,&format!("<tr style=\"height:{}px\">",sheet.row_heights.get(&row).copied().unwrap_or(sheet.default_row_height)),byte_limit)?;
             for col in (0..=cols).filter(|col|!sheet.hidden_cols.contains(col)) {
                 let merge=merged.get(&(row,col)).copied();
                 let display_anchor = merge.and_then(|range| {
@@ -3333,6 +3349,30 @@ mod phase200_conditional_defect {
         let formats=differential_fills(br#"<styleSheet><dxfs><dxf/><dxf><fill><patternFill><bgColor rgb="FFABCDEF"/></patternFill></fill></dxf></dxfs></styleSheet>"#,&[],&[])?;
         assert_eq!(formats,vec![None,Some([0xAB,0xCD,0xEF])]);
         assert!(conditional_rules(br#"<worksheet><conditionalFormatting sqref="A1"><cfRule type="expression" dxfId="1" priority="1"><formula>A1&gt;2</formula></cfRule></conditionalFormatting></worksheet>"#,&formats).is_err());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod phase200_default_geometry_defect {
+    use super::*;
+    #[test]
+    fn worksheet_default_geometry_survives_import_export_and_old_native_files() -> Result<(),String> {
+        let mut book=Book::default();let id=book.active_id();book.sheets[0].name="Sheet1".into();
+        let parts=BTreeMap::from([
+            ("xl/workbook.xml".into(),br#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" r:id="s"/></sheets></workbook>"#.to_vec()),
+            ("xl/_rels/workbook.xml.rels".into(),br#"<Relationships><Relationship Id="s" Target="worksheets/sheet1.xml"/></Relationships>"#.to_vec()),
+            ("xl/worksheets/sheet1.xml".into(),br#"<worksheet><sheetFormatPr defaultColWidth="20" defaultRowHeight="30"/></worksheet>"#.to_vec()),
+        ]);
+        read_metadata(&mut book,&parts)?;
+        assert_eq!(book.sheets[0].default_col_width,140.0);
+        assert_eq!(book.sheets[0].default_row_height,40.0);
+        book.set_cell(id,0,0,"text")?;
+        let imported=read(&write(&book,"xlsx")?,"xlsx")?;
+        assert_eq!(imported.sheets[0].default_col_width,140.0);
+        assert_eq!(imported.sheets[0].default_row_height,40.0);
+        let old:super::super::model::Sheet=serde_json::from_str("{}").map_err(|error|error.to_string())?;
+        assert_eq!((old.default_col_width,old.default_row_height),(96.0,26.0));
         Ok(())
     }
 }
