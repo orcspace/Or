@@ -491,7 +491,7 @@ impl Deck {
             .filter(|e| matches!(e.kind, ElementKind::Text))
             .map(|e| e.id)
             .collect::<Vec<_>>();
-        for (index, id) in text_ids.into_iter().enumerate() {
+        for (index, id) in text_ids.into_iter().take(needed).enumerate() {
             if let Some(e) = slide.element_mut(id) {
                 if index == 0 {
                     e.x = 60.0;
@@ -1784,5 +1784,20 @@ mod agenda_tests {
         assert!(small.insert_agenda().is_err());
         assert_eq!(small, before);
         Ok(())
+    }
+}
+
+
+#[cfg(test)]
+mod hundred_layout_tests {
+    use super::*;
+    #[test]
+    fn layout_change_preserves_additional_text_boxes()->Result<(),String> {
+        let mut deck=Deck::empty();let slide=deck.add_slide("content");
+        let extra=deck.add_element(slide,ElementKind::Text)?;
+        let element=deck.slide_mut(slide).and_then(|s|s.element_mut(extra)).ok_or("extra")?;
+        element.x=710.0;element.y=430.0;element.w=120.0;element.h=40.0;element.text="Independent annotation".into();
+        let original=element.clone();deck.set_layout(slide,"content")?;
+        assert_eq!(deck.slide(slide).and_then(|s|s.element(extra)),Some(&original));deck.validate()?;Ok(())
     }
 }

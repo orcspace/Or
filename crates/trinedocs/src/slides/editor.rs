@@ -27,6 +27,7 @@ struct State {
     selected: Vec<u64>,
     clipboard: std::sync::Arc<Vec<Element>>,
     drag_original: Vec<(u64, f32, f32, f32, f32)>,
+    drag_target: Option<u64>,
     edit_text: Option<u64>,
     /// Table cell (row, column) edited in place when `edit_text` is a table.
     edit_cell: Option<(usize, usize)>,
@@ -156,6 +157,10 @@ pub fn show(ui: &mut egui::Ui, deck: &mut Deck) -> bool {
         record_presentation(ui.ctx(), memory_id, state.presentation.active);
         ui.ctx().data_mut(|d| d.insert_temp(memory_id, state));
         return false;
+    }
+    if ui.is_enabled() && state.edit_text.is_some() && !egui::Popup::is_any_open(ui.ctx())
+        && ui.input(|input|input.key_pressed(egui::Key::Escape)) {
+        end_inline_edit(ui.ctx(),&mut state);
     }
     let mut changed = false;
     let image_result = state
@@ -2095,12 +2100,16 @@ fn inline_editor(
         };
         let size = font_size.min(ch / scale * 0.7) * scale;
         crate::docs::editor::reconcile_text_edit(ui.ctx(), editor_id.with((r, c)), value);
+        let cell_editor_id=editor_id.with((r,c));
+        let enter_navigation=ui.memory(|memory|memory.has_focus(cell_editor_id))
+            && ui.input(|input|input.key_pressed(egui::Key::Enter)&&!input.modifiers.shift&&!input.modifiers.ctrl&&!input.modifiers.alt);
+        if enter_navigation {ui.input_mut(|input|{input.consume_key(egui::Modifiers::NONE,egui::Key::Enter);});}
         let response = ui.put(
             Rect::from_min_size(
                 cell.min + Vec2::splat(5.0 * scale),
-                Vec2::new((cw - 10.0 * scale).max(8.0), size * 1.3),
+                Vec2::new((cw - 10.0 * scale).max(8.0), (ch-10.0*scale).max(size*1.3)),
             ),
-            egui::TextEdit::singleline(value)
+            egui::TextEdit::multiline(value)
                 .id(editor_id.with((r, c)))
                 .frame(egui::Frame::NONE)
                 .margin(egui::Margin::ZERO)
@@ -2119,8 +2128,9 @@ fn inline_editor(
             )
         });
         let moving = response.has_focus() && (up || down);
-        if moving || (response.lost_focus() && (tab || enter)) {
+        if moving || enter_navigation || (response.lost_focus() && (tab || enter)) {
             let index = r * columns + c;
+            let enter=enter||enter_navigation;
             let target = if tab && shift {
                 index.checked_sub(1)
             } else if tab {
@@ -2215,6 +2225,33 @@ fn snapped_drag_delta(original: &[(u64, f32, f32, f32, f32)], delta: Vec2, grid:
     };
     bounded_delta(original, delta)
 }
+fn object_hit_geometry(element:&Element,origin:Pos2,scale:f32,point:Pos2)->(Rect,bool) {
+    let object=Rect::from_min_size(origin+Vec2::new(element.x,element.y)*scale,Vec2::new(element.w,element.h)*scale);
+    if matches!(element.kind,ElementKind::Line|ElementKind::Arrow) {
+        let [x1,y1,x2,y2]=super::model::line_points(element);
+        let (a,b)=(origin+Vec2::new(x1,y1)*scale,origin+Vec2::new(x2,y2)*scale);
+        let padding=(element.stroke_width*scale*0.5).max(5.0);
+        let bounds=Rect::from_two_pos(a,b).expand(padding);
+        let segment=b-a;let squared=segment.length_sq();
+        let fraction=if squared>0.0 {((point-a).dot(segment)/squared).clamp(0.0,1.0)}else{0.0};
+        return (bounds,point.distance(a+segment*fraction)<=padding);
+    }
+    let angle=if matches!(element.kind,ElementKind::Table{..}|ElementKind::Chart{..}){0.0}else{element.rotation.to_radians()};
+    let turn=egui::emath::Rot2::from_angle(angle);
+    let corners=[object.left_top(),object.right_top(),object.right_bottom(),object.left_bottom()];
+    let mut bounds=Rect::NOTHING;
+    for corner in corners {bounds.extend_with(object.center()+turn*(corner-object.center()));}
+    let local=object.center()+egui::emath::Rot2::from_angle(-angle)*(point-object.center());
+    let hit=if matches!(element.kind,ElementKind::Ellipse) {
+        let radius=object.size()*0.5+Vec2::splat(2.0);
+        let delta=local-object.center();(delta.x/radius.x).powi(2)+(delta.y/radius.y).powi(2)<=1.0
+    }else{object.expand(2.0).contains(local)};
+    (bounds.expand(2.0),hit)
+}
+fn end_inline_edit(ctx:&egui::Context,state:&mut State) {
+    state.edit_text=None;state.edit_cell=None;state.edit_focus=false;
+    if let Some(id)=ctx.memory(|memory|memory.focused()) {ctx.memory_mut(|memory|memory.surrender_focus(id));}
+}
 fn canvas(
     ui: &mut egui::Ui,
     slide: &mut Slide,
@@ -2281,78 +2318,39 @@ fn canvas(
             paint_element(ui.ctx(), &painter, rect.min, scale, element, 1.0);
         }
     }
-    if response.clicked() {
-        state.selected.clear();
-        state.edit_text = None;
+    if response.clicked() || response.drag_started() {
+        if response.drag_started() {state.drag_target=None;}
         response.request_focus();
-    }
-    for index in 0..slide.elements.len() {
-        let Some(element) = slide.elements.get(index) else {
-            continue;
-        };
-        let object = Rect::from_min_size(
-            rect.min + Vec2::new(element.x, element.y) * scale,
-            Vec2::new(element.w, element.h) * scale,
-        );
-        let hit = ui.interact(
-            object,
-            ui.id().with(("slide_object", element.id)),
-            Sense::click_and_drag(),
-        );
-        let was_selected = state.selected.contains(&element.id);
-        if hit.clicked() || hit.drag_started() {
-            response.request_focus();
-            select_object(
-                slide,
-                state,
-                element.id,
-                ui.input(|i| i.modifiers.ctrl || i.modifiers.shift),
-                hit.clicked(),
-            );
-        }
-        if hit.clicked() && state.edit_text.is_some_and(|id| id != element.id) {
-            state.edit_text = None;
-        }
-        // Like PowerPoint: a click on an already selected text object or table places the caret.
-        let reclick = hit.clicked()
-            && was_selected
-            && !ui.input(|i| i.modifiers.ctrl || i.modifiers.shift)
-            && matches!(
-                element.kind,
-                ElementKind::Text
-                    | ElementKind::Rect
-                    | ElementKind::Ellipse
-                    | ElementKind::Table { .. }
-            );
-        if (hit.double_clicked() && !ui.input(|i| i.modifiers.ctrl || i.modifiers.shift)) || reclick
-        {
-            let cell = hit
-                .interact_pointer_pos()
-                .and_then(|pos| table_cell_at(element, object, pos));
-            begin_edit(state, element.id, cell);
-        }
-        if hit.drag_started() {
-            state.drag_original = slide
-                .elements
-                .iter()
-                .filter(|e| state.selected.contains(&e.id))
-                .map(|e| (e.id, e.x, e.y, e.w, e.h))
-                .collect();
-        }
-        if hit.dragged() {
-            let delta = snapped_drag_delta(
-                &state.drag_original,
-                hit.total_drag_delta().unwrap_or(Vec2::ZERO) / scale,
-                state.grid,
-            );
-            for (id, x, y, _, _) in &state.drag_original {
-                if let Some(e) = slide.element_mut(*id) {
-                    e.x = x + delta.x;
-                    e.y = y + delta.y;
-                    changed = true;
-                }
+        let pointer=if response.drag_started() {ui.input(|input|input.pointer.press_origin())}
+            else {response.interact_pointer_pos()};
+        let picked=pointer.and_then(|point|slide.elements.iter().rev().find(|element|
+            object_hit_geometry(element,rect.min,scale,point).1).map(|element|element.id));
+        if let Some(id)=picked {
+            let was_selected=state.selected.contains(&id);
+            let additive=ui.input(|input|input.modifiers.ctrl||input.modifiers.shift);
+            select_object(slide,state,id,additive,response.clicked());
+            if response.clicked() && state.edit_text.is_some_and(|editing|editing!=id) {state.edit_text=None;}
+            let reclick=response.clicked()&&was_selected&&!additive&&slide.element(id).is_some_and(|element|
+                matches!(element.kind,ElementKind::Text|ElementKind::Rect|ElementKind::Ellipse|ElementKind::Table{..}));
+            if (response.double_clicked()&&!additive)||reclick {
+                let cell=slide.element(id).and_then(|element| {
+                    let object=Rect::from_min_size(rect.min+Vec2::new(element.x,element.y)*scale,Vec2::new(element.w,element.h)*scale);
+                    pointer.and_then(|point|table_cell_at(element,object,point))
+                });
+                begin_edit(state,id,cell);
             }
-            break;
+            if response.drag_started() {
+                state.drag_target=Some(id);
+                state.drag_original=slide.elements.iter().filter(|element|state.selected.contains(&element.id))
+                    .map(|element|(element.id,element.x,element.y,element.w,element.h)).collect();
+            }
+        }else if response.clicked() {state.selected.clear();state.edit_text=None;}
+    }
+    if response.drag_stopped() {state.drag_target=None;}
+    if response.dragged() && state.drag_target.is_some() {
+        let delta=snapped_drag_delta(&state.drag_original,response.total_drag_delta().unwrap_or(Vec2::ZERO)/scale,state.grid);
+        for (id,x,y,_,_) in &state.drag_original {
+            if let Some(element)=slide.element_mut(*id) {element.x=x+delta.x;element.y=y+delta.y;changed=true;}
         }
     }
     for id in state.selected.clone() {
@@ -3818,5 +3816,53 @@ mod next_property_range_tests {
             properties(ui,&mut element);transition_timing_controls(ui,&mut transition);
         });
         assert_eq!(element,before);assert_eq!(transition,before_transition);Ok(())
+    }
+}
+
+
+#[cfg(test)]
+mod hundred_interaction_tests {
+    use super::*;
+    #[test]
+    fn object_hit_regions_follow_rotation_and_line_geometry() {
+        let e=Element{kind:ElementKind::Rect,x:100.0,y:100.0,w:200.0,h:20.0,rotation:90.0,..Element::default()};
+        let (bounds,hit)=object_hit_geometry(&e,Pos2::ZERO,1.0,Pos2::new(200.0,20.0));
+        assert!(bounds.contains(Pos2::new(200.0,20.0)));assert!(hit);
+        assert!(!object_hit_geometry(&e,Pos2::ZERO,1.0,Pos2::new(110.0,110.0)).1);
+        let line=Element{kind:ElementKind::Line,x:100.0,y:100.0,w:200.0,h:0.001,..Element::default()};
+        assert!(object_hit_geometry(&line,Pos2::ZERO,1.0,Pos2::new(150.0,103.0)).1);
+        assert!(!object_hit_geometry(&line,Pos2::ZERO,1.0,Pos2::new(150.0,110.0)).1);
+        let ellipse=Element{kind:ElementKind::Ellipse,x:0.0,y:0.0,w:100.0,h:100.0,..Element::default()};
+        assert!(!object_hit_geometry(&ellipse,Pos2::ZERO,1.0,Pos2::ZERO).1);
+    }
+    #[test]
+    fn escape_leaves_inline_editing_without_changing_the_deck() {
+        let ctx=egui::Context::default();let deck=Deck::default();let before=deck.clone();
+        let mut state=State{edit_text:Some(9),edit_cell:Some((1,2)),edit_focus:true,..State::default()};
+        let id=egui::Id::new("inline");ctx.memory_mut(|memory|memory.request_focus(id));
+        end_inline_edit(&ctx,&mut state);
+        assert!(state.edit_text.is_none());assert!(state.edit_cell.is_none());assert!(!state.edit_focus);
+        assert_ne!(ctx.memory(|memory|memory.focused()),Some(id));assert_eq!(deck,before);
+    }
+    fn key(modifiers:egui::Modifiers)->egui::Event {
+        egui::Event::Key{key:egui::Key::Enter,physical_key:None,pressed:true,repeat:false,modifiers}
+    }
+    #[test]
+    fn multiline_cell_editing_preserves_lines_and_enter_navigation()->Result<(),String> {
+        let ctx=egui::Context::default();crate::fonts::install(&ctx)?;
+        let mut e=Element{id:7,kind:ElementKind::Table{cells:vec![vec!["first\nsecond".into()],vec!["next".into()]]},..Element::default()};
+        let mut state=State::default();begin_edit(&mut state,7,Some((0,0)));
+        let draw=|events:Vec<egui::Event>,state:&mut State,e:&mut Element| {
+            let mut output=ctx.run_ui(egui::RawInput{events,..Default::default()},|ui|{inline_editor(ui,Pos2::ZERO,1.0,e,state);});
+            output.textures_delta.clear();
+        };
+        draw(vec![],&mut state,&mut e);
+        let shift=egui::Modifiers{shift:true,..egui::Modifiers::NONE};
+        draw(vec![egui::Event::ModifiersChanged(shift),key(shift)],&mut state,&mut e);
+        assert_eq!(state.edit_cell,Some((0,0)));
+        let ElementKind::Table{cells}=&e.kind else{return Err("table".into());};
+        assert!(cells[0][0].matches('\n').count()>=2);
+        draw(vec![egui::Event::ModifiersChanged(egui::Modifiers::NONE),key(egui::Modifiers::NONE)],&mut state,&mut e);
+        assert_eq!(state.edit_cell,Some((1,0)));assert!(state.edit_focus);Ok(())
     }
 }

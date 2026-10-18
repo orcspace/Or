@@ -1302,55 +1302,11 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                 let right = fmt.align == Align::Right
                     || (fmt.align == Align::General
                         && cell.is_some_and(|c| matches!(c.value, Value::Number(_))));
-                let family = crate::fonts::egui_family(ui.ctx(), &fmt.font, fmt.bold, fmt.italic);
-                let font = FontId::new(fmt.size * 1.333, family);
-                let align = if fmt.align == Align::Center {
-                    Align2::CENTER_CENTER
-                } else if right {
-                    Align2::RIGHT_CENTER
-                } else {
-                    Align2::LEFT_CENTER
-                };
-                let point = if fmt.align == Align::Center {
-                    cell_rect.center()
-                } else if right {
-                    Pos2::new(cell_rect.right() - 5.0, cell_rect.center().y)
-                } else {
-                    Pos2::new(cell_rect.left() + 5.0, cell_rect.center().y)
-                };
-                let clipped = painter.with_clip_rect(cell_rect.shrink(2.0));
                 let text_color = if ui.visuals().dark_mode && fmt.color == [28, 32, 38] {
                     ui.visuals().text_color()
-                } else {
-                    color(fmt.color)
-                };
-                if fmt.wrap {
-                    let galley =
-                        clipped.layout(text, font, text_color, (cell_rect.width() - 10.0).max(1.0));
-                    let x = if fmt.align == Align::Center {
-                        cell_rect.center().x - galley.size().x / 2.0
-                    } else if right {
-                        cell_rect.right() - 5.0 - galley.size().x
-                    } else {
-                        cell_rect.left() + 5.0
-                    };
-                    clipped.galley(Pos2::new(x, cell_rect.top() + 3.0), galley, text_color);
-                } else {
-                    clipped.text(point, align, text, font, text_color);
-                }
-                for offset in [fmt.underline.then_some(7.0), fmt.strike.then_some(0.0)]
-                    .into_iter()
-                    .flatten()
-                {
-                    let y = cell_rect.center().y + offset;
-                    clipped.line_segment(
-                        [
-                            Pos2::new(cell_rect.left() + 5.0, y),
-                            Pos2::new(cell_rect.right() - 5.0, y),
-                        ],
-                        Stroke::new(1.0, color(fmt.color)),
-                    );
-                }
+                } else { color(fmt.color) };
+                let clipped = painter.with_clip_rect(cell_rect.shrink(2.0));
+                clipped.add(cell_text_shape(ui, cell_rect, &fmt, text, text_color, right));
                 if (r, c) == (row, col) {
                     painter.rect_stroke(
                         cell_rect,
@@ -1699,25 +1655,7 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                                 continue;
                             }
                             if modifiers.ctrl && key == Key::A {
-                                // Excel: first Ctrl+A selects the data region, the next one the sheet.
-                                let (last_row, last_col) =
-                                    book.active_sheet().map(Sheet::extent).unwrap_or_default();
-                                let selection = &mut book.selection;
-                                let region = (0, 0, last_row, last_col);
-                                let current = selection.range();
-                                let whole = current.r0 == 0
-                                    && current.c0 == 0
-                                    && current.r1 == last_row
-                                    && current.c1 == last_col;
-                                let (r1, c1) = if whole {
-                                    (MAX_ROWS - 1, MAX_COLS - 1)
-                                } else {
-                                    (region.2, region.3)
-                                };
-                                selection.anchor_row = region.0;
-                                selection.anchor_col = region.1;
-                                selection.row = r1;
-                                selection.col = c1;
+                                select_current_region(book);
                                 continue;
                             }
                             if key == Key::Space && (modifiers.ctrl || modifiers.shift) {
@@ -1946,7 +1884,7 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
             });
         });
     let range=book.selection.range();
-    if range.validate().is_ok() && let Some(sheet)=book.active_sheet() {
+    if statistics_range_valid(range) && let Some(sheet)=book.active_sheet() {
         let (sum,mean,nonempty)=selection_statistics(sheet,range);
         ui.horizontal_wrapped(|ui| {
             ui.small(format!("Выделено: {}:{}  ·  Заполнено: {nonempty}",
@@ -2150,15 +2088,34 @@ struct SheetClipboard {
     row: u32,
     col: u32,
     cut: bool,
+    merges: Vec<Range>,
 }
 fn clipboard_id() -> egui::Id {
     egui::Id::new("sheets-typed-clipboard")
 }
 fn capture_clipboard(book: &Book, cut: bool) -> Result<SheetClipboard, String> {
-    let range = book.selection.range();
+    let mut range = book.selection.range();
+    let selected_range = range;
     let id = book.active_id();
-    let rows = book.read_range(id, range.r0, range.c0, range.r1, range.c1)?;
     let sheet = book.sheet_by_id(id).ok_or("Лист не найден")?;
+    loop {
+        let old = range;
+        for merge in &sheet.merges {
+            if merge.r0 <= range.r1 && range.r0 <= merge.r1 && merge.c0 <= range.c1 && range.c0 <= merge.c1 {
+                range = Range::new(range.r0.min(merge.r0), range.c0.min(merge.c0),
+                    range.r1.max(merge.r1), range.c1.max(merge.c1));
+            }
+        }
+        range.validate()?;
+        if range == old { break; }
+    }
+    if cut && range != selected_range {
+        return Err("Для вырезания выделите объединённые области полностью".into());
+    }
+    let rows = book.read_range(id, range.r0, range.c0, range.r1, range.c1)?;
+    let merges = sheet.merges.iter().filter(|merge| range.contains(merge.r0, merge.c0)
+        && range.contains(merge.r1, merge.c1))
+        .map(|merge| Range::new(merge.r0-range.r0, merge.c0-range.c0, merge.r1-range.r0, merge.c1-range.c0)).collect();
     Ok(SheetClipboard {
         text: super::io::to_csv(&rows, '\t'),
         cells: (range.r0..=range.r1)
@@ -2171,6 +2128,7 @@ fn capture_clipboard(book: &Book, cut: bool) -> Result<SheetClipboard, String> {
         row: range.r0,
         col: range.c0,
         cut,
+        merges,
     })
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2209,7 +2167,10 @@ fn paste_cells_with(
     let source_rows = clipboard.cells.len();
     let source_cols = clipboard.cells.first().map(Vec::len).unwrap_or(0);
     if source_rows == 0 || source_cols == 0 { return Ok(()); }
-    if clipboard.cells.iter().any(|line| line.len() != source_cols) {
+    if clipboard.cells.iter().any(|line| line.len() != source_cols)
+        || clipboard.merges.iter().any(|merge| merge.r0 > merge.r1 || merge.c0 > merge.c1
+            || merge.r1 >= source_rows as u32 || merge.c1 >= source_cols as u32)
+    {
         return Err("Недопустимый внутренний буфер".into());
     }
     let (rows, cols) = if transpose { (source_cols, source_rows) } else { (source_rows, source_cols) };
@@ -2247,6 +2208,18 @@ fn paste_cells_with(
         values.push(line);
     }
     let mut candidate = book.clone();
+    if mode == PasteMode::All && !clipboard.merges.is_empty() {
+        let destination = Range::new(row, col, row+rows as u32-1, col+cols as u32-1);
+        let incoming: Vec<Range> = clipboard.merges.iter().map(|merge| {
+            let local = if transpose { Range::new(merge.c0, merge.r0, merge.c1, merge.r1) } else { *merge };
+            Range::new(row+local.r0, col+local.c0, row+local.r1, col+local.c1)
+        }).collect();
+        if target.merges.iter().any(|merge| merge.r0 <= destination.r1 && destination.r0 <= merge.r1
+            && merge.c0 <= destination.c1 && destination.c0 <= merge.c1 && !incoming.contains(merge)) {
+            return Err("Вставка пересекает несовпадающую объединённую область".into());
+        }
+        candidate.unmerge(sheet, destination)?;
+    }
     if mode == PasteMode::Formats {
         let range = Range::new(row, col, row+rows as u32-1, col+cols as u32-1);
         if target.merges.iter().any(|merge| {
@@ -2279,6 +2252,13 @@ fn paste_cells_with(
             }
         }
     }
+    if mode == PasteMode::All {
+        for merge in &clipboard.merges {
+            let local = if transpose { Range::new(merge.c0, merge.r0, merge.c1, merge.r1) } else { *merge };
+            if local.r1 >= rows as u32 || local.c1 >= cols as u32 { return Err("Повреждённый буфер объединений".into()); }
+            candidate.merge(sheet, Range::new(row+local.r0, col+local.c0, row+local.r1, col+local.c1))?;
+        }
+    }
     candidate.validate()?;
     *book = candidate;
     Ok(())
@@ -2298,6 +2278,7 @@ fn paste_special(
         clipboard.row=row;
         clipboard.col=col;
         if transpose {
+            clipboard.merges = clipboard.merges.iter().map(|range| Range::new(range.c0, range.r0, range.c1, range.r1)).collect();
             let rows=clipboard.cells.len();
             let cols=clipboard.cells.first().map(Vec::len).unwrap_or(0);
             clipboard.cells=(0..cols).map(|c|
@@ -3961,13 +3942,27 @@ fn find_step(book:&mut Book,state:&mut State,backwards:bool) {
         Err(error)=>state.error=error,
     }
 }
+fn statistics_range_valid(range: Range) -> bool {
+    range.r0 <= range.r1 && range.c0 <= range.c1 && range.r1 < MAX_ROWS && range.c1 < MAX_COLS
+}
 fn selection_statistics(sheet:&Sheet,range:Range)->(Option<f64>,Option<f64>,usize) {
     let mut numbers=Vec::new();let mut nonempty=0;
-    for r in range.r0..=range.r1 {
-        for c in range.c0..=range.c1 {
-            if let Some(cell)=sheet.cell(r,c) {
-                if cell.value!=Value::Empty {nonempty+=1;}
-                if let Value::Number(value)=cell.value {numbers.push(value);}
+    let mut take = |cell: &Cell| {
+        if cell.value != Value::Empty { nonempty += 1; }
+        if let Value::Number(value) = cell.value { numbers.push(value); }
+    };
+    if range.validate().is_ok() {
+        for r in range.r0..=range.r1 {
+            for c in range.c0..=range.c1 {
+                if let Some(cell) = sheet.cell(r, c) { take(cell); }
+            }
+        }
+    } else {
+        // Whole rows/columns may contain billions of coordinates but at most the
+        // workbook's bounded stored cells. Never walk the rectangular area here.
+        for (key, cell) in &sheet.cells {
+            if super::model::parse_address(key).is_some_and(|(r, c)| range.contains(r, c)) {
+                take(cell);
             }
         }
     }
@@ -4015,5 +4010,160 @@ mod additional_search_status_tests {
             assert!(!ui.input(|input|input.key_pressed(Key::Escape)));
         });
         assert!(!state.find_open);
+    }
+}
+
+#[cfg(test)]
+mod hundred_statistics_tests {
+    use super::*;
+    #[test]
+    fn full_column_and_sheet_statistics_use_sparse_cells() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.set_cell(id, 0, 0, "10")?;
+        book.set_cell(id, MAX_ROWS - 1, 0, "20")?;
+        book.set_cell(id, 0, 1, "100")?;
+        let column = Range::new(0, 0, MAX_ROWS - 1, 0);
+        assert!(statistics_range_valid(column));
+        assert_eq!(selection_statistics(book.active_sheet().ok_or("sheet")?, column), (Some(30.0), Some(15.0), 2));
+        assert!(statistics_range_valid(Range::new(0, 0, MAX_ROWS - 1, MAX_COLS - 1)));
+        Ok(())
+    }
+}
+
+fn cell_text_shape(
+    ui: &egui::Ui,
+    rect: Rect,
+    fmt: &CellFormat,
+    text: String,
+    text_color: Color32,
+    right: bool,
+) -> egui::epaint::TextShape {
+    let family = crate::fonts::egui_family(ui.ctx(), &fmt.font, fmt.bold, fmt.italic);
+    let font = FontId::new(fmt.size * 1.333, family);
+    let width = if fmt.wrap { (rect.width() - 10.0).max(1.0) } else { f32::INFINITY };
+    let mut job = egui::text::LayoutJob::simple(text, font, text_color, width);
+    for section in &mut job.sections {
+        if fmt.underline { section.format.underline = Stroke::new(1.0, text_color); }
+        if fmt.strike { section.format.strikethrough = Stroke::new(1.0, text_color); }
+    }
+    let galley = ui.painter().layout_job(job);
+    let x = if fmt.align == Align::Center || fmt.rotation != 0 {
+        rect.center().x - galley.size().x / 2.0
+    } else if right { rect.right() - 5.0 - galley.size().x }
+    else { rect.left() + 5.0 };
+    let y = if fmt.wrap && fmt.rotation == 0 { rect.top() + 3.0 }
+        else { rect.center().y - galley.size().y / 2.0 };
+    egui::epaint::TextShape::new(Pos2::new(x, y), galley, text_color)
+        .with_angle_and_anchor(-f32::from(fmt.rotation).to_radians(), Align2::CENTER_CENTER)
+}
+fn current_region(sheet: &Sheet, row: u32, col: u32) -> Option<Range> {
+    let mut by_row: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+    let mut by_col: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+    for (key, cell) in &sheet.cells {
+        if cell.input.is_empty() { continue; }
+        if let Some((r, c)) = super::model::parse_address(key) {
+            by_row.entry(r).or_default().insert(c);
+            by_col.entry(c).or_default().insert(r);
+        }
+    }
+    let mut range = Range::new(row, col, row, col);
+    loop {
+        let old = range;
+        let row_has = |r, range: &Range| by_row.get(&r)
+            .is_some_and(|cols| cols.range(range.c0.saturating_sub(1)..=(range.c1+1).min(MAX_COLS-1)).next().is_some());
+        let col_has = |c, range: &Range| by_col.get(&c)
+            .is_some_and(|rows| rows.range(range.r0.saturating_sub(1)..=(range.r1+1).min(MAX_ROWS-1)).next().is_some());
+        if range.r0 > 0 && row_has(range.r0 - 1, &range) { range.r0 -= 1; }
+        if range.r1 + 1 < MAX_ROWS && row_has(range.r1 + 1, &range) { range.r1 += 1; }
+        if range.c0 > 0 && col_has(range.c0 - 1, &range) { range.c0 -= 1; }
+        if range.c1 + 1 < MAX_COLS && col_has(range.c1 + 1, &range) { range.c1 += 1; }
+        if range == old { break; }
+    }
+    by_row.range(range.r0..=range.r1)
+        .any(|(_, cols)| cols.range(range.c0..=range.c1).next().is_some()).then_some(range)
+}
+fn select_current_region(book: &mut Book) {
+    let region = book.active_sheet()
+        .and_then(|sheet| current_region(sheet, book.selection.row, book.selection.col));
+    let range = region.filter(|range| *range != book.selection.range())
+        .unwrap_or_else(|| Range::new(0, 0, MAX_ROWS - 1, MAX_COLS - 1));
+    book.selection = Selection {
+        row: range.r1, col: range.c1, anchor_row: range.r0, anchor_col: range.c0,
+    };
+}
+#[cfg(test)]
+mod hundred_cell_ui_tests {
+    use super::*;
+    #[test]
+    fn cell_rotation_reaches_the_native_text_shape() -> Result<(), String> {
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx)?;
+        let fmt = CellFormat { rotation: 45, ..CellFormat::default() };
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let shape = cell_text_shape(ui, Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, 30.0)),
+                &fmt, "Angle".into(), Color32::BLACK, false);
+            assert!((shape.angle + std::f32::consts::FRAC_PI_4).abs() < 1e-6);
+        });
+        Ok(())
+    }
+    #[test]
+    fn decorations_follow_the_text_galley_instead_of_the_cell_edges() -> Result<(), String> {
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx)?;
+        let fmt = CellFormat { underline: true, strike: true, wrap: true, ..CellFormat::default() };
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let shape = cell_text_shape(ui, Rect::from_min_size(Pos2::ZERO, Vec2::new(200.0, 60.0)),
+                &fmt, "Short".into(), Color32::RED, false);
+            assert!(shape.galley.size().x < 100.0);
+            for section in &shape.galley.job.sections {
+                assert_eq!(section.format.underline, Stroke::new(1.0, Color32::RED));
+                assert_eq!(section.format.strikethrough, Stroke::new(1.0, Color32::RED));
+            }
+        });
+        Ok(())
+    }
+    #[test]
+    fn control_a_starts_from_the_current_data_region() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        for (r, c) in [(1, 1), (1, 2), (2, 1), (2, 2), (7, 4)] {
+            book.set_input(id, r, c, "1")?;
+        }
+        book.selection = Selection { row: 1, col: 1, anchor_row: 1, anchor_col: 1 };
+        select_current_region(&mut book);
+        assert_eq!(book.selection.range(), Range::new(1, 1, 2, 2));
+        select_current_region(&mut book);
+        assert_eq!(book.selection.range(), Range::new(0, 0, MAX_ROWS - 1, MAX_COLS - 1));
+        let mut diagonal = Book::default();
+        let id = diagonal.active_id();
+        diagonal.set_input(id, 10, 10, "a")?;
+        diagonal.set_input(id, 11, 11, "b")?;
+        assert_eq!(current_region(diagonal.active_sheet().ok_or("sheet")?, 10, 10), Some(Range::new(10, 10, 11, 11)));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod hundred_merge_clipboard_tests {
+    use super::*;
+    #[test]
+    fn typed_clipboard_keeps_merged_areas_and_transposes_their_geometry() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.set_cell(id, 0, 0, "Title")?;
+        book.merge(id, Range::new(0, 0, 0, 1))?;
+        let clipboard = capture_clipboard(&book, false)?;
+        assert_eq!(clipboard.merges, vec![Range::new(0, 0, 0, 1)]);
+        assert!(capture_clipboard(&book, true).is_err());
+        paste_cells_with(&mut book, id, 3, 3, &clipboard, PasteMode::All, true)?;
+        assert!(book.active_sheet().ok_or("sheet")?.merges.contains(&Range::new(3, 3, 4, 3)));
+        paste_cells_with(&mut book, id, 3, 3, &clipboard, PasteMode::All, true)?;
+        assert_eq!(book.active_sheet().and_then(|sheet| sheet.cell(3, 3)).map(|cell| cell.value.clone()),
+            Some(Value::Text("Title".into())));
+        let before = book.clone();
+        assert!(paste_cells_with(&mut book, id, 0, 1, &clipboard, PasteMode::All, false).is_err());
+        assert_eq!(book, before);
+        Ok(())
     }
 }

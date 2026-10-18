@@ -343,7 +343,7 @@ fn apply_rpr(format: &mut TextFormat, node: &Node) {
     if let Some(v) = bool_prop(node, "i") {
         format.italic = v;
     }
-    if let Some(v) = bool_prop(node, "strike") {
+    if let Some(v) = bool_prop(node, "strike").or_else(||bool_prop(node,"dstrike")) {
         format.strike = v;
     }
     if let Some(n) = node.child("u") {
@@ -406,7 +406,7 @@ fn apply_style_rpr(format: &mut TextFormat, node: &Node) {
         ("i", previous.1, &mut format.italic),
         ("strike", previous.2, &mut format.strike),
     ] {
-        *value = match bool_prop(node, tag) {
+        *value = match bool_prop(node, tag).or_else(||if tag=="strike" {bool_prop(node,"dstrike")}else{None}) {
             Some(true) => !old,
             Some(false) | None => old,
         };
@@ -493,7 +493,8 @@ fn body_blocks<'a>(nodes: &'a [Node], out: &mut Vec<&'a Node>, depth: usize) {
                     body_blocks(&content.children, out, depth + 1);
                 }
             }
-            "customXml" if depth < 128 => body_blocks(&node.children, out, depth + 1),
+            "customXml" | "ins" | "moveTo" if depth < 128 => body_blocks(&node.children, out, depth + 1),
+            "del" | "moveFrom" => {},
             _ => out.push(node),
         }
     }
@@ -523,6 +524,7 @@ fn style_chain<'a>(
 /// Document-wide defaults of a DOCX: run format and paragraph layout (`w:docDefaults`).
 struct Defaults<'a> {
     format: &'a TextFormat,
+    hidden: bool,
     paragraph: &'a Paragraph,
     /// `styleId` of the default paragraph style (`a` in Russian Word, `Normal` in English).
     normal: &'a str,
@@ -566,6 +568,7 @@ fn paragraph(
         ..defaults.paragraph.clone()
     };
     let mut format = default_format.clone();
+    let mut hidden=defaults.hidden;
     let style = node
         .child("pPr")
         .and_then(|n| n.child("pStyle"))
@@ -578,6 +581,7 @@ fn paragraph(
     style_chain(styles,effective,&mut chain)?;
     for n in chain {
         if let Some(rpr) = n.child("rPr") {
+            if bool_prop(rpr,"vanish")==Some(true) {hidden=!hidden;}
             apply_style_rpr(&mut format, rpr);
         }
         if let Some(ppr) = n.child("pPr") {
@@ -592,6 +596,7 @@ fn paragraph(
     collect_runs(node, rels, None, &mut nodes);
     for (run, link) in nodes {
         let mut fmt = format.clone();
+        let mut run_hidden=hidden;
         fmt.link = link;
         if let Some(n) = run.child("rPr") {
             if let Some(id) = n.child("rStyle").and_then(Node::value) {
@@ -599,11 +604,17 @@ fn paragraph(
                 style_chain(styles, id, &mut character_styles)?;
                 for style in character_styles {
                     if let Some(rpr) = style.child("rPr") {
+                        if bool_prop(rpr,"vanish")==Some(true) {run_hidden=!run_hidden;}
                         apply_style_rpr(&mut fmt, rpr);
                     }
                 }
             }
             apply_rpr(&mut fmt, n);
+            if let Some(value)=bool_prop(n,"vanish") {run_hidden=value;}
+        }
+        if run_hidden {
+            doc.losses.push("Скрытый текст DOCX не отображается и не сохраняется.".into());
+            continue;
         }
         let mut text = String::new();
         for n in &run.children {
@@ -746,6 +757,7 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
         size: 10.0,
         ..TextFormat::default()
     };
+    let mut default_hidden=false;
     let mut default_paragraph = Paragraph {
         spacing_before: 0.0,
         spacing_after: 0.0,
@@ -757,6 +769,7 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
         theme.apply(&mut node);
         if let Some(n) = node.descendant("rPrDefault").and_then(|n| n.child("rPr")) {
             apply_rpr(&mut default_format, n);
+            default_hidden=bool_prop(n,"vanish").unwrap_or(false);
         }
         if let Some(n) = node.descendant("pPrDefault").and_then(|n| n.child("pPr")) {
             apply_ppr(&mut default_paragraph, n, &BTreeMap::new());
@@ -783,12 +796,7 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
                     .filter(|level| level.name == "lvl")
                     .filter_map(|level| {
                         let index = level.attr("ilvl")?.parse::<u8>().ok()?;
-                        let kind = if level.child("numFmt").and_then(Node::value) == Some("bullet")
-                        {
-                            List::Bullet
-                        } else {
-                            List::Number
-                        };
+                        let kind = word_number_kind(level.child("numFmt").and_then(Node::value));
                         Some((index, kind))
                     })
                     .collect::<BTreeMap<_, _>>();
@@ -814,11 +822,7 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
                     {
                         levels.insert(
                             index,
-                            if format == "bullet" {
-                                List::Bullet
-                            } else {
-                                List::Number
-                            },
+                            word_number_kind(Some(format)),
                         );
                     }
                 }
@@ -845,6 +849,7 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
         .unwrap_or_else(|| "Normal".into());
     let defaults = Defaults {
         format: &default_format,
+        hidden: default_hidden,
         paragraph: &default_paragraph,
         normal: &normal,
     };
@@ -945,6 +950,11 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
                             .unwrap_or_default(),
                     );
                     let mut cells = Vec::new();
+                    let grid_before=word_grid_before(tr)?;
+                    if grid_before>0 {
+                        let paragraph=Paragraph{id:doc.alloc_id(),..Default::default()};
+                        let mut cell=Cell::new(doc.alloc_id(),vec![paragraph],[255,255,255]);cell.span=grid_before as u16;cells.push(cell);
+                    }
                     let mut cell_blocks=Vec::new();body_blocks(&tr.children,&mut cell_blocks,0);
                     let cell_nodes=cell_blocks.into_iter().filter(|n|n.name=="tc").collect::<Vec<_>>();
                     if cell_nodes.len() > 256 {
@@ -991,12 +1001,11 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
                         cell.merged = tc_pr
                             .and_then(|n| n.child("vMerge"))
                             .is_some_and(|n| n.value() != Some("restart"));
-                        cell.v_align =
-                            match tc_pr.and_then(|n| n.child("vAlign")).and_then(Node::value) {
-                                Some("center") => VAlign::Center,
-                                Some("bottom") => VAlign::Bottom,
-                                _ => VAlign::Top,
-                            };
+                        for properties in chain.iter().filter_map(|style|style.child("tcPr")).chain(tc_pr) {
+                            if let Some(alignment)=properties.child("vAlign").and_then(Node::value) {
+                                cell.v_align=match alignment {"center"=>VAlign::Center,"bottom"=>VAlign::Bottom,_=>VAlign::Top};
+                            }
+                        }
                         cells.push(cell);
                     }
                     rows.push(cells);
@@ -1015,9 +1024,10 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
                 if widths.is_empty() {
                     let columns=rows.iter().map(|row|row.iter().map(Cell::span).sum::<usize>()).max().unwrap_or(0);
                     let mut inferred=vec![None;columns];
-                    for (cells,nodes) in rows.iter().zip(&cell_nodes_by_row) {
-                        let mut column=0;
-                        for (cell,node) in cells.iter().zip(nodes) {
+                    for ((cells,nodes),tr) in rows.iter().zip(&cell_nodes_by_row).zip(&row_nodes) {
+                        let before=word_grid_before(tr)?;
+                        let mut column=before;
+                        for (cell,node) in cells.iter().skip(usize::from(before>0)).zip(nodes) {
                             if let Some(width)=node.child("tcPr").and_then(|n|n.child("tcW"))
                                 .filter(|n|matches!(n.attr("type"),None|Some("dxa")))
                                 .and_then(|n|n.attr("w")).and_then(|v|v.parse::<f32>().ok())
@@ -1132,6 +1142,7 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
         ),
         ("anchor", "Плавающие рисунки переведены в отдельные блоки."),
         ("tblpPr", "Плавающие таблицы размещены в потоке текста."),
+        ("dstrike", "Двойное зачёркивание приведено к одинарному."),
     ] {
         if root.descendant(tag).is_some() {
             doc.losses.push(message.into());
@@ -1849,29 +1860,9 @@ fn inline_md(text: &str, inherited: &TextFormat) -> Vec<Run> {
                 };
                 if let Some(close) = close {
                     let url_start = close + 2;
-                    let mut nesting = 0;
-                    let mut escaped = false;
-                    let mut end = None;
-                    for (index, ch) in rest[url_start..].char_indices() {
-                        if !md_spend(budget, ch.len_utf8()) {
-                            plain.push_str(rest);
-                            break 'inline;
-                        }
-                        if escaped {
-                            escaped = false;
-                            continue;
-                        }
-                        match ch {
-                            '\\' => escaped = true,
-                            '(' => nesting += 1,
-                            ')' if nesting == 0 => {
-                                end = Some(url_start + index);
-                                break;
-                            }
-                            ')' => nesting -= 1,
-                            _ => {}
-                        }
-                    }
+                    let end=match markdown_link_end(rest,url_start,budget) {
+                        Ok(end)=>end,Err(())=>{plain.push_str(rest);break 'inline;}
+                    };
                     if let Some(end) = end {
                         if !plain.is_empty() {
                             out.push(Run {
@@ -1890,9 +1881,16 @@ fn inline_md(text: &str, inherited: &TextFormat) -> Vec<Run> {
                     }
                 }
             }
+            if matches!(ch,'*'|'_'|'~') {
+                let length=rest.chars().take_while(|next|*next==ch).count();
+                if rest[length..].chars().next().is_none_or(char::is_whitespace) {
+                    plain.push_str(&rest[..length]);offset+=length;continue;
+                }
+            }
             let mut matched = false;
             for marker in ["***", "___", "**", "__", "~~", "*", "_"] {
-                if !rest.starts_with(marker) {
+                if !rest.starts_with(marker)
+                    || rest[marker.len()..].chars().next().is_none_or(char::is_whitespace) {
                     continue;
                 }
                 if marker.starts_with('_')
@@ -1907,7 +1905,7 @@ fn inline_md(text: &str, inherited: &TextFormat) -> Vec<Run> {
                 {
                     continue;
                 }
-                let end = match md_unescaped(&rest[marker.len()..], marker, budget) {
+                let end = match markdown_emphasis_end(&rest[marker.len()..], marker, budget) {
                     Ok(Some(end)) if end > 0 => end,
                     Ok(_) => continue,
                     Err(()) => {
@@ -1970,7 +1968,7 @@ fn escape_markdown(text: &str) -> String {
         if ch.is_ascii_punctuation() {
             out.push('\\');
         }
-        if ch == '\u{000b}' {
+        if matches!(ch,'\u{000b}'|'\n') {
             out.push_str("  \n");
         } else {
             out.push(ch);
@@ -1995,7 +1993,7 @@ fn md_fence(line:&str)->Option<(char,usize)> {
     if line.len()-rest.len()>3 {return None;}
     let marker=rest.chars().next().filter(|ch|matches!(ch,'`'|'~'))?;
     let count=rest.chars().take_while(|ch|*ch==marker).count();
-    (count>=3).then_some((marker,count))
+    (count>=3 && (marker!='`' || !rest[count..].contains('`'))).then_some((marker,count))
 }
 fn md_setext(line:&str)->Option<&'static str> {
     let text=line.trim();
@@ -2020,7 +2018,6 @@ fn md_starts_block(line:&str)->bool {
     let text=line.trim_start_matches([' ','\t']);
     line.trim().is_empty() || md_atx(line).is_some() || md_fence(line).is_some()
         || markdown_list_prefix(text).is_some() || text.starts_with('>')
-        || line.starts_with("    ") || line.starts_with('\t')
 }
 fn md_code_paragraph(doc:&mut Doc,lines:&[String]) {
     let id=doc.alloc_id();
@@ -2040,12 +2037,14 @@ fn read_markdown(text:&str)->Doc {
         let line=lines[index];index+=1;
         if line.trim().is_empty(){continue;}
         if let Some((marker,count))=md_fence(line) {
+            let indent=line.len()-line.trim_start_matches(' ').len();
             let mut content=Vec::new();
             while index<lines.len() {
                 let value=lines[index];index+=1;
                 if md_fence(value).is_some_and(|(next,length)|next==marker && length>=count)
                     && value.trim().chars().all(|ch|ch==marker) {break;}
-                content.push(value.to_string());
+                let removed=value.bytes().take_while(|ch|*ch==b' ').count().min(indent);
+                content.push(value[removed..].to_string());
             }
             md_code_paragraph(&mut doc,&content);list_indents.clear();continue;
         }
@@ -2055,6 +2054,11 @@ fn read_markdown(text:&str)->Doc {
             while index<lines.len() {
                 if let Some(value)=lines[index].strip_prefix("    ").or_else(||lines[index].strip_prefix('\t')) {
                     content.push(value.to_string());index+=1;
+                }else if lines[index].trim().is_empty() {
+                    let next=(index..lines.len()).find(|next|!lines[*next].trim().is_empty());
+                    if let Some(next)=next.filter(|next|lines[*next].starts_with("    ") || lines[*next].starts_with('\t')) {
+                        content.extend((index..next).map(|_|String::new()));index=next;
+                    }else{break;}
                 }else{break;}
             }
             md_code_paragraph(&mut doc,&content);list_indents.clear();continue;
@@ -2254,8 +2258,8 @@ fn safe_html_link(value: &str) -> bool {
 }
 fn write_html(doc: &Doc) -> String {
     let mut out = format!(
-        "<!DOCTYPE html><html lang=\"ru\"><head><meta charset=\"utf-8\"/><title>{}</title></head><body>",
-        esc(&doc.title)
+        "<!DOCTYPE html><html lang=\"ru\"><head><meta charset=\"utf-8\"/><meta name=\"author\" content=\"{}\"/><title>{}</title></head><body>",
+        esc(&doc.author),esc(&doc.title)
     );
     let mut list = List::None;
     let mut numbered = false;
@@ -2293,6 +2297,7 @@ fn write_html(doc: &Doc) -> String {
             (_, "Heading5") => "h5",
             (_, "Heading6") => "h6",
             (_, "Quote") => "blockquote",
+            (_, "Code") => "pre",
             _ => "p",
         };
         out.push_str(&html_paragraph(p,tag));
@@ -2452,9 +2457,9 @@ fn read_html_with_limit(text:&str,limit:usize)->Result<Doc,String> {
     })?;
     let mut doc = Doc::default();
     doc.paragraphs.clear();
-    fn walk(node: &Node, doc: &mut Doc, inherited_css: &str, list: Option<(List,u8)>) {
+    fn walk(node: &Node, doc: &mut Doc, inherited_css: &str, list: Option<(List,u8)>)->Result<(),String> {
         if html_hidden(node) || matches!(node.name.as_str(), "script" | "style" | "head") {
-            return;
+            return Ok(());
         }
         if node.name=="img" {
             if let Some(bytes)=node.attr("src").and_then(decode_html_image)
@@ -2465,20 +2470,25 @@ fn read_html_with_limit(text:&str,limit:usize)->Result<Doc,String> {
                     doc.paragraphs.push(Paragraph {id,..Paragraph::default()});
                 }
                 let anchor=doc.paragraphs.last().map(|p|p.id).unwrap_or_default();
-                let width=number(node.attr("data-trinedocs-width"),image.width() as f32*0.75).clamp(1.0,10000.0);
-                let height=number(node.attr("data-trinedocs-height"),image.height() as f32*0.75).clamp(1.0,10000.0);
+                let (width,height)=html_image_geometry(node,image.width() as f32*0.75,image.height() as f32*0.75);
                 let id=doc.alloc_id();
                 doc.images.push(AnchoredImage {id,after_paragraph_id:anchor,bytes,width,height,alt:node.attr("alt").unwrap_or("").into()});
+            }else{
+                doc.losses.push("HTML: изображение пропущено — неподдерживаемый источник, повреждённые данные или превышен лимит.".into());
             }
-            return;
+            return Ok(());
         }
         let inherited=inherited_html_css(inherited_css);
-        let css=merge_html_css(&inherited,node.attr("style").unwrap_or_default());
+        let css=html_computed_css(&inherited,node.attr("style").unwrap_or_default());
         let list=match node.name.as_str() {
             "ol"|"ul"=>Some((if node.name=="ol" {List::Number}else{List::Bullet},
                 list.map(|(_,depth)|depth.saturating_add(1).min(8)).unwrap_or(0))),
             _=>list,
         };
+        if node.name=="table" {html_import_table(node,doc,&css,walk)?;return Ok(());}
+        if node.name=="li" && node.children.iter().any(|child|matches!(child.name.as_str(),"p"|"div"|"pre"|"h1"|"h2"|"h3"|"h4"|"h5"|"h6"|"blockquote")) {
+            html_import_list_item(node,doc,&css,list,walk)?;return Ok(());
+        }
         let block = matches!(
             node.name.as_str(),
             "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "blockquote" | "li" | "pre"
@@ -2490,11 +2500,12 @@ fn read_html_with_limit(text:&str,limit:usize)->Result<Doc,String> {
                 runs: Vec::new(),
                 ..Paragraph::default()
             };
-            fn runs(n: &Node, f: &TextFormat, out: &mut Vec<Run>) {
+            fn runs(n: &Node, f: &TextFormat, out: &mut Vec<Run>, preserve: bool, pending: &mut Option<TextFormat>) {
                 if html_hidden(n) || matches!(n.name.as_str(), "script" | "style" | "ul" | "ol") {
                     return;
                 }
                 let mut fmt = f.clone();
+                let mut preserve=preserve || n.name=="pre";
                 match n.name.as_str() {
                     "pre" | "code" | "kbd" | "samp" => fmt.font="Consolas".into(),
                     "b" | "strong" => fmt.bold = true,
@@ -2510,7 +2521,8 @@ fn read_html_with_limit(text:&str,limit:usize)->Result<Doc,String> {
                     for (key,value) in css_declarations(css) {
                             let lower=value.to_ascii_lowercase();
                             match key.as_str() {
-                                "font-size" => fmt.size = css_points(&value, fmt.size),
+                                "white-space" => preserve=matches!(lower.trim(),"pre"|"pre-wrap"|"break-spaces"),
+                                "font-size" => fmt.size = html_font_size(&value, f.size),
                                 "font-family" => {
                                     if let Some(family)=css_font_family(&value) {fmt.font=family;}
                                 }
@@ -2530,28 +2542,25 @@ fn read_html_with_limit(text:&str,limit:usize)->Result<Doc,String> {
                                     };
                                 }
                                 "font-style" => fmt.italic=matches!(lower.trim(),"italic"|"oblique"),
-                                "text-decoration" => {
-                                    fmt.underline = lower.contains("underline");
-                                    fmt.strike = lower.contains("line-through");
+                                "text-decoration" | "text-decoration-line" => {
+                                    fmt.underline |= lower.split_whitespace().any(|word|word=="underline");
+                                    fmt.strike |= lower.split_whitespace().any(|word|word=="line-through");
                                 }
+                                "vertical-align" => fmt.script=match lower.trim() {"super"=>1,"sub"=>-1,"baseline"=>0,_=>fmt.script},
                                 _ => {}
                             }
                     }
                 }
-                if !n.text.is_empty() {
-                    out.push(Run {
-                        text: n.text.clone(),
-                        format: fmt.clone(),
-                    });
-                }
+                if !n.text.is_empty() {html_inline_text(&n.text,&fmt,preserve,out,pending);}
                 for c in &n.children {
                     if c.name == "br" {
+                        *pending=None;
                         out.push(Run {
                             text: "\u{000b}".into(),
                             format: fmt.clone(),
                         });
                     } else {
-                        runs(c, &fmt, out);
+                        runs(c, &fmt, out,preserve,pending);
                     }
                 }
             }
@@ -2574,7 +2583,7 @@ fn read_html_with_limit(text:&str,limit:usize)->Result<Doc,String> {
             p.runs.clear();
             let mut styled = node.clone();
             styled.attrs.insert("style".into(), css.clone());
-            runs(&styled, &default_format, &mut p.runs);
+            runs(&styled, &default_format, &mut p.runs,false,&mut None);
             if node.name == "li" {
                 p.list=list.map(|(kind,_)|kind).unwrap_or(List::Bullet);
                 p.list_level=list.map(|(_,depth)|depth).unwrap_or(0);
@@ -2602,7 +2611,13 @@ fn read_html_with_limit(text:&str,limit:usize)->Result<Doc,String> {
                             if ["pt","px","in","cm","mm","pc","q"].iter().any(|unit|lower.trim().ends_with(unit)) {
                                 p.line_points=css_points(&value,0.0);
                                 p.line_exact=true;
-                            } else { p.line_spacing=number(Some(value.trim()),1.28).clamp(0.5,5.0); }
+                            } else if let Some(percent)=lower.trim().strip_suffix('%').and_then(|number|number.trim().parse::<f32>().ok()).filter(|number|number.is_finite() && *number>0.0) {
+                                let size=p.runs.iter().map(|run|run.format.size).fold(0.0_f32,f32::max).max(4.0);
+                                p.line_points=(size*percent/100.0).clamp(1.0,1584.0);p.line_exact=true;
+                            } else if let Some(em)=lower.trim().strip_suffix("em").and_then(|number|number.trim().parse::<f32>().ok()).filter(|number|number.is_finite() && *number>0.0) {
+                                let size=p.runs.iter().map(|run|run.format.size).fold(0.0_f32,f32::max).max(4.0);
+                                p.line_points=(size*em).clamp(1.0,1584.0);p.line_exact=true;
+                            } else { p.line_spacing=number(Some(value.trim()),p.line_spacing).clamp(0.5,5.0); }
                         }
                         _ => {}
                     }
@@ -2617,18 +2632,19 @@ fn read_html_with_limit(text:&str,limit:usize)->Result<Doc,String> {
             if let Some(exact)=node.attr("data-trinedocs-line-exact") {p.line_exact=exact=="true";}
             p.normalize();
             doc.paragraphs.push(p);
-            fn inline_images(node: &Node,doc: &mut Doc,css: &str,list: Option<(List,u8)>) {
-                if html_hidden(node) || matches!(node.name.as_str(),"script"|"style"|"ul"|"ol") {return;}
-                if node.name=="img" {walk(node,doc,css,list);}
-                else {for child in &node.children {inline_images(child,doc,css,list);}}
+            fn inline_images(node: &Node,doc: &mut Doc,css: &str,list: Option<(List,u8)>)->Result<(),String> {
+                if html_hidden(node) || matches!(node.name.as_str(),"script"|"style"|"ul"|"ol") {return Ok(());}
+                if node.name=="img" {walk(node,doc,css,list)?;}
+                else {for child in &node.children {inline_images(child,doc,css,list)?;}}
+                Ok(())
             }
-            for child in &node.children {inline_images(child,doc,&css,list);}
+            for child in &node.children {inline_images(child,doc,&css,list)?;}
             for child in node
                 .children
                 .iter()
                 .filter(|n| matches!(n.name.as_str(), "ol" | "ul"))
             {
-                walk(child, doc, &css, list);
+                walk(child, doc, &css, list)?;
             }
         } else {
             fn boundary(node: &Node) -> bool {
@@ -2662,7 +2678,7 @@ fn read_html_with_limit(text:&str,limit:usize)->Result<Doc,String> {
                         | "style"
                 ) || node.children.iter().any(boundary)
             }
-            fn flush(inline: &mut Vec<Node>, doc: &mut Doc, css: &str) {
+            fn flush(inline: &mut Vec<Node>, doc: &mut Doc, css: &str)->Result<(),String> {
                 let paragraph = Node {
                     name: "p".into(),
                     attrs: BTreeMap::from([("style".into(), css.into())]),
@@ -2673,25 +2689,30 @@ fn read_html_with_limit(text:&str,limit:usize)->Result<Doc,String> {
                 if !paragraph.text_content().trim().is_empty()
                     || paragraph.children.iter().any(|n| n.name == "br")
                 {
-                    walk(&paragraph, doc, "", None);
+                    walk(&paragraph, doc, "", None)?;
                 }
+                Ok(())
             }
             let mut inline = Vec::new();
             for child in &node.children {
                 if boundary(child) {
-                    flush(&mut inline, doc, &css);
-                    walk(child, doc, &css, list);
+                    flush(&mut inline, doc, &css)?;
+                    walk(child, doc, &css, list)?;
                 } else {
                     inline.push(child.clone());
                 }
             }
-            flush(&mut inline, doc, &css);
+            flush(&mut inline, doc, &css)?;
         }
+        Ok(())
     }
     normalize_html_names(&mut node);
-    walk(&node, &mut doc, "", None);
+    if let Some(title)=node.descendant("title") {doc.title=title.text_content();}
+    let mut metadata=Vec::new();node.descendants("meta",&mut metadata);
+    if let Some(author)=metadata.iter().find(|meta|meta.attr("name").is_some_and(|name|name.eq_ignore_ascii_case("author"))).and_then(|meta|meta.attr("content")) {doc.author=author.into();}
+    walk(&node, &mut doc, "", None)?;
     doc.losses.push(
-        "HTML: сложные CSS-макеты и сетевые изображения не поддерживаются; обычные таблицы без метаданных TrineDocs могут быть преобразованы в абзацы.".into(),
+        "HTML: сложные CSS-макеты, внешние изображения и часть оформления/вложенности таблиц не поддерживаются.".into(),
     );
     doc.normalize();
     Ok(doc)
@@ -3737,18 +3758,15 @@ mod tests {
         )?;
         assert_eq!(
             doc.plain_text(),
-            "before bold\nmiddle\nafter\nHeader\nCell one\nCell two\nend"
+            "before bold\nmiddle\nafter\nHeader\tCell one\nCell two\nend"
         );
         assert!(
             doc.paragraphs
                 .first()
                 .is_some_and(|p| p.runs.iter().any(|r| r.text == "bold" && r.format.bold))
         );
-        assert!(
-            doc.losses
-                .iter()
-                .any(|loss| loss.contains("таблицы преобразуются"))
-        );
+        assert_eq!(doc.tables.len(),1);
+        assert_eq!(doc.tables[0].rows[0].len(),2);
         Ok(())
     }
     #[test]
@@ -4832,7 +4850,7 @@ mod next_markdown_table_image_tests {
 fn inherited_html_css(css:&str)->String {
     css_declarations(css).into_iter().filter(|(key,_)|matches!(key.as_str(),
         "font-size"|"font-family"|"font-weight"|"font-style"|"color"|"text-align"|"text-indent"|
-        "line-height"|"widows"|"orphans"|"white-space"))
+        "line-height"|"widows"|"orphans"|"white-space"|"text-decoration"|"text-decoration-line"))
         .map(|(key,value)|format!("{key}:{value}")).collect::<Vec<_>>().join(";")
 }
 #[cfg(test)]
@@ -4870,5 +4888,482 @@ mod next_decode_limit_tests {
     fn oversized_html_is_rejected_before_plain_text_fallback() {
         let html=format!("<p><b>kept</b></p><!--{}-->"," ".repeat(256));
         assert!(super::read_html_with_limit(&html,64).is_err());
+    }
+}
+
+fn html_font_size(value:&str,parent:f32)->f32 {
+    let value=value.trim().to_ascii_lowercase();
+    let relative=value.strip_suffix('%').map(|number|(number,0.01))
+        .or_else(||value.strip_suffix("em").map(|number|(number,1.0)));
+    if let Some((number,factor))=relative {
+        return number.trim().parse::<f32>().ok().filter(|number|number.is_finite() && *number>0.0)
+            .map(|number|(parent*number*factor).clamp(4.0,144.0)).unwrap_or(parent);
+    }
+    css_points(&value,parent).clamp(4.0,144.0)
+}
+fn html_append_run(out:&mut Vec<Run>,text:String,format:&TextFormat) {
+    if text.is_empty(){return;}
+    if let Some(last)=out.last_mut().filter(|last|last.format==*format) {last.text.push_str(&text);}
+    else{out.push(Run{text,format:format.clone()});}
+}
+fn html_inline_text(text:&str,format:&TextFormat,preserve:bool,out:&mut Vec<Run>,pending:&mut Option<TextFormat>) {
+    let flush=|out:&mut Vec<Run>,pending:&mut Option<TextFormat>| {
+        if let Some(format)=pending.take()
+            && out.last().is_some_and(|run|!run.text.ends_with('\u{000b}')) {
+            html_append_run(out," ".into(),&format);
+        }
+    };
+    if preserve {
+        flush(out,pending);html_append_run(out,text.into(),format);return;
+    }
+    let mut chunk=String::new();
+    for ch in text.chars() {
+        if matches!(ch,' '| '\t'|'\r'|'\n'|'\u{000c}') {
+            html_append_run(out,std::mem::take(&mut chunk),format);
+            pending.get_or_insert_with(||format.clone());
+        }else{
+            flush(out,pending);chunk.push(ch);
+        }
+    }
+    html_append_run(out,chunk,format);
+}
+
+fn html_computed_css(parent:&str,child:&str)->String {
+    let parent_size=css_declarations(parent).iter().find(|(key,_)|key=="font-size")
+        .map(|(_,value)|html_font_size(value,11.0)).unwrap_or(11.0);
+    let merged=merge_html_css(parent,child);
+    let size=css_declarations(&merged).into_iter().find(|(key,_)|key=="font-size")
+        .map(|(_,value)|html_font_size(&value,parent_size)).unwrap_or(parent_size);
+    // Store computed relative lengths so inheritance does not apply the percentage twice.
+    let mut computed=if css_declarations(&merged).iter().any(|(key,_)|key=="font-size") {
+        merge_html_css(&merged,&format!("font-size:{size}pt"))
+    }else{merged.clone()};
+    if let Some(value)=css_declarations(&merged).into_iter().find(|(key,_)|key=="line-height").map(|(_,value)|value.to_ascii_lowercase()) {
+        let relative=value.trim().strip_suffix('%').map(|number|(number,0.01))
+            .or_else(||value.trim().strip_suffix("em").map(|number|(number,1.0)));
+        if let Some((number,factor))=relative
+            && let Some(number)=number.trim().parse::<f32>().ok().filter(|number|number.is_finite() && *number>0.0) {
+            computed=merge_html_css(&computed,&format!("line-height:{}pt",(size*number*factor).clamp(1.0,1584.0)));
+        }
+    }
+    computed
+}
+fn html_image_geometry(node:&Node,intrinsic_width:f32,intrinsic_height:f32)->(f32,f32) {
+    let attribute=|name:&str|node.attr(name).and_then(|value|value.trim().parse::<f32>().ok())
+        .filter(|value|value.is_finite() && *value>0.0).map(|value|value*0.75);
+    let mut width=attribute("width");let mut height=attribute("height");
+    for (key,value) in css_declarations(node.attr("style").unwrap_or("")) {
+        if matches!(key.as_str(),"width"|"height") {
+            let size=css_points(&value,f32::NAN);
+            if size.is_finite() && size>0.0 {
+                if key=="width" {width=Some(size);}else{height=Some(size);}
+            }
+        }
+    }
+    if let Some(value)=node.attr("data-trinedocs-width").and_then(|value|value.parse::<f32>().ok()).filter(|value|value.is_finite() && *value>0.0) {width=Some(value);}
+    if let Some(value)=node.attr("data-trinedocs-height").and_then(|value|value.parse::<f32>().ok()).filter(|value|value.is_finite() && *value>0.0) {height=Some(value);}
+    let intrinsic_width=f64::from(intrinsic_width).max(f64::from(f32::MIN_POSITIVE));
+    let intrinsic_height=f64::from(intrinsic_height).max(f64::from(f32::MIN_POSITIVE));
+    let (width,height)=match (width.map(f64::from),height.map(f64::from)) {
+        (Some(width),Some(height))=>(width,height),
+        (Some(width),None)=>(width,width*intrinsic_height/intrinsic_width),
+        (None,Some(height))=>(height*intrinsic_width/intrinsic_height,height),
+        (None,None)=>(intrinsic_width,intrinsic_height),
+    };
+    let fit=(10000.0/width).min(10000.0/height).min(1.0);
+    ((width*fit).max(0.001) as f32,(height*fit).max(0.001) as f32)
+}
+
+fn word_grid_before(row:&Node)->Result<usize,String> {
+    let Some(value)=row.child("trPr").and_then(|properties|properties.child("gridBefore")).and_then(Node::value) else{return Ok(0);};
+    let count=value.parse::<usize>().map_err(|_|"Некорректный gridBefore DOCX")?;
+    if count>256 {return Err("gridBefore DOCX превышает256 столбцов".into());}
+    Ok(count)
+}
+fn word_number_kind(format:Option<&str>)->List {
+    match format {Some("none")=>List::None,Some("bullet")=>List::Bullet,_=>List::Number}
+}
+
+fn markdown_link_end(text:&str,start:usize,budget:&mut usize)->Result<Option<usize>,()> {
+    let mut nesting=0;let mut escaped=false;let mut angle=false;let mut quote=None;
+    let mut first=true;let mut space=false;
+    for (index,ch) in text[start..].char_indices() {
+        if !md_spend(budget,ch.len_utf8()){return Err(());}
+        if escaped {escaped=false;continue;}
+        if ch=='\\' {escaped=true;continue;}
+        if angle {if ch=='>' {angle=false;}continue;}
+        if let Some(delimiter)=quote {if ch==delimiter {quote=None;}continue;}
+        if first && ch.is_whitespace() {continue;}
+        if first && ch=='<' {first=false;angle=true;continue;}
+        first=false;
+        if space && nesting==0 && matches!(ch,'\''|'"') {quote=Some(ch);space=false;continue;}
+        match ch {
+            '('=>nesting+=1,')' if nesting==0=>return Ok(Some(start+index)),
+            ')'=>nesting-=1,_=>{}
+        }
+        space=ch.is_whitespace();
+    }
+    Ok(None)
+}
+fn markdown_emphasis_end(text:&str,marker:&str,budget:&mut usize)->Result<Option<usize>,()> {
+    let mut offset=0;
+    while let Some(relative)=md_unescaped(&text[offset..],marker,budget)? {
+        let end=offset+relative;
+        let before=text[..end].chars().next_back();
+        let after=text[end+marker.len()..].chars().next();
+        if before.is_some_and(|ch|!ch.is_whitespace())
+            && !(marker.starts_with('_') && before.is_some_and(char::is_alphanumeric) && after.is_some_and(char::is_alphanumeric)) {
+            return Ok(Some(end));
+        }
+        offset=end+marker.len();
+    }
+    Ok(None)
+}
+
+type HtmlWalker=fn(&Node,&mut Doc,&str,Option<(List,u8)>)->Result<(),String>;
+fn html_table_rows<'a>(node:&'a Node,out:&mut Vec<(&'a Node,bool,usize)>,header:bool) {
+    let mut direct_start=out.len();
+    for child in &node.children {
+        if child.name=="tr" {out.push((child,header,0));}
+        else if matches!(child.name.as_str(),"thead"|"tbody"|"tfoot") {
+            let end=out.len();
+            for (_,_,group_end) in &mut out[direct_start..end] {*group_end=end;}
+            html_table_rows(child,out,child.name=="thead");
+            direct_start=out.len();
+        }
+    }
+    let end=out.len();
+    for (_,_,group_end) in &mut out[direct_start..end] {*group_end=end;}
+}
+fn html_span(node:&Node,name:&str,maximum:usize)->Result<usize,String> {
+    let Some(value)=node.attr(name) else{return Ok(1);};
+    let count=value.trim().parse::<usize>().map_err(|_|format!("HTML: некорректный {name}"))?;
+    if count==0 || count>maximum {return Err(format!("HTML: {name} превышает безопасный диапазон"));}
+    Ok(count)
+}
+fn html_row_span(node:&Node,remaining:usize)->Result<usize,String> {
+    let Some(value)=node.attr("rowspan") else{return Ok(1);};
+    let count=value.trim().parse::<usize>().map_err(|_|"HTML: некорректный rowspan")?;
+    // rowspan=0 covers the remaining rows of this row group, never a later tbody.
+    Ok(if count==0 {remaining}else{count.min(remaining)})
+}
+fn html_import_table(node:&Node,doc:&mut Doc,css:&str,walk:HtmlWalker)->Result<(),String> {
+    if doc.tables.len()>=1000 {return Err("HTML: превышен лимит1000 таблиц".into());}
+    let mut source=Vec::new();html_table_rows(node,&mut source,false);
+    if source.is_empty(){return Ok(());}
+    if source.len()>10000 {return Err("HTML: таблица превышает10000 строк".into());}
+    let mut budget=doc.tables.iter().flat_map(|table|&table.rows).map(Vec::len).sum::<usize>();
+    let mut active=vec![None::<(usize,usize)>;256];
+    let mut rows=Vec::new();let mut row_heights=Vec::new();let mut header_rows=0;
+    let mut borderless=true;let mut border_color=[0,0,0];let mut margin=WORD_CELL_MARGIN;
+    let mut first_cell=true;
+    for (ri,(row_node,in_header,group_end)) in source.iter().enumerate() {
+        let nodes=row_node.children.iter().filter(|child|matches!(child.name.as_str(),"td"|"th")).collect::<Vec<_>>();
+        if nodes.len()>256 {return Err("HTML: таблица превышает256 столбцов".into());}
+        if ri==header_rows && (*in_header || !nodes.is_empty() && nodes.iter().all(|cell|cell.name=="th")) {header_rows+=1;}
+        let mut row=Vec::new();let mut column=0;let mut cells=nodes.into_iter().peekable();let mut height=0.0_f32;
+        loop {
+            let continued=active.get(column).copied().flatten().filter(|(until,_)|*until>ri);
+            if let Some((_,span))=continued {
+                if span==0 {return Err("HTML: пересечение объединений таблицы".into());}
+                let paragraph=Paragraph{id:doc.alloc_id(),..Default::default()};
+                let mut cell=Cell::new(doc.alloc_id(),vec![paragraph],[255,255,255]);
+                cell.span=span as u16;cell.merged=true;row.push(cell);column+=span;
+            }else if let Some(cell_node)=cells.next() {
+                let span=html_span(cell_node,"colspan",256)?;
+                if column+span>256 || active[column..column+span].iter().any(|slot|slot.is_some_and(|(until,_)|until>ri)) {
+                    return Err("HTML: пересечение объединений или больше256 столбцов".into());
+                }
+                let row_span=html_row_span(cell_node,group_end.saturating_sub(ri).max(1))?;
+                let cell_css=html_computed_css(&inherited_html_css(css),cell_node.attr("style").unwrap_or(""));
+                let mut nested=Doc{paragraphs:Vec::new(),next_id:doc.next_id,page:doc.page.clone(),..Default::default()};
+                walk(cell_node,&mut nested,css,None)?;
+                doc.next_id=nested.next_id;doc.losses.extend(nested.losses);
+                if !nested.tables.is_empty() || !nested.images.is_empty() {
+                    doc.losses.push("HTML: вложенные таблицы и изображения ячеек не представлены в модели ячейки.".into());
+                }
+                if nested.paragraphs.is_empty() {nested.paragraphs.push(Paragraph{id:doc.alloc_id(),..Default::default()});}
+                let mut cell=Cell::new(doc.alloc_id(),nested.paragraphs,[255,255,255]);cell.span=span as u16;
+                let mut cell_padding=None;
+                for (key,value) in css_declarations(&cell_css) {
+                    match key.as_str() {
+                        "background"|"background-color"=>if let Some(color)=css_color(&value) {cell.fill=color;},
+                        "vertical-align"=>cell.v_align=match value.trim().to_ascii_lowercase().as_str() {"bottom"=>VAlign::Bottom,"middle"=>VAlign::Center,_=>VAlign::Top},
+                        "height"=>height=height.max(css_points(&value,0.0).clamp(0.0,1500.0)),
+                        "padding"=>{
+                            let values=value.split_whitespace().map(|part|css_points(part,0.0).clamp(0.0,72.0)).collect::<Vec<_>>();
+                            cell_padding=match values.as_slice() {[a]=>Some([*a;4]),[a,b]=>Some([*a,*b,*a,*b]),[a,b,c]=>Some([*a,*b,*c,*b]),[a,b,c,d]=>Some([*a,*b,*c,*d]),_=>None};
+                        }
+                        "border"=>if !value.split_whitespace().any(|word|word.eq_ignore_ascii_case("none") || word.eq_ignore_ascii_case("hidden"))
+                            && !value.trim().starts_with('0') {
+                            borderless=false;
+                            if let Some(color)=value.split_whitespace().find_map(css_color) {border_color=color;}
+                        },
+                        _=>{}
+                    }
+                }
+                if first_cell {if let Some(padding)=cell_padding {margin=padding;}first_cell=false;}
+                for (offset,slot) in active.iter_mut().skip(column).take(span).enumerate() {
+                    *slot=(row_span>1).then_some((ri+row_span,if offset==0 {span}else{0}));
+                }
+                row.push(cell);column+=span;
+            }else if let Some(next)=active.iter().enumerate().skip(column).find_map(|(index,slot)|
+                slot.filter(|(until,_)|*until>ri).map(|_|index)) {
+                if next>column {
+                    let paragraph=Paragraph{id:doc.alloc_id(),..Default::default()};
+                    let mut cell=Cell::new(doc.alloc_id(),vec![paragraph],[255,255,255]);
+                    cell.span=(next-column) as u16;row.push(cell);column=next;
+                }
+            }else{break;}
+            budget=budget.saturating_add(1);
+            if budget>100000 {return Err("HTML: таблицы превышают100000 ячеек".into());}
+        }
+        if row.is_empty() {
+            let paragraph=Paragraph{id:doc.alloc_id(),..Default::default()};
+            row.push(Cell::new(doc.alloc_id(),vec![paragraph],[255,255,255]));
+            budget+=1;if budget>100000 {return Err("HTML: таблицы превышают100000 ячеек".into());}
+        }
+        for (key,value) in css_declarations(row_node.attr("style").unwrap_or("")) {
+            if key=="height" {height=height.max(css_points(&value,0.0).clamp(0.0,1500.0));}
+        }
+        rows.push(row);row_heights.push(height);
+    }
+    if doc.paragraphs.is_empty() {let id=doc.alloc_id();doc.paragraphs.push(Paragraph{id,..Default::default()});}
+    let anchor=doc.paragraphs.last().map(|paragraph|paragraph.id).unwrap_or_default();
+    let columns=rows.iter().map(|row|row.iter().map(Cell::span).sum::<usize>()).max().unwrap_or(1);
+    let fallback=(doc.page.width-doc.page.margin_left-doc.page.margin_right)/columns as f32;
+    let mut widths=Vec::new();
+    for group in node.children.iter().filter(|child|child.name=="colgroup") {
+        for column in group.children.iter().filter(|child|child.name=="col") {
+            let mut width=column.attr("width").and_then(|value|value.parse::<f32>().ok()).filter(|value|value.is_finite() && *value>0.0).map(|value|value*0.75).unwrap_or(fallback);
+            for (key,value) in css_declarations(column.attr("style").unwrap_or("")) {if key=="width" {width=css_points(&value,width);}}
+            let span=html_span(column,"span",256)?;
+            if widths.len()+span>256 {return Err("HTML: colgroup превышает256 столбцов".into());}
+            widths.extend(std::iter::repeat_n(width.clamp(0.001,10000.0),span));
+        }
+    }
+    widths.resize(columns,fallback);widths.truncate(columns);
+    if row_heights.iter().all(|height|*height==0.0){row_heights.clear();}
+    let id=doc.alloc_id();
+    doc.tables.push(Table{id,after_paragraph_id:anchor,rows,column_widths:widths,border_color,borderless,cell_margin:margin,row_heights,header_rows});
+    Ok(())
+}
+
+fn html_import_list_item(node:&Node,doc:&mut Doc,css:&str,list:Option<(List,u8)>,walk:HtmlWalker)->Result<(),String> {
+    fn emit(node:&Node,doc:&mut Doc,css:&str,list:(List,u8),first:&mut bool,walk:HtmlWalker)->Result<(),String> {
+        let start=doc.paragraphs.len();
+        walk(node,doc,css,Some(list))?;
+        for paragraph in doc.paragraphs.iter_mut().skip(start).filter(|paragraph|paragraph.list==List::None) {
+            if !*first {paragraph.list=list.0;paragraph.list_level=list.1;*first=true;}
+            else {paragraph.indent+=(f32::from(list.1)+1.0)*18.0;}
+        }
+        Ok(())
+    }
+    fn flush(inline:&mut Vec<Node>,doc:&mut Doc,css:&str,list:(List,u8),first:&mut bool,walk:HtmlWalker)->Result<(),String> {
+        if inline.is_empty(){return Ok(());}
+        let paragraph=Node{name:"p".into(),children:std::mem::take(inline),..Default::default()};
+        if !paragraph.text_content().trim().is_empty() || paragraph.children.iter().any(|child|child.name=="br" || child.name=="img") {
+            emit(&paragraph,doc,css,list,first,walk)?;
+        }
+        Ok(())
+    }
+    let list=list.unwrap_or((List::Bullet,0));let mut first=false;let mut inline=Vec::new();
+    for child in &node.children {
+        if matches!(child.name.as_str(),"ol"|"ul") {
+            flush(&mut inline,doc,css,list,&mut first,walk)?;
+            walk(child,doc,css,Some(list))?;
+        }else if matches!(child.name.as_str(),"p"|"div"|"pre"|"h1"|"h2"|"h3"|"h4"|"h5"|"h6"|"blockquote"|"table") {
+            flush(&mut inline,doc,css,list,&mut first,walk)?;
+            emit(child,doc,css,list,&mut first,walk)?;
+        }else{inline.push(child.clone());}
+    }
+    flush(&mut inline,doc,css,list,&mut first,walk)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod hundred_docs_io_regressions {
+    use super::*;
+    fn html(source:&str)->Result<Doc,String>{read(source.as_bytes(),"html")}
+    fn md(source:&str)->Result<Doc,String>{read(source.as_bytes(),"md")}
+    fn word(body:&str,styles:&str,numbering:&str)->Result<Doc,String> {
+        let namespace=r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#;
+        let mut parts=vec![("word/document.xml".into(),format!("<w:document {namespace}><w:body>{body}</w:body></w:document>").into_bytes())];
+        if !styles.is_empty(){parts.push(("word/styles.xml".into(),format!("<w:styles {namespace}>{styles}</w:styles>").into_bytes()));}
+        if !numbering.is_empty(){parts.push(("word/numbering.xml".into(),format!("<w:numbering {namespace}>{numbering}</w:numbering>").into_bytes()));}
+        read(&write_zip(parts)?,"docx")
+    }
+    #[test]
+    fn html_normal_whitespace_collapses_across_inline_nodes_but_pre_stays_literal()->Result<(),String> {
+        let doc=html("<p> \n  one <b> \t two </b>  three \n <br/> four </p><pre>  a\n  b  </pre><p style=\"white-space:pre-wrap\">  c  </p>")?;
+        assert_eq!(doc.paragraphs[0].text(),"one two three\u{000b}four");
+        assert_eq!(doc.paragraphs[1].text(),"  a\n  b  ");
+        assert_eq!(doc.paragraphs[2].text(),"  c  ");
+        Ok(())
+    }
+    #[test]
+    fn html_code_style_survives_its_own_export()->Result<(),String> {
+        let mut doc=Doc::from_text("a  b\nnext");
+        doc.paragraphs[0].style="Code".into();
+        let exported=write(&doc,"html")?;
+        assert!(String::from_utf8_lossy(&exported).contains("<pre "));
+        let imported=read(&exported,"html")?;
+        assert_eq!(imported.paragraphs[0].style,"Code");
+        assert_eq!(imported.paragraphs[0].text(),"a  b");
+        let heading=html("<h1>Heading</h1>")?;assert_eq!(heading.paragraphs[0].runs[0].format.size,22.0);Ok(())
+    }
+    #[test]
+    fn html_relative_font_sizes_use_the_parent_size_once()->Result<(),String> {
+        let doc=html(r#"<div style="font-size:20pt"><p style="font-size:150%">big <span style="font-size:.5em">small</span></p></div>"#)?;
+        assert_eq!(doc.paragraphs[0].runs[0].format.size,30.0);
+        assert!(doc.paragraphs[0].runs.iter().any(|run|run.text=="small" && run.format.size==15.0));
+        Ok(())
+    }
+    #[test]
+    fn html_percentage_line_height_uses_the_computed_font_size()->Result<(),String> {
+        let doc=html(r#"<p style="font-size:20pt;line-height:150%">percent<span style="font-size:70pt">large</span></p><p style="font-size:12pt;line-height:2em">em</p>"#)?;
+        assert_eq!(doc.paragraphs[0].line_points,30.0);
+        assert_eq!(doc.paragraphs[1].line_points,24.0);
+        assert!(doc.paragraphs.iter().all(|paragraph|paragraph.line_exact));Ok(())
+    }
+    #[test]
+    fn html_css_vertical_alignment_keeps_super_and_subscripts()->Result<(),String> {
+        let doc=html(r#"<p>x<span style="vertical-align:super">2</span><span style="vertical-align:sub">i</span></p>"#)?;
+        assert_eq!(doc.paragraphs[0].runs[1].format.script,1);
+        assert_eq!(doc.paragraphs[0].runs[2].format.script,-1);Ok(())
+    }
+    #[test]
+    fn html_list_items_keep_multiple_block_paragraphs_and_nested_list_levels()->Result<(),String> {
+        let doc=html("<ul><li><p>first</p><p>second</p><ol><li>nested</li></ol></li><li>last</li></ul>")?;
+        assert_eq!(doc.paragraphs.iter().map(Paragraph::text).collect::<Vec<_>>(),vec!["first","second","nested","last"]);
+        assert_eq!((doc.paragraphs[0].list,doc.paragraphs[0].list_level),(List::Bullet,0));
+        assert_eq!(doc.paragraphs[1].list,List::None);assert_eq!(doc.paragraphs[1].indent,18.0);
+        assert_eq!((doc.paragraphs[2].list,doc.paragraphs[2].list_level),(List::Number,1));
+        let wrapped=html("<ul><li><div><p>A</p><ol><li>B</li></ol></div></li></ul>")?;
+        assert_eq!(wrapped.paragraphs.iter().map(Paragraph::text).collect::<Vec<_>>(),vec!["A","B"]);
+        assert_eq!((wrapped.paragraphs[0].list,wrapped.paragraphs[0].list_level),(List::Bullet,0));
+        assert_eq!((wrapped.paragraphs[1].list,wrapped.paragraphs[1].list_level),(List::Number,1));Ok(())
+    }
+    #[test]
+    fn html_tables_import_bounded_structure_merges_and_native_export_geometry()->Result<(),String> {
+        let doc=html(r##"<p>anchor</p><table><colgroup><col style="width:70pt"/><col style="width:90pt"/></colgroup><thead><tr><th colspan="2" rowspan="2" style="padding:1pt 2pt 3pt 4pt;vertical-align:bottom;border:1px solid #123456;background-color:#abcdef;height:24pt"><p><b>merged</b></p></th></tr><tr></tr></thead><tbody><tr><td>a</td><td>b</td></tr></tbody></table>"##)?;
+        let table=&doc.tables[0];
+        assert_eq!(table.rows.len(),3);assert_eq!(table.grid_columns(),2);
+        assert_eq!(table.rows[0][0].span,2);assert!(table.rows[1][0].merged);
+        assert_eq!(table.rows[0][0].fill,[171,205,239]);assert_eq!(table.rows[0][0].v_align,VAlign::Bottom);
+        assert!(table.rows[0][0].paragraphs[0].runs[0].format.bold);
+        assert_eq!(table.column_widths,vec![70.0,90.0]);assert_eq!(table.cell_margin,[1.0,2.0,3.0,4.0]);
+        assert_eq!(table.border_color,[18,52,86]);assert!(!table.borderless);
+        assert_eq!(table.header_rows,2);assert_eq!(table.row_heights[0],24.0);
+        let imported=read(&write(&doc,"html")?,"html")?;
+        assert_eq!(imported.tables[0].rows[0][0].span,2);
+        assert!(imported.tables[0].rows[1][0].merged);
+        assert_eq!(imported.tables[0].column_widths,table.column_widths);
+        assert!(html("<table><tr><td colspan=\"257\">bad</td></tr></table>").is_err());
+        for span in ["0","20"] {
+            let grouped=html(&format!("<table><thead><tr><th>H1</th><th>H2</th></tr></thead><tbody><tr><td rowspan=\"{span}\">A</td><td>B</td></tr><tr><td>C</td></tr></tbody><tbody><tr><td>D</td><td>E</td></tr></tbody></table>"))?;
+            let rows=&grouped.tables[0].rows;
+            assert_eq!(rows.len(),4);assert!(rows[2][0].merged);
+            assert!(!rows[3][0].merged);assert_eq!(cell_text(&rows[3][0]),"D");
+            assert_eq!(cell_text(&rows[2][1]),"C");
+        }
+        Ok(())
+    }
+    #[test]
+    fn html_images_use_standard_attributes_and_css_with_intrinsic_ratio()->Result<(),String> {
+        let mut image=std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(4,2).write_to(&mut image,image::ImageFormat::Png).map_err(|error|error.to_string())?;
+        let uri=format!("data:image/png;base64,{}",encode_image_base64(&image.into_inner()));
+        let doc=html(&format!("<img src=\"{uri}\" width=\"96\"/><img src=\"{uri}\" width=\"96\" style=\"width:2in;height:1in\"/>"))?;
+        assert_eq!((doc.images[0].width,doc.images[0].height),(72.0,36.0));
+        assert_eq!((doc.images[1].width,doc.images[1].height),(144.0,72.0));Ok(())
+    }
+    #[test]
+    fn html_rejected_embedded_images_report_the_actual_loss()->Result<(),String> {
+        let doc=html("<p>kept<img src=\"data:image/png;base64,AA=A\"/></p>")?;
+        assert!(doc.images.is_empty());assert_eq!(doc.paragraphs[0].text(),"kept");
+        assert!(doc.losses.iter().any(|loss|loss.contains("изображение пропущено")));Ok(())
+    }
+    #[test]
+    fn html_document_metadata_roundtrips_without_entering_body_text()->Result<(),String> {
+        let doc=html("<html><head><title>A &amp; B</title><meta name=\"author\" content=\"C &amp; D\"/></head><body><p>body</p></body></html>")?;
+        assert_eq!(doc.title,"A & B");assert_eq!(doc.author,"C & D");assert_eq!(doc.plain_text(),"body");
+        let again=read(&write(&doc,"html")?,"html")?;
+        assert_eq!(again.title,doc.title);assert_eq!(again.author,doc.author);Ok(())
+    }
+    #[test]
+    fn html_descendants_cannot_erase_an_ancestor_text_decoration()->Result<(),String> {
+        let doc=html(r#"<div style="text-decoration:underline"><p>one <span style="text-decoration:none">two</span></p></div>"#)?;
+        assert!(doc.paragraphs[0].runs.iter().all(|run|run.format.underline));Ok(())
+    }
+    #[test]
+    fn docx_hidden_runs_respect_style_inheritance_and_explicit_visibility()->Result<(),String> {
+        let styles=r#"<w:style w:type="paragraph" w:styleId="Secret"><w:rPr><w:vanish/></w:rPr></w:style><w:style w:type="character" w:styleId="Visible"><w:rPr><w:vanish/></w:rPr></w:style>"#;
+        let doc=word(r#"<w:p><w:pPr><w:pStyle w:val="Secret"/></w:pPr><w:r><w:t>hidden</w:t></w:r><w:r><w:rPr><w:rStyle w:val="Visible"/></w:rPr><w:t>shown</w:t></w:r><w:r><w:rPr><w:vanish w:val="0"/></w:rPr><w:t>override</w:t></w:r></w:p>"#,styles,"")?;
+        assert_eq!(doc.paragraphs[0].text(),"shownoverride");
+        assert!(doc.losses.iter().any(|loss|loss.contains("Скрытый текст")));Ok(())
+    }
+    #[test]
+    fn docx_double_strike_keeps_a_visible_strike_and_reports_the_approximation()->Result<(),String> {
+        let doc=word("<w:p><w:r><w:rPr><w:dstrike/></w:rPr><w:t>strike</w:t></w:r></w:p>","","")?;
+        assert!(doc.paragraphs[0].runs[0].format.strike);
+        assert!(doc.losses.iter().any(|loss|loss.contains("Двойное зачёркивание")));Ok(())
+    }
+    #[test]
+    fn docx_table_vertical_alignment_inherits_then_allows_a_direct_override()->Result<(),String> {
+        let styles=r#"<w:style w:type="table" w:styleId="Aligned"><w:tcPr><w:vAlign w:val="bottom"/></w:tcPr></w:style>"#;
+        let doc=word(r#"<w:tbl><w:tblPr><w:tblStyle w:val="Aligned"/></w:tblPr><w:tr><w:tc><w:p/></w:tc><w:tc><w:tcPr><w:vAlign w:val="center"/></w:tcPr><w:p/></w:tc></w:tr></w:tbl>"#,styles,"")?;
+        assert_eq!(doc.tables[0].rows[0][0].v_align,VAlign::Bottom);
+        assert_eq!(doc.tables[0].rows[0][1].v_align,VAlign::Center);Ok(())
+    }
+    #[test]
+    fn docx_grid_before_keeps_the_first_real_cell_in_its_grid_column()->Result<(),String> {
+        let doc=word(r#"<w:tbl><w:tblGrid><w:gridCol w:w="400"/><w:gridCol w:w="600"/><w:gridCol w:w="800"/></w:tblGrid><w:tr><w:trPr><w:gridBefore w:val="2"/></w:trPr><w:tc><w:p><w:r><w:t>third</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,"","")?;
+        let table=&doc.tables[0];assert_eq!(table.grid_starts(0),vec![0,2]);
+        assert_eq!(table.rows[0][0].span,2);assert_eq!(cell_text(&table.rows[0][1]),"third");Ok(())
+    }
+    #[test]
+    fn docx_numbering_none_does_not_create_a_visible_list_marker()->Result<(),String> {
+        let numbering=r#"<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="none"/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>"#;
+        let doc=word(r#"<w:p><w:pPr><w:numPr><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>plain</w:t></w:r></w:p>"#,"",numbering)?;
+        assert_eq!(doc.paragraphs[0].list,List::None);Ok(())
+    }
+    #[test]
+    fn docx_block_revisions_keep_inserted_content_and_skip_deleted_blocks()->Result<(),String> {
+        let doc=word("<w:ins><w:p><w:r><w:t>inserted</w:t></w:r></w:p></w:ins><w:moveTo><w:p><w:r><w:t>moved</w:t></w:r></w:p></w:moveTo><w:del><w:p><w:r><w:t>deleted</w:t></w:r></w:p></w:del>","","")?;
+        assert_eq!(doc.plain_text(),"inserted\nmoved");Ok(())
+    }
+    #[test]
+    fn markdown_fenced_code_checks_info_string_and_removes_opening_indentation()->Result<(),String> {
+        let doc=md("  ~~~lang\n  one\n    two\n ~~~\n")?;
+        assert_eq!(doc.paragraphs[0].text(),"one\u{000b}  two");
+        let invalid=md("```lang`bad\ntext")?;
+        assert!(invalid.paragraphs.iter().all(|paragraph|paragraph.style!="Code"));Ok(())
+    }
+    #[test]
+    fn markdown_indented_code_keeps_internal_blanks_and_cannot_interrupt_a_paragraph()->Result<(),String> {
+        let doc=md("    one\n\n    two\n\ntext\n    continuation")?;
+        assert_eq!(doc.paragraphs.len(),2);
+        assert_eq!(doc.paragraphs[0].text(),"one\u{000b}\u{000b}two");
+        assert_eq!(doc.paragraphs[1].text(),"text continuation");Ok(())
+    }
+    #[test]
+    fn markdown_link_closing_parentheses_ignore_angle_urls_and_quoted_titles()->Result<(),String> {
+        let doc=md("[one](<https://example.org/a(b> \"title ) here\") [two](https://example.org/c \"another ) title\")")?;
+        assert_eq!(doc.paragraphs[0].text(),"one two");
+        assert!(doc.paragraphs[0].runs.iter().any(|run|run.text=="one" && run.format.link.as_deref()==Some("https://example.org/a(b")));
+        assert!(doc.paragraphs[0].runs.iter().any(|run|run.text=="two" && run.format.link.as_deref()==Some("https://example.org/c")));Ok(())
+    }
+    #[test]
+    fn markdown_emphasis_requires_non_whitespace_delimiter_edges()->Result<(),String> {
+        let doc=md("* word * and __ word__ and *valid*")?;
+        assert_eq!(doc.paragraphs[0].text(),"* word * and __ word__ and valid");
+        assert!(doc.paragraphs[0].runs.iter().any(|run|run.text=="valid" && run.format.italic));Ok(())
+    }
+    #[test]
+    fn markdown_run_newlines_export_as_hard_breaks_inside_one_paragraph()->Result<(),String> {
+        let mut doc=Doc::from_text("placeholder");doc.paragraphs[0].runs[0].text="one\ntwo".into();
+        let imported=read(&write(&doc,"md")?,"md")?;
+        assert_eq!(imported.paragraphs.len(),1);assert_eq!(imported.paragraphs[0].text(),"one\u{000b}two");Ok(())
     }
 }

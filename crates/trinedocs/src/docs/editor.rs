@@ -2563,7 +2563,7 @@ fn cell_editor(
     if response.changed() {
         let mut next = doc.next_id;
         if let Some(cell) = active_cell(doc, Some(cursor)) {
-            edit_cell_text(cell, &text, &mut next);
+            if let Err(error)=try_edit_cell_text(cell,&text,&mut next) {state.message=Some(error);}
         }
         doc.next_id = next;
     }

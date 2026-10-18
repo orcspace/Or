@@ -34,7 +34,8 @@ pub fn write(deck: &Deck, ext: &str) -> Result<Vec<u8>, String> {
         "pptx" => write_pptx(deck),
         "trineslide" => crate::native::encode(&crate::native::Document::Slides(deck.clone())),
         "json" => serde_json::to_vec_pretty(deck).map_err(|e| e.to_string()),
-        "txt" | "md" => Ok(deck
+        "md" => linear_export(deck,"md",crate::package::MAX_FILE),
+        "txt" => Ok(deck
             .slides
             .iter()
             .map(|s| {
@@ -52,21 +53,7 @@ pub fn write(deck: &Deck, ext: &str) -> Result<Vec<u8>, String> {
             .collect::<Vec<_>>()
             .join("\n\n")
             .into_bytes()),
-        "html" => {
-            let body = deck
-                .slides
-                .iter()
-                .map(|s| {
-                    format!(
-                        "<section><h1>{}</h1>{}<aside>{}</aside></section>",
-                        xml_escape(&s.title),
-                        s.elements.iter().map(element_html).collect::<String>(),
-                        xml_escape(&s.notes)
-                    )
-                })
-                .collect::<String>();
-            Ok(format!("<!doctype html><html lang=\"ru\"><meta charset=\"utf-8\"><title>TrineDocs Slides</title><style>section{{min-height:80vh;padding:4rem;break-after:page}}p,td,aside{{white-space:pre-wrap}}table{{border-collapse:collapse}}td{{border:1px solid #ccc;padding:.5rem}}aside{{color:#666}}</style><body>{body}</body></html>").into_bytes())
-        }
+        "html" => linear_export(deck,"html",crate::package::MAX_FILE),
         _ => Err(format!("Экспорт .{ext} ещё не поддерживается")),
     }
 }
@@ -103,7 +90,92 @@ pub(crate) fn element_text(element: &Element) -> String {
         format!("{}\n{content}", element.text)
     }
 }
+fn image_data_uri(bytes:&[u8]) -> String {
+    const ALPHABET:&[u8;64]=b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mime=if matches!(image::guess_format(bytes),Ok(image::ImageFormat::Jpeg)) {"image/jpeg"}else{"image/png"};
+    let mut out=format!("data:{mime};base64,");
+    for chunk in bytes.chunks(3) {
+        let n=(u32::from(chunk[0])<<16)|(u32::from(*chunk.get(1).unwrap_or(&0))<<8)|u32::from(*chunk.get(2).unwrap_or(&0));
+        out.push(ALPHABET[((n>>18)&63)as usize]as char);out.push(ALPHABET[((n>>12)&63)as usize]as char);
+        out.push(if chunk.len()>1 {ALPHABET[((n>>6)&63)as usize]as char}else{'='});
+        out.push(if chunk.len()>2 {ALPHABET[(n&63)as usize]as char}else{'='});
+    }
+    out
+}
+fn markdown_literal(text:&str)->String {
+    let mut out=String::new();
+    for ch in text.chars() {
+        if ch.is_ascii_punctuation() {out.push('\\');}out.push(ch);
+    }
+    out.replace("\r\n","\n").replace('\r',"\n").replace('\n',"  \n")
+}
+fn export_push(out:&mut String,text:&str,limit:usize)->Result<(),String> {
+    if out.len().checked_add(text.len()).is_none_or(|length|length>limit) {
+        return Err("Экспорт Slides превышает безопасный размер".into());
+    }
+    out.push_str(text);Ok(())
+}
+fn image_export_budget(element:&Element,remaining:usize)->Result<(),String> {
+    if let ElementKind::Image{bytes}=&element.kind
+        && bytes.len().div_ceil(3).saturating_mul(4)>remaining {
+        return Err("Изображения Slides превышают безопасный размер экспорта".into());
+    }
+    Ok(())
+}
+fn linear_export(deck:&Deck,format:&str,limit:usize)->Result<Vec<u8>,String> {
+    // Preflight the aggregate encoded binary payload before allocating any data URI.
+    let encoded=deck.slides.iter().flat_map(|slide|&slide.elements).fold(0usize,|total,element|
+        if let ElementKind::Image{bytes}=&element.kind {total.saturating_add(bytes.len().div_ceil(3).saturating_mul(4))}else{total});
+    if encoded>limit {return Err("Изображения Slides превышают общий размер экспорта".into());}
+    let mut out=String::new();
+    if format=="html" {
+        export_push(&mut out,"<!doctype html><html lang=\"ru\"><meta charset=\"utf-8\"><title>TrineDocs Slides</title><style>section{min-height:80vh;padding:4rem;break-after:page}p,td,aside{white-space:pre-wrap}table{border-collapse:collapse}td{border:1px solid #ccc;padding:.5rem}aside{color:#666}</style><body>",limit)?;
+    }
+    for (index,slide) in deck.slides.iter().enumerate() {
+        if format=="html" {
+            export_push(&mut out,&format!("<section><h1>{}</h1>",xml_escape(&slide.title)),limit)?;
+            for element in &slide.elements {
+                image_export_budget(element,limit.saturating_sub(out.len()))?;
+                export_push(&mut out,&element_html(element),limit)?;
+            }
+            export_push(&mut out,&format!("<aside>{}</aside></section>",xml_escape(&slide.notes)),limit)?;
+        }else{
+            if index>0 {export_push(&mut out,"\n\n---\n\n",limit)?;}
+            let title=markdown_literal(&slide.title.replace(['\r','\n']," "));
+            export_push(&mut out,&format!("# {title}\n\n"),limit)?;
+            for (element_index,element) in slide.elements.iter().enumerate() {
+                if element_index>0 {export_push(&mut out,"\n\n",limit)?;}
+                image_export_budget(element,limit.saturating_sub(out.len()))?;
+                let text=if let ElementKind::Image{bytes}=&element.kind {
+                    format!("![{}]({})",markdown_literal(&element.text),image_data_uri(bytes))
+                }else{markdown_literal(&element_text(element))};
+                export_push(&mut out,&text,limit)?;
+            }
+            export_push(&mut out,&format!("\n\n{}",markdown_literal(&slide.notes)),limit)?;
+        }
+    }
+    if format=="html" {export_push(&mut out,"</body></html>",limit)?;}
+    if out.len()>limit {return Err("Экспорт Slides превышает безопасный размер".into());}
+    Ok(out.into_bytes())
+}
+fn css_quoted_font(value:&str)->String {
+    let mut out=String::new();
+    for ch in value.chars() {
+        match ch {'\\'=>out.push_str("\\\\"),'\''=>out.push_str("\\'"),'\r'|'\n'=>out.push_str("\\A "),_=>out.push(ch)}
+    }
+    out
+}
 fn element_html(element: &Element) -> String {
+    let font=css_quoted_font(&element.font);
+    let style=format!("font-family:'{font}';font-size:{}pt;font-weight:{};font-style:{};color:#{}",
+        element.font_size,if element.bold {"bold"}else{"normal"},if element.italic {"italic"}else{"normal"},hex(element.color));
+    format!("<div style=\"{}\">{}</div>",xml_escape(&style),element_html_content(element))
+}
+fn element_html_content(element: &Element) -> String {
+    if let ElementKind::Image{bytes}=&element.kind {
+        return format!("<figure><img src=\"{}\" alt=\"{}\" style=\"max-width:100%;width:{}pt;height:{}pt\"></figure>",
+            image_data_uri(bytes),xml_escape(&element.text),element.w,element.h);
+    }
     if let ElementKind::Table { cells } = &element.kind {
         let rows = cells
             .iter()
@@ -328,6 +400,7 @@ fn relationships_kind(
 /// and by the default colour map aliases (`tx1` = `dk1`, `bg1` = `lt1`, ...).
 #[derive(Clone, Default)]
 struct Look {
+    name: String,
     colors: BTreeMap<String, [u8; 3]>,
     major: String,
     minor: String,
@@ -338,6 +411,7 @@ impl Look {
         let Some(theme) = theme else {
             return look;
         };
+        look.name = theme.attr("name").to_string();
         if let Some(scheme) = theme.descend("clrScheme") {
             for entry in &scheme.children {
                 let value = entry
@@ -454,7 +528,7 @@ fn placeholder(shape: &Node) -> Option<(&str, &str)> {
         .find(|n| n.name.starts_with("nv"))?
         .child("nvPr")?
         .child("ph")?;
-    Some((ph.attr("type"), ph.attr("idx")))
+    Some((ph.attr("type"), if ph.attr("idx").is_empty() { "0" } else { ph.attr("idx") }))
 }
 fn placeholder_class(kind: &str) -> &str {
     match kind {
@@ -566,57 +640,102 @@ fn cached_points(node: &Node) -> Result<Vec<String>, String> {
     }
     Ok(points)
 }
+fn first_text_paragraph(body: &Node) -> Option<&Node> {
+    body.children.iter().filter(|node|node.name=="p")
+        .find(|node|!node.text_content().is_empty())
+        .or_else(||body.child("p"))
+}
+fn paragraph_level(paragraph: Option<&Node>) -> usize {
+    paragraph.and_then(|p|p.child("pPr")).and_then(|p|p.attr("lvl").parse::<usize>().ok())
+        .unwrap_or(0).min(8)
+}
+fn level_properties(style: &Node, level: usize) -> Option<&Node> {
+    style.child(&format!("lvl{}pPr",level+1)).and_then(|p|p.child("defRPr"))
+        .or_else(||style.child("defPPr").and_then(|p|p.child("defRPr")))
+}
+fn apply_run_properties(props: &Node, element: &mut Element, look: &Look) {
+    if !props.attr("sz").is_empty() {
+        element.font_size=(props.number("sz",element.font_size*100.0)/100.0).clamp(1.0,300.0);
+    }
+    if !props.attr("b").is_empty() { element.bold=matches!(props.attr("b"),"1"|"true"); }
+    if !props.attr("i").is_empty() { element.italic=matches!(props.attr("i"),"1"|"true"); }
+    element.color=color(props.child("solidFill"),look,element.color);
+    if let Some(face)=props.child("latin").and_then(|n|look.font(n.attr("typeface"))) { element.font=face; }
+}
+fn selected_run_properties(body: &Node) -> (Vec<&Node>, bool) {
+    let paragraph=first_text_paragraph(body);
+    let mut layers=Vec::new();
+    if let Some(props)=body.child("lstStyle").and_then(|style|level_properties(style,paragraph_level(paragraph))) {
+        layers.push(props);
+    }
+    if let Some(props)=paragraph.and_then(|p|p.child("pPr")).and_then(|p|p.child("defRPr")) {layers.push(props);}
+    let text_run=paragraph.and_then(|p|p.children.iter().find(|node|
+        matches!(node.name.as_str(),"r"|"fld")&&!node.text_content().is_empty()));
+    if let Some(props)=text_run.and_then(|run|run.child("rPr")) {layers.push(props);}
+    let has_text=paragraph.is_some_and(|p|!p.text_content().is_empty());
+    if !has_text && let Some(props)=paragraph.and_then(|p|p.child("endParaRPr")) {layers.push(props);}
+    (layers,has_text)
+}
 fn apply_text_look(
-    body: &Node,
-    element: &mut Element,
-    look: &Look,
-    style: Option<&Node>,
-    default_size: f32,
-    title: bool,
+    body:&Node,element:&mut Element,look:&Look,style:Option<&Node>,default_size:f32,title:bool,
 ) {
-    let mut layers = Vec::new();
-    if let Some(defaults) = body.descend("defRPr") {
-        layers.push(defaults);
-    }
-    // endParaRPr describes the next typed run; it must not restyle existing text.
-    let has_text=body.descend("t").is_some();
-    let direct=body.descend("rPr").or_else(||(!has_text).then(||body.descend("endParaRPr")).flatten());
-    if let Some(direct) = direct {
-        layers.push(direct);
-    }
-    element.font_size = default_size;
-    for props in layers {
-        if !props.attr("sz").is_empty() {
-            element.font_size =
-                (props.number("sz", element.font_size * 100.0) / 100.0).clamp(1.0, 300.0);
+    let (layers,_)=selected_run_properties(body);
+    element.font_size=default_size;
+    let theme_face=if title {&look.major}else{&look.minor};
+    if !theme_face.is_empty() {element.font.clone_from(theme_face);}
+    element.color=color(style.and_then(|n|n.child("fontRef")),look,element.color);
+    for props in layers {apply_run_properties(props,element,look);}
+}
+fn apply_inherited_text_look(
+    shape:&Node,body:&Node,sources:&[&Node],element:&mut Element,look:&Look,
+    style:Option<&Node>,default_size:f32,title:bool,
+) {
+    apply_text_look(body,element,look,style,default_size,title);
+    let own_layers=selected_run_properties(body).0;
+    let own_font=own_layers.iter().any(|props|props.child("latin").and_then(|n|look.font(n.attr("typeface"))).is_some());
+    let own_color=own_layers.iter().any(|props|props.child("solidFill").is_some())
+        ||style.and_then(|n|n.child("fontRef")).is_some();
+    let level=paragraph_level(first_text_paragraph(body));
+    let mut inherited=Element {font_size:default_size,color:element.color,font:element.font.clone(),..Element::default()};
+    for (source_index,source) in sources.iter().enumerate().rev() {
+        if let Some(styles)=source.child("txStyles").and_then(|styles|styles.child(if title {"titleStyle"}else if placeholder(shape).is_some() {"bodyStyle"}else{"otherStyle"}))
+            && let Some(props)=level_properties(styles,level) {apply_run_properties(props,&mut inherited,look);}
+        if let Some((kind,index))=placeholder(shape) {
+            let mut candidates=Vec::new();source.all("sp",&mut candidates);
+            let found=(source_index==0).then(||candidates.iter().find(|candidate|placeholder(candidate).is_some_and(|(_,i)|i==index))).flatten()
+                .or_else(||candidates.iter().find(|candidate|placeholder(candidate).is_some_and(|(k,_)|placeholder_class(k)==placeholder_class(kind))));
+            if let Some(inherited_body)=found.and_then(|node|node.child("txBody")) {
+                if let Some(props)=inherited_body.child("lstStyle").and_then(|style|level_properties(style,level)) {
+                    apply_run_properties(props,&mut inherited,look);
+                }
+                for props in selected_run_properties(inherited_body).0 {apply_run_properties(props,&mut inherited,look);}
+            }
         }
-        if !props.attr("b").is_empty() {
-            element.bold = matches!(props.attr("b"), "1" | "true");
-        }
-        if !props.attr("i").is_empty() {
-            element.italic = matches!(props.attr("i"), "1" | "true");
-        }
-        element.color = color(props.child("solidFill"), look, element.color);
-        if let Some(font) = props
-            .child("latin")
-            .and_then(|latin| look.font(latin.attr("typeface")))
-        {
-            element.font = font;
-        }
     }
-    if direct.and_then(|props|props.child("solidFill")).is_none()
-        && body.descend("defRPr").and_then(|props|props.child("solidFill")).is_none()
-    {
-        element.color = color(style.and_then(|n| n.child("fontRef")), look, element.color);
-    }
-    let theme_face = if title { &look.major } else { &look.minor };
-    let explicit_font=direct.and_then(|props|props.child("latin"))
-        .or_else(||body.descend("defRPr").and_then(|props|props.child("latin")));
-    if explicit_font.is_none() && !theme_face.is_empty() {
-        element.font.clone_from(theme_face);
-    }
+    let explicit=|name:&str|own_layers.iter().any(|props|!props.attr(name).is_empty());
+    if !explicit("sz") {element.font_size=inherited.font_size;}
+    if !explicit("b") {element.bold=inherited.bold;}
+    if !explicit("i") {element.italic=inherited.italic;}
+    if !own_font {element.font=inherited.font;}
+    if !own_color {element.color=inherited.color;}
 }
 
+fn flipped_image(bytes:&[u8],flip:(bool,bool))->Result<Vec<u8>,String> {
+    let mut image=crate::util::decode_image(bytes)?;
+    if flip.0 {image=image.fliph();}
+    if flip.1 {image=image.flipv();}
+    let mut output=std::io::Cursor::new(Vec::new());
+    image.write_to(&mut output,image::ImageFormat::Png).map_err(|error|error.to_string())?;
+    Ok(output.into_inner())
+}
+fn scale_group_appearance(element:&mut Element,map:[f32;4]) {
+    // A uniform group scale applies to line widths and text sizes too. Nonuniform text
+    // deformation cannot be represented by the current single font-size field.
+    if map[0]>0.0 && (map[0]-map[1]).abs()<=map[0].abs()*0.00001 {
+        element.font_size=(element.font_size*map[0]).clamp(1.0,300.0);
+        element.stroke_width=(element.stroke_width*map[0]).clamp(0.0,300.0);
+    }
+}
 fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
     let parts = read_zip(bytes)?;
     if let Some(json) = parts
@@ -646,6 +765,7 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
     let no_look = Look::default();
     let mut themed = false;
     let mut approximated = 0_usize;
+    let mut imported_image_bytes=0_usize;
     let rels_of = |path: &str| rels_of_kind(path, None);
     if let Some(size) = presentation.child("sldSz") {
         deck.width = size.number("cx", 12192000.0) / 12700.0;
@@ -655,7 +775,15 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
         deck.validate()?;
         return Ok(deck);
     };
-    for (index, slide_ref) in slide_list.children.iter().enumerate() {
+    let mut section_names=BTreeMap::new();
+    if let Some(sections)=presentation.descend("sectionLst") {
+        for section in sections.children.iter().filter(|node|node.name=="section") {
+            if let Some(ids)=section.child("sldIdLst") {
+                for id in &ids.children {section_names.insert(id.attr("id").to_string(),section.attr("name").to_string());}
+            }
+        }
+    }
+    for (index, slide_ref) in slide_list.children.iter().filter(|node|node.name=="sldId").enumerate() {
         let target = rels
             .get(slide_ref.attr("r:id"))
             .ok_or("Не найдена ссылка слайда")?;
@@ -665,6 +793,7 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
             id,
             title: format!("Слайд {}", index + 1),
             hidden: matches!(xml.attr("show"), "0" | "false"),
+            section:section_names.get(slide_ref.attr("id")).cloned().unwrap_or_default(),
             ..Slide::default()
         };
         let named_title = xml
@@ -702,6 +831,14 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
         }
         let raw_look = looks.get(&master).unwrap_or(&no_look);
         let sources: Vec<&Node> = chain.iter().filter_map(|p| parsed.get(p)).collect();
+        if let Some(layout) = sources.first() {
+            slide.layout = match layout.attr("type") {
+                "title" | "ctrTx" => "title",
+                "obj" | "tx" | "titleOnly" => "content",
+                "twoObj" | "twoTxTwoObj" => "two_content",
+                _ => "blank",
+            }.into();
+        }
         let master_look = raw_look.mapped(sources.get(1).and_then(|n| n.child("clrMap")));
         let mut resolved_look = master_look.clone();
         for node in sources.iter().take(1).copied().chain(std::iter::once(&xml)) {
@@ -716,6 +853,7 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
         let look = &resolved_look;
         if !themed && !look.colors.is_empty() {
             themed = true;
+            if !look.name.is_empty() { deck.theme.name.clone_from(&look.name); }
             for (name, slot) in [
                 ("tx1", &mut deck.theme.foreground),
                 ("bg1", &mut deck.theme.background),
@@ -766,12 +904,13 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
                     .descend("xfrm")
                     .filter(|n| n.child("off").is_some() || n.child("ext").is_some());
                 let mut flip = (false, false);
-                if let Some(transform) = own.or_else(|| inherited_xfrm(shape, &sources)) {
-                    if let Some(offset) = transform.child("off") {
+                let inherited = inherited_xfrm(shape, &sources);
+                if let Some(transform) = own.or(inherited) {
+                    if let Some(offset) = own.and_then(|n|n.child("off")).or_else(||inherited.and_then(|n|n.child("off"))) {
                         element.x = (map[0] * offset.number("x", 0.0) + map[2]) / 12700.0;
                         element.y = (map[1] * offset.number("y", 0.0) + map[3]) / 12700.0;
                     }
-                    if let Some(size) = transform.child("ext") {
+                    if let Some(size) = own.and_then(|n|n.child("ext")).or_else(||inherited.and_then(|n|n.child("ext"))) {
                         element.w = (map[0] * size.number("cx", 1270000.0) / 12700.0).max(0.001);
                         element.h = (map[1] * size.number("cy", 1270000.0) / 12700.0).max(0.001);
                     }
@@ -847,9 +986,12 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
                         continue;
                     }
                     super::model::image_dimensions(bytes)?;
-                    element.kind = ElementKind::Image {
-                        bytes: bytes.clone(),
-                    };
+                    let image_bytes=if flip.0||flip.1 {flipped_image(bytes,flip)?}else{bytes.clone()};
+                    imported_image_bytes=imported_image_bytes.saturating_add(image_bytes.len());
+                    if image_bytes.len()>32*1024*1024||imported_image_bytes>64*1024*1024 {
+                        return Err("Изображения PPTX превышают допустимый размер после преобразования".into());
+                    }
+                    element.kind = ElementKind::Image { bytes:image_bytes };
                 } else if let Some(table) = shape.descend("tbl") {
                     if let Some(cell) = table.child("tr").and_then(|row| row.child("tc")) {
                         if let Some(body) = cell.child("txBody") {
@@ -909,7 +1051,12 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
                             .map(cached_points)
                             .transpose()?
                             .unwrap_or_default();
+                        element.text = chart.descend("title").map(Node::text_content).unwrap_or_default();
+                        element.fill = color(chart.descend("ser").and_then(|series|series.child("spPr")), look, element.fill);
                         element.kind = ElementKind::Chart { values, labels };
+                    } else {
+                        deck.warnings.push("Пропущена диаграмма: отсутствует внутренняя часть PPTX".into());
+                        continue;
                     }
                 } else {
                     let geometry = shape.descend("prstGeom").map(|n| n.attr("prst"));
@@ -1002,7 +1149,7 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
                         Some(_) => 28.0,
                         None => 18.0,
                     };
-                    apply_text_look(body, &mut element, look, style, default_size, is_title);
+                    apply_inherited_text_look(shape,body,&sources,&mut element,look,style,default_size,is_title);
                     if named_title.is_none()
                         && !element.text.is_empty()
                         && (is_title || (!titled && slide.elements.is_empty()))
@@ -1011,6 +1158,7 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
                         titled |= is_title;
                     }
                 }
+                scale_group_appearance(&mut element,map);
                 if let Some(spid) = shape
                     .descend("cNvPr")
                     .map(|n| n.attr("id"))
@@ -1058,7 +1206,7 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
                 .find_map(|n| n.attr("dur").parse::<f32>().ok())
                 .filter(|ms| ms.is_finite() && *ms > 0.0);
             slide.transition.duration = match (exact, transition.attr("spd")) {
-                (Some(ms), _) => (ms / 1000.0).clamp(0.01, 3600.0),
+                (Some(ms), _) => (ms / 1000.0).clamp(0.001, 3600.0),
                 (None, "slow") => 1.0,
                 (None, "fast") => 0.25,
                 _ => 0.5,
@@ -1335,11 +1483,7 @@ fn wrap(root: &str, attributes: &str, body: &str) -> String {
     )
 }
 fn xfrm(e: &Element, prefix: &str) -> String {
-    let rotation = if prefix == "a" {
-        format!(" rot=\"{}\"", (e.rotation * 60000.0) as i64)
-    } else {
-        String::new()
-    };
+    let rotation = format!(" rot=\"{}\"", (e.rotation * 60000.0) as i64);
     format!(
         "<{prefix}:xfrm{rotation}><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/></{prefix}:xfrm>",
         emu(e.x),
@@ -1404,8 +1548,11 @@ fn shape_xml(e: &Element, id: usize) -> String {
         text_body(e)
     )
 }
-fn table_xml(e: &Element, id: usize, cells: &[Vec<String>]) -> String {
+fn table_xml(e: &Element, id: usize, cells: &[Vec<String>]) -> Result<String,String> {
     let cols = cells.iter().map(Vec::len).max().unwrap_or(1).max(1);
+    if cells.len().max(1).saturating_mul(cols)>100000 {
+        return Err("Плотная таблица PPTX превышает безопасный предел ячеек".into());
+    }
     let grid = (0..cols)
         .map(|_| format!("<a:gridCol w=\"{}\"/>", emu(e.w / cols as f32)))
         .collect::<String>();
@@ -1428,10 +1575,9 @@ fn table_xml(e: &Element, id: usize, cells: &[Vec<String>]) -> String {
         .iter()
         .map(|edge| format!("<a:{edge} w=\"{}\">{line}</a:{edge}>", emu(e.stroke_width)))
         .collect::<String>();
-    let rows = cells
-        .iter()
-        .enumerate()
-        .map(|(row_index, row)| {
+    let rows = (0..cells.len().max(1))
+        .map(|row_index| {
+            let row = cells.get(row_index).map(Vec::as_slice).unwrap_or(&[]);
             let fill = hex(if row_index == 0 { e.fill } else { [245, 247, 250] });
             let values = (0..cols)
                 .map(|col| {
@@ -1447,10 +1593,10 @@ fn table_xml(e: &Element, id: usize, cells: &[Vec<String>]) -> String {
             )
         })
         .collect::<String>();
-    format!(
+    Ok(format!(
         "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"{id}\" name=\"Table {id}\"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>{}<a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/table\"><a:tbl><a:tblPr firstRow=\"1\" bandRow=\"1\"/><a:tblGrid>{grid}</a:tblGrid>{rows}</a:tbl></a:graphicData></a:graphic></p:graphicFrame>",
         xfrm(e, "p")
-    )
+    ))
 }
 fn chart_xml(values: &[f32], labels: &[String], fill: [u8; 3],title:&str) -> String {
     let cats = values
@@ -1734,7 +1880,27 @@ fn timing_xml(slide: &Slide, size: (f32, f32)) -> String {
         "<p:timing><p:tnLst><p:par><p:cTn id=\"1\" dur=\"indefinite\" restart=\"never\" nodeType=\"tmRoot\"><p:childTnLst><p:seq concurrent=\"1\" nextAc=\"seek\"><p:cTn id=\"2\" dur=\"indefinite\" nodeType=\"mainSeq\"><p:childTnLst>{body}</p:childTnLst></p:cTn><p:prevCondLst><p:cond evt=\"onPrev\" delay=\"0\"><p:tgtEl><p:sldTgt/></p:tgtEl></p:cond></p:prevCondLst><p:nextCondLst><p:cond evt=\"onNext\" delay=\"0\"><p:tgtEl><p:sldTgt/></p:tgtEl></p:cond></p:nextCondLst></p:seq></p:childTnLst></p:cTn></p:par></p:tnLst></p:timing>"
     )
 }
+fn sections_xml(deck:&Deck)->String {
+    if !deck.slides.iter().any(|slide|!slide.section.is_empty()) {return String::new();}
+    let mut body=String::new();let mut start=0;
+    while start<deck.slides.len() {
+        let name=&deck.slides[start].section;
+        let end=(start+1..deck.slides.len()).find(|&index|&deck.slides[index].section!=name).unwrap_or(deck.slides.len());
+        let ids=(start..end).map(|index|format!("<p14:sldId id=\"{}\"/>",256+index)).collect::<String>();
+        body.push_str(&format!("<p14:section name=\"{}\" id=\"{{00000000-0000-4000-8000-{:012X}}}\"><p14:sldIdLst>{ids}</p14:sldIdLst></p14:section>",xml_escape(name),start+1));
+        start=end;
+    }
+    format!("<p:extLst><p:ext uri=\"{{521415D9-36F7-43E2-AB2F-B90AF26B5E84}}\"><p14:sectionLst xmlns:p14=\"http://schemas.microsoft.com/office/powerpoint/2010/main\">{body}</p14:sectionLst></p:ext></p:extLst>")
+}
 fn write_pptx(deck: &Deck) -> Result<Vec<u8>, String> {
+    let mut dense_cells=0_usize;
+    for element in deck.slides.iter().flat_map(|slide|&slide.elements) {
+        if let ElementKind::Table{cells}=&element.kind {
+            let columns=cells.iter().map(Vec::len).max().unwrap_or(1).max(1);
+            dense_cells=dense_cells.saturating_add(cells.len().max(1).saturating_mul(columns));
+            if dense_cells>100000 {return Err("Таблицы PPTX превышают общий предел плотных ячеек".into());}
+        }
+    }
     let mut parts: Vec<(String, Vec<u8>)> = Vec::new();
     let mut overrides = String::new();
     let mut slide_ids = String::new();
@@ -1792,7 +1958,7 @@ fn write_pptx(deck: &Deck) -> Result<Vec<u8>, String> {
                     ));
                     shapes.push_str(&format!("<p:pic><p:nvPicPr><p:cNvPr id=\"{id}\" name=\"Image {id}\"/><p:cNvPicPr><a:picLocks noChangeAspect=\"1\"/></p:cNvPicPr><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed=\"{relationship}\"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr>{}<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr></p:pic>",xfrm(e,"a")));
                 }
-                ElementKind::Table { cells } => shapes.push_str(&table_xml(e, id, cells)),
+                ElementKind::Table { cells } => shapes.push_str(&table_xml(e, id, cells)?),
                 ElementKind::Chart { values, labels } => {
                     chart_count += 1;
                     let relationship = format!("rIdChart{chart_count}");
@@ -1897,9 +2063,10 @@ fn write_pptx(deck: &Deck) -> Result<Vec<u8>, String> {
         "presentation",
         "",
         &format!(
-            "<p:sldMasterIdLst><p:sldMasterId id=\"2147483648\" r:id=\"rIdMaster\"/></p:sldMasterIdLst><p:notesMasterIdLst><p:notesMasterId r:id=\"rIdNotesMaster\"/></p:notesMasterIdLst><p:sldIdLst>{slide_ids}</p:sldIdLst><p:sldSz cx=\"{}\" cy=\"{}\"/><p:notesSz cx=\"6858000\" cy=\"9144000\"/><p:defaultTextStyle/>",
+            "<p:sldMasterIdLst><p:sldMasterId id=\"2147483648\" r:id=\"rIdMaster\"/></p:sldMasterIdLst><p:notesMasterIdLst><p:notesMasterId r:id=\"rIdNotesMaster\"/></p:notesMasterIdLst><p:sldIdLst>{slide_ids}</p:sldIdLst><p:sldSz cx=\"{}\" cy=\"{}\"/><p:notesSz cx=\"6858000\" cy=\"9144000\"/><p:defaultTextStyle/>{}",
             emu(deck.width),
-            emu(deck.height)
+            emu(deck.height),
+            sections_xml(deck)
         ),
     );
     for (path, kind) in [
@@ -2708,5 +2875,188 @@ mod next_no_fill_tests {
             matches!(primitive,crate::render::Primitive::Rect{x,y,w,h,..}
                 if *x==element.x && *y==element.y && *w==element.w && *h==element.h)));
         Ok(())
+    }
+}
+
+
+#[cfg(test)]
+mod hundred_slide_io_tests {
+    use super::*;
+    fn parts_without_native(deck:&Deck)->Result<BTreeMap<String,Vec<u8>>,String> {
+        Ok(read_zip(&write(deck,"pptx")?)?.into_iter().filter(|(path,_)|!path.starts_with("customXml/")).collect())
+    }
+    fn roundtrip_external(deck:&Deck)->Result<Deck,String> {
+        read(&write_zip(parts_without_native(deck)?.into_iter().collect())?,"pptx")
+    }
+    fn blank_deck()->Deck {let mut deck=Deck::empty();deck.add_slide("blank");deck}
+    fn shape_parts(shape:&str)->Result<BTreeMap<String,Vec<u8>>,String> {
+        let mut parts=parts_without_native(&blank_deck())?;
+        parts.insert("ppt/slides/slide1.xml".into(),wrap("sld","",&format!("<p:cSld><p:spTree>{GROUP}{shape}</p:spTree></p:cSld>")).into_bytes());
+        Ok(parts)
+    }
+    fn import_parts(parts:BTreeMap<String,Vec<u8>>)->Result<Deck,String> {read(&write_zip(parts.into_iter().collect())?,"pptx")}
+    fn placeholder_shape(properties:&str,body:&str)->String {
+        format!("<p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"Text\"/><p:cNvSpPr/><p:nvPr><p:ph type=\"title\" idx=\"0\"/></p:nvPr></p:nvSpPr><p:spPr>{properties}</p:spPr><p:txBody>{body}</p:txBody></p:sp>")
+    }
+    fn chart_deck()->Result<Deck,String> {
+        let mut deck=blank_deck();let slide=deck.slides[0].id;
+        let id=deck.add_element(slide,ElementKind::Chart{values:vec![1.0,2.0],labels:vec!["A".into(),"B".into()]})?;
+        let element=deck.slide_mut(slide).and_then(|s|s.element_mut(id)).ok_or("chart")?;
+        element.text="Profit & costs".into();element.fill=[11,22,33];Ok(deck)
+    }
+    fn png()->Result<Vec<u8>,String> {
+        let image=image::RgbaImage::from_fn(2,1,|x,_|if x==0 {image::Rgba([255,0,0,255])}else{image::Rgba([0,0,255,255])});
+        let mut out=std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image).write_to(&mut out,image::ImageFormat::Png).map_err(|e|e.to_string())?;
+        Ok(out.into_inner())
+    }
+    #[test]
+    fn pptx_graphic_frames_export_rotation()->Result<(),String> {
+        for kind in [ElementKind::Table{cells:vec![vec!["a".into()]]},ElementKind::Chart{values:vec![1.0],labels:vec![]}] {
+            let mut deck=blank_deck();let slide=deck.slides[0].id;let id=deck.add_element(slide,kind)?;
+            deck.slide_mut(slide).and_then(|s|s.element_mut(id)).ok_or("element")?.rotation=37.5;
+            let imported=roundtrip_external(&deck)?;assert_eq!(imported.slides[0].elements[0].rotation,37.5);
+        }Ok(())
+    }
+    #[test]
+    fn empty_pptx_tables_have_one_valid_row()->Result<(),String> {
+        let node=parse(table_xml(&Element::default(),2,&[])?.as_bytes())?;
+        let table=node.descend("tbl").ok_or("table")?;let row=table.child("tr").ok_or("empty row")?;
+        assert_eq!(row.children.iter().filter(|n|n.name=="tc").count(),1);Ok(())
+    }
+    #[test]
+    fn pptx_chart_imports_rich_title()->Result<(),String> {
+        let imported=roundtrip_external(&chart_deck()?)?;assert_eq!(imported.slides[0].elements[0].text,"Profit & costs");Ok(())
+    }
+    #[test]
+    fn pptx_chart_imports_series_fill()->Result<(),String> {
+        let imported=roundtrip_external(&chart_deck()?)?;assert_eq!(imported.slides[0].elements[0].fill,[11,22,33]);Ok(())
+    }
+    #[test]
+    fn missing_chart_part_is_reported_and_not_a_textbox()->Result<(),String> {
+        let mut parts=parts_without_native(&chart_deck()?)?;parts.remove("ppt/charts/chart1.xml");
+        let imported=import_parts(parts)?;assert!(imported.slides[0].elements.is_empty());
+        assert!(imported.warnings.iter().any(|warning|warning.contains("отсутствует внутренняя часть")));Ok(())
+    }
+    #[test]
+    fn placeholder_default_index_matches_explicit_zero()->Result<(),String> {
+        let shape=parse(br#"<sp><nvSpPr><nvPr><ph type="body"/></nvPr></nvSpPr></sp>"#)?;
+        let layout=parse(br#"<sldLayout><sp><nvSpPr><nvPr><ph type="title" idx="0"/></nvPr></nvSpPr><spPr><xfrm><off x="7" y="9"/><ext cx="11" cy="13"/></xfrm></spPr></sp></sldLayout>"#)?;
+        let transform=inherited_xfrm(&shape,&[&layout]).ok_or("transform")?;
+        assert_eq!(transform.child("off").map(|n|n.attr("x")),Some("7"));Ok(())
+    }
+    #[test]
+    fn partial_placeholder_transform_keeps_inherited_extent()->Result<(),String> {
+        let shape=placeholder_shape("<a:xfrm><a:off x=\"254000\" y=\"381000\"/></a:xfrm>","<a:p><a:r><a:t>Title</a:t></a:r></a:p>");
+        let mut parts=shape_parts(&shape)?;
+        parts.insert("ppt/slideLayouts/slideLayout1.xml".into(),wrap("sldLayout","type=\"title\"",&format!("<p:cSld><p:spTree>{}</p:spTree></p:cSld>",placeholder_shape("<a:xfrm><a:off x=\"12700\" y=\"12700\"/><a:ext cx=\"1270000\" cy=\"635000\"/></a:xfrm>",""))).into_bytes());
+        let imported=import_parts(parts)?;let e=&imported.slides[0].elements[0];
+        assert_eq!((e.x,e.y,e.w,e.h),(20.0,30.0,100.0,50.0));Ok(())
+    }
+    #[test]
+    fn pptx_theme_name_is_preserved()->Result<(),String> {
+        let mut deck=blank_deck();deck.theme.name="Custom & theme".into();
+        assert_eq!(roundtrip_external(&deck)?.theme.name,deck.theme.name);Ok(())
+    }
+    #[test]
+    fn pptx_layout_metadata_matches_the_linked_layout()->Result<(),String> {
+        let mut parts=shape_parts("")?;
+        parts.insert("ppt/slideLayouts/slideLayout1.xml".into(),wrap("sldLayout","type=\"twoObj\"","<p:cSld><p:spTree/></p:cSld>").into_bytes());
+        assert_eq!(import_parts(parts)?.slides[0].layout,"two_content");Ok(())
+    }
+    #[test]
+    fn leading_empty_paragraph_does_not_restyle_visible_text()->Result<(),String> {
+        let body=parse(br#"<txBody><p><r><rPr sz="6600" b="1"/><t/></r></p><p><r><rPr sz="1600" i="1"/><t>real text</t></r></p></txBody>"#)?;
+        let mut e=Element::default();apply_text_look(&body,&mut e,&Look::default(),None,18.0,false);
+        assert_eq!(e.font_size,16.0);assert!(e.italic);assert!(!e.bold);Ok(())
+    }
+    #[test]
+    fn drawingml_text_uses_its_list_level_defaults()->Result<(),String> {
+        let body=parse(br#"<txBody><lstStyle><lvl1pPr><defRPr sz="1000"/></lvl1pPr><lvl3pPr><defRPr sz="3300" b="1"/></lvl3pPr></lstStyle><p><pPr lvl="2"/><r><t>level three</t></r></p></txBody>"#)?;
+        let mut e=Element::default();apply_text_look(&body,&mut e,&Look::default(),None,18.0,false);
+        assert_eq!(e.font_size,33.0);assert!(e.bold);Ok(())
+    }
+    #[test]
+    fn placeholder_text_inherits_master_and_layout_properties()->Result<(),String> {
+        let shape=parse(br#"<sp><nvSpPr><nvPr><ph type="title" idx="0"/></nvPr></nvSpPr></sp>"#)?;
+        let body=parse(br#"<txBody><p><r><rPr i="0"/><t>text</t></r></p></txBody>"#)?;
+        let master=parse(br#"<sldMaster><txStyles><titleStyle><lvl1pPr><defRPr sz="4000" b="1" i="1"><solidFill><srgbClr val="123456"/></solidFill></defRPr></lvl1pPr></titleStyle></txStyles></sldMaster>"#)?;
+        let layout=parse(br#"<sldLayout><sp><nvSpPr><nvPr><ph type="title" idx="0"/></nvPr></nvSpPr><txBody><p><pPr><defRPr sz="3200"/></pPr></p></txBody></sp></sldLayout>"#)?;
+        let mut e=Element::default();apply_inherited_text_look(&shape,&body,&[&layout,&master],&mut e,&Look::default(),None,44.0,true);
+        assert_eq!(e.font_size,32.0);assert!(e.bold);assert!(!e.italic);assert_eq!(e.color,[18,52,86]);Ok(())
+    }
+    #[test]
+    fn unresolved_theme_face_keeps_the_fallback_font()->Result<(),String> {
+        let body=parse(br#"<txBody><p><r><rPr><latin typeface="+mn-ea"/></rPr><t>Text</t></r></p></txBody>"#)?;
+        let look=Look{minor:"Verdana".into(),..Look::default()};let mut e=Element::default();
+        apply_text_look(&body,&mut e,&look,None,18.0,false);assert_eq!(e.font,"Verdana");Ok(())
+    }
+    #[test]
+    fn html_slides_include_image_payloads()->Result<(),String> {
+        let mut deck=blank_deck();deck.add_element(deck.slides[0].id,ElementKind::Image{bytes:png()?})?;
+        let html=String::from_utf8(write(&deck,"html")?).map_err(|e|e.to_string())?;
+        assert!(html.contains("<img src=\"data:image/png;base64,iVBOR"));
+        let ElementKind::Image{bytes}=&deck.slides[0].elements[0].kind else{return Err("image".into());};
+        assert!(linear_export(&deck,"md",bytes.len()).err().unwrap_or_default().contains("общий"));
+        assert!(linear_export(&deck,"html",html.len()-1).is_err());
+        assert_eq!(linear_export(&deck,"html",html.len())?,html.into_bytes());Ok(())
+    }
+    #[test]
+    fn html_slides_keep_supported_text_style() {
+        let e=Element{text:"<literal>".into(),font:"A'B\"C\nD\rE".into(),bold:true,italic:true,font_size:19.0,color:[1,2,3],..Element::default()};
+        let html=element_html(&e);assert!(html.contains("font-size:19pt"));assert!(html.contains("font-weight:bold"));
+        assert!(html.contains("font-style:italic"));assert!(html.contains("color:#010203"));assert!(html.contains("&lt;literal&gt;"));
+        assert!(html.contains("&quot;"));assert!(!html.contains("font-family:'A'B"));
+        assert!(html.contains("\\A "));assert!(!html.contains('\r'));assert!(!html.contains('\n'));
+    }
+    #[test]
+    fn markdown_slides_escape_literal_content()->Result<(),String> {
+        let mut deck=blank_deck();deck.slides[0].title="# title\nsecond".into();
+        let id=deck.add_element(deck.slides[0].id,ElementKind::Text)?;
+        deck.slides[0].element_mut(id).ok_or("text")?.text="<tag> *literal*\n[next](url)".into();
+        let md=String::from_utf8(write(&deck,"md")?).map_err(|e|e.to_string())?;
+        assert!(md.contains("# \\# title second"));assert!(md.contains("\\<tag\\> \\*literal\\*  \n\\[next\\]\\(url\\)"));
+        assert!(linear_export(&deck,"md",md.len()-1).is_err());assert_eq!(linear_export(&deck,"md",md.len())?,md.into_bytes());Ok(())
+    }
+    #[test]
+    fn pptx_sections_survive_without_native_metadata()->Result<(),String> {
+        let mut deck=blank_deck();deck.slides[0].section="Intro & overview".into();
+        let id=deck.add_slide("blank");deck.slide_mut(id).ok_or("slide")?.section="Intro & overview".into();
+        let id=deck.add_slide("blank");deck.slide_mut(id).ok_or("slide")?.section="Details".into();
+        let imported=roundtrip_external(&deck)?;
+        assert_eq!(imported.slides.iter().map(|s|s.section.as_str()).collect::<Vec<_>>(),vec!["Intro & overview","Intro & overview","Details"]);Ok(())
+    }
+    #[test]
+    fn pptx_short_transitions_keep_their_declared_duration()->Result<(),String> {
+        let mut deck=blank_deck();deck.slides[0].transition.effect="fade".into();deck.slides[0].transition.duration=0.004;
+        assert!((roundtrip_external(&deck)?.slides[0].transition.duration-0.004).abs()<0.000001);Ok(())
+    }
+    #[test]
+    fn ragged_pptx_table_expansion_is_bounded()->Result<(),String> {
+        let mut cells=vec![vec![];1000];cells[0]=vec!["x".into();1000];
+        let e=Element{kind:ElementKind::Table{cells:cells.clone()},..Element::default()};
+        let mut deck=blank_deck();deck.add_element(deck.slides[0].id,e.kind.clone())?;deck.validate()?;
+        assert!(table_xml(&e,2,&cells).is_err());assert!(write(&deck,"pptx").is_err());
+        let mut cells=vec![vec![];51];cells[0]=vec!["x".into();1000];
+        let mut aggregate=blank_deck();
+        for _ in 0..2 {aggregate.add_element(aggregate.slides[0].id,ElementKind::Table{cells:cells.clone()})?;}
+        aggregate.validate()?;assert!(table_xml(&e,2,&cells).is_ok());assert!(write(&aggregate,"pptx").is_err());Ok(())
+    }
+    #[test]
+    fn pptx_picture_flips_transform_the_image_pixels()->Result<(),String> {
+        let mut deck=blank_deck();deck.add_element(deck.slides[0].id,ElementKind::Image{bytes:png()?})?;
+        let mut parts=parts_without_native(&deck)?;
+        let source=String::from_utf8(parts.remove("ppt/slides/slide1.xml").ok_or("slide")?).map_err(|e|e.to_string())?;
+        parts.insert("ppt/slides/slide1.xml".into(),source.replace("<a:xfrm rot=\"0\">","<a:xfrm rot=\"0\" flipH=\"1\">").into_bytes());
+        let imported=import_parts(parts)?;
+        let ElementKind::Image{bytes}=&imported.slides[0].elements[0].kind else{return Err("image".into());};
+        let flipped=crate::util::decode_image(bytes)?.to_rgba8();
+        assert_eq!(flipped.get_pixel(0,0).0,[0,0,255,255]);assert_eq!(flipped.get_pixel(1,0).0,[255,0,0,255]);Ok(())
+    }
+    #[test]
+    fn uniform_group_scale_updates_text_and_outline()->Result<(),String> {
+        let shape="<p:grpSp><p:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"2540000\" cy=\"2540000\"/><a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"1270000\" cy=\"1270000\"/></a:xfrm></p:grpSpPr><p:sp><p:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"1270000\" cy=\"1270000\"/></a:xfrm><a:prstGeom prst=\"rect\"/><a:ln w=\"19050\"><a:solidFill><a:srgbClr val=\"000000\"/></a:solidFill></a:ln></p:spPr><p:txBody><a:p><a:r><a:rPr sz=\"1200\"/><a:t>Scaled</a:t></a:r></a:p></p:txBody></p:sp></p:grpSp>";
+        let imported=import_parts(shape_parts(shape)?)?;let e=&imported.slides[0].elements[0];
+        assert_eq!((e.font_size,e.stroke_width),(24.0,3.0));Ok(())
     }
 }
