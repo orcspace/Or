@@ -1,5 +1,5 @@
 use super::model::{
-    Align, Book, CellFormat, ChartKind, MAX_RANGE_CELLS, Value, parse_address, parse_range,
+    Align, Book, CellFormat, ChartKind, ConditionalRule, MAX_RANGE_CELLS, Value, parse_address, parse_range,
 };
 use calamine::{Data, Reader as _, open_workbook_auto_from_rs};
 use quick_xml::{
@@ -8,7 +8,7 @@ use quick_xml::{
 };
 use rust_xlsxwriter::{
     Chart, ChartType, Color, Format, FormatAlign, FormatBorder, FormatUnderline, Formula, Image,
-    Workbook,
+    Workbook, ConditionalFormatCell, ConditionalFormatCellRule,
 };
 use std::{collections::BTreeMap, io::Cursor};
 
@@ -1150,6 +1150,113 @@ fn styles_with_theme_fonts(bytes: &[u8],theme:&[[u8;3]],faces:&BTreeMap<String,S
     }
     Ok(formats)
 }
+fn differential_fills(bytes:&[u8],palette:&[[u8;3]],theme:&[[u8;3]]) -> Result<Vec<Option<[u8;3]>>,String> {
+    let mut reader=Reader::from_str(std::str::from_utf8(bytes).map_err(|error|error.to_string())?);
+    let mut fills=Vec::new();
+    let (mut inside,mut unsupported,mut foreground,mut background,mut solid)=(false,false,None,None,false);
+    loop {
+        let event=reader.read_event().map_err(|error|error.to_string())?;
+        let empty=matches!(event,Event::Empty(_));
+        match event {
+            Event::Start(element)|Event::Empty(element) => {
+                let tag=local(&element);
+                if tag=="dxf" {
+                    inside=!empty;unsupported=false;foreground=None;background=None;solid=false;
+                    if empty {fills.push(None);}
+                } else if inside {
+                    let attributes=attrs(&element,&reader)?;
+                    match tag.as_str() {
+                        "font"|"border"|"numFmt"|"alignment"|"protection"|"gradientFill"=>unsupported=true,
+                        "patternFill"=>{
+                            solid=attributes.get("patternType").is_some_and(|value|value=="solid");
+                            unsupported|=attributes.get("patternType").is_some_and(|value|!matches!(value.as_str(),"none"|"solid"));
+                        }
+                        "fgColor"=>foreground=rgb_with_theme(&attributes,palette,theme),
+                        "bgColor"=>{
+                            if attributes.get("indexed").is_none_or(|value|value!="64") {
+                                background=rgb_with_theme(&attributes,palette,theme);
+                            }
+                        }
+                        _=>(),
+                    }
+                }
+            }
+            Event::End(element) if element.local_name().as_ref()=="dxf" => {
+                fills.push(if unsupported {None}else if solid {foreground.or(background)}else{background.or(foreground)});
+                inside=false;
+            }
+            Event::DocType(_)=>return Err("DTD запрещён".into()),
+            Event::Eof=>break,
+            _=>(),
+        }
+        if fills.len()>65536 {return Err("Слишком много дифференциальных форматов".into());}
+    }
+    Ok(fills)
+}
+fn conditional_rules(bytes:&[u8],fills:&[Option<[u8;3]>]) -> Result<Vec<ConditionalRule>,String> {
+    let mut reader=Reader::from_str(std::str::from_utf8(bytes).map_err(|error|error.to_string())?);
+    let mut ranges=Vec::new();
+    let mut current:Option<BTreeMap<String,String>>=None;
+    let mut formulas=Vec::new();
+    let mut result=Vec::new();
+    loop {
+        let event=reader.read_event().map_err(|error|error.to_string())?;
+        let empty=matches!(event,Event::Empty(_));
+        match event {
+            Event::Start(element)|Event::Empty(element) => {
+                let tag=local(&element);
+                let attributes=attrs(&element,&reader)?;
+                match tag.as_str() {
+                    "conditionalFormatting"=>{
+                        ranges=attributes.get("sqref").ok_or("Не поддерживается conditionalFormatting без sqref")?
+                            .split_whitespace().map(parse_range).collect::<Result<Vec<_>,_>>()?;
+                        if ranges.is_empty()||ranges.len()>10000 {return Err("Недопустимые области conditionalFormatting".into());}
+                    }
+                    "cfRule"=>{
+                        if empty {return Err("Не поддерживается пустое правило conditionalFormatting".into());}
+                        current=Some(attributes);formulas.clear();
+                    }
+                    "formula" if current.is_some()=>{
+                        if empty {formulas.push(String::new());}
+                        else {
+                            let raw=reader.read_text(element.name()).map_err(|error|error.to_string())?;
+                            formulas.push(quick_xml::escape::unescape(&raw).map_err(|error|error.to_string())?.into_owned());
+                        }
+                    }
+                    _=>(),
+                }
+            }
+            Event::End(element) if element.local_name().as_ref()=="cfRule" => {
+                let attributes=current.take().ok_or("Нет начала правила conditionalFormatting")?;
+                let operator=match attributes.get("operator").map(String::as_str) {
+                    Some("greaterThan")=>">",Some("lessThan")=>"<",Some("equal")=>"=",
+                    Some("greaterThanOrEqual")=>">=",Some("lessThanOrEqual")=>"<=",
+                    _=>return Err("Не поддерживается оператор conditionalFormatting".into()),
+                };
+                if attributes.get("type").is_none_or(|kind|kind!="cellIs")||formulas.len()!=1 {
+                    return Err("Поддерживаются только числовые cellIs правила условной заливки".into());
+                }
+                let threshold=formulas[0].trim().trim_start_matches('=').parse::<f64>()
+                    .ok().filter(|value|value.is_finite()).ok_or("Не поддерживается формула порога conditionalFormatting")?;
+                let index=attributes.get("dxfId").and_then(|value|value.parse::<usize>().ok())
+                    .ok_or("Нет формата conditionalFormatting")?;
+                let fill=fills.get(index).copied().flatten().ok_or("Не поддерживается формат conditionalFormatting: нужна только сплошная заливка")?;
+                let priority=attributes.get("priority").and_then(|value|value.parse::<u32>().ok())
+                    .filter(|value|*value>0).ok_or("Нет приоритета conditionalFormatting")?;
+                for range in &ranges {
+                    result.push((priority,ConditionalRule{range:*range,operator:operator.into(),threshold,fill}));
+                    if result.len()>10000 {return Err("Слишком много правил conditionalFormatting".into());}
+                }
+            }
+            Event::End(element) if element.local_name().as_ref()=="conditionalFormatting"=>ranges.clear(),
+            Event::DocType(_)=>return Err("DTD запрещён".into()),
+            Event::Eof=>break,
+            _=>(),
+        }
+    }
+    result.sort_by_key(|(priority,_)|*priority);
+    Ok(result.into_iter().map(|(_,rule)|rule).collect())
+}
 fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(), String> {
     let workbook_rels = relationships("xl/workbook.xml", parts);
     let style_path = workbook_rels
@@ -1170,6 +1277,8 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
         .map(|b| styles_with_theme_fonts(b,&theme,&faces))
         .transpose()?
         .unwrap_or_default();
+    let differential = parts.get(style_path).map(|bytes| differential_fills(bytes,&palette,&theme))
+        .transpose()?.unwrap_or_default();
     let mut targets = BTreeMap::new();
     if let Some(bytes) = parts.get("xl/_rels/workbook.xml.rels") {
         each_tag(bytes, |tag, a| {
@@ -1336,7 +1445,9 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
         if let Some((_,selection))=sheet_selections.iter().find(|(name,_)|name==&pane).or_else(||sheet_selections.first()) {
             selections.insert(id,selection.clone());
         }
-        read_sheet_images(book, id, &path, parts);
+        let rules=conditional_rules(bytes,&differential)?;
+        book.sheet_by_id_mut(id).ok_or("Лист не найден")?.conditional=rules;
+        read_sheet_images(book, id, &path, parts)?;
     }
     if book.active_sheet().is_some_and(|sheet| sheet.hidden) {
         book.active = book
@@ -1546,47 +1657,47 @@ fn relationships(
     }
     rels
 }
-/// Pictures from the sheet's drawing part. Best effort: a broken drawing never blocks opening.
+/// Import only drawings referenced by the worksheet; fail explicitly when a referenced picture is lost.
 fn read_sheet_images(
     book: &mut Book,
     id: u64,
     sheet_path: &str,
     parts: &BTreeMap<String, Vec<u8>>,
-) {
-    for (kind, drawing) in relationships(sheet_path, parts).into_values() {
-        if !kind.ends_with("/drawing") {
-            continue;
+) -> Result<(),String> {
+    let worksheet=parts.get(sheet_path).ok_or("Нет части листа с рисунками")?;
+    let rels=relationships(sheet_path,parts);
+    let mut drawings=Vec::new();
+    each_tag(worksheet,|tag,attrs| {
+        if tag=="drawing" {
+            let reference=attrs.get("r:id").ok_or("Нет связи рисунков листа")?;
+            let (kind,target)=rels.get(reference).ok_or("Не найдена связь рисунков листа")?;
+            if !kind.ends_with("/drawing") {return Err("Связь рисунков имеет неверный тип".into());}
+            drawings.push(target.clone());
         }
-        let media = relationships(&drawing, parts);
-        let Some(Ok(text)) = parts.get(&drawing).map(|b| std::str::from_utf8(b)) else {
-            continue;
-        };
-        for anchor in drawing_pictures(text).unwrap_or_default() {
-            let Some(bytes) = media
-                .get(&anchor.embed)
-                .and_then(|(_, target)| parts.get(target))
-            else {
-                continue;
-            };
-            let Some(sheet) = book.sheet_by_id(id) else {
-                continue;
-            };
-            let (row, col, x_offset, y_offset, width, height) = picture_geometry(sheet, &anchor);
-            if let Ok(image_id) = book.add_image(id, row, col, bytes.clone())
-                && let Some(image) = book
-                    .sheet_by_id_mut(id)
-                    .and_then(|s| s.images.iter_mut().find(|i| i.id == image_id))
-            {
-                image.x_offset = x_offset;
-                image.y_offset = y_offset;
-                if width > 0.0 && height > 0.0 {
-                    image.width = width.clamp(1.0, 8000.0);
-                    image.height = height.clamp(1.0, 8000.0);
-                }
-                image.alt = anchor.alt;
+        Ok(())
+    })?;
+    for drawing in drawings {
+        let media=relationships(&drawing,parts);
+        let bytes=parts.get(&drawing).ok_or("Не найдена часть рисунков листа")?;
+        let text=std::str::from_utf8(bytes).map_err(|error|error.to_string())?;
+        for anchor in drawing_pictures(text)? {
+            if anchor.embed.is_empty() {continue;} // Chart anchors are handled separately.
+            let (kind,target)=media.get(&anchor.embed).ok_or("Не найдена связь изображения")?;
+            if !kind.ends_with("/image") {return Err("Связь изображения имеет неверный тип".into());}
+            let bytes=parts.get(target).ok_or("Не найдены байты изображения")?;
+            let sheet=book.sheet_by_id(id).ok_or("Лист не найден")?;
+            let (row,col,x_offset,y_offset,width,height)=picture_geometry(sheet,&anchor);
+            let image_id=book.add_image(id,row,col,bytes.clone())?;
+            let image=book.sheet_by_id_mut(id).and_then(|sheet|sheet.images.iter_mut().find(|image|image.id==image_id))
+                .ok_or("Импортированный рисунок не найден")?;
+            image.x_offset=x_offset;image.y_offset=y_offset;
+            if width>0.0 && height>0.0 {
+                image.width=width.clamp(1.0,8000.0);image.height=height.clamp(1.0,8000.0);
             }
+            image.alt=anchor.alt;
         }
     }
+    Ok(())
 }
 #[derive(Default)]
 struct PicturePoint {
@@ -1673,7 +1784,10 @@ fn drawing_pictures(text: &str) -> Result<Vec<PictureAnchor>, String> {
                 _ => {}
             },
             Event::DocType(_) => return Err("DTD запрещён".into()),
-            Event::Eof => break,
+            Event::Eof => {
+                if current.is_some() {return Err("Незавершённая привязка рисунка".into());}
+                break;
+            },
             _ => {}
         }
     }
@@ -1968,6 +2082,21 @@ fn write_xlsx(book: &Book) -> Result<Vec<u8>, String> {
                     }
                 }
             }
+        }
+        for rule in &sheet.conditional {
+            let comparison=match rule.operator.as_str() {
+                ">"=>ConditionalFormatCellRule::GreaterThan(rule.threshold),
+                "<"=>ConditionalFormatCellRule::LessThan(rule.threshold),
+                "="=>ConditionalFormatCellRule::EqualTo(rule.threshold),
+                ">="=>ConditionalFormatCellRule::GreaterThanOrEqualTo(rule.threshold),
+                "<="=>ConditionalFormatCellRule::LessThanOrEqualTo(rule.threshold),
+                _=>return Err("Недопустимое условное форматирование".into()),
+            };
+            let format=ConditionalFormatCell::new().set_rule(comparison)
+                .set_format(Format::new().set_background_color(Color::RGB(rgb_number(rule.fill)))).set_stop_if_true(true);
+            let range=rule.range;
+            ws.add_conditional_format(range.r0,range.c0 as u16,range.r1,range.c1 as u16,&format)
+                .map_err(|error|error.to_string())?;
         }
         for model in &sheet.charts {
             let mut chart = Chart::new(match model.kind {
@@ -2876,7 +3005,8 @@ fn write_html_book(book:&Book,cell_limit:u64,byte_limit:usize)->Result<Vec<u8>,S
                 let span=merge.map(|range|format!(" rowspan=\"{}\" colspan=\"{}\"",
                     (range.r0..=range.r1).filter(|row|!sheet.hidden_rows.contains(row)).count(),
                     (range.c0..=range.c1).filter(|col|!sheet.hidden_cols.contains(col)).count())).unwrap_or_default();
-                let format=sheet.cell(source_row,source_col).map(|cell|cell.fmt.clone()).unwrap_or_default();
+                let mut format=sheet.cell(source_row,source_col).map(|cell|cell.fmt.clone()).unwrap_or_default();
+                if let Some(rgb)=sheet.cell(source_row,source_col).and_then(|cell|super::format::color(&cell.value,&format.number)) {format.color=rgb;}
                 let align=match format.align {Align::Left=>"left",Align::Center=>"center",Align::Right=>"right",
                     Align::General=>if sheet.cell(source_row,source_col).is_some_and(|cell|matches!(cell.value,Value::Number(_))) {"right"}else{"left"}};
                 let decoration=format!("{}{}",if format.underline {"underline "}else{""},if format.strike {"line-through"}else{""});
@@ -3152,5 +3282,57 @@ mod phase200_preflight_defects {
         assert!(preflight(&parts).is_err());
         let parts=BTreeMap::from([("custom/Strings.XML".into(),br#"<sst uniqueCount="1000001"/>"#.to_vec())]);
         assert!(preflight(&parts).is_err());
+    }
+}
+
+#[cfg(test)]
+mod phase200_drawing_defects {
+    use super::*;
+    fn parts(drawing:&str,referenced:bool)->BTreeMap<String,Vec<u8>> {
+        BTreeMap::from([
+            ("xl/worksheets/sheet1.xml".into(),if referenced {
+                br#"<worksheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><drawing r:id="d"/></worksheet>"#.to_vec()
+            } else {b"<worksheet/>".to_vec()}),
+            ("xl/worksheets/_rels/sheet1.xml.rels".into(),br#"<Relationships><Relationship Id="d" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#.to_vec()),
+            ("xl/drawings/drawing1.xml".into(),drawing.as_bytes().to_vec()),
+            ("xl/drawings/_rels/drawing1.xml.rels".into(),br#"<Relationships><Relationship Id="p" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/p.png"/></Relationships>"#.to_vec()),
+            ("xl/media/p.png".into(),b"broken image".to_vec()),
+        ])
+    }
+    const DRAWING:&str=r#"<wsDr xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><oneCellAnchor><from><col>0</col><row>0</row></from><ext cx="9525" cy="9525"/><pic><blip r:embed="p"/></pic></oneCellAnchor></wsDr>"#;
+    #[test]
+    fn referenced_invalid_pictures_fail_instead_of_disappearing() {
+        let mut book=Book::default();let id=book.active_id();
+        assert!(read_sheet_images(&mut book,id,"xl/worksheets/sheet1.xml",&parts(DRAWING,true)).is_err());
+        assert!(read_sheet_images(&mut book,id,"xl/worksheets/sheet1.xml",&parts("<wsDr><oneCellAnchor>",true)).is_err());
+    }
+    #[test]
+    fn orphan_drawing_relationships_do_not_import_unreferenced_content() -> Result<(),String> {
+        let mut book=Book::default();let id=book.active_id();
+        read_sheet_images(&mut book,id,"xl/worksheets/sheet1.xml",&parts(DRAWING,false))?;
+        assert!(book.sheets[0].images.is_empty());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod phase200_conditional_defect {
+    use super::*;
+    #[test]
+    fn numeric_conditional_fills_round_trip_through_xlsx() -> Result<(),String> {
+        let mut book=Book::default();let id=book.active_id();
+        book.set_cell(id,0,0,"20")?;
+        for (index,operator) in [">","<","=",">=","<="].into_iter().enumerate() {
+            book.sheets[0].conditional.push(ConditionalRule{
+                range:super::super::model::Range::new(0,0,1,1),operator:operator.into(),
+                threshold:index as f64-2.0,fill:[index as u8,100,200],
+            });
+        }
+        let imported=read(&write(&book,"xlsx")?,"xlsx")?;
+        assert_eq!(imported.sheets[0].conditional,book.sheets[0].conditional);
+        let formats=differential_fills(br#"<styleSheet><dxfs><dxf/><dxf><fill><patternFill><bgColor rgb="FFABCDEF"/></patternFill></fill></dxf></dxfs></styleSheet>"#,&[],&[])?;
+        assert_eq!(formats,vec![None,Some([0xAB,0xCD,0xEF])]);
+        assert!(conditional_rules(br#"<worksheet><conditionalFormatting sqref="A1"><cfRule type="expression" dxfId="1" priority="1"><formula>A1&gt;2</formula></cfRule></conditionalFormatting></worksheet>"#,&formats).is_err());
+        Ok(())
     }
 }

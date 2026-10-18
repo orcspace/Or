@@ -1695,7 +1695,10 @@ impl<'a> Engine<'a> {
                 let y = default_n(1, if name == "LOG" { 10.0 } else { 1.0 })?;
                 match name {
                     "POWER" => num(power(x, y)?),
-                    "LOG" => num(x.log(y)),
+                    "LOG" => {
+                        if x<=0.0 || y<=0.0 || y==1.0 {Err("#NUM!".into())}
+                        else {num(x.log(y))}
+                    },
                     "ATAN2" => {
                         if x == 0.0 && y == 0.0 {
                             Err("#DIV/0!".into())
@@ -2628,6 +2631,9 @@ impl<'a> Engine<'a> {
                 let periods = n(1)?;
                 let third = n(2)?;
                 let fourth = default_n(3, 0.0)?;
+                // Scale large cash flows down; leave small ones unscaled to retain tiny quotients.
+                let cash_scale=third.abs().max(fourth.abs()).max(1.0);
+                let (third,fourth)=(third/cash_scale,fourth/cash_scale);
                 let kind = if default_n(4, 0.0)? == 0.0 { 0.0 } else { 1.0 };
                 if periods == 0.0 && (name == "PMT") {
                     return Err("#DIV/0!".into());
@@ -2637,14 +2643,19 @@ impl<'a> Engine<'a> {
                     let discounted_future=exponential_scale(fourth,exponent);
                     let difference=-exponent.exp_m1();
                     return if name=="PMT" {
-                        num(-(third+discounted_future)*(rate/(1.0+rate*kind))/difference)
+                        num(-(third+discounted_future)*(rate/(1.0+rate*kind))/difference*cash_scale)
                     }else {
-                        num(-(third*((1.0+rate*kind)/rate)*difference+discounted_future))
+                        num(-(third*((1.0+rate*kind)/rate)*difference+discounted_future)*cash_scale)
                     };
                 }
                 let growth = growth(rate, periods);
                 let annuity = annuity(rate, periods, kind);
-                num(match name {
+                if name=="FV" && !growth.is_finite() && rate> -1.0 && rate!=0.0 {
+                    let payments=third*((1.0+rate*kind)/rate);
+                    let coefficient=-fourth-payments;
+                    return num(exponential_scale(coefficient*cash_scale,rate.ln_1p()*periods)+payments*cash_scale);
+                }
+                num((match name {
                     "PMT" => {
                         if annuity == 0.0 {
                             return Err("#DIV/0!".into());
@@ -2660,7 +2671,7 @@ impl<'a> Engine<'a> {
                         }
                     }
                     _ => (-fourth) * growth - third * annuity,
-                })
+                })*cash_scale)
             }
             "NPV" => {
                 arity(2, 255)?;
@@ -2813,8 +2824,10 @@ impl<'a> Engine<'a> {
                 let periods = n(2)?;
                 let present = n(3)?;
                 let future = default_n(4, 0.0)?;
+                let cash_scale=present.abs().max(future.abs()).max(1.0);
+                let (present,future)=(present/cash_scale,future/cash_scale);
                 let kind = if default_n(5, 0.0)? == 0.0 { 0.0 } else { 1.0 };
-                if period < 1.0 || period > periods.ceil() || rate <= -1.0 {
+                if period < 1.0 || period > periods || rate <= -1.0 {
                     return Err("#NUM!".into());
                 }
                 let annuity = |r: f64, count: f64| annuity(r, count, kind);
@@ -2834,11 +2847,11 @@ impl<'a> Engine<'a> {
                 } else {
                     fv(period - 1.0) * rate
                 };
-                num(if name == "IPMT" {
+                num((if name == "IPMT" {
                     interest
                 } else {
                     payment - interest
-                })
+                })*cash_scale)
             }
             "MAXIFS" | "MINIFS" => {
                 if a.len() < 3 || a.len().is_multiple_of(2) {
@@ -4744,6 +4757,53 @@ mod phase200_numeric_defects {
         book.set_range(id,0,0,&[vec!["-1".into()],vec!["1e200".into()]])?;
         assert!((number(&book,"=IRR(A1:A2)")?/1e200-1.0).abs()<1e-12);
         assert_eq!(conventional_irr(&[-1.0,3.0,-2.0]),None);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod phase200_formula_domains {
+    use super::*;
+    #[test]
+    fn logarithm_rejects_zero_and_unit_bases_before_evaluation() {
+        let book=Book::default();let id=book.active_id();
+        for input in ["=LOG(100,0)","=LOG(1,0)","=LOG(100,1)","=LOG(100,-2)"] {
+            assert_eq!(evaluate(&book,id,input),Value::Error("#NUM!".into()),"{input}");
+        }
+        let Value::Number(value)=evaluate(&book,id,"=LOG(100,0.1)") else {panic!("number");};
+        assert!((value+2.0).abs()<1e-12);
+    }
+    #[test]
+    fn interest_period_cannot_exceed_a_fractional_loan_term() {
+        let book=Book::default();let id=book.active_id();
+        for function in ["IPMT","PPMT"] {
+            assert_eq!(evaluate(&book,id,&format!("={function}(0.1,6,5.5,100)")),Value::Error("#NUM!".into()));
+            assert!(matches!(evaluate(&book,id,&format!("={function}(0.1,5,5.5,100)")),Value::Number(_)));
+        }
+    }
+}
+
+#[cfg(test)]
+mod phase200_cashflow_defect {
+    use super::*;
+    fn number(book:&Book,input:&str)->Result<f64,String> {
+        match evaluate(book,book.active_id(),input) {Value::Number(number)=>Ok(number),value=>Err(format!("{input}: {value:?}"))}
+    }
+    #[test]
+    fn annuity_cashflows_scale_before_overflow_and_cancel_exponential_growth() -> Result<(),String> {
+        let book=Book::default();
+        for (ordinary,large) in [
+            ("=PMT(0.1,10,1)","=PMT(0.1,10,1e308)"),
+            ("=PV(0.1,10,-1)","=PV(0.1,10,-1e307)"),
+            ("=FV(0.1,10,-1,1)","=FV(0.1,10,-1e307,1e307)"),
+            ("=PPMT(0.1,2,10,1)","=PPMT(0.1,2,10,1e308)"),
+        ] {
+            let scale=if ordinary.starts_with("=PV")||ordinary.starts_with("=FV"){1e307}else{1e308};
+            let expected=number(&book,ordinary)?;
+            assert!((number(&book,large)?/scale-expected).abs()<1e-10,"{large}");
+        }
+        assert_eq!(number(&book,"=FV(1,2000,-1,1)")?,-1.0);
+        assert!((number(&book,"=PV(-0.5,1060,0,1e-308)")?/1.235570475125E11-1.0).abs()<0.01);
         Ok(())
     }
 }

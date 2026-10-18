@@ -39,22 +39,8 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
     }
     let sections = split_sections(code);
     let negative = *number < 0.0;
-    let conditional = sections
-        .iter()
-        .take(2)
-        .any(|section| condition(section, *number).is_some());
-    let section = if conditional {
-        sections
-            .iter()
-            .take(3)
-            .find(|section| condition(section, *number).unwrap_or(true))
-    } else if *number == 0.0 && sections.len() > 2 {
-        sections.get(2)
-    } else if negative && sections.len() > 1 {
-        sections.get(1)
-    } else {
-        sections.first()
-    };
+    let conditional = sections.iter().take(2).any(|section| condition(section,*number).is_some());
+    let section = selected_numeric_section(&sections, *number);
     let Some(section) = section else {
         return String::new();
     };
@@ -459,6 +445,34 @@ fn text_section(code: &str, value: &str) -> String {
     }
     result.push_str(&unquote(&code[start..]));
     result
+}
+fn selected_numeric_section(sections:&[String], number:f64)->Option<&String> {
+    let conditional=sections.iter().take(2).any(|section|condition(section,number).is_some());
+    if conditional {
+        sections.iter().take(3).find(|section|condition(section,number).unwrap_or(true))
+    } else if number==0.0 && sections.len()>2 {sections.get(2)}
+    else if number<0.0 && sections.len()>1 {sections.get(1)}
+    else {sections.first()}
+}
+/// Named number-format colors override the cell's font color only in the chosen section.
+pub fn color(value:&Value,code:&str)->Option<[u8;3]> {
+    let sections=split_sections(code);
+    let section=match value {
+        Value::Number(number)=>selected_numeric_section(&sections,*number)?,
+        Value::Text(_)=>sections.get(3).or_else(||sections.first().filter(|section|outside_quotes(section).contains('@')))?,
+        _=>return None,
+    };
+    let tokens=outside_quotes(section);
+    for tail in tokens.split('[').skip(1) {
+        let Some((name,_))=tail.split_once(']') else {continue;};
+        let color=match name.to_ascii_lowercase().as_str() {
+            "black"=>[0,0,0],"blue"=>[0,0,255],"cyan"=>[0,255,255],"green"=>[0,255,0],
+            "magenta"=>[255,0,255],"red"=>[255,0,0],"white"=>[255,255,255],"yellow"=>[255,255,0],
+            _=>continue,
+        };
+        return Some(color);
+    }
+    None
 }
 fn condition(code: &str, number: f64) -> Option<bool> {
     let tokens = outside_tokens(code);
@@ -1075,5 +1089,20 @@ mod phase200_format_defects {
     fn unrepresentable_fraction_numerators_never_fall_back_to_zero() {
         assert_eq!(display(&Value::Number(1e308),"?/8",false),"#NUM!");
         assert_eq!(display(&Value::Number(0.0),"?/8",false),"0/8");
+    }
+}
+
+#[cfg(test)]
+mod phase200_number_color_defect {
+    use super::*;
+    #[test]
+    fn chosen_number_format_section_supplies_its_own_color() {
+        let code="[Blue]0;[Red](0);[Green]0;[Magenta]@";
+        assert_eq!(color(&Value::Number(-2.0),code),Some([255,0,0]));
+        assert_eq!(color(&Value::Number(2.0),code),Some([0,0,255]));
+        assert_eq!(color(&Value::Number(0.0),code),Some([0,255,0]));
+        assert_eq!(color(&Value::Text("x".into()),code),Some([255,0,255]));
+        assert_eq!(color(&Value::Number(2.0),"[>5][Red]0;[Blue]0"),Some([0,0,255]));
+        assert_eq!(color(&Value::Number(2.0),"\"[Red]\"0"),None);
     }
 }

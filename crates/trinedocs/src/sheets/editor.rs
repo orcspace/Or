@@ -1308,9 +1308,10 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                 let right = fmt.align == Align::Right
                     || (fmt.align == Align::General
                         && cell.is_some_and(|c| matches!(c.value, Value::Number(_))));
-                let text_color = if ui.visuals().dark_mode && fmt.color == [28, 32, 38] {
-                    ui.visuals().text_color()
-                } else { color(fmt.color) };
+                let number_color=cell.and_then(|cell|super::format::color(&cell.value,&fmt.number));
+                let text_color = if let Some(rgb)=number_color {color(rgb)}
+                    else if ui.visuals().dark_mode && fmt.color == [28,32,38] {ui.visuals().text_color()}
+                    else {color(fmt.color)};
                 let clipped = painter.with_clip_rect(cell_rect.shrink(2.0));
                 clipped.add(cell_text_shape(ui, cell_rect, &fmt, text, text_color, right));
                 if (r, c) == (row, col) {
