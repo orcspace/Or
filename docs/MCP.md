@@ -267,3 +267,19 @@ Subscriptions: document edit → resource-updated; resource set change → list_
 `slides_read` теперь фактически включает `fill_visible` в element metadata (предыдущая документация опережала сериализатор). `slides_format_text` допускает `format: {"fill_visible":false}` для массива element_ids; `slides_update_element` по-прежнему принимает nested element patch. Существующие typed validation/candidate/ops/undo и права edit сохраняются. Это noFill для поддержанных фигур, не полная модель DrawingML fills.
 
 Файловый dry_run выполняет общий preflight: ID документа, поддержанный формат, путь сохранения, read-only/save-lock/busy для соответствующей команды. Он не пишет файл и не запускает экспорт; это проверка базовых предпосылок, не гарантия успешного рендера/дисковой записи. Open по-прежнему проходит пользовательский UI-путь. Возврат фонового media job повторно проверяет MCP enabled и актуальное разрешение/поколение встроенного чата; отзыв не отменяет уже выполненный дисковый export.
+
+## Уточнения контракта нового прохода BUG-251…450 (2026-10-18)
+
+`app_status` / `list_documents` и `sheets_list` / `slides_list` теперь соблюдают `index` (0) и `count` (100, clamp1…100), возвращая `offset/page_size/total`. Это изменение default: списки длиннее100 требуют продолжения.
+
+`docs_read` и Docs-вариант `read_content` поддерживают `paragraph_id` (фильтр до index/count), `offset` (Unicode scalars, 0) и `characters` (4096, clamp1…16384). Наличие любого из этих аргументов включает окно rich runs; каждый paragraph содержит `text_offset/text_page_size/total_chars/text_truncated`. Без них прежнее чтение абзаца целиком сохраняется. Большой абзац можно обнаружить, задав characters и листая index/count. `docs_get_outline` отдаёт первые512 Unicode scalars заголовка с total_chars/text_truncated. Лимит ответа1MiB действует и для этих путей; это bounded response, а не полностью потоковая сериализация модели.
+
+`slides_read` и Slides-вариант `read_content`: необязательный `slide_id` фильтрует слайды до index/count; `element_index` (0) и `element_count` (100, clamp1…100) листают объекты каждого возвращаемого слайда независимо. Metadata содержит `element_offset/element_page_size/total_elements`. Изображения возвращают metadata без bytes. Один огромный text/table/chart по-прежнему может превысить1MiB; окна внутри таких объектов не добавлены. Для стабильного продолжения клиент сверяет version; snapshot token между страницами не реализован.
+
+Ответы model edit tools ограничивают `changed_ids` первыми256 уникальными IDs в исходном порядке. `changed_ids_count` сообщает полное число, `changed_ids_truncated` — усечение; no-op возвращает0 и пустой массив. Range writes/format включают IDs ячеек, sheet/slide правки — затронутый структурный объект. Workspace worker сохраняет полные IDs через непубличный model path для точных totals; внешнего обхода ограничения нет.
+
+`dry_run` model edits/undo/redo проверяет тот же commit engine, включая version exhaustion, read-only и очередь позиционных Docs edits, на минимальной preview Tab. Это не side effect и не гарантия сетевой/файловой операции. Create preflight проверяет allocator и занятые document IDs до dry_run. Неизвестные tools и неверно типизированные outer args отклоняются до создания запроса доступа. Новых ожидающих approval entries максимум128; повтор существующего legacy клиента не требует нового места.
+
+`sheets_add_image` сохраняет явно переданные dimensions и alt без молчаливого clamp/truncate: значения за пределами модели отклоняются атомарно. Typed schema `slides_format_text.format` теперь также объявляет ранее поддержанный handler-ом `fill_visible` (исправление остатка BUG-230, без нового BUG ID).
+
+Эти контракты проверены чтением кода и опубликованного diff; регрессии написаны, не запускались. MCP Inspector/GUI/runtime/Office-приёмка не проводилась.
