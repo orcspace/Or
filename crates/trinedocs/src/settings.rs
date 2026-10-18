@@ -59,6 +59,10 @@ impl Settings {
         if !matches!(self.theme.as_str(), "light" | "dark" | "system") {
             self.theme = "system".into();
         }
+        let mut recent=std::collections::HashSet::new();
+        self.recent.retain(|path|recent.insert(path.clone()));
+        let mut pinned=std::collections::HashSet::new();
+        self.pinned.retain(|path|pinned.insert(path.clone()));
         self.recent.truncate(50);
         self.pinned.truncate(50);
         self.chat_models = self.chat_models.map(|m| crate::chat::clean_model(&m));
@@ -155,5 +159,20 @@ mod tests {
         settings.toggle_pin("C:/extra.docx".into())?;
         assert_eq!(settings.pinned.len(), 50);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod recent_defect_tests {
+    use super::*;
+    #[test]
+    fn duplicate_settings_paths_do_not_displace_unique_recent_files() {
+        let mut settings=Settings::default();
+        settings.recent=vec![PathBuf::from("C:/a.docx");50];
+        settings.recent.push("C:/b.docx".into());
+        settings.pinned=vec!["C:/a.docx".into(),"C:/a.docx".into()];
+        let settings=settings.normalized();
+        assert_eq!(settings.recent,vec![PathBuf::from("C:/a.docx"),PathBuf::from("C:/b.docx")]);
+        assert_eq!(settings.pinned.len(),1);
     }
 }

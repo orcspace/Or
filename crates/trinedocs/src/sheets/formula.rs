@@ -790,6 +790,8 @@ struct Engine<'a> {
     work: usize,
     materialized: usize,
     budget_exhausted: bool,
+    cached_text: usize,
+    cache_text_limit: usize,
 }
 impl<'a> Engine<'a> {
     fn new(book: &'a Book) -> Self {
@@ -806,6 +808,8 @@ impl<'a> Engine<'a> {
             work: 0,
             materialized: 0,
             budget_exhausted: false,
+            cached_text: 0,
+            cache_text_limit: 64*1024*1024,
         }
     }
     fn root_cell(&mut self, sheet: usize, row: u32, col: u32) -> Value {
@@ -819,6 +823,9 @@ impl<'a> Engine<'a> {
         let key = (sheet, row, col);
         if let Some(value) = self.cache.get(&key) {
             return value.clone();
+        }
+        if self.book.sheets.get(sheet).and_then(|s|s.cell(row,col)).is_none() {
+            return Value::Empty;
         }
         if self.depth >= 256 {
             self.budget_exhausted = true;
@@ -835,7 +842,7 @@ impl<'a> Engine<'a> {
             .and_then(|s| s.cell(row, col))
             .map(|c| c.input.clone())
             .unwrap_or_default();
-        let value = if input.starts_with('=') {
+        let mut value = if input.starts_with('=') {
             match parse(&input).and_then(|e| self.eval(&e, sheet, row, col)) {
                 Ok(grid) => formula_result(grid.first()),
                 Err(e) => Value::Error(e),
@@ -847,7 +854,11 @@ impl<'a> Engine<'a> {
         self.visiting.remove(&key);
         // A limit reached through another cell is transient: that cell may fit as a root.
         if !self.budget_exhausted {
-            self.cache.insert(key, value.clone());
+            let bytes=match &value {Value::Text(text)=>text.len(),_=>0};
+            if self.cached_text.saturating_add(bytes)>self.cache_text_limit {
+                value=Value::Error("#NUM!".into());
+            } else {self.cached_text+=bytes;}
+            self.cache.insert(key,value.clone());
         }
         value
     }
@@ -1584,11 +1595,12 @@ impl<'a> Engine<'a> {
             "ROUND" | "ROUNDUP" | "ROUNDDOWN" | "TRUNC" => {
                 arity(if name == "TRUNC" { 1 } else { 2 }, 2)?;
                 let digits = default_n(1, 0.0)?.trunc();
-                if !(-308.0..=308.0).contains(&digits) {
-                    return Err("#NUM!".into());
+                let value=n(0)?;
+                if digits>308.0 {return num(value);}
+                if digits< -308.0 {
+                    return if name=="ROUNDUP" && value!=0.0 {Err("#NUM!".into())} else {num(0.0)};
                 }
                 let scale = 10f64.powf(digits);
-                let value = n(0)?;
                 let x = value * scale;
                 // A finite number this large already has no fractional digits to remove.
                 if !x.is_finite() && digits >= 0.0 {
@@ -3541,6 +3553,7 @@ fn lookup_equal(value: &Value, needle: &Value, wildcards: bool) -> bool {
 }
 fn wildcard_prefix(pattern: &str, text: &str) -> bool {
     let mut p: Vec<char> = pattern.chars().collect();
+    if p.iter().rev().take_while(|ch|**ch=='~').count()%2==1 {p.push('~');}
     p.push('*');
     wildcard(&p, &text.chars().collect::<Vec<_>>())
 }
@@ -3550,10 +3563,11 @@ fn wildcard(pattern: &[char], text: &[char]) -> bool {
     let mut star = None;
     let mut mark = 0;
     while ti < text.len() {
-        if pattern.get(pi) == Some(&'~') && pattern.get(pi + 1) == text.get(ti) {
-            pi += 2;
-            ti += 1;
-        } else if pattern.get(pi) == Some(&'?') || pattern.get(pi) == text.get(ti) {
+        let escaped=pattern.get(pi)==Some(&'~')
+            && pattern.get(pi+1).is_some_and(|ch|matches!(ch,'*'|'?'|'~'));
+        if escaped && pattern.get(pi+1)==text.get(ti) {
+            pi+=2;ti+=1;
+        } else if !escaped && (pattern.get(pi)==Some(&'?') || pattern.get(pi)==text.get(ti)) {
             pi += 1;
             ti += 1;
         } else if pattern.get(pi) == Some(&'*') {
@@ -4216,6 +4230,48 @@ mod defect_batch_two {
         let book=Book::default();
         assert!((number(&book,"=TIMEVALUE(\"12:34:56.5\")")?-45296.5/86400.0).abs()<1e-12);
         assert_eq!(evaluate(&book,book.active_id(),"=TIMEVALUE(\"12:34:NaN\")"),Value::Error("#VALUE!".into()));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod additional_calc_defect_tests {
+    use super::*;
+    #[test]
+    fn extreme_rounding_precision_does_not_reject_finite_answers() {
+        let book=Book::default();let id=book.active_id();
+        for input in ["=ROUND(123,400)","=ROUNDUP(123,400)","=ROUNDDOWN(123,400)","=TRUNC(123,400)"] {
+            assert_eq!(evaluate(&book,id,input),Value::Number(123.0),"{input}");
+        }
+        for input in ["=ROUND(123,-400)","=ROUNDDOWN(123,-400)","=TRUNC(123,-400)","=ROUNDUP(0,-400)"] {
+            assert_eq!(evaluate(&book,id,input),Value::Number(0.0),"{input}");
+        }
+    }
+    #[test]
+    fn escaped_wildcards_do_not_fall_back_to_matching_a_literal_tilde() {
+        assert!(!wildcard(&"~*".chars().collect::<Vec<_>>(),&"~abc".chars().collect::<Vec<_>>()));
+        assert!(!wildcard(&"~?".chars().collect::<Vec<_>>(),&"~a".chars().collect::<Vec<_>>()));
+        assert!(wildcard(&"~*".chars().collect::<Vec<_>>(),&['*']));
+        assert!(wildcard_prefix("~","~tail"));
+        assert!(wildcard_prefix("~~","~tail"));
+        assert!(!wildcard_prefix("~*","~tail"));
+    }
+    #[test]
+    fn empty_cells_do_not_accumulate_in_the_calculation_cache() {
+        let book=Book::default();let mut engine=Engine::new(&book);
+        for row in 0..10000 {assert_eq!(engine.root_cell(0,row,0),Value::Empty);}
+        assert!(engine.cache.is_empty());
+    }
+    #[test]
+    fn independent_text_results_share_a_workbook_cache_budget() -> Result<(),String> {
+        let mut book=Book::default();let id=book.active_id();
+        book.set_input(id,0,0,"=REPT(\"x\",8)")?;
+        book.set_input(id,1,0,"=REPT(\"y\",8)")?;
+        let mut engine=Engine::new(&book);engine.cache_text_limit=12;
+        assert_eq!(engine.root_cell(0,0,0),Value::Text("xxxxxxxx".into()));
+        assert_eq!(engine.root_cell(0,1,0),Value::Error("#NUM!".into()));
+        assert_eq!(engine.cached_text,8);
+        assert_eq!(engine.root_cell(0,0,0),Value::Text("xxxxxxxx".into()));
         Ok(())
     }
 }

@@ -182,37 +182,34 @@ pub fn style(ctx: &egui::Context, kind: &str, reduced_motion: bool) {
 }
 /// Ribbon tabs: plain labels, the active one underlined with the app accent.
 pub fn tabs(ui: &mut Ui, active: &mut usize, labels: &[&str]) {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
-        for (index, label) in labels.iter().enumerate() {
-            let selected = *active == index;
-            let text = RichText::new(*label).size(13.0);
-            let text = if selected {
-                text.strong().color(accent(ui))
-            } else {
-                text
-            };
-            let response = ui
-                .add(
-                    egui::Button::new(text)
-                        .frame_when_inactive(false)
-                        .min_size(egui::vec2(52.0, 32.0)),
-                )
-                .on_hover_cursor(egui::CursorIcon::PointingHand);
-            if response.clicked() {
-                *active = index;
-            }
-            if selected {
-                ui.painter().line_segment(
-                    [
-                        response.rect.left_bottom() + egui::vec2(12.0, -1.0),
-                        response.rect.right_bottom() - egui::vec2(12.0, 1.0),
-                    ],
-                    Stroke::new(2.0, accent(ui)),
-                );
-            }
-        }
-    });
+    if labels.is_empty() { return; }
+    *active=(*active).min(labels.len()-1);
+    egui::ScrollArea::horizontal()
+        .id_salt("ribbon-tabs")
+        .auto_shrink([false,true])
+        .show(ui,|ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x=2.0;
+                for (index,label) in labels.iter().enumerate() {
+                    let selected=*active==index;
+                    let text=RichText::new(*label).size(13.0);
+                    let text=if selected {text.strong().color(accent(ui))} else {text};
+                    let response=ui.add(egui::Button::new(text).selected(selected)
+                        .frame_when_inactive(false).min_size(egui::vec2(52.0,32.0)))
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    if response.clicked() {*active=index;}
+                    if response.has_focus() {
+                        response.scroll_to_me(Some(egui::Align::Center));
+                    }
+                    if selected {
+                        ui.painter().line_segment([
+                            response.rect.left_bottom()+egui::vec2(12.0,-1.0),
+                            response.rect.right_bottom()-egui::vec2(12.0,1.0)],
+                            Stroke::new(2.0,accent(ui)));
+                    }
+                }
+            });
+        });
 }
 /// Height of the two-row content area of a ribbon group.
 pub const GROUP_HEIGHT: f32 = 52.0;
@@ -283,11 +280,22 @@ pub fn tool(
     .on_hover_cursor(egui::CursorIcon::PointingHand)
     .on_hover_text(tip)
 }
+fn font_filter_id(ui: &Ui,id: &str) -> egui::Id {
+    ui.make_persistent_id((id,"font-filter"))
+}
+fn color_swatch(ui: &mut Ui,color: [u8;3],selected: bool) -> egui::Response {
+    let fill=Color32::from_rgb(color[0],color[1],color[2]);
+    let label=format!("Цвет #{:02X}{:02X}{:02X}",color[0],color[1],color[2]);
+    let response=ui.add_sized([22.0,22.0],egui::Button::new("").fill(fill).selected(selected));
+    response.widget_info(||egui::WidgetInfo::labeled(egui::WidgetType::Button,ui.is_enabled(),&label));
+    ui.painter().rect_filled(response.rect.shrink(2.0),2.0,fill);
+    response.on_hover_text(label)
+}
 /// Font family picker with a search box; each family is previewed in itself.
 /// Returns true when the family changed.
 pub fn font_picker(ui: &mut Ui, id: &str, family: &mut String, width: f32) -> bool {
     let mut changed = false;
-    let filter_id = egui::Id::new((id, "font-filter"));
+    let filter_id = font_filter_id(ui,id);
     egui::ComboBox::from_id_salt(id)
         .width(width)
         .height(420.0)
@@ -387,14 +395,14 @@ pub fn step_size(size: f32, grow: bool) -> f32 {
 pub fn color_tool(ui: &mut Ui, glyph: &str, tip: &str, color: Color32) -> egui::Response {
     let response = tool(ui, RichText::new(glyph).size(13.0), tip, false);
     let r = response.rect;
-    ui.painter().rect_filled(
-        egui::Rect::from_min_max(
-            egui::pos2(r.left() + 5.0, r.bottom() - 5.0),
-            egui::pos2(r.right() - 5.0, r.bottom() - 2.0),
-        ),
-        0.0,
-        color,
-    );
+    let bar=egui::Rect::from_min_max(
+        egui::pos2(r.left()+5.0,r.bottom()-5.0),
+        egui::pos2(r.right()-5.0,r.bottom()-2.0));
+    ui.painter().rect_filled(bar,0.0,color);
+    if color==Color32::TRANSPARENT {
+        ui.painter().line_segment([bar.left_bottom(),bar.right_top()],
+            Stroke::new(1.0,muted(ui)));
+    }
     response
 }
 /// Theme colours, greys and standard colours, as in the Office colour menu.
@@ -445,7 +453,7 @@ pub fn color_menu(
     let response = color_tool(ui, glyph, tip, shown);
     let mut picked = None;
     egui::Popup::menu(&response).show(|ui| {
-        ui.set_min_width(230.0);
+        ui.set_min_width(266.0);
         if let Some(label) = none_label
             && ui.button(label).clicked()
         {
@@ -456,11 +464,9 @@ pub fn color_menu(
             .spacing([3.0, 3.0])
             .show(ui, |ui| {
                 for (index, color) in COLORS.iter().enumerate() {
-                    let (rect, swatch) =
-                        ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
-                    let fill = Color32::from_rgb(color[0], color[1], color[2]);
-                    ui.painter().rect_filled(rect, 2.0, fill);
-                    let edge = if swatch.hovered() || current == Some(*color) {
+                    let swatch=color_swatch(ui,*color,current==Some(*color));
+                    let rect=swatch.rect;
+                    let edge = if swatch.hovered() || swatch.has_focus() || current == Some(*color) {
                         Stroke::new(2.0, accent(ui))
                     } else {
                         Stroke::new(1.0, border(ui))
@@ -710,6 +716,49 @@ mod tests {
             );
             output.textures_delta.clear();
         }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod ui_review_tests {
+    use super::*;
+    #[test]
+    fn font_filters_are_scoped_to_their_parent_ui() {
+        let ctx=egui::Context::default();
+        let _=ctx.run_ui(egui::RawInput::default(),|ui| {
+            let a=ui.push_id("doc-a",|ui|font_filter_id(ui,"font")).inner;
+            let b=ui.push_id("doc-b",|ui|font_filter_id(ui,"font")).inner;
+            assert_ne!(a,b);
+            ui.data_mut(|data|data.insert_temp(a,"Arial".to_string()));
+            assert!(ui.data(|data|data.get_temp::<String>(b)).is_none());
+        });
+    }
+    #[test]
+    fn palette_swatches_are_focusable_named_controls() -> Result<(),String> {
+        let ctx=egui::Context::default();
+        crate::fonts::install(&ctx)?;
+        ctx.enable_accesskit();
+        let out=ctx.run_ui(egui::RawInput::default(),|ui| {
+            let swatch=color_swatch(ui,[12,34,56],true);
+            assert!(swatch.sense.is_focusable());
+        });
+        let tree=format!("{:?}",out.platform_output.accesskit_update);
+        assert!(tree.contains("Цвет #0C2238"));
+        Ok(())
+    }
+    #[test]
+    fn ribbon_tabs_keep_a_horizontal_scroll_extent() -> Result<(),String> {
+        let ctx=egui::Context::default();
+        crate::fonts::install(&ctx)?;
+        let _=ctx.run_ui(egui::RawInput {screen_rect:Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,egui::vec2(260.0,240.0))),..Default::default()},|ui| {
+            let right=ui.max_rect().right();
+            let mut active=usize::MAX;
+            tabs(ui,&mut active,&["Главная","Вставка","Макет","Рецензирование","Вид"]);
+            assert_eq!(active,4);
+            assert!(ui.min_rect().right()<=right+1.0);
+        });
         Ok(())
     }
 }

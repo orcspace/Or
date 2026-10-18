@@ -75,6 +75,7 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
     {
         return date_display(numeric, &section,ru);
     }
+    let percent = bare.chars().filter(|c| *c == '%').count();
     if bare.contains('/') && bare.contains('?') {
         let (left, right) = bare.split_once('/').unwrap_or(("", ""));
         let denominator = right
@@ -86,7 +87,8 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
             .filter(|den| *den > 0 && *den <= 1_000_000);
         let mixed = left.split_whitespace().count() > 1;
         let sign = if numeric < 0.0 { "-" } else { "" };
-        let n = numeric.abs();
+        let n = numeric.abs()*100f64.powi(percent as i32);
+        if !n.is_finite() {return "#NUM!".into();}
         let whole = if mixed { n.floor() } else { 0.0 };
         let fraction = n - whole;
         let max_den = 10u32.pow(
@@ -105,24 +107,17 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
                 best = (numerator, den, diff);
             }
         }
-        if mixed && best.0 == 0.0 {
-            return format!("{sign}{whole:.0}");
-        }
-        if mixed && best.0 == f64::from(best.1) {
-            return format!("{sign}{:.0}", whole + 1.0);
-        }
-        return format!(
-            "{sign}{}{:.0}/{}",
-            if mixed && whole != 0.0 {
-                format!("{whole:.0} ")
-            } else {
-                String::new()
-            },
-            best.0,
-            best.1
-        );
+        let body=if mixed && best.0==0.0 {format!("{sign}{whole:.0}")}
+            else if mixed && best.0==f64::from(best.1) {format!("{sign}{:.0}",whole+1.0)}
+            else {format!("{sign}{}{:.0}/{}",
+                if mixed && whole!=0.0 {format!("{whole:.0} ")}else{String::new()},best.0,best.1)};
+        let tokens=outside_tokens(&section);
+        let start=tokens.iter().find(|(_,c)|matches!(c,'0'|'#'|'?')).map(|(i,_)|*i).unwrap_or(0);
+        let slash=tokens.iter().find(|(_,c)|*c=='/').map(|(i,_)|*i).unwrap_or(0);
+        let end=section[slash+1..].char_indices().take_while(|(_,c)|c.is_ascii_digit() || matches!(c,'?'|'#'))
+            .last().map(|(i,c)|slash+1+i+c.len_utf8()).unwrap_or(slash+1);
+        return format!("{}{}{}",unquote(&section[..start]),body,unquote(&section[end..]));
     }
-    let percent = bare.chars().filter(|c| *c == '%').count();
     let mut n = numeric * 100f64.powi(percent as i32);
     let tokens = outside_tokens(&section);
     let first = tokens
@@ -140,9 +135,14 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
         (Some(a), Some(b)) => (a, b),
         _ => return unquote(&section),
     };
-    let pattern = section.get(start..end).unwrap_or("0");
+    let mut pattern = section.get(start..end).unwrap_or("0").to_string();
     let tail = section.get(end..).unwrap_or("");
-    let scale = tail.chars().take_while(|c| *c == ',').count();
+    let decimal=outside_tokens(&pattern).into_iter().find(|(_,c)|*c=='.').map(|(i,_)|i);
+    let inner_scale=decimal.map(|i|pattern[..i].chars().rev().take_while(|c|*c==',').count()).unwrap_or(0);
+    if let Some(decimal)=decimal && inner_scale>0 {
+        pattern.replace_range(decimal-inner_scale..decimal,"");
+    }
+    let scale = tail.chars().take_while(|c| *c == ',').count()+inner_scale;
     n /= 1000f64.powi(scale as i32);
     if !n.is_finite() {
         return "#NUM!".into();
@@ -159,7 +159,9 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
     let integer_pattern = pattern.split(['.', 'E', 'e']).next().unwrap_or("");
     let minimum_digits = integer_pattern.chars().filter(|c| *c == '0').count();
     let fixed = || numeric_pattern(n, &decimal_pattern, minimum_digits);
-    let rendered = if let Some(exponent) = pattern.to_uppercase().find('E') {
+    let rendered = if let Some(masked)=integer_literal_mask(n,&pattern) {
+        masked
+    } else if let Some(exponent) = pattern.to_uppercase().find('E') {
         let digits = pattern
             .get(exponent..)
             .unwrap_or("")
@@ -324,7 +326,9 @@ fn split_sections(code: &str) -> Vec<String> {
     let mut out = vec![String::new()];
     let mut quote = false;
     let mut escape = false;
+    let mut skip = false;
     for c in code.chars() {
+        if skip { if let Some(last)=out.last_mut() {last.push(c);} skip=false; continue; }
         if c == ';' && !quote && !escape {
             out.push(String::new());
             continue;
@@ -335,6 +339,7 @@ fn split_sections(code: &str) -> Vec<String> {
         if c == '"' && !escape {
             quote = !quote;
         }
+        if !quote && !escape && matches!(c,'_'|'*') {skip=true;}
         escape = c == '\\' && !escape;
     }
     out
@@ -605,10 +610,8 @@ fn date_display(serial: f64, code: &str, ru: bool) -> String {
                 i += 1;
             }
             let count = i - start;
-            let next = chars[i..]
-                .iter()
-                .find(|v| v.is_ascii_alphabetic())
-                .map(|v| v.to_ascii_lowercase());
+            let next = outside_quotes(&chars[i..].iter().collect::<String>())
+                .chars().find(|v|v.is_ascii_alphabetic()).map(|v|v.to_ascii_lowercase());
             let minutes = token == 'm' && (previous == 'h' || next == Some('s'));
             let n = match token {
                 'y' => {
@@ -945,5 +948,62 @@ mod format_defect_tests {
         assert_eq!(display(&Value::Number(date),"d mmmm yyyy",true),"1 января 2024");
         assert_eq!(display(&Value::Number(date),"mmmm",false),"January");
         assert_eq!(display(&Value::Number(2958465.999999),"yyyy-mm-dd",false),"9999-12-31");
+    }
+}
+
+fn integer_literal_mask(number: f64,pattern: &str) -> Option<String> {
+    if !pattern.contains(['"','\\']) {return None;}
+    let mut parts=Vec::new();
+    let (mut quoted,mut escaped)=(false,false);
+    for ch in pattern.chars() {
+        if escaped {parts.push((false,ch));escaped=false;continue;}
+        if ch=='"' {quoted=!quoted;continue;}
+        if !quoted && ch=='\\' {escaped=true;continue;}
+        if quoted {parts.push((false,ch));}
+        else if matches!(ch,'0'|'#'|'?') {parts.push((true,ch));}
+        else if matches!(ch,'('|')'|' '|'-'|'+') {parts.push((false,ch));}
+        else {return None;}
+    }
+    let mut digits:Vec<_>=fixed(number.abs(),0).chars().collect();
+    let mut out=Vec::new();
+    for (slot,ch) in parts.into_iter().rev() {
+        if slot {
+            if let Some(digit)=digits.pop() {out.push(digit);}
+            else if ch=='0' {out.push('0');}
+            else if ch=='?' {out.push(' ');}
+        } else {out.push(ch);}
+    }
+    while let Some(digit)=digits.pop() {out.push(digit);}
+    if number<0.0 {out.push('-');}
+    Some(out.into_iter().rev().collect())
+}
+#[cfg(test)]
+mod second_format_defects {
+    use super::*;
+    #[test]
+    fn spacing_and_fill_arguments_do_not_split_format_sections() {
+        assert_eq!(split_sections("0_;"),vec!["0_;".to_string()]);
+        assert_eq!(split_sections("0*;;(0)"),vec!["0*;".to_string(),"(0)".to_string()]);
+    }
+    #[test]
+    fn integer_format_keeps_embedded_literal_masks() {
+        assert_eq!(display(&Value::Number(1234.0),r#"00"-"00"#,false),"12-34");
+        assert_eq!(display(&Value::Number(1234567.0),r#"(000) 00"-"00"#,false),"(123) 45-67");
+        assert_eq!(display(&Value::Number(42.0),r#"00"-"00"#,false),"00-42");
+    }
+    #[test]
+    fn scaling_commas_before_a_decimal_are_applied() {
+        assert_eq!(display(&Value::Number(12345.0),"0,.0",false),"12.3");
+        assert_eq!(display(&Value::Number(12345000.0),r#"0,,.00" M""#,false),"12.35 M");
+    }
+    #[test]
+    fn fraction_formats_keep_percentages_and_literal_affixes() {
+        assert_eq!(display(&Value::Number(0.125),"# ?/?%",false),"12 1/2%");
+        assert_eq!(display(&Value::Number(1.25),r#""$"# ?/?" kg""#,false),"$1 1/4 kg");
+    }
+    #[test]
+    fn quoted_words_cannot_change_month_tokens_into_minutes() {
+        assert_eq!(display(&Value::Number(super::super::formula::date_serial(2024,1,15)),
+            r#"mm" seconds""#,false),"01 seconds");
     }
 }
