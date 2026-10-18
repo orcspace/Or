@@ -3695,7 +3695,15 @@ mod two_hundred_docs_model_regressions {
         assert_eq!(zero.layout().rows[0].marker,"0.");assert_eq!(zero.layout().rows[1].marker,"1.");
         let id=doc.paragraphs[0].id;doc.insert_text(id,5,"\nnew")?;assert_eq!(doc.paragraphs[1].list_start,None);
         let html=super::super::io::read(br#"<ol start="7"><li>a</li><li value="12">b</li><li>c</li></ol>"#,"html")?;
-        assert_eq!(html.layout().rows.iter().map(|row|row.marker.as_str()).collect::<Vec<_>>(),vec!["7.","12.","13."]);Ok(())
+        assert_eq!(html.layout().rows.iter().map(|row|row.marker.as_str()).collect::<Vec<_>>(),vec!["7.","12.","13."]);
+        let mut ordinary=Doc::from_text(&(0..64).map(|index|format!("item {index}")).collect::<Vec<_>>().join("\n"));
+        for paragraph in &mut ordinary.paragraphs {paragraph.list=List::Number;}
+        let imported=super::super::io::read(&super::super::io::write(&ordinary,"docx")?,"docx")?;
+        let parts=crate::package::read_zip(&super::super::io::write(&imported,"docx")?)?;
+        let numbering=String::from_utf8_lossy(parts.get("word/numbering.xml").ok_or("numbering")?);
+        assert_eq!(numbering.matches("<w:num w:numId=").count(),2);
+        let output=String::from_utf8(super::super::io::write(&imported,"html")?).map_err(|error|error.to_string())?;
+        assert_eq!(output.matches("<ol ").count(),1);Ok(())
     }
     #[test]
     fn deleting_a_whole_leading_paragraph_keeps_the_surviving_paragraph_properties()->Result<(),String> {

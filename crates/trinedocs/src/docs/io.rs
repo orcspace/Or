@@ -1494,7 +1494,8 @@ impl ExportNumbering {
                     current = None;
                 }
                 List::Number => {
-                    if current.is_none() || level < start_level || paragraph.list_start.is_some() {
+                    let restart=paragraph.list_start.is_some_and(|start|start as usize!=counters[level].saturating_add(1));
+                    if current.is_none() || level < start_level || restart {
                         let mut starts = counters.map(|value| value + 1);
                         starts[level + 1..].fill(1);
                         if let Some(start)=paragraph.list_start {starts[level]=start as usize;}
@@ -2450,6 +2451,14 @@ fn safe_html_link(value: &str) -> bool {
         )
     })
 }
+fn html_escaped_text(out:&mut String,text:&str,limit:usize)->Result<(),String> {
+    let mut buffer=[0u8;4];
+    for ch in text.chars() {
+        let escaped=match ch {'&'=>"&amp;",'<'=>"&lt;",'>'=>"&gt;",'"'=>"&quot;",'\''=>"&apos;",'\n'|'\u{000b}'=>"<br/>",_=>ch.encode_utf8(&mut buffer)};
+        html_extend(out,escaped,limit)?;
+    }
+    Ok(())
+}
 fn html_extend(out:&mut String,text:&str,limit:usize)->Result<(),String> {
     if text.len()>limit.saturating_sub(out.len()) {return Err("HTML превышает безопасный предел размера".into());}
     out.push_str(text);Ok(())
@@ -2477,10 +2486,12 @@ fn write_html_bounded(doc: &Doc,limit:usize) -> Result<String,String> {
         if p.list==List::None {
             html_close_lists(&mut out,&mut lists,0,limit)?;numbers.fill(0);
         }else{
-            let number=if p.list==List::Number {p.list_start.map(|start|start as usize).unwrap_or_else(||numbers[depth-1].saturating_add(1))}else{0};
+            let expected=numbers[depth-1].saturating_add(1);
+            let restart=p.list==List::Number && p.list_start.is_some_and(|start|start as usize!=expected);
+            let number=if p.list==List::Number {p.list_start.map(|start|start as usize).unwrap_or(expected)}else{0};
             numbers[depth-1]=number;for value in &mut numbers[depth..] {*value=0;}
             if lists.len()>depth {html_close_lists(&mut out,&mut lists,depth,limit)?;}
-            if lists.len()==depth && (lists.last()!=Some(&p.list) || p.list==List::Number && p.list_start.is_some()) {
+            if lists.len()==depth && (lists.last()!=Some(&p.list) || restart) {
                 html_close_lists(&mut out,&mut lists,depth-1,limit)?;
             }else if lists.len()==depth {html_extend(&mut out,"</li>",limit)?;}
             while lists.len()<depth {
@@ -2620,7 +2631,7 @@ fn read_html(text:&str)->Result<Doc,String> {
 fn read_html_with_limit(text:&str,limit:usize)->Result<Doc,String> {
     if text.len()>limit {return Err("HTML превышает безопасный лимит размера".into());}
     // HTML is imported as data only; scripts, CSS imports and network images are never executed.
-    let mut clean=normalize_html_optional_tags(&normalize_html_voids(&normalize_html_attributes(&normalize_html_entities(text))));
+    let mut clean=normalize_html_optional_tags(&normalize_html_voids(&normalize_html_attributes(&normalize_html_entities(text))))?;
     if let Some(start) = clean.to_ascii_lowercase().find("<!doctype")
         && let Some(end) = clean.get(start..).and_then(|s| s.find('>'))
     {
@@ -4198,7 +4209,7 @@ fn html_paragraph_bounded(p: &Paragraph,tag: &str,limit:usize) -> Result<String,
         let link=f.link.as_deref().filter(|link|safe_html_link(link));
         if let Some(link)=link { html_extend(&mut out,&format!("<a href=\"{}\">",esc(link)),limit)?; }
         if f.script!=0 { html_extend(&mut out,if f.script>0 {"<sup>"}else{"<sub>"},limit)?; }
-        html_extend(&mut out,&esc(&r.text).replace(['\u{000b}','\n'],"<br/>"),limit)?;
+        html_escaped_text(&mut out,&r.text,limit)?;
         if f.script!=0 { html_extend(&mut out,if f.script>0 {"</sup>"}else{"</sub>"},limit)?; }
         if link.is_some() { html_extend(&mut out,"</a>",limit)?; }
         html_extend(&mut out,"</span>",limit)?;
@@ -5728,36 +5739,80 @@ fn normalize_html_attributes(text:&str)->String {
     out
 }
 
-fn normalize_html_optional_tags(text:&str)->String {
-    fn close(out:&mut String,stack:&mut Vec<String>,at:usize) {
-        while stack.len()>at {if let Some(name)=stack.pop() {out.push_str("</");out.push_str(&name);out.push('>');}}
+fn normalize_html_optional_tags(text:&str)->Result<String,String> {
+    if text.len()>XML_LIMIT {return Err("HTML превышает безопасный предел размера".into());}
+    fn template_end(text:&str,opening:usize)->usize {
+        let mut depth=1usize;let mut position=opening;
+        while position<text.len() {
+            let Some(relative)=text[position..].find('<') else{return text.len();};position+=relative;
+            let rest=&text[position..];
+            if rest.starts_with("<!--") || rest.starts_with("<![CDATA[") {
+                let marker=if rest.starts_with("<!--") {"-->"}else{"]]>"};
+                let length=rest.find(marker).map(|end|end+marker.len()).unwrap_or(rest.len());position+=length;continue;
+            }
+            let(mut quote,mut end)=(None,None);
+            for (index,ch) in rest.char_indices().skip(1) {
+                if let Some(open)=quote {if ch==open {quote=None;}continue;}
+                if matches!(ch,'\''|'"') {quote=Some(ch);}else if ch=='>' {end=Some(index);break;}
+            }
+            let Some(end)=end else{return text.len();};
+            let tag=&rest[..=end];let closing=tag.starts_with("</");let begin=if closing {2}else{1};
+            let name=tag[begin..].split(|ch:char|ch.is_ascii_whitespace() || matches!(ch,'/'|'>')).next().unwrap_or("");
+            if name.eq_ignore_ascii_case("template") {
+                if closing {depth-=1;if depth==0 {return position+tag.len();}}
+                else if !tag.trim_end().ends_with("/>") {depth+=1;}
+            }
+            position+=tag.len();
+        }
+        text.len()
+    }
+    fn close(out:&mut String,stack:&mut Vec<String>,at:usize)->Result<(),String> {
+        while stack.len()>at {if let Some(name)=stack.pop() {html_extend(out,"</",XML_LIMIT)?;html_extend(out,&name,XML_LIMIT)?;html_extend(out,">",XML_LIMIT)?;}}
+        Ok(())
     }
     let mut out=String::with_capacity(text.len());let mut stack=Vec::<String>::new();let mut offset=0;
     while offset<text.len() {
         let rest=&text[offset..];
-        if !rest.starts_with('<') {let length=rest.find('<').unwrap_or(rest.len());out.push_str(&rest[..length]);offset+=length;continue;}
+        if !rest.starts_with('<') {let length=rest.find('<').unwrap_or(rest.len());html_extend(&mut out,&rest[..length],XML_LIMIT)?;offset+=length;continue;}
         if rest.starts_with("<!--") || rest.starts_with("<![CDATA[") {
             let marker=if rest.starts_with("<!--") {"-->"}else{"]]>"};
-            let length=rest.find(marker).map(|end|end+marker.len()).unwrap_or(rest.len());out.push_str(&rest[..length]);offset+=length;continue;
+            let length=rest.find(marker).map(|end|end+marker.len()).unwrap_or(rest.len());html_extend(&mut out,&rest[..length],XML_LIMIT)?;offset+=length;continue;
         }
         let(mut quote,mut end)=(None,None);
         for (index,ch) in rest.char_indices().skip(1) {
             if let Some(open)=quote {if ch==open {quote=None;}continue;}
             if matches!(ch,'\''|'"') {quote=Some(ch);}else if ch=='>' {end=Some(index);break;}
         }
-        let Some(end)=end else{out.push_str(rest);break;};
+        let Some(end)=end else{html_extend(&mut out,rest,XML_LIMIT)?;break;};
         let tag=&rest[..=end];
-        if tag.starts_with("<!") || tag.starts_with("<?") {out.push_str(tag);offset+=tag.len();continue;}
+        if tag.starts_with("<!") || tag.starts_with("<?") {html_extend(&mut out,tag,XML_LIMIT)?;offset+=tag.len();continue;}
         let closing=tag.starts_with("</");let begin=if closing {2}else{1};
         let name_end=tag[begin..].find(|ch:char|!ch.is_ascii_alphanumeric() && ch!='-' && ch!=':').map(|end|begin+end).unwrap_or(tag.len()-1);
-        if begin==name_end {out.push_str("&lt;");offset+=1;continue;}
+        if begin==name_end {html_extend(&mut out,"&lt;",XML_LIMIT)?;offset+=1;continue;}
         let name=tag[begin..name_end].to_ascii_lowercase();
+        if !closing && matches!(name.as_str(),"script"|"style") {
+            let marker=format!("</{name}");let mut from=tag.len();let mut length=rest.len();
+            while let Some(found)=rest[from..].find('<') {
+                let at=from+found;let tail=at+marker.len();
+                if rest[at..].get(..marker.len()).is_some_and(|prefix|prefix.eq_ignore_ascii_case(&marker))
+                    && rest.as_bytes().get(tail).is_some_and(|ch|ch.is_ascii_whitespace() || matches!(*ch,b'>'|b'/')) {
+                    length=rest[tail..].find('>').map(|end|tail+end+1).unwrap_or(rest.len());break;
+                }
+                from=at+1;
+            }
+            html_extend(&mut out,"<",XML_LIMIT)?;html_extend(&mut out,&name,XML_LIMIT)?;html_extend(&mut out,"/>",XML_LIMIT)?;offset+=length;continue;
+        }
+        if !closing && name=="template" {
+            let length=if tag.trim_end().ends_with("/>") {tag.len()}else{template_end(rest,tag.len())};
+            html_extend(&mut out,"<template/>",XML_LIMIT)?;offset+=length;continue;
+        }
         if closing {
-            if let Some(at)=stack.iter().rposition(|open|*open==name) {close(&mut out,&mut stack,at);}
+            if let Some(at)=stack.iter().rposition(|open|*open==name) {close(&mut out,&mut stack,at)?;}
             offset+=tag.len();continue;
         }
+        if name=="body" && let Some(at)=stack.iter().rposition(|open|open=="head") {close(&mut out,&mut stack,at)?;}
         if matches!(name.as_str(),"p"|"div"|"section"|"article"|"pre"|"blockquote"|"ul"|"ol"|"table"|"h1"|"h2"|"h3"|"h4"|"h5"|"h6")
-            && let Some(at)=stack.iter().rposition(|open|open=="p") {close(&mut out,&mut stack,at);}
+            && let Some(at)=stack.iter().rposition(|open|open=="p") {close(&mut out,&mut stack,at)?;}
         let boundary=match name.as_str() {"li"=>Some(("li",&["ul","ol"][..])),"dt"|"dd"=>Some(("dt",&["dl"][..])),
             "tr"=>Some(("tr",&["table"][..])),"td"|"th"=>Some(("td",&["tr"][..])),
             "thead"|"tbody"|"tfoot"=>Some(("tbody",&["table"][..])),_=>None};
@@ -5766,14 +5821,16 @@ fn normalize_html_optional_tags(text:&str)->String {
             if let Some(at)=stack.iter().enumerate().skip(floor).rfind(|(_,open)|match kind {
                 "dt"=>matches!(open.as_str(),"dt"|"dd"),"td"=>matches!(open.as_str(),"td"|"th"),
                 "tbody"=>matches!(open.as_str(),"thead"|"tbody"|"tfoot"),_=>open.as_str()==kind
-            }).map(|(at,_)|at) {close(&mut out,&mut stack,at);}
+            }).map(|(at,_)|at) {close(&mut out,&mut stack,at)?;}
         }
-        out.push('<');out.push_str(&name);out.push_str(&tag[name_end..]);offset+=tag.len();
+        html_extend(&mut out,"<",XML_LIMIT)?;html_extend(&mut out,&name,XML_LIMIT)?;html_extend(&mut out,&tag[name_end..],XML_LIMIT)?;offset+=tag.len();
         if !tag.trim_end().ends_with("/>") && !matches!(name.as_str(),"area"|"base"|"br"|"col"|"embed"|"hr"|"img"|"input"|"link"|"meta"|"param"|"source"|"track"|"wbr") {
+            // The synthetic HTML root consumes one of the XML parser's128 levels.
+            if stack.len()>=127 {return Err("HTML превышает безопасную глубину вложенности".into());}
             stack.push(name);
         }
     }
-    close(&mut out,&mut stack,0);out
+    close(&mut out,&mut stack,0)?;Ok(out)
 }
 
 #[cfg(test)]
@@ -5862,7 +5919,10 @@ mod two_hundred_docs_io_regressions {
         let doc=html("<P style=color:red>one<p>two<ul><li><b>three</b><li>four</ul><table><tr><td>A<td>B<tr><td>C<td>D</table>")?;
         assert_eq!(doc.paragraphs.iter().map(Paragraph::text).collect::<Vec<_>>(),vec!["one","two","three","four"]);
         assert_eq!(doc.paragraphs[0].runs[0].format.color,[255,0,0]);assert!(doc.paragraphs[2].runs[0].format.bold);
-        assert_eq!(doc.tables[0].rows.len(),2);assert_eq!(cell_text(&doc.tables[0].rows[1][1]),"D");Ok(())
+        assert_eq!(doc.tables[0].rows.len(),2);assert_eq!(cell_text(&doc.tables[0].rows[1][1]),"D");
+        let head=html("<html><head><title>Title</title><body><p>Body")?;assert_eq!(head.title,"Title");assert_eq!(head.plain_text(),"Body");
+        assert!(normalize_html_optional_tags(&"<a>".repeat(129)).is_err());
+        assert!(html(&format!("{}text","<a>".repeat(129))).is_err());Ok(())
     }
     #[test]
     fn html_hidden_detection_uses_real_css_declarations_instead_of_quoted_fragments()->Result<(),String> {
@@ -5879,7 +5939,9 @@ mod two_hundred_docs_io_regressions {
         let doc=html("<p>before<template><p>secret</p><template>inner</template>outer secret</template>after</p>")?;
         assert!(!doc.plain_text().contains("secret"));assert!(!doc.plain_text().contains("inner"));assert!(doc.plain_text().contains("before") && doc.plain_text().contains("after"));
         let fallback=fallback_html_text("before<template>secret<template>inner</template>outer secret</template>after");
-        assert_eq!(fallback,"beforeafter");Ok(())
+        assert_eq!(fallback,"beforeafter");
+        let script=html("<p>before<script><p>secret</p></script><style><p>hidden css</p></style>after</p>")?;
+        assert_eq!(script.plain_text(),"beforeafter");Ok(())
     }
     #[test]
     fn html_semantic_and_legacy_text_tags_map_to_existing_text_format_fields()->Result<(),String> {
@@ -5918,7 +5980,9 @@ mod two_hundred_docs_io_regressions {
         let mut doc=Doc::from_text("text");let exact=write_html_bounded(&doc,XML_LIMIT)?;
         assert_eq!(write_html_bounded(&doc,exact.len())?,exact);assert!(write_html_bounded(&doc,exact.len()-1).is_err());
         doc.paragraphs[0].runs=(0..100).map(|index|Run{text:"x".into(),format:TextFormat{bold:index%2==0,link:Some(format!("https://example.org/{}","a".repeat(1000))),..Default::default()}}).collect();
-        assert!(write_html_bounded(&doc,1024).is_err());assert!(html_paragraph_bounded(&doc.paragraphs[0],"p",1024).is_err());Ok(())
+        assert!(write_html_bounded(&doc,1024).is_err());assert!(html_paragraph_bounded(&doc.paragraphs[0],"p",1024).is_err());
+        doc.paragraphs[0].runs=vec![Run{text:"&".repeat(64*1024*1024),format:TextFormat::default()}];
+        assert!(html_paragraph_bounded(&doc.paragraphs[0],"p",1024).is_err());Ok(())
     }
     #[test]
     fn word_symbols_keep_order_and_font()->Result<(),String> {
