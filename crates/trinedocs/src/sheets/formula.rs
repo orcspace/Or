@@ -789,6 +789,7 @@ struct Engine<'a> {
     random: u64,
     work: usize,
     materialized: usize,
+    budget_exhausted: bool,
 }
 impl<'a> Engine<'a> {
     fn new(book: &'a Book) -> Self {
@@ -804,14 +805,26 @@ impl<'a> Engine<'a> {
             random: elapsed.as_nanos() as u64 | 1,
             work: 0,
             materialized: 0,
+            budget_exhausted: false,
         }
+    }
+    fn root_cell(&mut self, sheet: usize, row: u32, col: u32) -> Value {
+        // Share valid dependency results, but give each independent calculation its own budget.
+        self.work = 0;
+        self.materialized = 0;
+        self.budget_exhausted = false;
+        self.cell(sheet, row, col)
     }
     fn cell(&mut self, sheet: usize, row: u32, col: u32) -> Value {
         let key = (sheet, row, col);
         if let Some(value) = self.cache.get(&key) {
             return value.clone();
         }
-        if self.depth >= 256 || !self.visiting.insert(key) {
+        if self.depth >= 256 {
+            self.budget_exhausted = true;
+            return Value::Error("#REF!".into());
+        }
+        if !self.visiting.insert(key) {
             return Value::Error("#REF!".into());
         }
         self.depth += 1;
@@ -832,12 +845,16 @@ impl<'a> Engine<'a> {
         };
         self.depth -= 1;
         self.visiting.remove(&key);
-        self.cache.insert(key, value.clone());
+        // A limit reached through another cell is transient: that cell may fit as a root.
+        if !self.budget_exhausted {
+            self.cache.insert(key, value.clone());
+        }
         value
     }
     fn eval(&mut self, expr: &Expr, sheet: usize, row: u32, col: u32) -> CalcResult<Grid> {
         self.work += 1;
         if self.depth >= 128 || self.work > 1_000_000 {
+            self.budget_exhausted = true;
             return Err("#NUM!".into());
         }
         self.depth += 1;
@@ -869,6 +886,7 @@ impl<'a> Engine<'a> {
                         };
                         self.materialized = self.materialized.saturating_add(bytes);
                         if self.work > 1_000_000 || self.materialized > 64 * 1024 * 1024 {
+                            self.budget_exhausted = true;
                             return Err("#NUM!".into());
                         }
                         values.push(value);
@@ -3710,7 +3728,7 @@ pub fn recalculate(book: &mut Book) {
     let values = {
         let mut engine = Engine::new(book);
         keys.iter()
-            .map(|&(s, r, c)| engine.cell(s, r, c))
+            .map(|&(s, r, c)| engine.root_cell(s, r, c))
             .collect::<Vec<_>>()
     };
     for ((si, r, c), value) in keys.into_iter().zip(values) {
@@ -3741,4 +3759,25 @@ pub fn dependencies(input: &str) -> Vec<(Option<String>, Range)> {
         visit(&expr, &mut result);
     }
     result
+}
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    #[test]
+    fn budget_failures_are_not_cached_as_dependency_results() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.set_input(id, 0, 0, "=B1+1")?;
+        book.set_input(id, 0, 1, "=2+3")?;
+        let mut engine = Engine::new(&book);
+        // A dependency reached near the end of a caller's budget must get a fresh try.
+        engine.work = 999_998;
+        assert_eq!(engine.cell(0, 0, 0), Value::Error("#NUM!".into()));
+        assert!(!engine.cache.contains_key(&(0, 0, 0)));
+        assert!(!engine.cache.contains_key(&(0, 0, 1)));
+        assert_eq!(engine.root_cell(0, 0, 1), Value::Number(5.0));
+        assert_eq!(engine.root_cell(0, 0, 0), Value::Number(6.0));
+        Ok(())
+    }
 }

@@ -1354,11 +1354,115 @@ fn login_state(provider: Provider, exe: &Path) -> Access {
 }
 /// TOML string for a `-c key=value` override; literal quotes avoid escaping Windows paths.
 fn toml_string(value: &str) -> String {
-    if value.contains('\'') || value.contains('\n') {
+    if value.chars().any(|ch| ch == '\'' || ch.is_control()) {
         serde_json::to_string(value).unwrap_or_default()
     } else {
         format!("'{value}'")
     }
+}
+// These restrictions apply to both MCP discovery and the actual chat process.
+const CODEX_DISABLED_FEATURES: &[&str] = &[
+    "shell_tool",
+    "view_image",
+    "js_repl",
+    "code_mode",
+    "stable_environment_tools",
+    "multi_agent",
+    "multi_agent_v2",
+    "apps",
+    "plugins",
+    "plugin_hooks",
+    "hooks",
+    "memories",
+    "browser_use",
+    "browser_use_external",
+    "computer_use",
+    "in_app_local_automation",
+    "remote_plugin",
+    "skill_mcp_dependency_install",
+    "request_permissions_tool",
+];
+fn restrict_codex(command: &mut Command) {
+    for feature in CODEX_DISABLED_FEATURES {
+        command.arg("-c").arg(format!("features.{feature}=false"));
+    }
+    command.arg("-c").arg("approval_policy=\"never\"");
+}
+fn codex_mcp_override(list: &[u8], shim: &str, client: &str) -> Result<String, String> {
+    if list.len() > 4 * 1024 * 1024 {
+        return Err("Слишком большой список MCP Codex".into());
+    }
+    let servers: Value = serde_json::from_slice(list)
+        .map_err(|e| format!("Не удалось прочитать список MCP Codex: {e}"))?;
+    let servers = servers.as_array().ok_or("Неизвестный формат списка MCP Codex")?;
+    let mut disabled = std::collections::BTreeSet::new();
+    for server in servers {
+        let name = server
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+            .ok_or("В списке MCP Codex отсутствует имя сервера")?;
+        if name != "trinedocs" {
+            disabled.insert(name);
+        }
+    }
+    // Codex deep-merges config tables. An empty mcp_servers table does not clear
+    // inherited servers: disable every effective entry, using quoted TOML keys.
+    let mut entries = disabled
+        .into_iter()
+        .map(|name| format!("{}={{enabled=false}}", toml_string(name)))
+        .collect::<Vec<_>>();
+    entries.push(format!(
+        "trinedocs={{enabled=true,command={},args=['--client', {}]}}",
+        toml_string(shim),
+        toml_string(client)
+    ));
+    Ok(format!("mcp_servers={{{}}}", entries.join(",")))
+}
+fn codex_chat_mcp(
+    exe: &Path,
+    dir: &Path,
+    shim: &str,
+    client: &str,
+    child_state: &Process,
+) -> Result<String, String> {
+    let mut command = hidden(exe);
+    restrict_codex(&mut command);
+    let mut child = command
+        .args(["mcp", "list", "--json"])
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Не удалось проверить инструменты Codex: {e}"))?;
+    let Some(stdout) = child.stdout.take() else {
+        terminate(child);
+        return Err("Нет stdout списка MCP Codex".into());
+    };
+    {
+        // Discovery belongs to the same turn, so Stop and shutdown can cancel it too.
+        let mut state = child_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.cancelled {
+            drop(state);
+            terminate(child);
+            return Err("Остановлено.".into());
+        }
+        state.child = Some(child);
+    }
+    let mut bytes = Vec::new();
+    let read = stdout.take(4 * 1024 * 1024 + 1).read_to_end(&mut bytes);
+    if read.is_err() || bytes.len() > 4 * 1024 * 1024 {
+        kill(child_state);
+        return Err("Не удалось прочитать ограниченный список MCP Codex".into());
+    }
+    let status = wait_child(child_state).ok_or("Проверка MCP Codex остановлена")?;
+    if !status.success() {
+        return Err("Не удалось проверить список MCP Codex. Обновите Codex CLI и повторите.".into());
+    }
+    codex_mcp_override(&bytes, shim, client)
 }
 fn start(
     provider: Provider,
@@ -1503,16 +1607,12 @@ fn launch(
                 "--sandbox",
                 "read-only",
             ]);
-            // Live web search (results only, no shell or file access in the read-only sandbox).
+            // Read-only limits writes; tool restrictions separately prevent shell/file access.
+            restrict_codex(&mut command);
             command.arg("-c").arg("web_search=\"live\"");
-            command.arg("-c").arg(format!(
-                "mcp_servers.trinedocs.command={}",
-                toml_string(shim_text)
-            ));
-            command.arg("-c").arg(format!(
-                "mcp_servers.trinedocs.args=['--client', {}]",
-                toml_string(client)
-            ));
+            command
+                .arg("-c")
+                .arg(codex_chat_mcp(exe, &dir, shim_text, client, child_state)?);
             if !model.is_empty() {
                 command.args(["-m", model]);
             }
@@ -2218,5 +2318,50 @@ mod tests {
         assert!(!is_auth_error("The login column does not exist"));
         assert!(is_auth_error("HTTP 401 unauthorized"));
         assert!(is_auth_error("Please run /login"));
+    }
+}
+
+#[cfg(test)]
+mod codex_isolation_review_tests {
+    use super::*;
+
+    #[test]
+    fn codex_launch_explicitly_disables_shell_and_inherited_execution_features() {
+        let mut command = Command::new("codex");
+        restrict_codex(&mut command);
+        let args = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        for expected in [
+            "features.shell_tool=false",
+            "features.view_image=false",
+            "features.apps=false",
+            "features.plugins=false",
+            "features.hooks=false",
+            "features.js_repl=false",
+            "features.multi_agent=false",
+            "features.request_permissions_tool=false",
+            "approval_policy=\"never\"",
+        ] {
+            assert!(args.windows(2).any(|pair| pair[0] == "-c" && pair[1] == expected), "{expected}");
+        }
+    }
+    #[test]
+    fn codex_mcp_override_disables_all_other_names_including_quoted_and_dotted_names() -> Result<(), String> {
+        let names = ["other", "name.with.dots", "O'Neil", "line\rbreak"];
+        let mut servers = names.iter().map(|name| serde_json::json!({"name":name})).collect::<Vec<_>>();
+        servers.push(serde_json::json!({"name":"trinedocs"}));
+        let bytes = serde_json::to_vec(&servers).map_err(|e| e.to_string())?;
+        let config = codex_mcp_override(&bytes, r"C:\Program Files\TrineDocs\trinedocs-mcp.exe", "nonce")?;
+        let parsed = config.parse::<toml_edit::DocumentMut>().map_err(|e| e.to_string())?;
+        for name in names {
+            assert_eq!(parsed["mcp_servers"][name]["enabled"].as_bool(), Some(false));
+        }
+        let own = &parsed["mcp_servers"]["trinedocs"];
+        assert_eq!(own["enabled"].as_bool(), Some(true));
+        assert_eq!(own["command"].as_str(), Some(r"C:\Program Files\TrineDocs\trinedocs-mcp.exe"));
+        assert_eq!(own["args"].as_array().and_then(|args| args.get(1)).and_then(toml_edit::Value::as_str), Some("nonce"));
+        for malformed in [b"{}".as_slice(), b"[{}]".as_slice(), b"[{\"name\":\"\"}]".as_slice()] {
+            assert!(codex_mcp_override(malformed, "shim", "nonce").is_err());
+        }
+        Ok(())
     }
 }

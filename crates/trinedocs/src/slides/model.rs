@@ -909,7 +909,11 @@ impl Deck {
         Ok(())
     }
     pub fn pages(&self) -> Vec<crate::render::Page> {
-        self.slides.iter().map(|slide| self.page(slide)).collect()
+        self.slides
+            .iter()
+            .filter(|slide| !slide.hidden)
+            .map(|slide| self.page(slide))
+            .collect()
     }
     pub fn page(&self, slide: &Slide) -> crate::render::Page {
         use crate::render::Primitive;
@@ -1645,6 +1649,27 @@ mod tests {
                 .iter()
                 .any(|item| matches!(item, crate::render::Primitive::Line { .. }))
         );
+        Ok(())
+    }
+}
+#[cfg(test)]
+mod hidden_export_tests {
+    use super::*;
+
+    #[test]
+    fn printable_pages_skip_hidden_slides_and_keep_visible_order() -> Result<(), String> {
+        let mut deck = Deck::empty();
+        for color in [[10, 20, 30], [40, 50, 60], [70, 80, 90]] {
+            let id = deck.add_slide("blank");
+            deck.slide_mut(id).ok_or("slide")?.background = color;
+        }
+        deck.slides[1].hidden = true;
+        let pages = deck.pages();
+        assert_eq!(pages.len(), 2);
+        for (page, expected) in pages.iter().zip([[10, 20, 30], [70, 80, 90]]) {
+            assert!(matches!(page.items.first(), Some(crate::render::Primitive::Rect { color, .. }) if *color == expected));
+        }
+        assert_eq!(deck.page(&deck.slides[1]).items.len(), 1);
         Ok(())
     }
 }

@@ -1,5 +1,5 @@
 use super::model::{
-    Align, Book, CellFormat, ChartKind, MAX_COLS, MAX_ROWS, Range, Selection, Sheet, Value, address,
+    Align, Book, Cell, CellFormat, ChartKind, MAX_COLS, MAX_ROWS, Range, Selection, Sheet, Value, address,
 };
 use eframe::egui::{
     self, Align2, Color32, FontId, Key, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2,
@@ -147,12 +147,12 @@ fn toolbar(
             ui.menu_button("Буфер", |ui| {
                 if command_action(ui.button("Копировать · Ctrl+C"), book, state, &mut changed)
                 {
-                    copy_range(ui, book, state);
+                    copy_range(ui, book, state, false);
                     ui.close();
                 }
                 if command_action(ui.button("Вырезать · Ctrl+X"), book, state, &mut changed)
                 {
-                    if copy_range(ui, book, state) {
+                    if copy_range(ui, book, state, true) {
                         changed |= clear(book, state);
                     }
                     ui.close();
@@ -1589,27 +1589,21 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                 for event in events {
                     match event {
                         egui::Event::Copy | egui::Event::Cut => {
-                            let range = book.selection.range();
-                            if let Ok(rows) =
-                                book.read_range(id, range.r0, range.c0, range.r1, range.c1)
-                            {
-                                ui.ctx().copy_text(super::io::to_csv(&rows, '\t'));
-                            }
-                            if matches!(event, egui::Event::Cut) {
+                            let cut = matches!(event, egui::Event::Cut);
+                            if copy_range(ui, book, &mut state, cut) && cut {
                                 changed |= clear(book, &mut state);
                             }
                         }
                         egui::Event::Paste(text) if state.editing => {
                             state.buffer.push_str(&text);
                         }
-                        egui::Event::Paste(text) => match super::io::parse_csv(&text, '\t') {
-                            Ok(rows) => {
-                                let (row, col) = (book.selection.row, book.selection.col);
-                                changed |=
-                                    result(&mut state, paste_values(book, id, row, col, &rows))
-                            }
-                            Err(e) => state.error = e,
-                        },
+                        egui::Event::Paste(text) => {
+                            let (row, col) = (book.selection.row, book.selection.col);
+                            changed |= result(
+                                &mut state,
+                                paste_clipboard(ui.ctx(), book, id, row, col, &text),
+                            );
+                        }
                         egui::Event::Text(text) => {
                             if state.editing {
                                 state.buffer.push_str(&text);
@@ -2143,11 +2137,109 @@ fn add_sheet(book: &mut Book, state: &mut State) -> bool {
         index += 1;
     }
 }
-fn copy_range(ui: &egui::Ui, book: &Book, state: &mut State) -> bool {
+#[derive(Clone)]
+struct SheetClipboard {
+    text: String,
+    cells: Vec<Vec<Option<Cell>>>,
+    row: u32,
+    col: u32,
+    cut: bool,
+}
+fn clipboard_id() -> egui::Id {
+    egui::Id::new("sheets-typed-clipboard")
+}
+fn capture_clipboard(book: &Book, cut: bool) -> Result<SheetClipboard, String> {
     let range = book.selection.range();
-    match book.read_range(book.active_id(), range.r0, range.c0, range.r1, range.c1) {
-        Ok(rows) => {
-            ui.ctx().copy_text(super::io::to_csv(&rows, '\t'));
+    let id = book.active_id();
+    let rows = book.read_range(id, range.r0, range.c0, range.r1, range.c1)?;
+    let sheet = book.sheet_by_id(id).ok_or("Лист не найден")?;
+    Ok(SheetClipboard {
+        text: super::io::to_csv(&rows, '\t'),
+        cells: (range.r0..=range.r1)
+            .map(|row| {
+                (range.c0..=range.c1)
+                    .map(|col| sheet.cell(row, col).cloned())
+                    .collect()
+            })
+            .collect(),
+        row: range.r0,
+        col: range.c0,
+        cut,
+    })
+}
+fn paste_cells(
+    book: &mut Book,
+    sheet: u64,
+    row: u32,
+    col: u32,
+    clipboard: &SheetClipboard,
+) -> Result<(), String> {
+    let dr = i64::from(row) - i64::from(clipboard.row);
+    let dc = i64::from(col) - i64::from(clipboard.col);
+    let values: Vec<Vec<String>> = clipboard
+        .cells
+        .iter()
+        .map(|line| {
+            line.iter()
+                .map(|cell| {
+                    cell.as_ref().map_or_else(String::new, |cell| {
+                        if clipboard.cut {
+                            cell.input.clone()
+                        } else {
+                            super::formula::shift_references(&cell.input, dr, dc)
+                        }
+                    })
+                })
+                .collect()
+        })
+        .collect();
+    // Preflight bounds and merged cells on a candidate; a failed paste changes nothing.
+    let mut candidate = book.clone();
+    candidate.set_range(sheet, row, col, &values)?;
+    let target = candidate.sheet_by_id_mut(sheet).ok_or("Лист не найден")?;
+    for (r, line) in clipboard.cells.iter().enumerate() {
+        for (c, original) in line.iter().enumerate() {
+            let key = address(row + r as u32, col + c as u32);
+            if let Some(original) = original {
+                if let Some(cell) = target.cells.get_mut(&key) {
+                    cell.fmt = original.fmt.clone();
+                }
+            } else {
+                target.cells.remove(&key);
+            }
+        }
+    }
+    candidate.validate()?;
+    *book = candidate;
+    Ok(())
+}
+fn paste_clipboard(
+    ctx: &egui::Context,
+    book: &mut Book,
+    sheet: u64,
+    row: u32,
+    col: u32,
+    text: &str,
+) -> Result<(), String> {
+    let clipboard = ctx.data_mut(|data| data.get_temp::<SheetClipboard>(clipboard_id()));
+    if let Some(mut clipboard) = clipboard.filter(|clipboard| clipboard.text == text) {
+        paste_cells(book, sheet, row, col, &clipboard)?;
+        if clipboard.cut {
+            clipboard.cut = false;
+            clipboard.row = row;
+            clipboard.col = col;
+            ctx.data_mut(|data| data.insert_temp(clipboard_id(), clipboard));
+        }
+        return Ok(());
+    }
+    ctx.data_mut(|data| data.remove_temp::<SheetClipboard>(clipboard_id()));
+    paste_values(book, sheet, row, col, &super::io::parse_csv(text, '\t')?)
+}
+fn copy_range(ui: &egui::Ui, book: &Book, state: &mut State, cut: bool) -> bool {
+    match capture_clipboard(book, cut) {
+        Ok(clipboard) => {
+            ui.ctx().copy_text(clipboard.text.clone());
+            ui.ctx().data_mut(|data| data.insert_temp(clipboard_id(), clipboard));
             state.error.clear();
             true
         }
@@ -2291,6 +2383,9 @@ fn place_image(sheet: &mut Sheet, image: u64, local: Vec2, size: Vec2) {
         picture.height = size.y.clamp(1.0, 8000.0);
     }
 }
+fn image_texture_id(sheet: u64, image: &super::model::SheetImage) -> egui::Id {
+    egui::Id::new(("sheet_image", sheet, image.id, image.bytes.as_slice()))
+}
 fn paint_image(
     ui: &egui::Ui,
     painter: &egui::Painter,
@@ -2298,7 +2393,7 @@ fn paint_image(
     image: &super::model::SheetImage,
     rect: Rect,
 ) {
-    let key = egui::Id::new(("sheet_image", sheet, image.id, image.bytes.len()));
+    let key = image_texture_id(sheet, image);
     let ctx = ui.ctx();
     let texture = ctx.data_mut(|d| d.get_temp::<egui::TextureHandle>(key));
     let texture = texture.or_else(|| {
@@ -3555,5 +3650,100 @@ mod tests {
             .insert(2);
         assert!(!apply_focus_request(&mut book, &mut state, (id, 2, 3)));
         Ok(())
+    }
+}
+#[cfg(test)]
+mod clipboard_review_tests {
+    use super::*;
+
+    #[test]
+    fn internal_clipboard_preserves_input_precision_types_format_and_blanks() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        for (col, input) in ["=1/3", "TRUE", "=1/0", "'0012", "1.2345678901234567"].iter().enumerate() {
+            book.set_input(id, 0, col as u32, input)?;
+        }
+        book.set_format(id, Range::new(0, 0, 0, 0), CellFormat {
+            number: "0.00".into(),
+            bold: true,
+            ..CellFormat::default()
+        })?;
+        book.set_input(id, 2, 5, "replace this with a blank")?;
+        book.recalculate();
+        book.selection = Selection { anchor_col: 5, ..Selection::default() };
+        let clipboard = capture_clipboard(&book, false)?;
+        let text = clipboard.text.clone();
+        let ctx = egui::Context::default();
+        ctx.data_mut(|data| data.insert_temp(clipboard_id(), clipboard));
+        paste_clipboard(&ctx, &mut book, id, 2, 0, &text)?;
+        let sheet = book.sheet_by_id(id).ok_or("sheet")?;
+        for col in 0..5 {
+            let source = sheet.cell(0, col).ok_or("source")?;
+            let pasted = sheet.cell(2, col).ok_or("pasted")?;
+            assert_eq!(pasted.input, source.input);
+            assert_eq!(pasted.value, source.value);
+            assert_eq!(pasted.fmt, source.fmt);
+            assert_ne!(pasted.id, source.id);
+        }
+        assert!(sheet.cell(2, 5).is_none());
+        Ok(())
+    }
+    #[test]
+    fn copy_shifts_relative_references_and_cut_keeps_the_original_references() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.set_input(id, 0, 0, "7")?;
+        book.set_input(id, 0, 1, "=A1+$A$1")?;
+        book.recalculate();
+        book.selection = Selection { row: 0, col: 1, anchor_row: 0, anchor_col: 1 };
+        let copy = capture_clipboard(&book, false)?;
+        paste_cells(&mut book, id, 2, 1, &copy)?;
+        assert_eq!(book.sheet_by_id(id).and_then(|s| s.cell(2, 1)).map(|c| c.input.as_str()), Some("=A3+$A$1"));
+        let cut = capture_clipboard(&book, true)?;
+        book.clear_range(id, Range::new(0, 1, 0, 1), true, false)?;
+        paste_cells(&mut book, id, 4, 1, &cut)?;
+        assert_eq!(book.sheet_by_id(id).and_then(|s| s.cell(4, 1)).map(|c| c.input.as_str()), Some("=A1+$A$1"));
+        assert_eq!(book.sheet_by_id(id).and_then(|s| s.cell(4, 1)).map(|c| &c.value), Some(&Value::Number(14.0)));
+        Ok(())
+    }
+    #[test]
+    fn rejected_typed_paste_is_atomic_and_external_text_discards_internal_metadata() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.set_input(id, 0, 0, "=1/3")?;
+        book.set_input(id, 0, 1, "other")?;
+        book.recalculate();
+        book.selection = Selection { anchor_col: 1, ..Selection::default() };
+        let clipboard = capture_clipboard(&book, false)?;
+        let before = book.clone();
+        assert!(paste_cells(&mut book, id, 0, MAX_COLS - 1, &clipboard).is_err());
+        assert_eq!(book, before);
+        book.merge(id, Range::new(2, 0, 2, 1))?;
+        let before = book.clone();
+        assert!(paste_cells(&mut book, id, 2, 0, &clipboard).is_err());
+        assert_eq!(book, before);
+        let ctx = egui::Context::default();
+        ctx.data_mut(|data| data.insert_temp(clipboard_id(), clipboard));
+        paste_clipboard(&ctx, &mut book, id, 4, 0, "external")?;
+        assert_eq!(book.sheet_by_id(id).and_then(|s| s.cell(4, 0)).map(|c| c.input.as_str()), Some("external"));
+        assert!(ctx.data_mut(|data| data.get_temp::<SheetClipboard>(clipboard_id())).is_none());
+        Ok(())
+    }
+    #[test]
+    fn equal_length_picture_replacement_gets_a_different_texture_key() {
+        let image = super::super::model::SheetImage {
+            id: 2,
+            row: 0,
+            col: 0,
+            x_offset: 0.0,
+            y_offset: 0.0,
+            width: 10.0,
+            height: 10.0,
+            bytes: vec![1, 2, 3],
+            alt: String::new(),
+        };
+        let replacement = super::super::model::SheetImage { bytes: vec![4, 5, 6], ..image.clone() };
+        assert_ne!(image_texture_id(1, &image), image_texture_id(1, &replacement));
+        assert_eq!(image_texture_id(1, &image), image_texture_id(1, &image.clone()));
     }
 }

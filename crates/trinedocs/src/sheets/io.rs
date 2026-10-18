@@ -64,7 +64,7 @@ pub fn write(book: &Book, ext: &str) -> Result<Vec<u8>, String> {
             let mut out = String::from(
                 "<!doctype html><meta charset=\"utf-8\"><style>td{border:1px solid #d6dbe1;padding:4px;white-space:pre-wrap}table{border-collapse:collapse}</style>",
             );
-            for s in &book.sheets {
+            for s in book.sheets.iter().filter(|sheet| !sheet.hidden) {
                 let (r, c) = s.extent();
                 if (u64::from(r) + 1) * (u64::from(c) + 1) > MAX_RANGE_CELLS as u64 {
                     return Err("Слишком большой диапазон HTML".into());
@@ -73,9 +73,9 @@ pub fn write(book: &Book, ext: &str) -> Result<Vec<u8>, String> {
                     "<h2>{}</h2><table>",
                     crate::package::xml_escape(&s.name)
                 ));
-                for row in 0..=r {
+                for row in (0..=r).filter(|row| !s.hidden_rows.contains(row)) {
                     out.push_str("<tr>");
-                    for col in 0..=c {
+                    for col in (0..=c).filter(|col| !s.hidden_cols.contains(col)) {
                         let fmt = s.cell(row, col).map(|c| c.fmt.clone()).unwrap_or_default();
                         let fill = fmt
                             .fill

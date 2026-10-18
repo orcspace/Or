@@ -10,6 +10,7 @@ struct Node {
     attrs: BTreeMap<String, String>,
     children: Vec<Node>,
     text: String,
+    supported_choice: bool,
 }
 impl Node {
     fn child(&self, name: &str) -> Option<&Node> {
@@ -54,6 +55,7 @@ fn xml(bytes: &[u8]) -> Result<Node, String> {
     let mut reader = Reader::from_reader(bytes);
     reader.config_mut().trim_text(false);
     let mut stack = vec![Node::default()];
+    let mut namespace_stack = vec![BTreeMap::<String, String>::new()];
     let mut count = 0;
     loop {
         let event = reader
@@ -66,14 +68,30 @@ fn xml(bytes: &[u8]) -> Result<Node, String> {
                     name: local(e.name().as_ref()),
                     ..Node::default()
                 };
+                let mut namespaces = namespace_stack.last().cloned().unwrap_or_default();
                 for attribute in e.attributes() {
                     let a = attribute.map_err(|e| e.to_string())?;
-                    node.attrs.insert(
-                        local(a.key.as_ref()),
-                        a.normalized_value(quick_xml::XmlVersion::Implicit1_0)
-                            .map_err(|e| e.to_string())?
-                            .into_owned(),
-                    );
+                    let key: &str = a.key.as_ref();
+                    let value = a
+                        .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                        .map_err(|e| e.to_string())?
+                        .into_owned();
+                    if let Some(prefix) = key.strip_prefix("xmlns:") {
+                        namespaces.insert(prefix.to_string(), value.clone());
+                    } else if key == "xmlns" {
+                        namespaces.insert(String::new(), value.clone());
+                    }
+                    node.attrs.insert(local(key), value);
+                }
+                if node.name == "Choice" {
+                    node.supported_choice = node.attr("Requires").is_some_and(|requires| {
+                        !requires.trim().is_empty()
+                            && requires.split_whitespace().all(|prefix| {
+                                namespaces
+                                    .get(prefix)
+                                    .is_some_and(|uri| supported_choice_namespace(uri))
+                            })
+                    });
                 }
                 count += 1;
                 if count > 1_000_000 || stack.len() > 128 {
@@ -85,12 +103,14 @@ fn xml(bytes: &[u8]) -> Result<Node, String> {
                     }
                 } else {
                     stack.push(node);
+                    namespace_stack.push(namespaces);
                 }
             }
             Event::End(_) => {
                 if stack.len() <= 1 {
                     return Err("Несогласованная структура XML".into());
                 }
+                namespace_stack.pop();
                 if let Some(node) = stack.pop()
                     && let Some(parent) = stack.last_mut()
                 {
@@ -154,11 +174,47 @@ fn xml(bytes: &[u8]) -> Result<Node, String> {
         .children
         .into_iter()
         .filter(|node| node.name != "#text" || !node.text.trim().is_empty());
-    let node = elements.next().ok_or("Пустой XML")?;
+    let mut node = elements.next().ok_or("Пустой XML")?;
     if node.name == "#text" || elements.next().is_some() {
         return Err("XML должен содержать ровно один корневой элемент".into());
     }
+    normalize_alternate_content(&mut node);
     Ok(node)
+}
+// Only namespaces whose content is understood by this importer can select a Choice.
+fn supported_choice_namespace(uri: &str) -> bool {
+    matches!(
+        uri,
+        "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            | "http://purl.oclc.org/ooxml/wordprocessingml/main"
+            | "http://schemas.openxmlformats.org/drawingml/2006/main"
+            | "http://purl.oclc.org/ooxml/drawingml/main"
+            | "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+            | "http://purl.oclc.org/ooxml/drawingml/wordprocessingDrawing"
+            | "http://schemas.openxmlformats.org/drawingml/2006/picture"
+            | "http://purl.oclc.org/ooxml/drawingml/picture"
+    )
+}
+fn normalize_alternate_content(node: &mut Node) {
+    let mut children = Vec::new();
+    for mut child in std::mem::take(&mut node.children) {
+        if child.name == "AlternateContent" {
+            let selected = child
+                .children
+                .iter()
+                .position(|branch| branch.name == "Choice" && branch.supported_choice)
+                .or_else(|| child.children.iter().position(|branch| branch.name == "Fallback"));
+            if let Some(index) = selected {
+                let mut branch = child.children.remove(index);
+                normalize_alternate_content(&mut branch);
+                children.extend(branch.children);
+            }
+        } else {
+            normalize_alternate_content(&mut child);
+            children.push(child);
+        }
+    }
+    node.children = children;
 }
 pub fn read(bytes: &[u8], ext: &str) -> Result<Doc, String> {
     let ext = ext.trim_start_matches('.').to_ascii_lowercase();
@@ -593,18 +649,6 @@ fn visible_drawings<'a>(node: &'a Node, out: &mut Vec<&'a Node>) {
     for child in &node.children {
         match child.name.as_str() {
             "del" | "moveFrom" => {}
-            "AlternateContent" => {
-                let branch = child
-                    .children
-                    .iter()
-                    .find(|branch| {
-                        branch.name == "Choice" && branch.descendant("drawing").is_some()
-                    })
-                    .or_else(|| child.child("Fallback"));
-                if let Some(branch) = branch {
-                    visible_drawings(branch, out);
-                }
-            }
             "drawing" => out.push(child),
             _ => visible_drawings(child, out),
         }
@@ -2777,7 +2821,7 @@ mod tests {
     #[test]
     fn docx_drawing_collection_uses_only_the_visible_revision_and_alternate_branch()
     -> Result<(), String> {
-        let node = xml(br#"<p><del><drawing><blip/></drawing></del><moveFrom><drawing/></moveFrom><ins><drawing id="kept"/></ins><AlternateContent><Choice><drawing id="choice"/></Choice><Fallback><drawing id="fallback"/></Fallback></AlternateContent></p>"#)?;
+        let node = xml(br#"<p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><del><drawing><blip/></drawing></del><moveFrom><drawing/></moveFrom><ins><drawing id="kept"/></ins><AlternateContent><Choice Requires="w"><drawing id="choice"/></Choice><Fallback><drawing id="fallback"/></Fallback></AlternateContent></p>"#)?;
         let mut drawings = Vec::new();
         visible_drawings(&node, &mut drawings);
         assert_eq!(drawings.len(), 2);
@@ -3602,5 +3646,38 @@ mod tests {
                 );
             }
         }
+    }
+}
+#[cfg(test)]
+mod alternate_content_review_tests {
+    use super::*;
+
+    fn import_body(body: &str) -> Result<Doc, String> {
+        let document = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:core="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:future="urn:unsupported" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><w:body>{body}</w:body></w:document>"#
+        );
+        read(&write_zip(vec![("word/document.xml".into(), document.into_bytes())])?, "docx")
+    }
+    #[test]
+    fn docx_alternate_content_selects_one_supported_branch_at_every_level() -> Result<(), String> {
+        let doc = import_body(r#"<mc:AlternateContent><mc:Choice Requires="core"><w:p><w:r><w:t>body</w:t></w:r></w:p></mc:Choice><mc:Fallback><w:p><w:r><w:t>duplicate body</w:t></w:r></w:p></mc:Fallback></mc:AlternateContent><w:p><mc:AlternateContent><mc:Choice Requires="core"><w:r><w:t>choice</w:t></w:r></mc:Choice><mc:Fallback><w:r><w:t>duplicate run</w:t></w:r></mc:Fallback></mc:AlternateContent><w:r><mc:AlternateContent><mc:Choice Requires="future"><w:t>unsupported</w:t></mc:Choice><mc:Fallback><w:t> fallback</w:t></mc:Fallback></mc:AlternateContent></w:r></w:p>"#)?;
+        let texts = doc.paragraphs.iter().map(|p| p.text()).collect::<Vec<_>>();
+        assert_eq!(texts, vec!["body", "choice fallback"]);
+        Ok(())
+    }
+    #[test]
+    fn docx_requires_uses_namespace_uris_and_all_required_prefixes() -> Result<(), String> {
+        for choice in [
+            r#"<mc:Choice Requires="core future">"#,
+            r#"<mc:Choice Requires="undeclared">"#,
+            r#"<mc:Choice xmlns:core="urn:unsupported" Requires="core">"#,
+            r#"<mc:Choice>"#,
+        ] {
+            let doc = import_body(&format!(
+                r#"<w:p><mc:AlternateContent>{choice}<w:r><w:t>wrong</w:t></w:r></mc:Choice><mc:Fallback><w:r><w:t>fallback</w:t></w:r></mc:Fallback></mc:AlternateContent></w:p>"#
+            ))?;
+            assert_eq!(doc.paragraphs[0].text(), "fallback");
+        }
+        Ok(())
     }
 }
