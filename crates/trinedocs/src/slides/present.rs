@@ -9,6 +9,7 @@ pub struct Presentation {
     slide_id: Option<u64>,
     slide_started: f64,
     animation_bias: f32,
+    animation_signature: Option<u64>,
     previous_time: f32,
     previous_click_times: Vec<f32>,
     started: f64,
@@ -51,6 +52,7 @@ impl Presentation {
             }
         }
         self.slide_id = deck.slides.get(self.index).map(|slide| slide.id);
+        self.animation_signature=deck.slides.get(self.index).map(super::editor::animation_signature);
         self.active = true;
         self.started = ctx.input(|i| i.time);
         self.slide_started = self.started;
@@ -75,6 +77,7 @@ impl Presentation {
         self.animation_bias=0.0;
         self.index = index;
         self.slide_id = deck.slides.get(index).map(|slide| slide.id);
+        self.animation_signature=deck.slides.get(index).map(super::editor::animation_signature);
         self.slide_started = time;
         self.clicks = 0;
         self.click_times.clear();
@@ -237,6 +240,13 @@ impl Presentation {
             self.move_to(deck, index, time);
             self.previous = None;
         }
+        let signature=deck.slides.get(self.index).map(super::editor::animation_signature);
+        if self.animation_signature.is_some() && self.animation_signature!=signature {
+            self.clicks=0;self.click_times.clear();self.animation_bias=0.0;
+            self.slide_started=time;self.previous=None;
+            if self.blank_since.is_some(){self.blank_since=Some(time);}
+        }
+        self.animation_signature=signature;
         true
     }
 }
@@ -869,4 +879,18 @@ mod phase200_presenter_tests {
         state.click_times=vec![2.0];state.animation_bias=5.0;state.move_to(&deck,1,14.0);
         assert_eq!(state.previous_time,9.0);assert_eq!(state.previous_click_times,vec![2.0]);assert_eq!(state.animation_bias,0.0);
     }
+    #[test]
+    fn live_animation_changes_reset_click_mapping_but_content_edits_keep_playback()->Result<(),String> {
+        let mut deck=Deck::default();deck.add_slide("blank");
+        deck.slides[0].elements[0].animation=super::super::model::Animation{effect:"fade".into(),trigger:"on_click".into(),..Default::default()};
+        let mut state=Presentation{active:true,..Default::default()};state.move_to(&deck,0,0.0);state.next(&deck,1.0);
+        assert_eq!(state.clicks,1);
+        deck.slides[0].elements[0].text="Edited caption".into();assert!(state.sync_slide(&deck,2.0));assert_eq!(state.clicks,1);
+        let slide_id=deck.slides[0].id;deck.add_element(slide_id,super::super::model::ElementKind::Rect)?;
+        assert!(state.sync_slide(&deck,2.5));assert_eq!(state.clicks,1);
+        deck.slides[0].elements[0].animation.effect="fade_out".into();
+        assert!(state.sync_slide(&deck,3.0));assert_eq!(state.clicks,0);assert!(state.click_times.is_empty());assert_eq!(state.slide_started,3.0);
+        state.next(&deck,4.0);assert_eq!(state.index,0);assert_eq!(state.clicks,1);Ok(())
+    }
+
 }

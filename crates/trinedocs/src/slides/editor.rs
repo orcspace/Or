@@ -681,6 +681,12 @@ fn thumbnail_panel(
 
     changed
 }
+fn slide_property_text(ui:&mut egui::Ui,value:&mut String,slide_id:u64,field:&str,hint:&str)->bool {
+    let id=ui.id().with(("slide-property",slide_id,field));
+    crate::docs::editor::reconcile_text_edit(ui.ctx(),id,value);
+    let changed=ui.add(egui::TextEdit::singleline(&mut *value).id(id).desired_width(f32::INFINITY).hint_text(hint)).changed();
+    crate::docs::editor::remember_text_edit(ui.ctx(),id,value);changed
+}
 fn slide_panel(ui: &mut egui::Ui, deck: &mut Deck, state: &mut State, main_height: f32) -> bool {
     let mut changed = false;
     let right_width = 260.0;
@@ -696,12 +702,7 @@ fn slide_panel(ui: &mut egui::Ui, deck: &mut Deck, state: &mut State, main_heigh
                             .size(12.0)
                             .color(crate::chrome::muted(ui)),
                     );
-                    changed |= ui
-                        .add(
-                            egui::TextEdit::singleline(&mut slide.title)
-                                .desired_width(f32::INFINITY),
-                        )
-                        .changed();
+                    changed|=slide_property_text(ui,&mut slide.title,slide.id,"title","");
                     egui::CollapsingHeader::new("Параметры слайда")
                         .id_salt("slide-details")
                         .default_open(false)
@@ -714,13 +715,7 @@ fn slide_panel(ui: &mut egui::Ui, deck: &mut Deck, state: &mut State, main_heigh
                                     ui.color_edit_button_srgb(&mut slide.background).changed();
                             });
                             ui.label(egui::RichText::new("Раздел").color(crate::chrome::muted(ui)));
-                            changed |= ui
-                                .add(
-                                    egui::TextEdit::singleline(&mut slide.section)
-                                        .desired_width(f32::INFINITY)
-                                        .hint_text("Без раздела"),
-                                )
-                                .changed();
+                            changed|=slide_property_text(ui,&mut slide.section,slide.id,"section","Без раздела");
                         });
                     ui.separator();
                     egui::CollapsingHeader::new("Переход слайда")
@@ -2250,7 +2245,7 @@ fn object_hit_geometry(element:&Element,origin:Pos2,scale:f32,point:Pos2)->(Rect
         let fraction=if squared>0.0 {((point-a).dot(segment)/squared).clamp(0.0,1.0)}else{0.0};
         return (bounds,point.distance(a+segment*fraction)<=padding);
     }
-    let angle=if matches!(element.kind,ElementKind::Table{..}|ElementKind::Chart{..}){0.0}else{element.rotation.to_radians()};
+    let angle=if matches!(element.kind,ElementKind::Table{..}|ElementKind::Chart{..}){0.0}else{element.rotation.rem_euclid(360.0).to_radians()};
     let turn=egui::emath::Rot2::from_angle(angle);
     let corners=[object.left_top(),object.right_top(),object.right_bottom(),object.left_bottom()];
     let mut bounds=Rect::NOTHING;
@@ -2693,6 +2688,18 @@ fn align(slide: &mut Slide, ids: &[u64], axis: &str, width: f32, height: f32) {
 pub fn rgb(c: [u8; 3]) -> Color32 {
     Color32::from_rgb(c[0], c[1], c[2])
 }
+pub(crate) fn animation_signature(slide:&Slide)->u64 {
+    use std::hash::{Hash,Hasher};
+    let mut hash=std::collections::hash_map::DefaultHasher::new();
+    for element in slide.elements.iter().filter(|element|element.is_animated()) {
+        element.id.hash(&mut hash);
+        for (slot,animation) in element.animations() {
+            slot.hash(&mut hash);animation.effect.hash(&mut hash);animation.trigger.hash(&mut hash);animation.order.hash(&mut hash);
+            for value in [animation.delay,animation.duration,animation.dx,animation.dy] {value.to_bits().hash(&mut hash);}
+        }
+    }
+    hash.finish()
+}
 fn animation_start(
     animation: &Animation,
     click_times: &[f32],
@@ -2748,20 +2755,30 @@ pub(crate) fn animation_end(slide: &Slide, click_times: &[f32]) -> f32 {
         })
         .fold(0.0_f32, f32::max)
 }
+struct PaintElement<'a> {
+    source:&'a Element,x:f32,y:f32,w:f32,h:f32,rotation:f32,font_size:f32,stroke_width:f32,
+}
+impl<'a> PaintElement<'a> {
+    fn new(source:&'a Element)->Self {Self{source,x:source.x,y:source.y,w:source.w,h:source.h,rotation:source.rotation,font_size:source.font_size,stroke_width:source.stroke_width}}
+}
+impl std::ops::Deref for PaintElement<'_> {
+    type Target=Element;
+    fn deref(&self)->&Element {self.source}
+}
 /// The element as it looks at `time` after its animation steps; `None` while it is hidden.
-fn animated_state(
-    element: &Element,
+fn animated_state<'a>(
+    element: &'a Element,
     steps: &[(usize, f32)],
     time: f32,
     slide_width: f32,
-) -> Option<(Element, f32)> {
+) -> Option<(PaintElement<'a>, f32)> {
     let mut visible = !steps
         .first()
         .and_then(|(slot, _)| element.animation_slot(*slot))
         .is_some_and(Animation::is_entrance);
     let mut ordered: Vec<(usize, f32)> = steps.to_vec();
     ordered.sort_by(|a, b| a.1.total_cmp(&b.1));
-    let mut out = element.clone();
+    let mut out = PaintElement::new(element);
     let (mut opacity, mut scale, mut shift) = (1.0_f32, 1.0_f32, 0.0_f32);
     for (slot, start) in ordered {
         let Some(animation) = element.animation_slot(slot) else {
@@ -2779,7 +2796,7 @@ fn animated_state(
                 if running {
                     opacity *= ease;
                     match animation.effect.as_str() {
-                        "fly_in" => shift += (1.0 - ease) * slide_width,
+                        "fly_in" => shift += (1.0 - ease) * (slide_width-out.x),
                         "zoom" => scale *= 0.05 + 0.95 * ease,
                         _ => {}
                     }
@@ -2791,7 +2808,7 @@ fn animated_state(
                 } else {
                     opacity *= 1.0 - ease;
                     match animation.effect.as_str() {
-                        "fly_out" => shift += ease * slide_width,
+                        "fly_out" => shift += ease * (slide_width-out.x),
                         "zoom_out" => scale *= 1.0 - 0.95 * ease,
                         _ => {}
                     }
@@ -2839,7 +2856,7 @@ pub fn paint_slide(
             && !steps.is_empty()
         {
             if let Some((animated, opacity)) = animated_state(element, steps, *time, deck.width) {
-                paint_element(ctx, &painter, rect.min, scale, &animated, opacity);
+                paint_projected(ctx,&painter,rect.min,scale,&animated,opacity);
             }
             continue;
         }
@@ -2872,6 +2889,9 @@ fn paint_element(
     e: &Element,
     opacity: f32,
 ) {
+    paint_projected(ctx,painter,origin,scale,&PaintElement::new(e),opacity);
+}
+fn paint_projected(ctx:&egui::Context,painter:&egui::Painter,origin:Pos2,scale:f32,e:&PaintElement<'_>,opacity:f32) {
     if opacity <= 0.0 {
         return;
     }
@@ -2886,18 +2906,18 @@ fn paint_element(
         ElementKind::Rect => {
             let mut shape =
                 egui::epaint::RectShape::new(rect,0.0,if e.fill_visible {rgb(e.fill)}else{Color32::TRANSPARENT},stroke,StrokeKind::Inside);
-            shape.angle = e.rotation.to_radians();
+            shape.angle = e.rotation.rem_euclid(360.0).to_radians();
             painter.add(shape);
         }
         ElementKind::Ellipse => {
             let mut shape =
                 egui::epaint::EllipseShape::filled(rect.center(),rect.size()/2.0,if e.fill_visible {rgb(e.fill)}else{Color32::TRANSPARENT});
             shape.stroke = stroke;
-            shape.angle = e.rotation.to_radians();
+            shape.angle = e.rotation.rem_euclid(360.0).to_radians();
             painter.add(shape);
         }
         ElementKind::Line | ElementKind::Arrow => {
-            let [x1, y1, x2, y2] = super::model::line_points(e);
+            let [x1, y1, x2, y2] = super::model::line_points_geometry(e.x,e.y,e.w,e.h,e.rotation);
             let start = origin + Vec2::new(x1, y1) * scale;
             let end = origin + Vec2::new(x2, y2) * scale;
             if matches!(e.kind, ElementKind::Arrow) {
@@ -2936,7 +2956,7 @@ fn paint_element(
                     Color32::WHITE,
                 );
                 if e.rotation != 0.0 {
-                    let turn = egui::emath::Rot2::from_angle(e.rotation.to_radians());
+                    let turn = egui::emath::Rot2::from_angle(e.rotation.rem_euclid(360.0).to_radians());
                     let center = rect.center();
                     for vertex in &mut mesh.vertices {
                         vertex.pos = center + turn * (vertex.pos - center);
@@ -3010,7 +3030,7 @@ fn paint_element(
         ElementKind::Chart { values, labels } => {
             let (min, max) = super::model::chart_bounds(values);
             let range = max - min;
-            let layout=super::model::chart_layout(e,labels);
+            let layout=super::model::chart_layout_geometry(e.y,e.h,e.font_size,!e.text.is_empty(),labels);
             let painter=painter.with_clip_rect(rect);
             let plot_height=layout.plot_h*scale;
             let cw = rect.width() / values.len().max(labels.len()).max(1) as f32;
@@ -3055,13 +3075,13 @@ fn paint_element(
     }
     if !e.text.is_empty() {
         if let ElementKind::Chart{labels,..}=&e.kind {
-            let title_height=super::model::chart_layout(e,labels).title_h*scale;
+            let title_height=super::model::chart_layout_geometry(e.y,e.h,e.font_size,!e.text.is_empty(),labels).title_h*scale;
             painter=painter.with_clip_rect(Rect::from_min_size(rect.min,Vec2::new(rect.width(),title_height)));
         }
         let mut job = egui::text::LayoutJob::default();
         job.wrap.max_width = f32::INFINITY;
         job.append(
-            &super::model::text_lines(e).join("\n"),
+            &super::model::text_lines_content(&e.text,e.w,e.font_size,&e.font,e.bold,e.italic).join("\n"),
             0.0,
             egui::TextFormat {
                 font_id: FontId::new(
@@ -3074,7 +3094,7 @@ fn paint_element(
             },
         );
         let galley = painter.layout_job(job);
-        let angle = e.rotation.to_radians();
+        let angle = e.rotation.rem_euclid(360.0).to_radians();
         let pos = rect.center()
             + egui::emath::Rot2::from_angle(angle)
                 * (rect.min + Vec2::splat(5.0 * scale) - rect.center());
@@ -3983,4 +4003,39 @@ mod phase200_editor_tests {
         assert!(cache.get(2).is_none());assert!(cache.get(1).is_some());assert!(cache.get(3).is_some());
         assert_eq!(cache.entries.len(),2);
     }
+    #[test]
+    fn fly_effects_travel_to_the_slide_edge_from_off_canvas_objects()->Result<(),String> {
+        let mut element=Element{x:-1000.0,animation:Animation{effect:"fly_in".into(),duration:1.0,..Default::default()},..Default::default()};
+        let (frame,_)=animated_state(&element,&[(0,0.0)],0.0,960.0).ok_or("entrance")?;assert_eq!(frame.x,960.0);
+        element.animation.effect="fly_out".into();
+        let (frame,_)=animated_state(&element,&[(0,0.0)],0.5,960.0).ok_or("exit")?;
+        assert!((frame.x-715.0).abs()<0.001);Ok(())
+    }
+    #[test]
+    fn animation_geometry_borrows_large_payloads_instead_of_cloning_them()->Result<(),String> {
+        let element=Element{kind:ElementKind::Image{bytes:vec![9;1024*1024]},text:"caption".repeat(100),
+            animation:Animation{effect:"move".into(),duration:1.0,dx:100.0,..Default::default()},..Default::default()};
+        let (frame,_)=animated_state(&element,&[(0,0.0)],0.5,960.0).ok_or("frame")?;
+        assert!(std::ptr::eq(frame.source,&element));
+        assert_eq!(frame.text.as_ptr(),element.text.as_ptr());
+        assert!(matches!((&frame.kind,&element.kind),(ElementKind::Image{bytes:a},ElementKind::Image{bytes:b}) if a.as_ptr()==b.as_ptr()));
+        assert_eq!(frame.x,element.x+87.5);assert_eq!(element.x,60.0);Ok(())
+    }
+
+    #[test]
+    fn slide_property_text_focus_does_not_transfer_to_another_slide() {
+        let ctx=egui::Context::default();let mut a="Slide A".to_string();let mut b="Slide B".to_string();let mut field_id=None;
+        let _=ctx.run(egui::RawInput::default(),|ctx|{
+            egui::CentralPanel::default().show(ctx,|ui|{
+                field_id=Some(ui.id().with(("slide-property",1_u64,"title")));
+                slide_property_text(ui,&mut a,1,"title","");
+            });
+        });
+        if let Some(id)=field_id {ctx.memory_mut(|memory|memory.request_focus(id));}
+        let _=ctx.run(egui::RawInput{events:vec![egui::Event::Text("wrong slide".into())],..Default::default()},|ctx|{
+            egui::CentralPanel::default().show(ctx,|ui|{slide_property_text(ui,&mut b,2,"title","");});
+        });
+        assert_eq!(b,"Slide B");
+    }
+
 }

@@ -434,7 +434,7 @@ impl Look {
                     .child("srgbClr")
                     .map(|n| n.attr("val"))
                     .or_else(|| entry.child("sysClr").map(|n| n.attr("lastClr")));
-                if let Some(rgb) = value.and_then(parse_hex) {
+                if let Some(rgb) = value.and_then(parse_hex).or_else(||entry.child("scrgbClr").and_then(sc_rgb)) {
                     look.colors.insert(entry.name.clone(), rgb);
                 }
             }
@@ -493,15 +493,28 @@ fn parse_hex(value: &str) -> Option<[u8; 3]> {
     let number = u32::from_str_radix(value, 16).ok()?;
     Some([(number >> 16) as u8, (number >> 8) as u8, number as u8])
 }
+fn drawing_percentage(text:&str)->Option<f64> {
+    let (number,scale)=if let Some(number)=text.strip_suffix('%'){(number,100.0)}else{(text,100000.0)};
+    number.parse::<f64>().ok().filter(|number|number.is_finite()).map(|number|number/scale)
+}
+fn sc_rgb(node:&Node)->Option<[u8;3]> {
+    let channel=|name|drawing_percentage(node.attr(name)).map(|value|{
+        let value=value.clamp(0.0,1.0);
+        let encoded=if value<=0.0031308 {value*12.92}else{1.055*value.powf(1.0/2.4)-0.055};
+        (encoded*255.0).round().clamp(0.0,255.0) as u8
+    });
+    Some([channel("r")?,channel("g")?,channel("b")?])
+}
 fn color(node: Option<&Node>, look: &Look, fallback: [u8; 3]) -> [u8; 3] {
     let Some(node) = node else { return fallback; };
     let source = node.descend("srgbClr").or_else(|| node.descend("schemeClr"))
-        .or_else(|| node.descend("sysClr"));
+        .or_else(|| node.descend("sysClr")).or_else(||node.descend("scrgbClr"));
     let Some(source) = source else { return fallback; };
     let mut rgb = match source.name.as_str() {
         "srgbClr" => parse_hex(source.attr("val")),
         "schemeClr" => look.colors.get(source.attr("val")).copied(),
         "sysClr" => parse_hex(source.attr("lastClr")),
+        "scrgbClr" => sc_rgb(source),
         _ => None,
     }.unwrap_or(fallback);
     for transform in &source.children {
@@ -611,10 +624,11 @@ fn flatten<'a>(
             let value = |child: &str, key: &str| x.child(child).map_or(0.0, |n| n.number(key, 0.0));
             let (cx, cy) = (value("ext", "cx"), value("ext", "cy"));
             let (chx, chy) = (value("chExt", "cx"), value("chExt", "cy"));
-            let sx = if chx > 0.0 { cx / chx } else { 1.0 };
-            let sy = if chy > 0.0 { cy / chy } else { 1.0 };
-            let dx = value("off", "x") - value("chOff", "x") * sx;
-            let dy = value("off", "y") - value("chOff", "y") * sy;
+            let flip_x=matches!(x.attr("flipH"),"1"|"true");let flip_y=matches!(x.attr("flipV"),"1"|"true");
+            let sx = if chx > 0.0 { cx / chx } else { 1.0 } * if flip_x{-1.0}else{1.0};
+            let sy = if chy > 0.0 { cy / chy } else { 1.0 } * if flip_y{-1.0}else{1.0};
+            let dx = value("off", "x") + if flip_x{cx}else{0.0} - value("chOff", "x") * sx;
+            let dy = value("off", "y") + if flip_y{cy}else{0.0} - value("chOff", "y") * sy;
             inner = [
                 map[0] * sx,
                 map[1] * sy,
@@ -626,7 +640,33 @@ fn flatten<'a>(
         flatten(shape, inner, depth + 1, out, rotated_groups);
     }
 }
+fn multilevel_points(cache:&Node)->Result<Vec<String>,String> {
+    let mut count=cache.child("ptCount").map(|node|node.attr("val").parse::<usize>()).transpose().map_err(|_|"Некорректное число категорий")?.unwrap_or(0);
+    if count>10000 {return Err("Слишком много категорий".into());}
+    let mut levels=Vec::new();
+    for level in cache.children.iter().filter(|node|node.name=="lvl") {
+        if levels.len()>=32 {return Err("Слишком много уровней категорий".into());}
+        let mut labels=BTreeMap::new();
+        for point in level.children.iter().filter(|node|node.name=="pt") {
+            let index=point.attr("idx").parse::<usize>().map_err(|_|"Некорректный индекс категории")?;
+            if index>=10000 {return Err("Слишком большой индекс категории".into());}
+            count=count.max(index+1);labels.insert(index,point.child("v").map(|node|node.text.as_str()).unwrap_or(""));
+        }
+        levels.push(labels);
+    }
+    let mut output=Vec::with_capacity(count);let mut total=0_usize;
+    for index in 0..count {
+        let labels=levels.iter().enumerate().rev().filter_map(|(level,labels)|{
+            if level==0 {labels.get(&index).copied()}else{labels.range(..=index).next_back().map(|(_,label)|*label)}
+        }).collect::<Vec<_>>();
+        let size=labels.iter().fold(labels.len().saturating_sub(1),|size,label|size.saturating_add(label.len()));
+        total=total.saturating_add(size);if total>8*1024*1024 {return Err("Текст категорий превышает8МБ".into());}
+        output.push(labels.join("\n"));
+    }
+    Ok(output)
+}
 fn cached_points(node: &Node) -> Result<Vec<String>, String> {
+    if let Some(cache)=node.descend("multiLvlStrCache"){return multilevel_points(cache);}
     let cache = ["numCache", "strCache", "numLit", "strLit"]
         .iter()
         .find_map(|name| node.descend(name))
@@ -755,9 +795,10 @@ fn flipped_image(bytes:&[u8],flip:(bool,bool))->Result<Vec<u8>,String> {
 fn scale_group_appearance(element:&mut Element,map:[f32;4]) {
     // A uniform group scale applies to line widths and text sizes too. Nonuniform text
     // deformation cannot be represented by the current single font-size field.
-    if map[0]>0.0 && (map[0]-map[1]).abs()<=map[0].abs()*0.00001 {
-        element.font_size=(element.font_size*map[0]).clamp(1.0,300.0);
-        element.stroke_width=(element.stroke_width*map[0]).clamp(0.0,300.0);
+    let (sx,sy)=(map[0].abs(),map[1].abs());
+    if sx>0.0 && (sx-sy).abs()<=sx*0.00001 {
+        element.font_size=(element.font_size*sx).clamp(1.0,300.0);
+        element.stroke_width=(element.stroke_width*sx).clamp(0.0,300.0);
     }
 }
 fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
@@ -853,7 +894,19 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
                 .transpose()?;
             looks.insert(master.clone(), Look::read(theme.as_ref()));
         }
-        let raw_look = looks.get(&master).unwrap_or(&no_look);
+        let mut current_look=looks.get(&master).unwrap_or(&no_look).clone();
+        // Layout overrides precede a slide override; omitted scheme components inherit.
+        for owner in chain.iter().take(1).map(String::as_str).chain(std::iter::once(target.as_str())) {
+            if let Some(path)=rels_of_kind(owner,Some("themeOverride"))?.values().next() {
+                if !parsed.contains_key(path) && let Some(bytes)=parts.get(path) {parsed.insert(path.clone(),parse(bytes)?);}
+                if let Some(theme)=parsed.get(path) {
+                    let replacement=Look::read(Some(theme));
+                    if theme.child("clrScheme").is_some() {current_look.colors.extend(replacement.colors);}
+                    if theme.child("fontScheme").is_some() {current_look.major=replacement.major;current_look.minor=replacement.minor;}
+                }
+            }
+        }
+        let raw_look=&current_look;
         let sources: Vec<&Node> = chain.iter().filter_map(|p| parsed.get(p)).collect();
         if let Some(layout) = sources.first() {
             slide.layout = match layout.attr("type") {
@@ -935,8 +988,8 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
                         element.y = (map[1] * offset.number("y", 0.0) + map[3]) / 12700.0;
                     }
                     if let Some(size) = own.and_then(|n|n.child("ext")).or_else(||inherited.and_then(|n|n.child("ext"))) {
-                        element.w = (map[0] * size.number("cx", 1270000.0) / 12700.0).max(0.001);
-                        element.h = (map[1] * size.number("cy", 1270000.0) / 12700.0).max(0.001);
+                        element.w = (map[0].abs() * size.number("cx", 1270000.0) / 12700.0).max(0.001);
+                        element.h = (map[1].abs() * size.number("cy", 1270000.0) / 12700.0).max(0.001);
                     }
                     element.rotation = transform.number("rot", 0.0) / 60000.0;
                     flip = (
@@ -944,6 +997,9 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
                         matches!(transform.attr("flipV"), "1" | "true"),
                     );
                 }
+                if map[0]<0.0 {element.x-=element.w;flip.0=!flip.0;}
+                if map[1]<0.0 {element.y-=element.h;flip.1=!flip.1;}
+                if (map[0]<0.0)!=(map[1]<0.0) {element.rotation=-element.rotation;}
                 let props = shape.child("spPr");
                 let style = shape.child("style");
                 if matches!(shape.name.as_str(), "sp" | "cxnSp") {
@@ -969,13 +1025,6 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
                     element.stroke = color(line.or(line_ref), look, element.stroke);
                     element.stroke_width = match line {
                         Some(line) if line.child("noFill").is_some() => 0.0,
-                        Some(line)
-                            if line.child("solidFill").is_none()
-                                && line.child("gradFill").is_none()
-                                && line_ref.is_none() =>
-                        {
-                            0.0
-                        }
                         Some(line) => line.number("w", 12700.0) / 12700.0,
                         None if line_ref.is_some() => 1.0,
                         None => 0.0,
@@ -1251,7 +1300,7 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
                 notes.all("sp", &mut shapes);
                 slide.notes = shapes
                     .iter()
-                    .filter(|s| placeholder(s).is_some_and(|(t, _)| t == "body"))
+                    .filter(|s| placeholder(s).is_none_or(|(kind,_)|kind=="body"))
                     .filter_map(|s| s.child("txBody"))
                     .map(|body| body.paragraph_text())
                     .collect::<Vec<_>>()
@@ -1285,21 +1334,23 @@ fn node_delay(node: &Node) -> f32 {
         .min_by(f32::total_cmp).unwrap_or(0.0)).unwrap_or(0.0)
 }
 /// Effect nodes under a time node with their start in ms from the start of the click group.
-fn timed_effects<'a>(node: &'a Node, offset: f32, out: &mut Vec<(f32, &'a Node)>) {
-    let Some(children) = node.child("childTnLst") else {
-        return;
-    };
-    for child in &children.children {
-        let Some(ctn) = child.child("cTn") else {
-            continue;
-        };
-        let start = offset + node_delay(ctn);
-        if ctn.attr("presetClass").is_empty() {
-            timed_effects(ctn, start, out);
-        } else {
-            out.push((start, ctn));
+fn timed_effects<'a>(node:&'a Node,offset:f32,out:&mut Vec<(f32,&'a Node)>) {
+    collect_timed_effects(node,offset,false,out);
+}
+fn collect_timed_effects<'a>(node:&'a Node,offset:f32,sequential:bool,out:&mut Vec<(f32,&'a Node)>)->f32 {
+    let mut end=offset;
+    if let Some(children)=node.child("childTnLst") {
+        for child in &children.children {
+            let Some(ctn)=child.child("cTn") else{continue;};
+            let start=if sequential{end}else{offset}+node_delay(ctn);
+            let child_end=if ctn.attr("presetClass").is_empty() {
+                collect_timed_effects(ctn,start,child.name=="seq",out)
+            }else{out.push((start,ctn));start+effect_duration_ms(ctn)};
+            end=end.max(child_end);
         }
     }
+    let own=node.number("dur",0.0);
+    if own>0.0 {offset+own}else{end}
 }
 /// TrineDocs effect for a PowerPoint preset; `None` = no equivalent. The flag marks presets
 /// replaced by the closest TrineDocs effect.
@@ -1387,6 +1438,7 @@ fn effect_duration_ms(effect:&Node)->f32 {
         if matches!(node.attr("autoRev"),"1"|"true") {duration*=2.0;}
         node_delay(node)+duration
     }).filter(|duration|*duration>0.0).fold(1.0_f32,f32::max)
+        * if matches!(effect.attr("autoRev"),"1"|"true"){2.0}else{1.0}
 }
 fn read_timing(
     timing: &Node,
@@ -1645,7 +1697,7 @@ fn table_xml(e: &Element, id: usize, cells: &[Vec<String>]) -> Result<String,Str
     ))
 }
 fn chart_title(chart:&Node)->Result<String,String> {
-    let Some(title)=chart.descend("title") else{return Ok(String::new());};
+    let Some(title)=chart.descend("chart").and_then(|chart|chart.child("title")) else{return Ok(String::new());};
     let Some(text)=title.child("tx") else{return Ok(String::new());};
     if let Some(rich)=text.child("rich") {return Ok(rich.paragraph_text());}
     if let Some(reference)=text.child("strRef").or_else(||text.child("strLit")) {
@@ -3277,6 +3329,99 @@ mod phase200_io_tests {
         let mut output=LimitedJson{bytes:Vec::new(),limit:3};
         assert!(std::io::Write::write_all(&mut output,b"123").is_ok());
         assert!(std::io::Write::write_all(&mut output,b"4").is_err());assert_eq!(output.bytes,b"123");Ok(())
+    }
+
+    #[test]
+    fn linear_rgb_colours_import_as_gamma_encoded_srgb_in_fills_and_themes()->Result<(),String> {
+        let fill=parse(br#"<solidFill><scrgbClr r="50000" g="50000" b="50000"/></solidFill>"#)?;
+        assert_eq!(color(Some(&fill),&Look::default(),[1,2,3]),[188,188,188]);
+        let theme=parse(br#"<theme><themeElements><clrScheme><accent1><scrgbClr r="100%" g="0%" b="50%"/></accent1></clrScheme></themeElements></theme>"#)?;
+        assert_eq!(Look::read(Some(&theme)).colors.get("accent1"),Some(&[255,0,188]));
+        let malformed=parse(br#"<scrgbClr r="NaN" g="0" b="0"/>"#)?;assert_eq!(color(Some(&malformed),&Look::default(),[1,2,3]),[1,2,3]);Ok(())
+    }
+    #[test]
+    fn axis_titles_are_not_mistaken_for_the_chart_title()->Result<(),String> {
+        let chart=parse(br#"<chartSpace><chart><plotArea><valAx><title><tx><rich><p><r><t>Revenue axis</t></r></p></rich></tx></title></valAx></plotArea></chart></chartSpace>"#)?;
+        assert_eq!(chart_title(&chart)?,"");
+        let chart=parse(br#"<chartSpace><chart><title><tx><rich><p><r><t>Actual title</t></r></p></rich></tx></title><plotArea><valAx><title><tx><rich><p><r><t>Axis</t></r></p></rich></tx></title></valAx></plotArea></chart></chartSpace>"#)?;
+        assert_eq!(chart_title(&chart)?,"Actual title");Ok(())
+    }
+
+    #[test]
+    fn layout_and_slide_theme_overrides_merge_before_text_style_resolution()->Result<(),String> {
+        let mut deck=Deck::default();deck.theme.font="Arial".into();
+        let mut parts=read_zip(&write(&deck,"pptx")?)?;
+        parts.retain(|path,_|!path.starts_with("customXml/"));
+        let slide_path="ppt/slides/slide1.xml";
+        let xml=String::from_utf8(parts.get(slide_path).ok_or("slide")?.clone()).map_err(|error|error.to_string())?;
+        parts.insert(slide_path.into(),xml.replace("<a:latin typeface=\"Arial\"/>","").into_bytes());
+        let overrides=[
+            ("ppt/slideLayouts/_rels/slideLayout1.xml.rels","../theme/override-layout.xml","ppt/theme/override-layout.xml",
+                format!("<a:themeOverride xmlns:a=\"{A}\"><a:fontScheme name=\"Layout\"><a:majorFont><a:latin typeface=\"Georgia\"/></a:majorFont><a:minorFont><a:latin typeface=\"Verdana\"/></a:minorFont></a:fontScheme></a:themeOverride>")),
+            ("ppt/slides/_rels/slide1.xml.rels","../theme/override-slide.xml","ppt/theme/override-slide.xml",
+                format!("<a:themeOverride xmlns:a=\"{A}\"><a:fontScheme name=\"Slide\"><a:majorFont><a:latin typeface=\"Georgia\"/></a:majorFont><a:minorFont><a:latin typeface=\"Tahoma\"/></a:minorFont></a:fontScheme></a:themeOverride>"))
+        ];
+        for (rels_path,target,path,theme) in overrides {
+            let relations=String::from_utf8(parts.get(rels_path).ok_or("rels")?.clone()).map_err(|error|error.to_string())?;
+            parts.insert(rels_path.into(),relations.replace("</Relationships>",&format!("{}</Relationships>",rel("rThemeOverride","themeOverride",target))).into_bytes());
+            parts.insert(path.into(),theme.into_bytes());
+            let types=String::from_utf8(parts.get("[Content_Types].xml").ok_or("types")?.clone()).map_err(|error|error.to_string())?;
+            parts.insert("[Content_Types].xml".into(),types.replace("</Types>",&format!("<Override PartName=\"/{path}\" ContentType=\"application/vnd.openxmlformats-officedocument.themeOverride+xml\"/></Types>")).into_bytes());
+        }
+        let imported=read(&write_zip(parts.into_iter().collect())?,"pptx")?;
+        assert!(imported.slides[0].elements.iter().all(|element|element.font=="Tahoma"));
+        assert_eq!(imported.theme.font,"Tahoma");assert_eq!(imported.theme.accent,deck.theme.accent);Ok(())
+    }
+
+    #[test]
+    fn group_flips_reflect_child_frames_and_compose_through_nested_groups()->Result<(),String> {
+        let mut deck=Deck::empty();deck.add_slide("blank");
+        let shape=Element{x:10.0,y:20.0,w:20.0,h:10.0,rotation:30.0,kind:ElementKind::Rect,..Default::default()};
+        let group=|content:&str|format!("<p:grpSp><p:nvGrpSpPr><p:cNvPr id=\"8\" name=\"Group\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm flipH=\"true\"><a:off x=\"0\" y=\"0\"/><a:ext cx=\"1270000\" cy=\"1270000\"/><a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"1270000\" cy=\"1270000\"/></a:xfrm></p:grpSpPr>{content}</p:grpSp>");
+        for (content,expected_x,rotation) in [(group(&shape_xml(&shape,2)),70.0,330.0),(group(&group(&shape_xml(&shape,2))),10.0,30.0)] {
+            let mut parts=read_zip(&write(&deck,"pptx")?)?;parts.retain(|path,_|!path.starts_with("customXml/"));
+            parts.insert("ppt/slides/slide1.xml".into(),wrap("sld","",&format!("<p:cSld><p:spTree>{GROUP}{content}</p:spTree></p:cSld>")).into_bytes());
+            let imported=read(&write_zip(parts.into_iter().collect())?,"pptx")?;
+            let element=&imported.slides[0].elements[0];
+            assert_eq!((element.x,element.y,element.w,element.h),(expected_x,20.0,20.0,10.0));assert_eq!(element.rotation,rotation);
+        }Ok(())
+    }
+
+    #[test]
+    fn ordinary_speaker_note_text_boxes_survive_import_without_footer_fields()->Result<(),String> {
+        let deck=Deck::default();let mut parts=read_zip(&write(&deck,"pptx")?)?;parts.retain(|path,_|!path.starts_with("customXml/"));
+        let note=|text:&str,id:usize,kind:Option<&str>|{
+            let xml=shape_xml(&Element{text:text.into(),..Default::default()},id);
+            kind.map(|kind|xml.replace("<p:nvPr/>",&format!("<p:nvPr><p:ph type=\"{kind}\"/></p:nvPr>"))).unwrap_or(xml)
+        };
+        let shapes=note("Main notes",2,Some("body"))+&note("Extra note",3,None)+&note("Footer",4,Some("ftr"));
+        parts.insert("ppt/notesSlides/notesSlide1.xml".into(),wrap("notes","",&format!("<p:cSld><p:spTree>{GROUP}{shapes}</p:spTree></p:cSld>")).into_bytes());
+        let imported=read(&write_zip(parts.into_iter().collect())?,"pptx")?;
+        assert_eq!(imported.slides[0].notes,"Main notes\nExtra note");Ok(())
+    }
+
+    #[test]
+    fn multilevel_category_cache_preserves_parent_and_leaf_labels_with_bounds()->Result<(),String> {
+        let node=parse(br#"<cat><multiLvlStrRef><multiLvlStrCache><ptCount val="4"/><lvl><pt idx="0"><v>Q1</v></pt><pt idx="1"><v>Q2</v></pt><pt idx="2"><v>Q1</v></pt><pt idx="3"><v>Q2</v></pt></lvl><lvl><pt idx="0"><v>2024</v></pt><pt idx="2"><v>2025</v></pt></lvl></multiLvlStrCache></multiLvlStrRef></cat>"#)?;
+        assert_eq!(cached_points(&node)?,vec!["2024\nQ1","2024\nQ2","2025\nQ1","2025\nQ2"]);
+        let large=parse(br#"<multiLvlStrCache><ptCount val="10001"/></multiLvlStrCache>"#)?;assert!(cached_points(&large).is_err());
+        let levels=parse(format!("<multiLvlStrCache>{}</multiLvlStrCache>","<lvl/>".repeat(33)).as_bytes())?;assert!(cached_points(&levels).is_err());Ok(())
+    }
+    #[test]
+    fn nested_sequential_timing_waits_for_the_preceding_child()->Result<(),String> {
+        let effects=timing_effect("2",0,1000)+&timing_effect("3",250,500);
+        let timing=timing_group(&format!("<seq><cTn><childTnLst>{effects}</childTnLst></cTn></seq>"))?;
+        let mut slide=timing_slide();let ids=BTreeMap::from([("2".into(),0),("3".into(),1)]);
+        assert_eq!(read_timing(&timing,&ids,&mut slide,(960.0,540.0)),0);
+        assert_eq!(slide.elements[0].animation.delay,0.0);assert_eq!(slide.elements[1].animation.delay,1.25);
+        assert_eq!(slide.elements[1].animation.trigger,"with_previous");Ok(())
+    }
+    #[test]
+    fn outlines_with_width_but_no_fill_child_remain_visible()->Result<(),String> {
+        let mut deck=Deck::empty();deck.add_slide("blank");let mut parts=read_zip(&write(&deck,"pptx")?)?;parts.retain(|path,_|!path.starts_with("customXml/"));
+        let shape=format!("<p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"Width only\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"1270000\" cy=\"1270000\"/></a:xfrm><a:prstGeom prst=\"rect\"/><a:ln w=\"25400\"/></p:spPr></p:sp>");
+        parts.insert("ppt/slides/slide1.xml".into(),wrap("sld","",&format!("<p:cSld><p:spTree>{GROUP}{shape}</p:spTree></p:cSld>")).into_bytes());
+        let imported=read(&write_zip(parts.into_iter().collect())?,"pptx")?;assert_eq!(imported.slides[0].elements[0].stroke_width,2.0);Ok(())
     }
 
 }

@@ -1259,9 +1259,12 @@ impl Deck {
 /// End points `[x1, y1, x2, y2]` of a line or arrow: the frame diagonal from the top-left to
 /// the bottom-right corner, turned by the element rotation around the frame centre.
 pub fn line_points(e: &Element) -> [f32; 4] {
-    let (cx, cy) = (e.x + e.w / 2.0, e.y + e.h / 2.0);
-    let (sin, cos) = e.rotation.to_radians().sin_cos();
-    let (hx, hy) = (e.w / 2.0, e.h / 2.0);
+    line_points_geometry(e.x,e.y,e.w,e.h,e.rotation)
+}
+pub(crate) fn line_points_geometry(x:f32,y:f32,w:f32,h:f32,rotation:f32)->[f32;4] {
+    let (cx,cy)=(x+w/2.0,y+h/2.0);
+    let (sin,cos)=rotation.rem_euclid(360.0).to_radians().sin_cos();
+    let (hx,hy)=(w/2.0,h/2.0);
     let (rx, ry) = (hx * cos - hy * sin, hx * sin + hy * cos);
     [cx - rx, cy - ry, cx + rx, cy + ry]
 }
@@ -1320,12 +1323,15 @@ pub fn chart_bounds(values: &[f32]) -> (f32, f32) {
 #[derive(Clone,Copy,Debug)]
 pub(crate) struct ChartLayout {pub plot_y:f32,pub plot_h:f32,pub label_y:f32,pub label_size:f32,pub title_h:f32}
 pub(crate) fn chart_layout(element:&Element,labels:&[String])->ChartLayout {
+    chart_layout_geometry(element.y,element.h,element.font_size,!element.text.is_empty(),labels)
+}
+pub(crate) fn chart_layout_geometry(y:f32,h:f32,font_size:f32,has_title:bool,labels:&[String])->ChartLayout {
     let lines=labels.iter().map(|text|text.replace("\r\n","\n").replace('\r',"\n").split('\n').count()).max().unwrap_or(1).max(1);
-    let title_h=if element.text.is_empty(){0.0}else{(element.font_size*1.2+10.0).min(element.h*0.35)};
-    let label_h=(element.font_size*1.2*lines as f32+5.0).min(element.h*0.4);
-    let label_size=element.font_size.min((label_h-2.0).max(0.0)/(lines as f32*1.2));
-    let plot_h=(element.h-title_h-label_h).max(0.0);
-    ChartLayout{plot_y:element.y+title_h,plot_h,label_y:element.y+title_h+plot_h+2.0,label_size,title_h}
+    let title_h=if !has_title{0.0}else{(font_size*1.2+10.0).min(h*0.35)};
+    let label_h=(font_size*1.2*lines as f32+5.0).min(h*0.4);
+    let label_size=font_size.min((label_h-2.0).max(0.0)/(lines as f32*1.2));
+    let plot_h=(h-title_h-label_h).max(0.0);
+    ChartLayout{plot_y:y+title_h,plot_h,label_y:y+title_h+plot_h+2.0,label_size,title_h}
 }
 pub(crate) fn visible_text_lines(height:f32,size:f32)->usize {
     if size<=0.0||height<5.0+size {0}else{1+((height-5.0-size)/(size*1.2)).floor() as usize}
@@ -1349,16 +1355,18 @@ pub fn text_width(text: &str, size: f32, bold: bool, italic: bool) -> f32 {
     text_width_with_font(text,size,crate::fonts::DEFAULT_FAMILY,bold,italic)
 }
 pub fn text_lines(element: &Element) -> Vec<String> {
-    let advances = crate::fonts::advances(&element.font, element.bold, element.italic);
+    text_lines_content(&element.text,element.w,element.font_size,&element.font,element.bold,element.italic)
+}
+pub(crate) fn text_lines_content(text:&str,width:f32,size:f32,font:&str,bold:bool,italic:bool)->Vec<String> {
+    let advances = crate::fonts::advances(font,bold,italic);
     let advance = |ch: char| {
         advances
             .get(&ch)
-            .map_or(element.font_size * 0.55, |w| w * element.font_size)
+            .map_or(size * 0.55, |w| w * size)
     };
-    let limit = (element.w - 10.0).max(1.0);
+    let limit = (width - 10.0).max(1.0);
     let mut lines = Vec::new();
-    let normalized = element
-        .text
+    let normalized = text
         .replace("\r\n", "\n")
         .replace('\r', "\n")
         .replace('\t', "    ");
@@ -1430,7 +1438,8 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert!(bars.iter().filter(|h| (**h - 100.0).abs() < 0.001).count() >= 2);
+        let expected=chart_layout(deck.slide(slide).and_then(|s|s.element(chart)).ok_or("chart")?,&["positive".into(),"negative".into()]).plot_h/2.0;
+        assert!(bars.iter().filter(|h| (**h - expected).abs() < 0.001).count() >= 2);
         deck.validate()
     }
 
@@ -1921,4 +1930,11 @@ mod phase200_model_tests {
         let text=page.items.iter().filter_map(|item|if let crate::render::Primitive::TextStyled{text,..}=item {Some(text.as_str())}else{None}).collect::<Vec<_>>();
         assert_eq!(text,vec!["A"]);Ok(())
     }
+    #[test]
+    fn complete_rotation_turns_do_not_drift_line_endpoints() {
+        let a=Element{w:10000.0,h:10000.0,rotation:0.0,..Default::default()};
+        let b=Element{rotation:360000.0,..a.clone()};assert_eq!(line_points(&a),line_points(&b));
+        let c=Element{rotation:-360000.0,..a.clone()};assert_eq!(line_points(&a),line_points(&c));
+    }
+
 }
