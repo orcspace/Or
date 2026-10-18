@@ -41,6 +41,7 @@ pub enum Category {
     Formulas,
     Bounds,
     Readability,
+    Formatting,
 }
 impl Category {
     pub fn parse(value: &str) -> Option<Self> {
@@ -51,6 +52,7 @@ impl Category {
             "formulas" => Some(Self::Formulas),
             "bounds" => Some(Self::Bounds),
             "readability" => Some(Self::Readability),
+            "formatting" => Some(Self::Formatting),
             _ => None,
         }
     }
@@ -62,16 +64,18 @@ impl Category {
             Self::Formulas => "formulas",
             Self::Bounds => "bounds",
             Self::Readability => "readability",
+            Self::Formatting => "formatting",
         }
     }
 
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::All,
         Self::Structure,
         Self::Images,
         Self::Formulas,
         Self::Bounds,
         Self::Readability,
+        Self::Formatting,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -81,6 +85,7 @@ impl Category {
             Self::Formulas => "Формулы",
             Self::Bounds => "Границы слайда",
             Self::Readability => "Читаемость",
+            Self::Formatting => "Оформление",
         }
     }
 }
@@ -244,7 +249,7 @@ pub fn inspect(document: &Document) -> Report {
     let mut report = Report::default();
     match document {
         Document::Docs(doc) => {
-            report.scope = "Уровни и пустые заголовки, описания изображений.";
+            report.scope = "Заголовки, описания изображений; размер, жирность и курсив относительно встроенных стилей TrineDocs (не пользовательских стилей Office).";
             let mut previous = 0;
             for (index, paragraph) in doc.paragraphs.iter().enumerate() {
                 if let Some(level) = paragraph
@@ -271,6 +276,30 @@ pub fn inspect(document: &Document) -> Report {
                         );
                     }
                     previous = level;
+                }
+            }
+            for (index, paragraph) in doc.paragraphs.iter().enumerate() {
+                if !matches!(paragraph.style.as_str(), "Normal" | "Title" | "Quote"
+                    | "Heading1" | "Heading2" | "Heading3" | "Heading4" | "Heading5" | "Heading6") {
+                    continue;
+                }
+                let mut baseline = crate::docs::model::Paragraph::default();
+                baseline.set_style(&paragraph.style);
+                let expected = &baseline.runs[0].format;
+                let mut differences = std::collections::BTreeSet::new();
+                for run in paragraph.runs.iter().filter(|run| !run.text.is_empty()) {
+                    if run.format.size != expected.size { differences.insert("размер"); }
+                    if run.format.bold != expected.bold { differences.insert("жирность"); }
+                    if run.format.italic != expected.italic { differences.insert("курсив"); }
+                }
+                if !differences.is_empty() {
+                    report.push(
+                        Category::Formatting,
+                        format!("Абзац {} · {}", index + 1, paragraph.style),
+                        format!("Отличия от встроенного стиля: {}. Прямое оформление может быть намеренным.",
+                            differences.into_iter().collect::<Vec<_>>().join(", ")),
+                        Target::Paragraph(paragraph.id),
+                    );
                 }
             }
             for (index, image) in doc.images.iter().enumerate() {
@@ -410,7 +439,7 @@ mod tests {
         let document = Document::Docs(doc);
         let before = document.clone();
         let report = inspect(&document);
-        assert_eq!(report.findings.len(), 2);
+        assert_eq!(report.filtered("", Category::Structure).len(), 2);
         assert_eq!(document, before);
     }
     #[test]
@@ -513,5 +542,25 @@ mod tests {
         assert!(copy.contains("Не включено в отчёт: 8"));
         assert!(copy.contains("Пропущен уровень") && !copy.contains("Нет описания"));
         assert!(copy.contains("Проверяются только заголовки"));
+    }
+}
+#[cfg(test)]
+mod style_lens_tests {
+    use super::*;
+    #[test]
+    fn style_lens_reports_known_style_overrides_without_mutation() {
+        let mut doc = crate::docs::model::Doc::from_text("Heading\nCustom");
+        doc.paragraphs[0].set_style("Heading1");
+        doc.paragraphs[0].runs[0].format.size = 12.0;
+        doc.paragraphs[1].style = "MyCustomStyle".into();
+        let target_id = doc.paragraphs[0].id;
+        let document = Document::Docs(doc);
+        let before = document.clone();
+        let report = inspect(&document);
+        let formatting = report.filtered("", Category::Formatting);
+        assert_eq!(formatting.len(), 1);
+        assert_eq!(formatting[0].target, Target::Paragraph(target_id));
+        assert_eq!(Category::parse("formatting"), Some(Category::Formatting));
+        assert_eq!(document, before);
     }
 }

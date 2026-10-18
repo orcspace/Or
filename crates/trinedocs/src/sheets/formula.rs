@@ -3781,3 +3781,137 @@ mod budget_tests {
         Ok(())
     }
 }
+
+pub fn explain(book: &Book, sheet: u64, row: u32, col: u32) -> Result<serde_json::Value, String> {
+    use serde_json::json;
+    if row >= MAX_ROWS || col >= MAX_COLS {
+        return Err("invalid_range".into());
+    }
+    let source = book.sheet_by_id(sheet).ok_or("Лист не найден")?;
+    let cell = source.cell(row, col);
+    let input = cell.map(|cell| cell.input.as_str()).unwrap_or("");
+    let value = cell.map(|cell| &cell.value).unwrap_or(&Value::Empty);
+    let kind = match value {
+        Value::Empty => "empty", Value::Number(_) => "number", Value::Text(_) => "text",
+        Value::Bool(_) => "boolean", Value::Error(_) => "error",
+    };
+    struct Walk<'a> {
+        book: &'a Book, sheet: u64, dependencies: Vec<serde_json::Value>,
+        names: HashSet<String>, omitted: usize,
+    }
+    impl Walk<'_> {
+        fn push(&mut self, value: serde_json::Value) {
+            if self.dependencies.len() < 64 { self.dependencies.push(value); }
+            else { self.omitted += 1; }
+        }
+        fn visit(&mut self, expr: &Expr, depth: usize) {
+            if depth >= 32 || self.dependencies.len() >= 64 {
+                self.omitted += 1;
+                return;
+            }
+            match expr {
+                Expr::Reference(name, range) => {
+                    let target = match name {
+                        Some(name) => self.book.sheets.iter().find(|s| s.name.to_lowercase() == name.to_lowercase()),
+                        None => self.book.sheet_by_id(self.sheet),
+                    };
+                    if let Some(target) = target {
+                        let mut sample = Vec::new();
+                        for r in range.r0..=range.r1 {
+                            for c in range.c0..=range.c1 {
+                                if sample.len() == 4 { break; }
+                                sample.push(json!({
+                                    "address":address(r,c),
+                                    "value_type":match target.cell(r,c).map(|cell| &cell.value) {
+                                        None | Some(Value::Empty) => "empty",
+                                        Some(Value::Number(_)) => "number",
+                                        Some(Value::Text(_)) => "text",
+                                        Some(Value::Bool(_)) => "boolean",
+                                        Some(Value::Error(_)) => "error",
+                                    },
+                                    "input":target.cell(r,c).map(|v| v.input.chars().take(80).collect::<String>()),
+                                    "display":target.display(r,c,self.book.locale_ru).chars().take(120).collect::<String>()
+                                }));
+                            }
+                            if sample.len() == 4 { break; }
+                        }
+                        self.push(json!({
+                            "kind":"range","sheet_id":target.id,"sheet":target.name,
+                            "range":format!("{}:{}",address(range.r0,range.c0),address(range.r1,range.c1)),
+                            "cells":(u64::from(range.r1-range.r0)+1)*(u64::from(range.c1-range.c0)+1),
+                            "hidden":target.hidden,"sample":sample
+                        }));
+                    } else { self.push(json!({"kind":"range","sheet":name,"error":"#REF!"})); }
+                }
+                Expr::Name(name) => {
+                    if !self.names.insert(name.to_lowercase()) {
+                        self.push(json!({"kind":"name","name":name,"status":"already_visited"}));
+                        return;
+                    }
+                    let definition = self.book.names.iter()
+                        .find(|(n,_)| n.to_lowercase() == name.to_lowercase())
+                        .map(|(_,input)| input.clone());
+                    if let Some(input) = definition {
+                        self.push(json!({"kind":"name","name":name,"input":input.chars().take(256).collect::<String>()}));
+                        match parse(&input) {
+                            Ok(expr) => self.visit(&expr, depth+1),
+                            Err(_) => self.push(json!({"kind":"name","name":name,"error":"invalid_formula"})),
+                        }
+                    } else { self.push(json!({"kind":"name","name":name,"error":"#NAME?"})); }
+                }
+                Expr::Unary(_, expr) => self.visit(expr, depth+1),
+                Expr::Binary(_, a, b) => { self.visit(a, depth+1); self.visit(b, depth+1); }
+                Expr::Call(_, args) => { for expr in args { self.visit(expr, depth+1); } }
+                Expr::Literal(_) => {}
+            }
+        }
+    }
+    let mut walk = Walk { book, sheet, dependencies: Vec::new(), names: HashSet::new(), omitted: 0 };
+    let syntax_error = if input.starts_with('=') {
+        match parse(input) {
+            Ok(expr) => { walk.visit(&expr, 0); None }
+            Err(error) => Some(error),
+        }
+    } else { None };
+    Ok(json!({
+        "sheet_id":sheet,"address":address(row,col),"input":input.chars().take(4096).collect::<String>(),
+        "input_truncated":input.chars().count()>4096,"value_type":kind,
+        "display":source.display(row,col,book.locale_ru).chars().take(512).collect::<String>(),
+        "formula":input.starts_with('='),"syntax_error":syntax_error,
+        "dependencies":walk.dependencies,"omitted":walk.omitted,"truncated":walk.omitted>0,
+        "scope":"Direct references and named expressions; cached values, no evaluation or mutation."
+    }))
+}
+#[cfg(test)]
+mod passport_tests {
+    use super::*;
+    #[test]
+    fn passport_is_read_only_and_resolves_named_dependencies() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.set_cell(id, 0, 0, "7")?;
+        book.names.insert("Tax".into(), "=A1".into());
+        book.set_cell(id, 0, 1, "=Tax+1")?;
+        let before = book.clone();
+        let report = explain(&book, id, 0, 1)?;
+        assert_eq!(report["value_type"], "number");
+        assert_eq!(report["dependencies"][0]["name"], "Tax");
+        assert_eq!(report["dependencies"][1]["range"], "A1:A1");
+        assert_eq!(report["dependencies"][1]["sample"][0]["value_type"], "number");
+        assert_eq!(book, before);
+        assert!(explain(&book, id, MAX_ROWS, 0).is_err());
+        Ok(())
+    }
+    #[test]
+    fn passport_bounds_named_cycles_and_reports_missing_sheets() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.names.insert("Loop".into(), "=Loop".into());
+        book.set_input(id, 0, 0, "=Loop+'Missing'!A1")?;
+        let report = explain(&book, id, 0, 0)?;
+        assert_eq!(report["dependencies"][1]["status"], "already_visited");
+        assert_eq!(report["dependencies"][2]["error"], "#REF!");
+        assert!(report.to_string().len() < 4096);
+        Ok(())
+    }
+}

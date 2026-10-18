@@ -22,6 +22,7 @@ struct State {
     show_properties: bool,
     canvas_rect: Option<Rect>,
     show_notes: bool,
+    agenda_open: bool,
     selected: Vec<u64>,
     clipboard: std::sync::Arc<Vec<Element>>,
     drag_original: Vec<(u64, f32, f32, f32, f32)>,
@@ -483,6 +484,41 @@ pub fn show(ui: &mut egui::Ui, deck: &mut Deck) -> bool {
         }
     }
     record_presentation(ui.ctx(), memory_id, state.presentation.active);
+    if state.agenda_open {
+        let mut open = true;
+        let mut inserted = false;
+        let enabled = ui.is_enabled();
+        egui::Window::new("Повестка презентации")
+            .id(memory_id.with("agenda"))
+            .open(&mut open)
+            .default_width(540.0)
+            .show(ui.ctx(), |ui| {
+                ui.label("Видимые слайды и разделы. Длинные заголовки сокращаются до 80 знаков, разделы — до 40.");
+                ui.label("Пункты будут разбиты по страницам и добавлены в начало как редактируемые слайды.");
+                match deck.agenda_entries() {
+                    Ok(entries) => {
+                        egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
+                            for entry in entries { ui.label(entry); }
+                        });
+                        if ui.add_enabled(enabled, egui::Button::new("Добавить повестку")).clicked() {
+                            match deck.insert_agenda() {
+                                Ok(ids) => {
+                                    if let Some(id) = ids.first() { state.slide_id = *id; }
+                                    state.selected.clear();
+                                    state.scroll_to_selection = true;
+                                    state.error.clear();
+                                    changed = true;
+                                    inserted = true;
+                                }
+                                Err(error) => state.error = error,
+                            }
+                        }
+                    }
+                    Err(error) => { ui.label(error); }
+                }
+            });
+        state.agenda_open = open && !inserted;
+    }
     ui.ctx().data_mut(|d| d.insert_temp(memory_id, state));
     changed
 }
@@ -1126,6 +1162,9 @@ fn ribbon(ui: &mut egui::Ui, deck: &mut Deck, state: &mut State) -> bool {
         }
         1 => {
             changed |= new_slide_menu(ui, deck, state);
+            if ui.button("Повестка…").clicked() {
+                state.agenda_open = true;
+            }
             ui.add_enabled_ui(has_slide, |ui| {
                 ui.menu_button("Таблица", |ui| {
                     ui.horizontal(|ui| {

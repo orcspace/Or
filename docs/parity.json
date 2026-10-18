@@ -42,10 +42,10 @@
     "priority": "P0",
     "phase": 1,
     "requirement": "REQ-11-002",
-    "mcp": "GAP: точная ops/tool-схема ещё не определена",
-    "import": "planned",
-    "export": "planned",
-    "status": "planned"
+    "mcp": "UI Sheets: внутренний типизированный буфер; всё/значения/ввод/форматы и transpose; атомарный preflight. GAP: специальные внешние HTML/RTF/Excel форматы и runtime acceptance.",
+    "import": "internal clipboard",
+    "export": "n/a",
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-COM-005",
@@ -4242,10 +4242,10 @@
     "priority": "P1",
     "phase": 8,
     "requirement": "REQ-11-008",
-    "mcp": "GAP: read-only sheets_explain_formula, bounded graph/result",
-    "import": "planned",
-    "export": "n/a",
-    "status": "planned"
+    "mcp": "sheets_explain_formula и UI Паспорт формулы: cached value/type, direct/named dependencies до64, 4 samples с типами, parse/missing reference diagnostics, no evaluation/mutation. GAP: полный trace вычисления и runtime acceptance.",
+    "import": "n/a",
+    "export": "clipboard report",
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-TRI-035",
@@ -4290,10 +4290,10 @@
     "priority": "P1",
     "phase": 8,
     "requirement": "REQ-11-005",
-    "mcp": "GAP: read-only style audit со stable paragraph/run anchors",
-    "import": "planned",
-    "export": "n/a",
-    "status": "planned"
+    "mcp": "inspect_document kind=formatting и UI инспектора: размер/bold/italic относительно встроенных стилей TrineDocs, stable paragraph targets, bounded report. GAP: произвольные стили Office, таблицы и runtime acceptance.",
+    "import": "n/a",
+    "export": "clipboard report",
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-TRI-039",
@@ -4302,10 +4302,10 @@
     "priority": "P1",
     "phase": 8,
     "requirement": "REQ-11-011",
-    "mcp": "GAP: preview agenda + обычные slides ops после выбора",
-    "import": "planned",
-    "export": "planned",
-    "status": "planned"
+    "mcp": "UI Вставка → Повестка: preview видимых заголовков/разделов до200, редактируемые страницы в начале, atomic insert и undo. Заголовки80/разделы40 знаков, min480×320pt. MCP: обычные slides ops; GAP: dedicated generator tool и runtime acceptance.",
+    "import": "current deck",
+    "export": "ordinary editable slides",
+    "status": "implemented_unverified"
   },
   {
     "id": "PAR-TRI-040",

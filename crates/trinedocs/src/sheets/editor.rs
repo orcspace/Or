@@ -18,6 +18,8 @@ struct State {
     find: String,
     replace: String,
     find_open: bool,
+    passport_open: bool,
+    paste_transpose: bool,
     rename: String,
     ribbon_tab: usize,
     location: String,
@@ -157,6 +159,22 @@ fn toolbar(
                         changed |= clear(book, state);
                     }
                     ui.close();
+                }
+                ui.separator();
+                ui.label("Специальная вставка из внутреннего буфера");
+                ui.checkbox(&mut state.paste_transpose, "Транспонировать");
+                for (label, mode) in [
+                    ("Всё", PasteMode::All),
+                    ("Только значения", PasteMode::Values),
+                    ("Формулы и исходный ввод", PasteMode::Inputs),
+                    ("Только форматы", PasteMode::Formats),
+                ] {
+                    let available = ui.ctx().data(|data| data.get_temp::<SheetClipboard>(clipboard_id()).is_some());
+                    if command_action(ui.add_enabled(available, egui::Button::new(label)), book, state, &mut changed) {
+                        let transpose = state.paste_transpose;
+                        changed |= result(state, paste_special(ui.ctx(), book, mode, transpose));
+                        ui.close();
+                    }
                 }
                 ui.separator();
                 if command_action(
@@ -531,6 +549,9 @@ fn toolbar(
                 ) {
                     book.recalculate();
                     changed = true;
+                }
+                if ui.button("Паспорт формулы").clicked() {
+                    state.passport_open = true;
                 }
             });
         }
@@ -1974,6 +1995,29 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                 }
             });
         });
+    if state.passport_open {
+        let mut open = true;
+        egui::Window::new("Паспорт формулы")
+            .id(state_id.with("formula-passport"))
+            .open(&mut open)
+            .default_width(560.0)
+            .show(ui.ctx(), |ui| {
+                ui.label("Сохранённые значения; пересчёт и изменение книги не выполняются.");
+                match super::formula::explain(book, book.active_id(), book.selection.row, book.selection.col) {
+                    Ok(passport) => {
+                        let report = serde_json::to_string_pretty(&passport).unwrap_or_default();
+                        if ui.button("Копировать отчёт").clicked() {
+                            ui.ctx().copy_text(report.clone());
+                        }
+                        egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                            ui.add(egui::Label::new(egui::RichText::new(report).monospace()).selectable(true));
+                        });
+                    }
+                    Err(error) => { ui.label(error); }
+                }
+            });
+        state.passport_open = open;
+    }
     ui.ctx().data_mut(|d| d.insert_temp(state_id, state));
     changed
 }
@@ -2168,6 +2212,21 @@ fn capture_clipboard(book: &Book, cut: bool) -> Result<SheetClipboard, String> {
         cut,
     })
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PasteMode {
+    All,
+    Values,
+    Inputs,
+    Formats,
+}
+fn value_input(value: &Value) -> String {
+    match value {
+        Value::Empty => String::new(),
+        Value::Number(number) => number.to_string(),
+        Value::Text(text) => format!("'{text}"),
+        Value::Bool(_) | Value::Error(_) => value.display(),
+    }
+}
 fn paste_cells(
     book: &mut Book,
     sheet: u64,
@@ -2175,44 +2234,106 @@ fn paste_cells(
     col: u32,
     clipboard: &SheetClipboard,
 ) -> Result<(), String> {
-    let dr = i64::from(row) - i64::from(clipboard.row);
-    let dc = i64::from(col) - i64::from(clipboard.col);
-    let values: Vec<Vec<String>> = clipboard
-        .cells
-        .iter()
-        .map(|line| {
-            line.iter()
-                .map(|cell| {
-                    cell.as_ref().map_or_else(String::new, |cell| {
-                        if clipboard.cut {
-                            cell.input.clone()
-                        } else {
-                            super::formula::shift_references(&cell.input, dr, dc)
-                        }
-                    })
-                })
-                .collect()
-        })
-        .collect();
-    // Preflight bounds and merged cells on a candidate; a failed paste changes nothing.
-    let mut candidate = book.clone();
-    candidate.set_range(sheet, row, col, &values)?;
-    let target = candidate.sheet_by_id_mut(sheet).ok_or("Лист не найден")?;
-    for (r, line) in clipboard.cells.iter().enumerate() {
-        for (c, original) in line.iter().enumerate() {
-            let key = address(row + r as u32, col + c as u32);
-            if let Some(original) = original {
-                if let Some(cell) = target.cells.get_mut(&key) {
-                    cell.fmt = original.fmt.clone();
-                }
+    paste_cells_with(book, sheet, row, col, clipboard, PasteMode::All, false)
+}
+fn paste_cells_with(
+    book: &mut Book,
+    sheet: u64,
+    row: u32,
+    col: u32,
+    clipboard: &SheetClipboard,
+    mode: PasteMode,
+    transpose: bool,
+) -> Result<(), String> {
+    let source_rows = clipboard.cells.len();
+    let source_cols = clipboard.cells.first().map(Vec::len).unwrap_or(0);
+    if source_rows == 0 || source_cols == 0 { return Ok(()); }
+    if clipboard.cells.iter().any(|line| line.len() != source_cols) {
+        return Err("Недопустимый внутренний буфер".into());
+    }
+    let (rows, cols) = if transpose { (source_cols, source_rows) } else { (source_rows, source_cols) };
+    if u64::from(row) + rows as u64 > u64::from(MAX_ROWS)
+        || u64::from(col) + cols as u64 > u64::from(MAX_COLS)
+        || rows.saturating_mul(cols) > super::model::MAX_RANGE_CELLS
+    {
+        return Err("Вставка выходит за границы листа".into());
+    }
+    let target = book.sheet_by_id(sheet).ok_or("Лист не найден")?;
+    let mut values = Vec::new();
+    for r in 0..rows {
+        let mut line = Vec::new();
+        for c in 0..cols {
+            let (sr, sc) = if transpose { (c, r) } else { (r, c) };
+            let original = clipboard.cells[sr][sc].as_ref();
+            let input = if mode == PasteMode::Formats {
+                target.cell(row+r as u32, col+c as u32).map(|cell| cell.input.clone()).unwrap_or_default()
+            } else if mode == PasteMode::Values {
+                original.map(|cell| value_input(&cell.value)).unwrap_or_default()
             } else {
-                target.cells.remove(&key);
+                original.map(|cell| {
+                    if clipboard.cut { cell.input.clone() }
+                    else {
+                        super::formula::shift_references(
+                            &cell.input,
+                            i64::from(row) + r as i64 - i64::from(clipboard.row) - sr as i64,
+                            i64::from(col) + c as i64 - i64::from(clipboard.col) - sc as i64,
+                        )
+                    }
+                }).unwrap_or_default()
+            };
+            line.push(input);
+        }
+        values.push(line);
+    }
+    let mut candidate = book.clone();
+    if mode == PasteMode::Formats {
+        let range = Range::new(row, col, row+rows as u32-1, col+cols as u32-1);
+        if target.merges.iter().any(|merge| {
+            merge.r0 <= range.r1 && range.r0 <= merge.r1
+                && merge.c0 <= range.c1 && range.c0 <= merge.c1
+                && (rows*cols > 1 || (row,col) != (merge.r0,merge.c0))
+        }) {
+            return Err("Вставка затрагивает объединённые ячейки".into());
+        }
+        for (r,line) in values.iter().enumerate() {
+            for (c,input) in line.iter().enumerate() {
+                candidate.set_input(sheet,row+r as u32,col+c as u32,input)?;
+            }
+        }
+    } else {
+        candidate.set_range(sheet, row, col, &values)?;
+    }
+    if matches!(mode, PasteMode::All | PasteMode::Formats) {
+        let target = candidate.sheet_by_id_mut(sheet).ok_or("Лист не найден")?;
+        for r in 0..rows {
+            for c in 0..cols {
+                let (sr, sc) = if transpose { (c, r) } else { (r, c) };
+                let original = clipboard.cells[sr][sc].as_ref();
+                let key = address(row+r as u32, col+c as u32);
+                if mode == PasteMode::All && original.is_none() {
+                    target.cells.remove(&key);
+                } else if let Some(cell) = target.cells.get_mut(&key) {
+                    cell.fmt = original.map(|cell| cell.fmt.clone()).unwrap_or_default();
+                }
             }
         }
     }
     candidate.validate()?;
     *book = candidate;
     Ok(())
+}
+fn paste_special(
+    ctx: &egui::Context,
+    book: &mut Book,
+    mode: PasteMode,
+    transpose: bool,
+) -> Result<(), String> {
+    let clipboard = ctx.data_mut(|data| data.get_temp::<SheetClipboard>(clipboard_id()))
+        .ok_or("Сначала скопируйте ячейки в TrineDocs")?;
+    paste_cells_with(
+        book, book.active_id(), book.selection.row, book.selection.col,
+        &clipboard, mode, transpose,
+    )
 }
 fn paste_clipboard(
     ctx: &egui::Context,
@@ -3794,5 +3915,51 @@ mod clipboard_review_tests {
             image_texture_id(1, &image),
             image_texture_id(1, &image.clone())
         );
+    }
+}
+#[cfg(test)]
+mod paste_special_tests {
+    use super::*;
+    #[test]
+    fn values_paste_preserves_exact_types_without_copying_formats() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        for (col,input) in ["=1/3", "'001", "TRUE", "=1/0"].iter().enumerate() {
+            book.set_input(id, 0, col as u32, input)?;
+        }
+        book.set_format(id, Range::new(0,0,0,0), CellFormat { number:"0.00".into(), ..CellFormat::default() })?;
+        book.recalculate();
+        book.selection = Selection { anchor_col:3, ..Selection::default() };
+        let clipboard = capture_clipboard(&book, false)?;
+        paste_cells_with(&mut book, id, 2, 0, &clipboard, PasteMode::Values, false)?;
+        let sheet = book.active_sheet().ok_or("sheet")?;
+        for col in 0..4 {
+            assert_eq!(sheet.cell(0,col).map(|c| &c.value), sheet.cell(2,col).map(|c| &c.value));
+        }
+        assert_eq!(sheet.cell(2,0).ok_or("pasted")?.fmt.number, CellFormat::default().number);
+        assert!(!sheet.cell(2,0).ok_or("pasted")?.input.starts_with('='));
+        Ok(())
+    }
+    #[test]
+    fn transposed_inputs_use_each_source_coordinate_and_formats_keep_values() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.set_input(id, 0, 0, "=C1")?;
+        book.set_input(id, 0, 1, "=D1")?;
+        book.set_format(id, Range::new(0,0,0,0), CellFormat { bold:true, ..CellFormat::default() })?;
+        book.selection = Selection { anchor_col:1, ..Selection::default() };
+        let clipboard = capture_clipboard(&book, false)?;
+        paste_cells_with(&mut book, id, 2, 0, &clipboard, PasteMode::Inputs, true)?;
+        assert_eq!(book.active_sheet().and_then(|s| s.cell(2,0)).map(|c| c.input.as_str()), Some("=C3"));
+        assert_eq!(book.active_sheet().and_then(|s| s.cell(3,0)).map(|c| c.input.as_str()), Some("=C4"));
+        book.set_input(id, 5, 0, "keep")?;
+        paste_cells_with(&mut book, id, 5, 0, &clipboard, PasteMode::Formats, false)?;
+        let cell = book.active_sheet().and_then(|s| s.cell(5,0)).ok_or("cell")?;
+        assert_eq!(cell.input, "keep");
+        assert!(cell.fmt.bold);
+        let before = book.clone();
+        assert!(paste_cells_with(&mut book, id, MAX_ROWS-1, 0, &clipboard, PasteMode::Values, true).is_err());
+        assert_eq!(book, before);
+        Ok(())
     }
 }

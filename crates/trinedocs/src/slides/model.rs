@@ -908,6 +908,82 @@ impl Deck {
         }
         Ok(())
     }
+    pub fn agenda_entries(&self) -> Result<Vec<String>, String> {
+        let visible: Vec<_> = self.slides.iter().filter(|slide| !slide.hidden).collect();
+        if visible.is_empty() || visible.len() > 200 {
+            return Err("Повестка поддерживает от 1 до 200 видимых слайдов".into());
+        }
+        Ok(visible.into_iter().enumerate().map(|(index, slide)| {
+            let title = slide.elements.iter()
+                .filter(|e| matches!(e.kind, ElementKind::Text) && !e.text.trim().is_empty())
+                .max_by(|a,b| a.font_size.total_cmp(&b.font_size).then_with(|| b.y.total_cmp(&a.y)))
+                .map(|e| e.text.as_str()).unwrap_or(&slide.title);
+            let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+            let title = if title.chars().count() > 80 {
+                format!("{}…", title.chars().take(80).collect::<String>())
+            } else { title };
+            let section = slide.section.split_whitespace().collect::<Vec<_>>().join(" ");
+            let section: String = section.chars().take(40).collect();
+            format!("{}. {}{}", index+1,
+                if section.is_empty() { String::new() } else { format!("{section} — ") },
+                title)
+        }).collect())
+    }
+    pub fn insert_agenda(&mut self) -> Result<Vec<u64>, String> {
+        if self.width < 480.0 || self.height < 320.0 {
+            return Err("Для повестки нужен слайд не меньше 480 × 320 pt".into());
+        }
+        let entries = self.agenda_entries()?;
+        let mut body = Element {
+            x: 60.0, y: 112.0, w: self.width-120.0, h: self.height-152.0,
+            font_size: 18.0, font: self.theme.font.clone(), color: self.theme.foreground,
+            ..Element::default()
+        };
+        let mut pages = Vec::new();
+        let mut chunk = String::new();
+        for entry in entries {
+            let proposed = if chunk.is_empty() { entry.clone() } else { format!("{chunk}\n{entry}") };
+            body.text = proposed.clone();
+            if text_lines(&body).len() as f32 * body.font_size * 1.2 + 10.0 > body.h {
+                if chunk.is_empty() {
+                    return Err("Заголовок повестки не помещается: увеличьте размер слайда".into());
+                }
+                pages.push(chunk);
+                chunk = entry;
+                body.text = chunk.clone();
+                if text_lines(&body).len() as f32 * body.font_size * 1.2 + 10.0 > body.h {
+                    return Err("Заголовок повестки не помещается: увеличьте размер слайда".into());
+                }
+            } else { chunk = proposed; }
+        }
+        if !chunk.is_empty() { pages.push(chunk); }
+        let mut candidate = self.clone();
+        let mut ids = Vec::new();
+        let total = pages.len();
+        for (index, text) in pages.into_iter().enumerate() {
+            let id = candidate.add_slide("blank");
+            let title = candidate.add_element(id, ElementKind::Text)?;
+            let title_text = if total == 1 { "Повестка".into() } else { format!("Повестка · {}/{total}", index+1) };
+            let font = candidate.theme.font.clone();
+            if let Some(element) = candidate.slide_mut(id).and_then(|s| s.element_mut(title)) {
+                element.x = 60.0; element.y = 40.0; element.w = body.w; element.h = 56.0;
+                element.text = title_text.clone(); element.font_size = 28.0;
+                element.bold = true; element.font = font;
+            }
+            let content = candidate.add_element(id, ElementKind::Text)?;
+            if let Some(element) = candidate.slide_mut(id).and_then(|s| s.element_mut(content)) {
+                let own_id = element.id;
+                *element = body.clone();
+                element.id = own_id; element.text = text;
+            }
+            candidate.slide_mut(id).ok_or("Слайд не найден")?.title = title_text;
+            candidate.move_slide(id, index)?;
+            ids.push(id);
+        }
+        candidate.validate()?;
+        *self = candidate;
+        Ok(ids)
+    }
     pub fn pages(&self) -> Vec<crate::render::Page> {
         self.slides
             .iter()
@@ -1672,6 +1748,37 @@ mod hidden_export_tests {
             );
         }
         assert_eq!(deck.page(&deck.slides[1]).items.len(), 1);
+        Ok(())
+    }
+}
+#[cfg(test)]
+mod agenda_tests {
+    use super::*;
+    #[test]
+    fn agenda_skips_hidden_slides_and_inserts_editable_pages_atomically() -> Result<(), String> {
+        let mut deck = Deck::empty();
+        let first = deck.add_slide("blank");
+        deck.slide_mut(first).ok_or("first")?.title = "First".into();
+        let hidden = deck.add_slide("blank");
+        deck.slide_mut(hidden).ok_or("hidden")?.title = "Secret".into();
+        deck.slide_mut(hidden).ok_or("hidden")?.hidden = true;
+        let last = deck.add_slide("blank");
+        deck.slide_mut(last).ok_or("last")?.title = "Last".into();
+        deck.slide_mut(last).ok_or("last")?.section = "Part".into();
+        let entries = deck.agenda_entries()?;
+        assert_eq!(entries, vec!["1. First", "2. Part — Last"]);
+        let original_ids = deck.slides.iter().map(|s| s.id).collect::<Vec<_>>();
+        let ids = deck.insert_agenda()?;
+        assert!(!ids.is_empty());
+        assert_eq!(deck.slides[0].id, ids[0]);
+        assert_eq!(deck.slides[ids.len()..].iter().map(|s| s.id).collect::<Vec<_>>(), original_ids);
+        assert!(deck.slides[0].elements.iter().any(|e| e.text.contains("First")));
+        deck.validate()?;
+        let mut small = Deck::default();
+        small.width = 100.0;
+        let before = small.clone();
+        assert!(small.insert_agenda().is_err());
+        assert_eq!(small, before);
         Ok(())
     }
 }
