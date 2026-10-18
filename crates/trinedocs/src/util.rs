@@ -245,3 +245,15 @@ mod tests {
         Ok(())
     }
 }
+
+/// Applies an affine luminance transform while keeping hue and saturation.
+pub fn adjust_rgb_luminance(rgb: [u8;3],multiplier: f64,offset: f64) -> [u8;3] {
+    let [r,g,b]=rgb.map(|channel|f64::from(channel)/255.0);
+    let high=r.max(g).max(b);let low=r.min(g).min(b);
+    let light=(high+low)/2.0;let next=(light*multiplier+offset).clamp(0.0,1.0);
+    let delta=high-low;
+    if delta<=f64::EPSILON {return [(next*255.0).round() as u8;3];}
+    let saturation=delta/(1.0-(2.0*light-1.0).abs());
+    let chroma=(1.0-(2.0*next-1.0).abs())*saturation;let shift=next-chroma/2.0;
+    [r,g,b].map(|channel|(((channel-low)/delta*chroma+shift)*255.0).round().clamp(0.0,255.0) as u8)
+}

@@ -354,7 +354,7 @@ fn apply_rpr(format: &mut TextFormat, node: &Node) {
     }
     if let Some(value) = node.child("color").and_then(Node::value) {
         if value == "auto" {
-            format.color = TextFormat::default().color;
+            format.color = [0,0,0];
         } else if let Some(rgb) = color(value) {
             format.color = rgb;
         }
@@ -374,13 +374,7 @@ fn apply_rpr(format: &mut TextFormat, node: &Node) {
             _ => 0,
         };
     }
-    if let Some(n) = node
-        .child("shd")
-        .and_then(|n| n.attr("fill"))
-        .and_then(color)
-    {
-        format.highlight = Some(n);
-    }
+    if let Some(shading)=node.child("shd") {format.highlight=word_shading(shading);}
     if let Some(n) = node.child("highlight").and_then(Node::value) {
         format.highlight = match n {
             "none" => None,
@@ -580,7 +574,8 @@ fn paragraph(
     // Word layers a table style between the document defaults and the paragraph style,
     // which is why "Table Grid" cells have no spacing after paragraphs.
     let mut chain = table_style.to_vec();
-    style_chain(styles, style, &mut chain)?;
+    let effective=if styles.contains_key(style) {style}else{defaults.normal};
+    style_chain(styles,effective,&mut chain)?;
     for n in chain {
         if let Some(rpr) = n.child("rPr") {
             apply_style_rpr(&mut format, rpr);
@@ -727,10 +722,14 @@ fn resolve_part(target: &str) -> Option<String> {
     Some(components.join("/"))
 }
 fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
-    let parts = read_zip(bytes)?;
-    let root = xml(parts
+    let mut parts = read_zip(bytes)?;
+    normalize_docx_parts(&mut parts)?;
+    let theme=parts.get("word/theme/theme1.xml").map(|bytes|xml(bytes)).transpose()?
+        .map(|node|WordTheme::read(&node)).unwrap_or_default();
+    let mut root = xml(parts
         .get("word/document.xml")
         .ok_or("В DOCX отсутствует word/document.xml")?)?;
+    theme.apply(&mut root);
     let body = root
         .child("body")
         .ok_or("В DOCX отсутствует тело документа")?;
@@ -754,7 +753,8 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
         ..Paragraph::default()
     };
     if let Some(bytes) = parts.get("word/styles.xml") {
-        let node = xml(bytes)?;
+        let mut node = xml(bytes)?;
+        theme.apply(&mut node);
         if let Some(n) = node.descendant("rPrDefault").and_then(|n| n.child("rPr")) {
             apply_rpr(&mut default_format, n);
         }
@@ -915,29 +915,28 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
                 let id = doc.alloc_id();
                 let tbl_pr = node.child("tblPr");
                 let mut chain = Vec::new();
-                if let Some(style) = tbl_pr
-                    .and_then(|n| n.child("tblStyle"))
-                    .and_then(Node::value)
-                {
-                    style_chain(&styles, style, &mut chain)?;
-                }
+                let table_style=tbl_pr.and_then(|node|node.child("tblStyle")).and_then(Node::value)
+                    .or_else(||styles.iter().find(|(_,node)|node.attr("type")==Some("table")
+                        && matches!(node.attr("default"),Some("1"|"true"))).map(|(id,_)|id.as_str()));
+                if let Some(style)=table_style {style_chain(&styles,style,&mut chain)?;}
                 let mut rows = Vec::new();
                 let mut row_heights = Vec::new();
+                let mut row_blocks=Vec::new();
+                body_blocks(&node.children,&mut row_blocks,0);
+                let row_nodes=row_blocks.into_iter().filter(|n|n.name=="tr").collect::<Vec<_>>();
                 // Leading rows marked as headers repeat on every page.
-                let header_rows = node
-                    .children
-                    .iter()
-                    .filter(|n| n.name == "tr")
+                let header_rows = row_nodes.iter().copied()
                     .take_while(|tr| {
                         tr.child("trPr")
                             .and_then(|n| bool_prop(n, "tblHeader"))
                             .unwrap_or(false)
                     })
                     .count();
-                if node.children.iter().filter(|n| n.name == "tr").count() > 10000 {
+                if row_nodes.len() > 10000 {
                     return Err("Таблица DOCX превышает 10 000 строк".into());
                 }
-                for tr in node.children.iter().filter(|n| n.name == "tr") {
+                let mut cell_nodes_by_row=Vec::new();
+                for tr in &row_nodes {
                     row_heights.push(
                         tr.child("trPr")
                             .and_then(|n| n.child("trHeight"))
@@ -946,10 +945,12 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
                             .unwrap_or_default(),
                     );
                     let mut cells = Vec::new();
-                    if tr.children.iter().filter(|n| n.name == "tc").count() > 256 {
+                    let mut cell_blocks=Vec::new();body_blocks(&tr.children,&mut cell_blocks,0);
+                    let cell_nodes=cell_blocks.into_iter().filter(|n|n.name=="tc").collect::<Vec<_>>();
+                    if cell_nodes.len() > 256 {
                         return Err("Таблица DOCX превышает 256 столбцов".into());
                     }
-                    for tc in tr.children.iter().filter(|n| n.name == "tc") {
+                    for tc in &cell_nodes {
                         if tc.descendant("drawing").is_some() {
                             doc.losses
                                 .push("Рисунки внутри ячеек таблицы не импортированы.".into());
@@ -975,11 +976,10 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
                             });
                         }
                         let tc_pr = tc.child("tcPr");
-                        let fill = tc_pr
-                            .and_then(|n| n.child("shd"))
-                            .and_then(|n| n.attr("fill"))
-                            .and_then(color)
-                            .unwrap_or([255, 255, 255]);
+                        let mut fill=[255,255,255];
+                        for properties in chain.iter().filter_map(|style|style.child("tcPr")).chain(tc_pr) {
+                            if let Some(shading)=properties.child("shd") {fill=word_shading(shading).unwrap_or([255,255,255]);}
+                        }
                         let mut cell = Cell::new(cell_id, paragraphs, fill);
                         cell.span = number(
                             tc_pr
@@ -1000,8 +1000,9 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
                         cells.push(cell);
                     }
                     rows.push(cells);
+                    cell_nodes_by_row.push(cell_nodes);
                 }
-                let widths: Vec<f32> = node
+                let mut widths: Vec<f32> = node
                     .child("tblGrid")
                     .map(|g| {
                         g.children
@@ -1011,6 +1012,28 @@ fn read_docx(bytes: &[u8]) -> Result<Doc, String> {
                             .collect()
                     })
                     .unwrap_or_default();
+                if widths.is_empty() {
+                    let columns=rows.iter().map(|row|row.iter().map(Cell::span).sum::<usize>()).max().unwrap_or(0);
+                    let mut inferred=vec![None;columns];
+                    for (cells,nodes) in rows.iter().zip(&cell_nodes_by_row) {
+                        let mut column=0;
+                        for (cell,node) in cells.iter().zip(nodes) {
+                            if let Some(width)=node.child("tcPr").and_then(|n|n.child("tcW"))
+                                .filter(|n|matches!(n.attr("type"),None|Some("dxa")))
+                                .and_then(|n|n.attr("w")).and_then(|v|v.parse::<f32>().ok())
+                                .filter(|v|v.is_finite() && *v>0.0) {
+                                for slot in inferred.iter_mut().skip(column).take(cell.span()) {
+                                    if slot.is_none() {*slot=Some((width/20.0/cell.span() as f32).clamp(1.0,2000.0));}
+                                }
+                            }
+                            column+=cell.span();
+                        }
+                    }
+                    if inferred.iter().any(Option::is_some) {
+                        let fallback=(doc.page.width-doc.page.margin_left-doc.page.margin_right)/columns.max(1) as f32;
+                        widths=inferred.into_iter().map(|width|width.unwrap_or(fallback).clamp(1.0,2000.0)).collect();
+                    }
+                }
                 // Borders come from the table itself, its style, or the cells; Word's plain
                 // table has none, so a table without any of them stays borderless.
                 let own = tbl_pr.and_then(|n| n.child("tblBorders"));
@@ -2051,12 +2074,14 @@ fn write_markdown(doc: &Doc) -> String {
 }
 
 fn css_points(value: &str, fallback: f32) -> f32 {
-    let value = value.trim();
-    let factor = if value.ends_with("px") { 0.75 } else { 1.0 };
-    number(
-        Some(value.trim_end_matches("pt").trim_end_matches("px")),
-        fallback / factor,
-    ) * factor
+    let value=value.trim().to_ascii_lowercase();
+    let (digits,factor)=["px","pt","in","cm","mm","pc","q"].into_iter().find_map(|unit| {
+        value.strip_suffix(unit).map(|digits|(digits,match unit {
+            "px"=>0.75,"in"=>72.0,"cm"=>72.0/2.54,"mm"=>72.0/25.4,
+            "pc"=>12.0,"q"=>72.0/101.6,_=>1.0
+        }))
+    }).unwrap_or((&value,1.0));
+    number(Some(digits),fallback/factor)*factor
 }
 fn safe_html_link(value: &str) -> bool {
     let scheme = value.split_once(':').map(|(scheme, _)| {
@@ -2246,16 +2271,17 @@ fn normalize_html_names(node: &mut Node) {
 
 fn read_html(text: &str) -> Result<Doc, String> {
     // HTML is imported as data only; scripts, CSS imports and network images are never executed.
-    let mut clean = text
-        .replace("&nbsp;", "&#160;")
-        .replace("<br>", "<br/>")
-        .replace("<BR>", "<br/>");
-    if let Some(start) = clean.find("<!DOCTYPE").or_else(|| clean.find("<!doctype"))
+    let mut clean=normalize_html_voids(&normalize_html_entities(text));
+    if let Some(start) = clean.to_ascii_lowercase().find("<!doctype")
         && let Some(end) = clean.get(start..).and_then(|s| s.find('>'))
     {
         clean.replace_range(start..=start + end, "");
     }
-    let mut node = xml(clean.as_bytes()).or_else(|_| {
+    if clean.trim_start().starts_with("<?xml") && let Some(end)=clean.find("?>") {
+        clean.replace_range(..end+2,"");
+    }
+    let wrapped=format!("<trinedocs-html-root>{clean}</trinedocs-html-root>");
+    let mut node = xml(wrapped.as_bytes()).or_else(|_| {
         let plain = fallback_html_text(text);
         let plain = quick_xml::escape::unescape(&plain)
             .map_err(|e| e.to_string())?
@@ -2268,7 +2294,7 @@ fn read_html(text: &str) -> Result<Doc, String> {
     })?;
     let mut doc = Doc::default();
     doc.paragraphs.clear();
-    fn walk(node: &Node, doc: &mut Doc, inherited_css: &str, list: Option<List>) {
+    fn walk(node: &Node, doc: &mut Doc, inherited_css: &str, list: Option<(List,u8)>) {
         if html_hidden(node) || matches!(node.name.as_str(), "script" | "style" | "head") {
             return;
         }
@@ -2288,11 +2314,11 @@ fn read_html(text: &str) -> Result<Doc, String> {
             }
             return;
         }
-        let css = format!("{inherited_css};{}", node.attr("style").unwrap_or_default());
-        let list = match node.name.as_str() {
-            "ol" => Some(List::Number),
-            "ul" => Some(List::Bullet),
-            _ => list,
+        let css=merge_html_css(inherited_css,node.attr("style").unwrap_or_default());
+        let list=match node.name.as_str() {
+            "ol"|"ul"=>Some((if node.name=="ol" {List::Number}else{List::Bullet},
+                list.map(|(_,depth)|depth.saturating_add(1).min(8)).unwrap_or(0))),
+            _=>list,
         };
         let block = matches!(
             node.name.as_str(),
@@ -2321,33 +2347,35 @@ fn read_html(text: &str) -> Result<Doc, String> {
                     _ => {}
                 }
                 if let Some(css) = n.attr("style") {
-                    for declaration in css.split(';') {
-                        if let Some((key, value)) = declaration.split_once(':') {
-                            match key.trim() {
-                                "font-size" => fmt.size = css_points(value, 11.0),
+                    for (key,value) in css_declarations(css) {
+                            let lower=value.to_ascii_lowercase();
+                            match key.as_str() {
+                                "font-size" => fmt.size = css_points(&value, fmt.size),
                                 "font-family" => {
-                                    fmt.font =
-                                        value.trim().trim_matches('\'').trim_matches('"').into()
+                                    if let Some(family)=css_font_family(&value) {fmt.font=family;}
                                 }
                                 "color" => {
-                                    if let Some(c) = color(value.trim().trim_start_matches('#')) {
+                                    if let Some(c) = css_color(&value) {
                                         fmt.color = c;
                                     }
                                 }
                                 "background-color" => {
-                                    fmt.highlight = color(value.trim().trim_start_matches('#'))
+                                    if lower.trim()=="transparent" || lower.trim()=="initial" {fmt.highlight=None;}
+                                    else if let Some(color)=css_color(&value) {fmt.highlight=Some(color);}
                                 }
                                 "font-weight" => {
-                                    fmt.bold = value.trim() == "bold" || value.trim() == "700"
+                                    fmt.bold=match lower.trim() {
+                                        "bold"|"bolder"=>true,"normal"|"lighter"=>false,
+                                        value=>value.parse::<u16>().ok().filter(|weight|(1..=1000).contains(weight)).map(|weight|weight>=600).unwrap_or(fmt.bold)
+                                    };
                                 }
-                                "font-style" => fmt.italic = value.trim() == "italic",
+                                "font-style" => fmt.italic=matches!(lower.trim(),"italic"|"oblique"),
                                 "text-decoration" => {
-                                    fmt.underline = value.contains("underline");
-                                    fmt.strike = value.contains("line-through");
+                                    fmt.underline = lower.contains("underline");
+                                    fmt.strike = lower.contains("line-through");
                                 }
                                 _ => {}
                             }
-                        }
                     }
                 }
                 if !n.text.is_empty() {
@@ -2387,36 +2415,36 @@ fn read_html(text: &str) -> Result<Doc, String> {
             styled.attrs.insert("style".into(), css.clone());
             runs(&styled, &default_format, &mut p.runs);
             if node.name == "li" {
-                p.list = list.unwrap_or(List::Bullet);
+                p.list=list.map(|(kind,_)|kind).unwrap_or(List::Bullet);
+                p.list_level=list.map(|(_,depth)|depth).unwrap_or(0);
             }
-            for declaration in css.split(';') {
-                if let Some((key, value)) = declaration.split_once(':') {
-                    match key.trim() {
+            for (key,value) in css_declarations(&css) {
+                    let lower=value.to_ascii_lowercase();
+                    match key.as_str() {
                         "text-align" => {
-                            p.align = match value.trim() {
+                            p.align = match lower.trim() {
                                 "center" => Align::Center,
                                 "right" => Align::Right,
                                 "justify" => Align::Justify,
                                 _ => Align::Left,
                             }
                         }
-                        "margin-left" => p.indent = css_points(value, 0.0),
-                        "margin-top" => p.spacing_before=css_points(value,0.0),
-                        "margin-bottom" => p.spacing_after=css_points(value,0.0),
-                        "text-indent" => p.first_indent=css_points(value,0.0),
-                        "break-before" | "page-break-before" => p.page_break_before=value.trim()=="page" || value.trim()=="always",
-                        "break-after" | "page-break-after" => p.keep_next=value.trim()=="avoid",
-                        "break-inside" | "page-break-inside" => p.keep_lines=value.trim()=="avoid",
-                        "widows" => p.widow_control=value.trim()!="1",
+                        "margin-left" => p.indent = css_points(&value, 0.0),
+                        "margin-top" => p.spacing_before=css_points(&value,0.0),
+                        "margin-bottom" => p.spacing_after=css_points(&value,0.0),
+                        "text-indent" => p.first_indent=css_points(&value,0.0),
+                        "break-before" | "page-break-before" => p.page_break_before=lower.trim()=="page" || lower.trim()=="always",
+                        "break-after" | "page-break-after" => p.keep_next=lower.trim()=="avoid",
+                        "break-inside" | "page-break-inside" => p.keep_lines=lower.trim()=="avoid",
+                        "widows" => p.widow_control=lower.trim()!="1",
                         "line-height" => {
-                            if value.trim().ends_with("pt") || value.trim().ends_with("px") {
-                                p.line_points=css_points(value,0.0);
+                            if ["pt","px","in","cm","mm","pc","q"].iter().any(|unit|lower.trim().ends_with(unit)) {
+                                p.line_points=css_points(&value,0.0);
                                 p.line_exact=true;
                             } else { p.line_spacing=number(Some(value.trim()),1.28).clamp(0.5,5.0); }
                         }
                         _ => {}
                     }
-                }
             }
             if let Some(level)=node.attr("data-trinedocs-list-level").and_then(|v|v.parse::<u8>().ok()).filter(|v|*v<=8) {
                 p.list_level=level;
@@ -2428,6 +2456,12 @@ fn read_html(text: &str) -> Result<Doc, String> {
             if let Some(exact)=node.attr("data-trinedocs-line-exact") {p.line_exact=exact=="true";}
             p.normalize();
             doc.paragraphs.push(p);
+            fn inline_images(node: &Node,doc: &mut Doc,css: &str,list: Option<(List,u8)>) {
+                if html_hidden(node) || matches!(node.name.as_str(),"script"|"style"|"ul"|"ol") {return;}
+                if node.name=="img" {walk(node,doc,css,list);}
+                else {for child in &node.children {inline_images(child,doc,css,list);}}
+            }
+            for child in &node.children {inline_images(child,doc,&css,list);}
             for child in node
                 .children
                 .iter()
@@ -3957,5 +3991,443 @@ mod text_export_defect_tests {
         doc.paragraphs[0].runs[0].format.link=Some("https://example.org/a".into());
         assert!(write_markdown(&doc).contains("[visible](https://example.org/a)"));
         Ok(())
+    }
+}
+
+fn css_declarations(css: &str) -> Vec<(String,String)> {
+    let mut chunks=Vec::new();
+    let (mut start,mut quote,mut escape)=(0,None,false);
+    for (index,ch) in css.char_indices() {
+        if escape {escape=false;continue;}
+        if ch=='\\' {escape=true;continue;}
+        if let Some(open)=quote {if ch==open {quote=None;}continue;}
+        if matches!(ch,'\''|'"') {quote=Some(ch);}
+        else if ch==';' {chunks.push(&css[start..index]);start=index+1;}
+    }
+    chunks.push(&css[start..]);
+    let mut result:Vec<(String,String,bool)>=Vec::new();
+    for chunk in chunks {
+        let Some((key,value))=chunk.split_once(':') else {continue;};
+        let key=key.trim().to_ascii_lowercase();
+        let (value,important)=match value.rsplit_once('!') {
+            Some((value,tail)) if tail.trim().eq_ignore_ascii_case("important")=>(value.trim(),true),
+            _=>(value.trim(),false),
+        };
+        if let Some((_,old,priority))=result.iter_mut().find(|(name,_,_)|*name==key) {
+            if !*priority || important {*old=value.into();*priority=important;}
+        } else {result.push((key,value.into(),important));}
+    }
+    result.into_iter().map(|(key,value,_)|(key,value)).collect()
+}
+fn merge_html_css(parent: &str,child: &str) -> String {
+    let mut values=css_declarations(parent);
+    for (key,value) in css_declarations(child) {
+        if let Some((_,old))=values.iter_mut().find(|(name,_)|*name==key) {*old=value;}
+        else {values.push((key,value));}
+    }
+    values.into_iter().map(|(key,value)|format!("{key}:{value}")).collect::<Vec<_>>().join(";")
+}
+fn css_font_family(value: &str) -> Option<String> {
+    let (mut quote,mut escaped,mut end)=(None,false,value.len());
+    for (index,ch) in value.char_indices() {
+        if escaped {escaped=false;continue;}
+        if ch=='\\' {escaped=true;continue;}
+        if let Some(open)=quote {if ch==open {quote=None;}continue;}
+        if matches!(ch,'\''|'"') {quote=Some(ch);}
+        else if ch==',' {end=index;break;}
+    }
+    let first=value[..end].trim();
+    let first=if first.starts_with('"') && first.ends_with('"')
+        || first.starts_with('\'') && first.ends_with('\'') {first.get(1..first.len().saturating_sub(1))?} else {first};
+    let mut result=String::new();let mut chars=first.chars();
+    while let Some(ch)=chars.next() {
+        if ch=='\\' {result.push(chars.next()?);}else{result.push(ch);}
+    }
+    (!result.is_empty()).then_some(result)
+}
+fn css_color(value: &str) -> Option<[u8;3]> {
+    let value=value.trim().to_ascii_lowercase();
+    if let Some(hex)=value.strip_prefix('#') {
+        if hex.len()==3 && hex.is_ascii() {
+            return color(&hex.chars().flat_map(|ch|[ch,ch]).collect::<String>());
+        }
+        return color(hex);
+    }
+    if let Some(body)=value.strip_prefix("rgb(").and_then(|body|body.strip_suffix(')')) {
+        let parts=body.split(',').map(str::trim).collect::<Vec<_>>();
+        if parts.len()!=3 {return None;}
+        let mut rgb=[0u8;3];
+        for (slot,part) in rgb.iter_mut().zip(parts) {
+            let number=if let Some(percent)=part.strip_suffix('%') {
+                percent.parse::<f64>().ok()?*255.0/100.0
+            } else {part.parse::<f64>().ok()?};
+            if !number.is_finite() {return None;}
+            *slot=number.round().clamp(0.0,255.0) as u8;
+        }
+        return Some(rgb);
+    }
+    Some(match value.as_str() {
+        "black"=>[0,0,0],"silver"=>[192,192,192],"gray"|"grey"=>[128,128,128],
+        "white"=>[255,255,255],"maroon"=>[128,0,0],"red"=>[255,0,0],"purple"=>[128,0,128],
+        "fuchsia"|"magenta"=>[255,0,255],"green"=>[0,128,0],"lime"=>[0,255,0],
+        "olive"=>[128,128,0],"yellow"=>[255,255,0],"navy"=>[0,0,128],
+        "blue"=>[0,0,255],"teal"=>[0,128,128],"aqua"|"cyan"=>[0,255,255],
+        "orange"=>[255,165,0],"rebeccapurple"=>[102,51,153],_=>return None,
+    })
+}
+fn normalize_html_entities(text: &str) -> String {
+    let mut out=String::with_capacity(text.len());let mut rest=text;
+    while let Some(index)=rest.find('&') {
+        let special=[("<!--","-->"),("<![CDATA[","]]>")].into_iter()
+            .filter_map(|(open,close)|rest.find(open).map(|start|(start,close)))
+            .filter(|(start,_)|*start<index).min_by_key(|(start,_)|*start);
+        if let Some((start,close))=special {
+            let end=rest[start..].find(close).map(|end|start+end+close.len()).unwrap_or(rest.len());
+            out.push_str(&rest[..end]);rest=&rest[end..];continue;
+        }
+        out.push_str(&rest[..index]);rest=&rest[index..];
+        let end=rest.find(';').filter(|end|*end<=32);
+        let Some(end)=end else {out.push_str("&amp;");rest=&rest[1..];continue;};
+        let name=&rest[1..end];
+        if name.is_empty() || !name.chars().all(|ch|ch.is_ascii_alphanumeric() || ch=='#') {
+            out.push_str("&amp;");rest=&rest[1..];continue;
+        }
+        let decoded=match name {
+            "nbsp"=>Some(160),"copy"=>Some(169),"reg"=>Some(174),"trade"=>Some(8482),
+            "euro"=>Some(8364),"pound"=>Some(163),"yen"=>Some(165),"cent"=>Some(162),
+            "ndash"=>Some(8211),"mdash"=>Some(8212),"hellip"=>Some(8230),"laquo"=>Some(171),"raquo"=>Some(187),
+            "lsquo"=>Some(8216),"rsquo"=>Some(8217),"ldquo"=>Some(8220),"rdquo"=>Some(8221),
+            "bull"=>Some(8226),"middot"=>Some(183),"times"=>Some(215),"divide"=>Some(247),
+            "minus"=>Some(8722),"deg"=>Some(176),"plusmn"=>Some(177),"sup2"=>Some(178),"sup3"=>Some(179),
+            _=>None,
+        };
+        if let Some(code)=decoded {out.push_str(&format!("&#{code};"));}
+        else if matches!(name,"amp"|"lt"|"gt"|"quot"|"apos") || name.starts_with('#') {out.push_str(&rest[..=end]);}
+        else {out.push_str("&amp;");out.push_str(&rest[1..=end]);}
+        rest=&rest[end+1..];
+    }
+    out.push_str(rest);out
+}
+fn normalize_html_voids(text: &str) -> String {
+    let mut out=String::with_capacity(text.len());let mut offset=0;
+    while offset<text.len() {
+        let rest=&text[offset..];
+        if !rest.starts_with('<') {
+            let len=rest.find('<').unwrap_or(rest.len());out.push_str(&rest[..len]);offset+=len;continue;
+        }
+        if rest.starts_with("<!--") || rest.starts_with("<![CDATA[") {
+            let close=if rest.starts_with("<!--") {"-->"}else{"]]>"};
+            let len=rest.find(close).map(|end|end+close.len()).unwrap_or(rest.len());
+            out.push_str(&rest[..len]);offset+=len;continue;
+        }
+        let (mut quote,mut end)=(None,None);
+        for (index,ch) in rest.char_indices().skip(1) {
+            if let Some(open)=quote {if ch==open {quote=None;}continue;}
+            if matches!(ch,'\''|'"') {quote=Some(ch);}else if ch=='>' {end=Some(index);break;}
+        }
+        let Some(end)=end else {out.push_str(rest);break;};
+        let tag=&rest[..=end];
+        let name=tag[1..].trim_start().trim_start_matches('/').split(|ch:char|ch.is_ascii_whitespace() || matches!(ch,'/'|'>'))
+            .next().unwrap_or("").to_ascii_lowercase();
+        let void=matches!(name.as_str(),"area"|"base"|"br"|"col"|"embed"|"hr"|"img"|"input"|"link"|"meta"|"param"|"source"|"track"|"wbr");
+        if void && !tag.starts_with("</") && !tag[..tag.len()-1].trim_end().ends_with('/') {
+            out.push_str(&tag[..tag.len()-1]);out.push_str("/>");
+        } else if !void || !tag.starts_with("</") {out.push_str(tag);}
+        offset+=end+1;
+    }
+    out
+}
+
+#[cfg(test)]
+mod additional_html_defect_tests {
+    use super::*;
+    fn html(source: &str) -> Result<Doc,String> {read(source.as_bytes(),"html")}
+    fn first(doc: &Doc) -> Result<&TextFormat,String> {
+        doc.paragraphs.first().and_then(|p|p.runs.iter().find(|r|!r.text.is_empty()))
+            .map(|r|&r.format).ok_or_else(||"run".into())
+    }
+    #[test]
+    fn quoted_css_separators_cannot_create_other_properties() -> Result<(),String> {
+        let doc=html(r#"<p style="font-family:'A; color:red; B';color:blue">text</p>"#)?;
+        let format=first(&doc)?;
+        assert_eq!(format.font,"A; color:red; B");
+        assert_eq!(format.color,[0,0,255]);
+        Ok(())
+    }
+    #[test]
+    fn html_css_properties_and_keywords_are_case_insensitive() -> Result<(),String> {
+        let doc=html(r#"<p style="TEXT-ALIGN:RIGHT"><span style="FONT-STYLE:ITALIC;COLOR:RED">text</span></p>"#)?;
+        assert_eq!(doc.paragraphs[0].align,Align::Right);
+        assert!(first(&doc)?.italic);assert_eq!(first(&doc)?.color,[255,0,0]);
+        Ok(())
+    }
+    #[test]
+    fn important_css_wins_locally_but_does_not_block_child_overrides() -> Result<(),String> {
+        let doc=html(r#"<div style="font-weight:bold!important"><p style="font-weight:normal;color:red!important;color:blue">text</p></div>"#)?;
+        assert!(!first(&doc)?.bold);assert_eq!(first(&doc)?.color,[255,0,0]);Ok(())
+    }
+    #[test]
+    fn html_colors_support_short_hex_rgb_percentages_and_names() -> Result<(),String> {
+        for (source,color) in [("#abc",[170,187,204]),("rgb(12,34,56)",[12,34,56]),
+            ("rgb(100%,0%,50%)",[255,0,128]),("navy",[0,0,128])] {
+            let doc=html(&format!("<p style=\"color:{source}\">text</p>"))?;
+            assert_eq!(first(&doc)?.color,color);
+        }
+        Ok(())
+    }
+    #[test]
+    fn html_absolute_length_units_are_converted_to_points() -> Result<(),String> {
+        for (value,expected) in [("1in",72.0),("2.54cm",72.0),("25.4mm",72.0),("2pc",24.0)] {
+            let doc=html(&format!("<p style=\"font-size:{value}\">text</p>"))?;
+            assert!((first(&doc)?.size-expected).abs()<0.01);
+        }Ok(())
+    }
+    #[test]
+    fn html_numeric_weights_map_to_the_supported_bold_face() -> Result<(),String> {
+        for weight in [600,700,800,900] {
+            let doc=html(&format!("<p style=\"font-weight:{weight}\">text</p>"))?;
+            assert!(first(&doc)?.bold,"{weight}");
+        }
+        let doc=html("<p style=\"font-weight:400\">text</p>")?;
+        assert!(!first(&doc)?.bold);Ok(())
+    }
+    #[test]
+    fn html_font_families_select_the_first_family_and_unescape_it() -> Result<(),String> {
+        let doc=html(r#"<p style="font-family:'A\'s, Family', sans-serif">text</p>"#)?;
+        assert_eq!(first(&doc)?.font,"A's, Family");Ok(())
+    }
+    #[test]
+    fn html_inline_data_images_keep_their_paragraph_anchor() -> Result<(),String> {
+        let mut png=std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(2,2).write_to(&mut png,image::ImageFormat::Png)
+            .map_err(|e|e.to_string())?;
+        let doc=html(&format!("<p>before<img src=\"data:image/png;base64,{}\"/>after</p>",
+            encode_image_base64(&png.into_inner())))?;
+        assert_eq!(doc.plain_text(),"beforeafter");assert_eq!(doc.images.len(),1);
+        assert_eq!(doc.images[0].after_paragraph_id,doc.paragraphs[0].id);Ok(())
+    }
+    #[test]
+    fn html_nested_lists_restore_model_levels() -> Result<(),String> {
+        let doc=html("<ul><li>outer<ol><li>inner</li></ol></li></ul>")?;
+        assert_eq!(doc.plain_text(),"outer\ninner");
+        assert_eq!((doc.paragraphs[0].list,doc.paragraphs[0].list_level),(List::Bullet,0));
+        assert_eq!((doc.paragraphs[1].list,doc.paragraphs[1].list_level),(List::Number,1));Ok(())
+    }
+    #[test]
+    fn html_void_tags_with_attributes_keep_rich_content() -> Result<(),String> {
+        let doc=html(r#"<p><b>one<br class="soft">two</b></p>"#)?;
+        assert_eq!(doc.plain_text(),"one\u{000b}two");assert!(first(&doc)?.bold);Ok(())
+    }
+    #[test]
+    fn html_fragments_can_contain_multiple_rich_blocks() -> Result<(),String> {
+        let doc=html("<p><b>one</b></p><p><i>two</i></p>")?;
+        assert_eq!(doc.plain_text(),"one\ntwo");
+        assert!(first(&doc)?.bold);assert!(doc.paragraphs[1].runs[0].format.italic);Ok(())
+    }
+    #[test]
+    fn html_named_entities_and_literal_ampersands_do_not_abort_import() -> Result<(),String> {
+        let doc=html("<p><b>&copy; &euro; &mdash; AT&T</b></p>")?;
+        assert_eq!(doc.plain_text(),"© € — AT&T");assert!(first(&doc)?.bold);Ok(())
+    }
+    #[test]
+    fn mixed_case_html_doctype_does_not_discard_formatting() -> Result<(),String> {
+        let doc=html("<!DoCtYpE html><html><body><p><b>text</b></p></body></html>")?;
+        assert_eq!(doc.plain_text(),"text");assert!(first(&doc)?.bold);Ok(())
+    }
+}
+
+fn word_shading(node: &Node) -> Option<[u8;3]> {
+    if node.value()==Some("nil") {return None;}
+    node.attr(if node.value()==Some("solid") {"color"}else{"fill"}).and_then(color)
+}
+#[derive(Default)]
+struct WordTheme {
+    colors:BTreeMap<String,[u8;3]>,
+    major:String,
+    minor:String,
+}
+impl WordTheme {
+    fn read(node: &Node) -> Self {
+        let mut theme=Self::default();
+        if let Some(scheme)=node.descendant("clrScheme") {
+            for entry in &scheme.children {
+                let rgb=entry.child("srgbClr").and_then(|node|node.attr("val"))
+                    .or_else(||entry.child("sysClr").and_then(|node|node.attr("lastClr"))).and_then(color);
+                if let Some(rgb)=rgb {theme.colors.insert(entry.name.clone(),rgb);}
+            }
+        }
+        for (alias,slot) in [("dark1","dk1"),("light1","lt1"),("dark2","dk2"),("light2","lt2"),
+            ("text1","dk1"),("background1","lt1"),("text2","dk2"),("background2","lt2"),
+            ("hyperlink","hlink"),("followedHyperlink","folHlink")] {
+            if let Some(rgb)=theme.colors.get(slot).copied() {theme.colors.insert(alias.into(),rgb);}
+        }
+        let face=|tag|node.descendant(tag).and_then(|node|node.child("latin"))
+            .and_then(|node|node.attr("typeface")).unwrap_or("").to_string();
+        theme.major=face("majorFont");theme.minor=face("minorFont");theme
+    }
+    fn apply(&self,node: &mut Node) {
+        for (destination,slot,tint,shade) in [
+            ("val","themeColor","themeTint","themeShade"),
+            ("fill","themeFill","themeFillTint","themeFillShade"),
+            ("color","themeColor","themeTint","themeShade"),
+        ] {
+            if (node.name=="color" && destination=="val")
+                || (node.name=="shd" && destination!="val") {
+                let base=node.attr(slot).and_then(|slot|self.colors.get(slot)).copied();
+                if let Some(mut rgb)=base {
+                    let amount=|key|node.attr(key).and_then(|value|u8::from_str_radix(value,16).ok()).map(|value|f64::from(value)/255.0);
+                    if let Some(tint)=amount(tint) {rgb=crate::util::adjust_rgb_luminance(rgb,tint,1.0-tint);}
+                    else if let Some(shade)=amount(shade) {rgb=crate::util::adjust_rgb_luminance(rgb,shade,0.0);}
+                    node.attrs.insert(destination.into(),hex(rgb));
+                }
+            }
+        }
+        if node.name=="rFonts" {
+            if let Some(face)=["asciiTheme","hAnsiTheme","eastAsiaTheme"].iter().find_map(|key|node.attr(key))
+                .and_then(|kind|if kind.starts_with("major") {Some(&self.major)}else if kind.starts_with("minor"){Some(&self.minor)}else{None})
+                .filter(|face|!face.is_empty()) {
+                node.attrs.insert("ascii".into(),face.clone());
+                node.attrs.insert("hAnsi".into(),face.clone());
+            }
+        }
+        for child in &mut node.children {self.apply(child);}
+    }
+}
+fn docx_part(source: &str,target: &str) -> Option<String> {
+    if target.contains(':') || target.contains('\\') || target.starts_with("//") {return None;}
+    let base=source.rsplit_once('/').map(|(base,_)|base).unwrap_or("");
+    let raw=if target.starts_with('/') {target.trim_start_matches('/').to_string()}
+        else if base.is_empty() {target.to_string()}else{format!("{base}/{target}")};
+    let mut parts=Vec::new();
+    for component in raw.split('/') {
+        match component {""|"."=>{},".."=>{parts.pop()?;},_=>parts.push(component)}
+    }
+    Some(parts.join("/"))
+}
+fn docx_rels_path(source: &str) -> String {
+    let (base,name)=source.rsplit_once('/').unwrap_or(("",source));
+    if base.is_empty(){format!("_rels/{name}.rels")}else{format!("{base}/_rels/{name}.rels")}
+}
+fn normalize_docx_parts(parts: &mut BTreeMap<String,Vec<u8>>) -> Result<(),String> {
+    let root_rels=parts.get("_rels/.rels").map(|bytes|xml(bytes)).transpose()?;
+    let main=root_rels.as_ref().and_then(|node|node.children.iter().find(|node|
+        node.attr("Type").is_some_and(|kind|kind.ends_with("/officeDocument"))
+            && node.attr("TargetMode")!=Some("External")))
+        .and_then(|node|node.attr("Target")).and_then(|target|docx_part("",target))
+        .unwrap_or_else(||"word/document.xml".into());
+    let rels=parts.get(&docx_rels_path(&main)).map(|bytes|xml(bytes)).transpose()?;
+    let mut aliases=Vec::new();
+    if main!="word/document.xml" && let Some(bytes)=parts.get(&main) {aliases.push(("word/document.xml".into(),bytes.clone()));}
+    let mut normalized=String::from("<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">");
+    if let Some(rels)=rels {
+        for rel in rels.children.iter().filter(|node|node.name=="Relationship") {
+            let Some(id)=rel.attr("Id") else {continue;};
+            let kind=rel.attr("Type").unwrap_or("");
+            let external=rel.attr("TargetMode")==Some("External");
+            let target=rel.attr("Target").unwrap_or("");
+            let absolute=if external {target.into()}else {
+                let Some(path)=docx_part(&main,target) else {continue;};format!("/{path}")
+            };
+            normalized.push_str(&format!("<Relationship Id=\"{}\" Type=\"{}\" Target=\"{}\"{} />",
+                esc(id),esc(kind),esc(&absolute),if external {" TargetMode=\"External\""}else{""}));
+            if !external {
+                let alias=if kind.ends_with("/styles") {Some("word/styles.xml")}
+                    else if kind.ends_with("/numbering") {Some("word/numbering.xml")}
+                    else if kind.ends_with("/theme") {Some("word/theme/theme1.xml")} else {None};
+                if let Some(alias)=alias && let Some(bytes)=parts.get(absolute.trim_start_matches('/')) {
+                    aliases.push((alias.into(),bytes.clone()));
+                }
+            }
+        }
+        normalized.push_str("</Relationships>");
+        aliases.push(("word/_rels/document.xml.rels".into(),normalized.into_bytes()));
+    }
+    for (path,bytes) in aliases {parts.insert(path,bytes);}
+    Ok(())
+}
+
+#[cfg(test)]
+mod additional_word_defect_tests {
+    use super::*;
+    const NS:&str=r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#;
+    fn document(body:&str,styles:&str,theme:&str)->Result<Doc,String> {
+        let mut parts=vec![("word/document.xml".into(),
+            format!("<w:document {NS}><w:body>{body}</w:body></w:document>").into_bytes())];
+        if !styles.is_empty(){parts.push(("word/styles.xml".into(),format!("<w:styles {NS}>{styles}</w:styles>").into_bytes()));}
+        if !theme.is_empty(){parts.push(("word/theme/theme1.xml".into(),theme.as_bytes().to_vec()));}
+        read(&write_zip(parts)?,"docx")
+    }
+    fn run(body:&str,theme:&str)->Result<TextFormat,String> {
+        let doc=document(&format!("<w:p><w:r><w:rPr>{body}</w:rPr><w:t>text</w:t></w:r></w:p>"),"",theme)?;
+        Ok(doc.paragraphs[0].runs[0].format.clone())
+    }
+    fn theme()->&'static str {r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:clrScheme><a:dk1><a:srgbClr val="112233"/></a:dk1><a:accent1><a:srgbClr val="FF0000"/></a:accent1></a:clrScheme><a:fontScheme><a:majorFont><a:latin typeface="Georgia"/></a:majorFont><a:minorFont><a:latin typeface="Verdana"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>"#}
+    #[test]
+    fn word_auto_color_uses_the_automatic_black_ink() -> Result<(),String> {
+        assert_eq!(run(r#"<w:color w:val="auto"/>"#,"")?.color,[0,0,0]);Ok(())
+    }
+    #[test]
+    fn word_shading_resets_and_solid_foreground_are_respected() -> Result<(),String> {
+        let styles=r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:rPr><w:shd w:val="clear" w:fill="FFFF00"/></w:rPr></w:style>"#;
+        let doc=document(r#"<w:p><w:r><w:rPr><w:shd w:val="nil"/></w:rPr><w:t>plain</w:t></w:r></w:p>"#,styles,"")?;
+        assert_eq!(doc.paragraphs[0].runs[0].format.highlight,None);
+        assert_eq!(run(r#"<w:shd w:val="solid" w:color="FF0000" w:fill="00FF00"/>"#,"")?.highlight,Some([255,0,0]));Ok(())
+    }
+    #[test]
+    fn word_theme_slots_override_fallback_rgb() -> Result<(),String> {
+        assert_eq!(run(r#"<w:color w:val="0000FF" w:themeColor="accent1"/>"#,theme())?.color,[255,0,0]);
+        assert_eq!(run(r#"<w:color w:val="000000" w:themeColor="text1"/>"#,theme())?.color,[17,34,51]);Ok(())
+    }
+    #[test]
+    fn word_theme_tint_and_shade_use_luminance_and_tint_precedence() -> Result<(),String> {
+        assert_eq!(run(r#"<w:color w:themeColor="accent1" w:themeShade="BF"/>"#,theme())?.color,[191,0,0]);
+        assert_eq!(run(r#"<w:color w:themeColor="accent1" w:themeTint="80" w:themeShade="00"/>"#,theme())?.color,[255,127,127]);Ok(())
+    }
+    #[test]
+    fn word_theme_fonts_resolve_major_and_minor_faces() -> Result<(),String> {
+        assert_eq!(run(r#"<w:rFonts w:asciiTheme="majorHAnsi"/>"#,theme())?.font,"Georgia");
+        assert_eq!(run(r#"<w:rFonts w:asciiTheme="minorHAnsi"/>"#,theme())?.font,"Verdana");Ok(())
+    }
+    #[test]
+    fn missing_word_style_keeps_the_default_paragraph_format() -> Result<(),String> {
+        let doc=document(r#"<w:p><w:pPr><w:pStyle w:val="Missing"/></w:pPr><w:r><w:t>text</w:t></w:r></w:p>"#,
+            r#"<w:style w:type="paragraph" w:default="1" w:styleId="Base"><w:rPr><w:b/></w:rPr></w:style>"#,"")?;
+        assert!(doc.paragraphs[0].runs[0].format.bold);Ok(())
+    }
+    #[test]
+    fn word_table_content_controls_keep_rows_and_cells() -> Result<(),String> {
+        let doc=document("<w:tbl><w:sdt><w:sdtContent><w:tr><w:sdt><w:sdtContent><w:tc><w:p><w:r><w:t>kept</w:t></w:r></w:p></w:tc></w:sdtContent></w:sdt></w:tr></w:sdtContent></w:sdt></w:tbl>","","")?;
+        assert_eq!(doc.tables.len(),1);assert_eq!(cell_text(&doc.tables[0].rows[0][0]),"kept");Ok(())
+    }
+    #[test]
+    fn word_table_cell_fill_inherits_the_table_style() -> Result<(),String> {
+        let doc=document(r#"<w:tbl><w:tblPr><w:tblStyle w:val="Tinted"/></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>"#,
+            r#"<w:style w:type="table" w:styleId="Tinted"><w:tcPr><w:shd w:val="clear" w:fill="AABBCC"/></w:tcPr></w:style>"#,"")?;
+        assert_eq!(doc.tables[0].rows[0][0].fill,[170,187,204]);Ok(())
+    }
+    #[test]
+    fn word_cell_widths_supply_a_missing_table_grid() -> Result<(),String> {
+        let doc=document(r#"<w:tbl><w:tr><w:tc><w:tcPr><w:tcW w:type="dxa" w:w="720"/></w:tcPr><w:p/></w:tc><w:tc><w:tcPr><w:tcW w:type="dxa" w:w="1440"/></w:tcPr><w:p/></w:tc></w:tr></w:tbl>"#,"","")?;
+        assert_eq!(doc.tables[0].column_widths,vec![36.0,72.0]);Ok(())
+    }
+    #[test]
+    fn docx_part_roles_are_resolved_from_relationships() -> Result<(),String> {
+        let rels=|body:&str|format!("<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">{body}</Relationships>").into_bytes();
+        let parts=vec![
+            ("_rels/.rels".into(),rels(r#"<Relationship Id="doc" Type="http://x/officeDocument" Target="content/main.xml"/>"#)),
+            ("content/main.xml".into(),format!("<w:document {NS}><w:body><w:p><w:pPr><w:pStyle w:val=\"Base\"/></w:pPr><w:r><w:t>text</w:t></w:r></w:p></w:body></w:document>").into_bytes()),
+            ("content/_rels/main.xml.rels".into(),rels(r#"<Relationship Id="styles" Type="http://x/styles" Target="../looks/s.xml"/><Relationship Id="theme" Type="http://x/theme" Target="../looks/t.xml"/>"#)),
+            ("looks/s.xml".into(),format!("<w:styles {NS}><w:style w:type=\"paragraph\" w:styleId=\"Base\"><w:rPr><w:color w:themeColor=\"accent1\"/><w:b/></w:rPr></w:style></w:styles>").into_bytes()),
+            ("looks/t.xml".into(),theme().as_bytes().to_vec()),
+        ];
+        let doc=read(&write_zip(parts)?,"docx")?;
+        assert_eq!(doc.plain_text(),"text");assert!(doc.paragraphs[0].runs[0].format.bold);
+        assert_eq!(doc.paragraphs[0].runs[0].format.color,[255,0,0]);Ok(())
+    }
+    #[test]
+    fn default_word_table_style_applies_without_an_explicit_reference() -> Result<(),String> {
+        let doc=document("<w:tbl><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>",
+            r#"<w:style w:type="table" w:default="1" w:styleId="DefaultTable"><w:tcPr><w:shd w:val="clear" w:fill="010203"/></w:tcPr></w:style>"#,"")?;
+        assert_eq!(doc.tables[0].rows[0][0].fill,[1,2,3]);Ok(())
     }
 }
