@@ -951,7 +951,17 @@ impl<'a> Engine<'a> {
                 result
             }
             Expr::Unary(op, e) => {
-                let n = self.eval(e, sheet, row, col)?.number()?;
+                let grid = self.eval(e, sheet, row, col)?;
+                if op == "+" {
+                    // Unary plus preserves text and logical values, but a blank cell becomes zero.
+                    let value = match grid.first() {
+                        Value::Empty => Value::Number(0.0),
+                        Value::Error(error) => return Err(error),
+                        value => value,
+                    };
+                    return Ok(Grid::scalar(value));
+                }
+                let n = grid.number()?;
                 finite(match op.as_str() {
                     "-" => -n,
                     "%" => n / 100.0,
@@ -1235,7 +1245,7 @@ impl<'a> Engine<'a> {
                 let target = self.book.sheets.get(target).ok_or("#REF!")?.name.clone();
                 self.skip_subtotal_cells(grid, Some(&target), &range, sheet, hidden);
             }
-            evaluated.push(if name.starts_with("IS") || name == "TYPE" {
+            evaluated.push(if name.starts_with("IS") || matches!(name, "TYPE" | "COUNT" | "COUNTA") {
                 value.unwrap_or_else(|e| Grid::scalar(Value::Error(e)))
             } else {
                 value?
@@ -2670,9 +2680,9 @@ impl<'a> Engine<'a> {
             }
             "IRR" => {
                 arity(1, 2)?;
-                let vals = numbers(&a[..1], false)?;
-                let scale = vals.iter().map(|v| v.abs()).fold(0.0, f64::max);
-                let vals: Vec<_> = vals.into_iter().map(|v| v / scale).collect();
+                let original = numbers(&a[..1], false)?;
+                let scale = original.iter().map(|v| v.abs()).fold(0.0, f64::max);
+                let vals: Vec<_> = original.iter().map(|v| *v / scale).collect();
                 if !vals.iter().any(|v| *v < 0.0) || !vals.iter().any(|v| *v > 0.0) {
                     return Err("#NUM!".into());
                 }
@@ -2701,7 +2711,9 @@ impl<'a> Engine<'a> {
                     }
                     rate = next;
                 }
-                Err("#NUM!".into())
+                // A single cash-flow sign change has at most one positive discount-factor root.
+                // Logarithmic bracketing reaches finite rates that Newton's 100 steps cannot.
+                num(conventional_irr(&original).ok_or("#NUM!")?)
             }
             "SLN" => {
                 arity(3, 3)?;
@@ -2709,7 +2721,7 @@ impl<'a> Engine<'a> {
                 if life == 0.0 {
                     Err("#DIV/0!".into())
                 } else {
-                    num((n(0)? - n(1)?) / life)
+                    num(difference_quotient(n(0)?, n(1)?, life))
                 }
             }
             "SYD" => {
@@ -2719,7 +2731,18 @@ impl<'a> Engine<'a> {
                 if life <= 0.0 || period <= 0.0 || period > life {
                     Err("#NUM!".into())
                 } else {
-                    num((n(0)? - n(1)?) * (life - period + 1.0) * 2.0 / (life * (life + 1.0)))
+                    let (cost, salvage) = (n(0)?, n(1)?);
+                    let ratio = (life - period + 1.0) / (life + 1.0);
+                    let difference = cost - salvage;
+                    let value = if life < 1.0 {
+                        let quotient = finite(difference_quotient(cost, salvage, life))?;
+                        balanced_product(&[quotient, 2.0, ratio])
+                    } else if difference.is_finite() {
+                        balanced_product(&[difference, 2.0 / life, ratio])
+                    } else {
+                        balanced_product(&[cost * 0.5 - salvage * 0.5, 2.0, 2.0 / life, ratio])
+                    };
+                    num(value)
                 }
             }
             "NPER" => {
@@ -2760,6 +2783,9 @@ impl<'a> Engine<'a> {
                 if periods <= 0.0 {
                     return Err("#NUM!".into());
                 }
+                let scale = payment.abs().max(present.abs()).max(future.abs());
+                if scale == 0.0 { return Err("#NUM!".into()); }
+                let (payment, present, future) = (payment / scale, present / scale, future / scale);
                 let balance = |r: f64| -> f64 {
                     present * growth(r, periods) + payment * annuity(r, periods, kind) + future
                 };
@@ -3398,6 +3424,37 @@ fn working_days(first: i64, last: i64, holidays: &std::collections::BTreeSet<i64
             .range(first..=last)
             .filter(|date| weekday(**date))
             .count() as i64
+}
+fn difference_quotient(left: f64, right: f64, divisor: f64) -> f64 {
+    let difference = left - right;
+    if difference.is_finite() { difference / divisor }
+    else { (left * 0.5 - right * 0.5) / divisor * 2.0 }
+}
+fn conventional_irr(values: &[f64]) -> Option<f64> {
+    let nonzero: Vec<_> = values.iter().filter(|value| **value != 0.0).collect();
+    if nonzero.windows(2).filter(|pair| pair[0].is_sign_negative() != pair[1].is_sign_negative()).count() != 1 {
+        return None;
+    }
+    let terms: Vec<_> = values.iter().enumerate().filter(|(_, value)| **value != 0.0)
+        .map(|(index, value)| (index as f64, value.abs().ln(), value.signum())).collect();
+    let residual = |log_rate: f64| {
+        let maximum = terms.iter().map(|(index, log_value, _)| log_value - index * log_rate)
+            .fold(f64::NEG_INFINITY, f64::max);
+        terms.iter().map(|(index, log_value, sign)| sign * (log_value - index * log_rate - maximum).exp()).sum::<f64>()
+    };
+    let (mut low, mut high) = ((f64::EPSILON * 0.5).ln(), f64::MAX.ln());
+    let low_sign = residual(low).signum();
+    let upper = residual(high);
+    if upper == 0.0 { return finite(high.exp_m1()).ok(); }
+    if low_sign == upper.signum() { return None; }
+    for _ in 0..256 {
+        let middle = low + (high - low) * 0.5;
+        if middle == low || middle == high { break; }
+        let value = residual(middle);
+        if value == 0.0 { return finite(middle.exp_m1()).ok().filter(|rate| *rate > -1.0); }
+        if value.signum() == low_sign { low = middle; } else { high = middle; }
+    }
+    finite((low + (high - low) * 0.5).exp_m1()).ok().filter(|rate| *rate > -1.0)
 }
 fn growth(rate: f64, periods: f64) -> f64 {
     if rate > -1.0 {
@@ -4624,6 +4681,69 @@ mod hundred_range_and_wildcard_tests {
         assert_eq!(evaluate(&book, id, "=SUMIF(A1:A2,1,INDEX(B1:B2,1))"), Value::Number(30.0));
         book.active_sheet_mut().ok_or("sheet")?.hidden_rows.insert(1);
         assert_eq!(evaluate(&book, id, "=SUBTOTAL(109,INDEX(B1:B2,0))"), Value::Number(10.0));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod phase200_numeric_defects {
+    use super::*;
+    fn number(book: &Book, input: &str) -> Result<f64, String> {
+        match evaluate(book, book.active_id(), input) {
+            Value::Number(value) => Ok(value), value => Err(format!("{input}: {value:?}")),
+        }
+    }
+    #[test]
+    fn count_functions_classify_computed_errors_as_values() -> Result<(), String> {
+        let mut book = Book::default(); let id = book.active_id();
+        book.set_cell(id, 0, 0, "=1/0")?;
+        for (input, expected) in [("=COUNT(1/0)", 0.0), ("=COUNTA(1/0)", 1.0),
+            ("=COUNT(A1)", 0.0), ("=COUNTA(A1)", 1.0), ("=COUNT(#N/A,2)", 1.0)] {
+            assert_eq!(number(&book, input)?, expected, "{input}");
+        }
+        assert_eq!(evaluate(&book,id,"=SUM(1/0)"),Value::Error("#DIV/0!".into()));
+        Ok(())
+    }
+    #[test]
+    fn unary_plus_preserves_text_and_boolean_types() {
+        let book = Book::default(); let id = book.active_id();
+        for (input, expected) in [
+            ("=TYPE(+\"123\")", Value::Number(2.0)),
+            ("=+\"plain\"", Value::Text("plain".into())),
+            ("=TYPE(+TRUE())", Value::Number(4.0)),
+            ("=+A1", Value::Number(0.0)),
+            ("=+(1/0)", Value::Error("#DIV/0!".into())),
+        ] { assert_eq!(evaluate(&book,id,input),expected,"{input}"); }
+    }
+    #[test]
+    fn straight_line_depreciation_divides_before_an_overflowing_difference() -> Result<(), String> {
+        let book = Book::default();
+        assert_eq!(number(&book,"=SLN(1e308,-1e308,2)")?,1e308);
+        assert_eq!(number(&book,"=SLN(1e308,1e308,1e-300)")?,0.0);
+        Ok(())
+    }
+    #[test]
+    fn sum_of_years_depreciation_avoids_squaring_large_lives() -> Result<(), String> {
+        let book = Book::default();
+        let value=number(&book,"=SYD(1,0,1e200,1)")?;
+        assert!((value / 2e-200 - 1.0).abs() < 1e-12);
+        assert!((number(&book,"=SYD(1e308,-1e308,2,1)")? / (1e308_f64 * (4.0 / 3.0)) - 1.0).abs() < 1e-12);
+        assert_eq!(number(&book,"=SYD(1,0,1,1)")?,1.0);
+        Ok(())
+    }
+    #[test]
+    fn rate_is_invariant_under_large_cash_flow_scaling() -> Result<(), String> {
+        let book=Book::default();
+        let expected=number(&book,"=RATE(10,-20,100)")?;
+        assert!((number(&book,"=RATE(10,-2e307,1e308)")?-expected).abs()<1e-9);
+        Ok(())
+    }
+    #[test]
+    fn irr_brackets_large_unique_finite_rates() -> Result<(), String> {
+        let mut book=Book::default();let id=book.active_id();
+        book.set_range(id,0,0,&[vec!["-1".into()],vec!["1e200".into()]])?;
+        assert!((number(&book,"=IRR(A1:A2)")?/1e200-1.0).abs()<1e-12);
+        assert_eq!(conventional_irr(&[-1.0,3.0,-2.0]),None);
         Ok(())
     }
 }
