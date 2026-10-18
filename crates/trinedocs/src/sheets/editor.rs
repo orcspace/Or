@@ -28,6 +28,8 @@ struct State {
     scroll_to_selection: bool,
     rename_sheet_id: Option<u64>,
     selected_image: Option<u64>,
+    selected_chart: Option<u64>,
+    chart_drag: Option<(u64,Vec2)>,
     image_job: Option<ImageJob>,
     image_target: Option<(u64, u32, u32)>,
     #[cfg(test)]
@@ -771,6 +773,7 @@ fn apply_focus_request(book: &mut Book, state: &mut State, request: (u64, u32, u
         .map(|cell| cell.input.clone())
         .unwrap_or_default();
     state.selected_image = None;
+            state.selected_chart = None;
     state.scroll_to_selection = true;
     state.error.clear();
     true
@@ -832,6 +835,7 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
     if state.last != (id, row, col) {
         if state.last.0 != id {
             state.selected_image = None;
+            state.selected_chart = None;
         }
         changed |= commit(book, &mut state);
         if !state.editing {
@@ -855,6 +859,7 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
     if state.last != (id, row, col) {
         if state.last.0 != id {
             state.selected_image = None;
+            state.selected_chart = None;
         }
         changed |= commit(book, &mut state);
         if !state.editing {
@@ -1131,7 +1136,6 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         for chart in &sheet.charts {
-                            ui.strong(&chart.title);
                             ui.label(
                                 egui::RichText::new(chart_kind_name(chart.kind))
                                     .small()
@@ -1319,7 +1323,47 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
             }
             if response.clicked() {
                 state.selected_image = None;
+            state.selected_chart = None;
             }
+            let mut chart_edit=None;
+            let mut chart_clicked=false;
+            for chart in &sheet.charts {
+                let chart_rect=floating_chart_rect(sheet,origin,chart);
+                if !ui.clip_rect().intersects(chart_rect) {continue;}
+                paint_chart(ui,sheet,chart,chart_rect);
+                #[cfg(test)]
+                state.test_controls.insert(format!("chart-{}",chart.id),chart_rect);
+                let response=ui.interact(chart_rect,state_id.with(("chart",chart.id)),Sense::click_and_drag());
+                if response.clicked()||response.drag_started() {
+                    state.selected_chart=Some(chart.id);state.selected_image=None;chart_clicked=true;
+                    ui.memory_mut(|memory|memory.request_focus(canvas_id));
+                }
+                if response.drag_started() && let Some(pointer)=response.interact_pointer_pos() {
+                    state.chart_drag=Some((chart.id,pointer-chart_rect.min));
+                }
+                if response.dragged() && let Some((id,offset))=state.chart_drag
+                    && id==chart.id && let Some(pointer)=response.interact_pointer_pos() {
+                    chart_edit=Some((chart.id,Rect::from_min_size(pointer-offset,chart_rect.size())));
+                }
+                if response.drag_stopped() {state.chart_drag=None;}
+                if state.selected_chart==Some(chart.id) {
+                    let accent=crate::chrome::accent(ui);
+                    painter.rect_stroke(chart_rect,0.0,Stroke::new(1.5,accent),StrokeKind::Outside);
+                    let handle=Rect::from_center_size(chart_rect.max,Vec2::splat(9.0));
+                    painter.rect_filled(handle,1.0,accent);
+                    let handle_response=ui.interact(handle,state_id.with(("chart-size",chart.id)),Sense::drag())
+                        .on_hover_cursor(egui::CursorIcon::ResizeNwSe);
+                    if handle_response.dragged() {
+                        let size=(chart_rect.size()+handle_response.drag_delta()).clamp(Vec2::splat(1.0),Vec2::splat(4000.0));
+                        chart_edit=Some((chart.id,Rect::from_min_size(chart_rect.min,size)));
+                    }
+                }
+            }
+            if chart_clicked||chart_edit.is_some() {changed|=commit(book,&mut state);}
+            if !state.editing && let Some((chart,target))=chart_edit && let Some(sheet)=book.active_sheet_mut() {
+                changed|=place_chart(sheet,chart,target.min-origin,target.size());
+            }
+            let Some(sheet)=book.active_sheet() else {return;};
             let mut image_edit = None;
             for image in &sheet.images {
                 let image_rect = Rect::from_min_size(
@@ -1346,6 +1390,7 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                 );
                 if image_response.clicked() || image_response.drag_started() {
                     state.selected_image = Some(image.id);
+                    state.selected_chart = None;
                     response.request_focus();
                 }
                 if image_response.dragged() {
@@ -1628,6 +1673,12 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                             if key == Key::Delete || key == Key::Backspace {
                                 if let Some(image) = state.selected_image.take() {
                                     changed |= result(&mut state, book.delete_image(id, image));
+                                } else if let Some(chart)=state.selected_chart.take() {
+                                    if let Some(sheet)=book.active_sheet_mut() {
+                                        let previous=sheet.charts.len();
+                                        sheet.charts.retain(|item|item.id!=chart);
+                                        changed|=previous!=sheet.charts.len();
+                                    }
                                 } else {
                                     changed |= clear(book, &mut state);
                                 }
@@ -2425,7 +2476,24 @@ fn grid_size(sheet: &Sheet, rows: u32, cols: u32) -> (f32, f32) {
                 + 16.0,
         );
     }
+    for chart in &sheet.charts {
+        let rect=floating_chart_rect(sheet,Pos2::ZERO,chart);
+        width=width.max(rect.max.x+16.0);height=height.max(rect.max.y+16.0);
+    }
     (width, height)
+}
+fn floating_chart_rect(sheet:&Sheet,origin:Pos2,chart:&super::model::Chart)->Rect {
+    Rect::from_min_size(origin+Vec2::new(48.0+axis_pos(chart.col,sheet.default_col_width,&sheet.widths,&sheet.hidden_cols),
+        28.0+axis_pos(chart.row,sheet.default_row_height,&sheet.row_heights,&sheet.hidden_rows)),Vec2::new(chart.width,chart.height))
+}
+fn place_chart(sheet:&mut Sheet,id:u64,local:Vec2,size:Vec2)->bool {
+    let col=axis_index((local.x-48.0).max(0.0),MAX_COLS,sheet.default_col_width,&sheet.widths,&sheet.hidden_cols);
+    let row=axis_index((local.y-28.0).max(0.0),MAX_ROWS,sheet.default_row_height,&sheet.row_heights,&sheet.hidden_rows);
+    let Some(chart)=sheet.charts.iter_mut().find(|chart|chart.id==id) else {return false;};
+    let (width,height)=(size.x.clamp(1.0,4000.0),size.y.clamp(1.0,4000.0));
+    let changed=(chart.row,chart.col,chart.width,chart.height)!=(row,col,width,height);
+    chart.row=row;chart.col=col;chart.width=width;chart.height=height;
+    changed
 }
 fn constrained_image_size(original: Vec2, requested: Vec2, keep_ratio: bool) -> Vec2 {
     if !keep_ratio { return requested.clamp(Vec2::splat(16.0),Vec2::splat(8000.0)); }
@@ -2683,8 +2751,8 @@ fn paint_chart(ui: &egui::Ui, sheet: &Sheet, chart: &super::model::Chart, rect: 
     let painter = ui.painter().with_clip_rect(rect);
     painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
     let r = chart.range;
-    let start = if r.r1 > r.r0 { r.r0 + 1 } else { r.r0 };
-    let first_col = if r.c1 > r.c0 { r.c0 + 1 } else { r.c0 };
+    let start = if chart.has_headers && r.r1 > r.r0 { r.r0 + 1 } else { r.r0 };
+    let first_col = if chart.has_categories && r.c1 > r.c0 { r.c0 + 1 } else { r.c0 };
     let palette = [
         Color32::from_rgb(35, 150, 100),
         Color32::from_rgb(52, 110, 220),
@@ -2709,7 +2777,12 @@ fn paint_chart(ui: &egui::Ui, sheet: &Sheet, chart: &super::model::Chart, rect: 
     if first.is_empty() {
         return;
     }
-    let plot = rect.shrink2(Vec2::new(30.0, 18.0));
+    if rect.width()>32.0 && rect.height()>36.0 {
+        painter.text(rect.min+Vec2::new(8.0,8.0),Align2::LEFT_TOP,&chart.title,FontId::proportional(12.0),ui.visuals().text_color());
+    }
+    let mut plot = rect.shrink2(Vec2::new(30.0, 18.0));
+    plot.min.y+=18.0;
+    if plot.width()<=0.0||plot.height()<=0.0 {return;}
     let (lo, hi) = chart_bounds(series.iter().flatten().copied(), true);
     let y = |v: f64| plot.bottom() - chart_fraction(v, lo, hi) * plot.height();
     if matches!(chart.kind, ChartKind::Pie | ChartKind::Doughnut) {
@@ -4203,5 +4276,24 @@ mod phase200_editor_defects {
         let tiny=constrained_image_size(Vec2::new(1.0,8000.0),Vec2::ZERO,true);
         assert_eq!(tiny,Vec2::new(1.0,8000.0));
         assert_eq!(constrained_image_size(Vec2::new(100.0,100.0),Vec2::new(9000.0,20.0),false),Vec2::new(8000.0,20.0));
+    }
+}
+
+#[cfg(test)]
+mod phase200_floating_chart_defect {
+    use super::*;
+    #[test]
+    fn native_charts_use_their_model_anchor_and_remain_editable() -> Result<(),String> {
+        let mut book=Book::default();let id=book.active_id();
+        let chart=book.add_chart(id,ChartKind::Column,Range::new(0,0,1,1),"Floating")?;
+        let sheet=book.active_sheet_mut().ok_or("sheet")?;
+        assert!(place_chart(sheet,chart,Vec2::new(48.0+80.0*96.0,28.0+2000.0*26.0),Vec2::new(500.0,300.0)));
+        let model=sheet.charts.iter().find(|item|item.id==chart).ok_or("chart")?;
+        assert_eq!((model.row,model.col,model.width,model.height),(2000,80,500.0,300.0));
+        let rect=floating_chart_rect(sheet,Pos2::ZERO,model);
+        let (width,height)=grid_size(sheet,50,20);
+        assert!(width>=rect.max.x+16.0&&height>=rect.max.y+16.0);
+        assert!(!place_chart(sheet,chart,rect.min.to_vec2(),rect.size()));
+        Ok(())
     }
 }

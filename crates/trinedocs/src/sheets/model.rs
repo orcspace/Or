@@ -10,7 +10,7 @@ struct PrintAxis {
 impl PrintAxis {
     fn new(base:f32,sizes:&BTreeMap<u32,f32>,hidden:&BTreeSet<u32>,maximum:u32)->Self {
         let mut sum=0.0;
-        let adjustments=sizes.iter().filter(|(index,_)|!hidden.contains(index)).map(|(index,size)| {
+        let adjustments=sizes.iter().filter(|(index,_)|!hidden.contains(*index)).map(|(index,size)| {
             sum+=f64::from(*size)-f64::from(base);(*index,sum)
         }).collect();
         Self{base:f64::from(base),maximum,hidden:hidden.iter().copied().collect(),adjustments}
@@ -238,6 +238,10 @@ pub enum ChartKind {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Chart {
     pub id: u64,
+    #[serde(default="true_value")]
+    pub has_headers: bool,
+    #[serde(default="true_value")]
+    pub has_categories: bool,
     pub title: String,
     pub kind: ChartKind,
     pub range: Range,
@@ -246,6 +250,7 @@ pub struct Chart {
     pub width: f32,
     pub height: f32,
 }
+fn true_value()->bool {true}
 /// A picture floating over the grid, anchored to a cell with a pixel offset (like Excel).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct SheetImage {
@@ -1403,7 +1408,7 @@ impl Book {
         let id = self.allocate_id();
         let s = self.sheet_by_id_mut(sheet).ok_or("Лист не найден")?;
         s.charts.push(Chart {
-            id,
+            id,has_headers:true,has_categories:true,
             title: title.into(),
             kind,
             range,
