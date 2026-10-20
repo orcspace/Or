@@ -44,22 +44,27 @@ fn consume_shell_key(ctx: &egui::Context, modifiers: egui::Modifiers, key: egui:
         found
     })
 }
-fn palette_commands(has_document: bool, query: &str) -> Vec<(&'static str, &'static str)> {
+fn palette_commands(
+    has_document: bool,
+    query: &str,
+    language: &str,
+) -> Vec<(&'static str, &'static str)> {
     let query = query.trim().to_lowercase();
     [
-        ("docs", "Создать документ"),
-        ("sheets", "Создать таблицу"),
-        ("slides", "Создать презентацию"),
-        ("open", "Открыть файл · Ctrl+O"),
-        ("settings", "Настройки"),
-        ("inspect", "Проверить документ"),
-        ("save", "Сохранить · Ctrl+S"),
-        ("saveas", "Сохранить как… · Ctrl+Shift+S"),
-        ("copy", "Сохранить копию…"),
-        ("pdf", "Экспорт в PDF"),
-        ("close", "Закрыть документ · Ctrl+W"),
+        ("docs", "Create a document"),
+        ("sheets", "Create a spreadsheet"),
+        ("slides", "Create a presentation"),
+        ("open", "Open a file · Ctrl+O"),
+        ("settings", "Settings"),
+        ("inspect", "Check the document"),
+        ("save", "Save · Ctrl+S"),
+        ("saveas", "Save as… · Ctrl+Shift+S"),
+        ("copy", "Save a copy…"),
+        ("pdf", "Export to PDF"),
+        ("close", "Close the document · Ctrl+W"),
     ]
     .into_iter()
+    .map(|(key, label)| (key, crate::i18n::tr(label, language)))
     .filter(|(key, label)| {
         (has_document || matches!(*key, "docs" | "sheets" | "slides" | "open" | "settings"))
             && label.to_lowercase().contains(&query)
@@ -127,7 +132,7 @@ fn prepare_open(
     let title = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "Без названия".into());
+        .unwrap_or_else(|| self.tr("Untitled").into());
     Ok(PreparedOpen::Install {
         tab: Box::new(Tab::new(id, document, title, Some(path.to_path_buf()))),
         following,
@@ -275,7 +280,7 @@ impl App {
             media_jobs: Vec::new(),
             pending: None,
             close_after_save: None,
-            status: "Готово".into(),
+            status: self.tr("Ready").into(),
             error: font_error,
             show_settings: false,
             show_inspector: false,
@@ -592,7 +597,7 @@ impl App {
             if crate::sheets::editor::commit_pending(&self.editor_ctx, id, &mut book)? {
                 t.apply(Op::Replace {
                     document: Document::Sheets(book),
-                    label: "Редактирование".into(),
+                    label: self.tr("Editing").into(),
                     author: Author::User,
                     base_version: None,
                 })?;
@@ -614,7 +619,7 @@ impl App {
             return;
         }
         if self.saving.contains(&id) {
-            self.error = "Сохранение уже выполняется".into();
+            self.error = self.tr("Saving is already running").into();
             return;
         }
         let Some(t) = self.tabs.iter().find(|t| t.id == id) else {
@@ -646,7 +651,7 @@ impl App {
                 .and_then(|p| p.file_stem())
                 .and_then(|s| s.to_str())
                 .map(str::to_string)
-                .unwrap_or_else(|| "Без названия".into());
+                .unwrap_or_else(|| self.tr("Untitled").into());
             match self.worker.send(Job::PickSave {
                 id,
                 name,
@@ -712,7 +717,7 @@ impl App {
             Ok(()) => {
                 self.reloading.insert(id, target);
                 self.disk_changed = None;
-                self.status = "Перезагрузка…".into();
+                self.status = self.tr("Reloading…").into();
             }
             Err(e) => self.error = e,
         }
@@ -795,7 +800,7 @@ impl App {
                         .unwrap_or_else(Instant::now);
                 }
                 self.saving.insert(id);
-                self.status = "Сохранение…".into();
+                self.status = self.tr("Saving…").into();
             }
             Err(e) => self.fail_save(id, e),
         }
@@ -884,7 +889,9 @@ impl App {
                     {
                         t.save_locked = false;
                         self.locks.insert(id, lock);
-                        self.status = "Блокировка снята · можно сохранить файл".into();
+                        self.status = self
+                            .tr("The lock was removed · the file can be saved")
+                            .into();
                     }
                 }
                 Event::RegistrationPreview(p) => {
@@ -897,7 +904,9 @@ impl App {
                     }
                 }
                 Event::Registered => {
-                    self.status = "Клиент MCP зарегистрирован. Перезапустите клиент.".into()
+                    self.status = self
+                        .tr("The MCP client is registered. Restart the client.")
+                        .into()
                 }
                 Event::PickedOpen(path) => {
                     self.opening = false;
@@ -991,9 +1000,9 @@ impl App {
                         self.error = error;
                     }
                     self.status = if reload.is_some() {
-                        "Файл перезагружен"
+                        self.tr("File reloaded")
                     } else {
-                        "Файл открыт"
+                        self.tr("File opened")
                     }
                     .into();
                 }
@@ -1040,11 +1049,11 @@ impl App {
                         }
                     }
                     self.status = if copy {
-                        "Копия сохранена"
+                        self.tr("Copy saved")
                     } else if export {
-                        "Экспорт завершён"
+                        self.tr("Export finished")
                     } else {
-                        "Сохранено"
+                        self.tr("Saved")
                     }
                     .into();
                     if let Some(reply) = self.mcp_saves.remove(&id) {
@@ -1064,7 +1073,7 @@ impl App {
                         self.close_after_save = None;
                         self.exit_after_save = false;
                         self.pending = Some(Pending::Close(id));
-                        self.status = "После сохранения появились новые правки".into();
+                        self.status = self.tr("New edits appeared after saving").into();
                     }
                 }
                 Event::Canceled { id } => {
@@ -1079,7 +1088,7 @@ impl App {
                     }
                     self.saving.remove(&id);
                     if let Some(reply) = self.mcp_saves.remove(&id) {
-                        let _ = reply.send(Err("Отменено".into()));
+                        let _ = reply.send(Err(self.tr("Cancelled").into()));
                     }
                 }
                 Event::Error { message, id } => {
@@ -1388,9 +1397,9 @@ impl App {
                             "ИИ · {} документа · {}",
                             task.targets.len(),
                             if task.cancelled() {
-                                "Отмена…"
+                                self.tr("Cancel…")
                             } else {
-                                "Подготовка правок"
+                                self.tr("Preparing the edits")
                             }
                         ));
                         let titles = task
@@ -1401,7 +1410,7 @@ impl App {
                             .join(" · ");
                         ui.weak(titles);
                         if ui
-                            .add_enabled(!task.cancelled(), egui::Button::new("Отменить"))
+                            .add_enabled(!task.cancelled(), egui::Button::new(self.tr("Cancel")))
                             .clicked()
                         {
                             task.cancel();
@@ -2136,19 +2145,36 @@ impl App {
         let mut kind_filter: usize = ui.data(|d| d.get_temp(kind_id)).unwrap_or_default();
         egui::ScrollArea::vertical().id_salt("home").show(ui, |ui| {
             let width = (ui.available_width() - 32.0).clamp(0.0, 960.0);
-            let inset = ((ui.available_width() - width) * 0.5 - ui.spacing().item_spacing.x).max(0.0);
+            let inset =
+                ((ui.available_width() - width) * 0.5 - ui.spacing().item_spacing.x).max(0.0);
             ui.horizontal(|ui| {
                 ui.add_space(inset);
                 ui.vertical(|ui| {
                     ui.set_width(width);
                     ui.add_space(28.0);
-                    ui.label(egui::RichText::new("Ваше рабочее пространство").size(26.0).strong());
-                    ui.weak("Документы, таблицы и презентации в одном месте.");
+                    ui.label(
+                        egui::RichText::new(self.tr("Your workspace"))
+                            .size(26.0)
+                            .strong(),
+                    );
+                    ui.weak(self.tr("Documents, spreadsheets and presentations in one place."));
                     ui.add_space(20.0);
                     let cards = [
-                        ("docs", "Документ", crate::chrome::accent_for("docs", ui.visuals().dark_mode)),
-                        ("sheets", "Таблица", crate::chrome::accent_for("sheets", ui.visuals().dark_mode)),
-                        ("slides", "Презентация", crate::chrome::accent_for("slides", ui.visuals().dark_mode)),
+                        (
+                            "docs",
+                            self.tr("Document"),
+                            crate::chrome::accent_for("docs", ui.visuals().dark_mode),
+                        ),
+                        (
+                            "sheets",
+                            self.tr("Spreadsheet"),
+                            crate::chrome::accent_for("sheets", ui.visuals().dark_mode),
+                        ),
+                        (
+                            "slides",
+                            self.tr("Presentation"),
+                            crate::chrome::accent_for("slides", ui.visuals().dark_mode),
+                        ),
                     ];
                     let gap = 12.0;
                     let card_width = ((width - gap * 2.0) / 3.0).clamp(132.0, 312.0);
@@ -2162,17 +2188,27 @@ impl App {
                     });
                     ui.add_space(32.0);
                     ui.horizontal_wrapped(|ui| {
-                        for (index, label) in ["Недавние", "Закреплённые"].into_iter().enumerate() {
+                        for (index, label) in [self.tr("Recent"), self.tr("Pinned")]
+                            .into_iter()
+                            .enumerate()
+                        {
                             let selected = filter % 2 == index;
                             let text = egui::RichText::new(label).size(15.0);
                             let response = ui.add(
-                                egui::Button::new(if selected { text.strong() } else { text.color(crate::chrome::muted(ui)) })
-                                    .frame_when_inactive(false)
-                                    .min_size(egui::vec2(0.0, 30.0)),
+                                egui::Button::new(if selected {
+                                    text.strong()
+                                } else {
+                                    text.color(crate::chrome::muted(ui))
+                                })
+                                .frame_when_inactive(false)
+                                .min_size(egui::vec2(0.0, 30.0)),
                             );
                             if selected {
                                 ui.painter().line_segment(
-                                    [response.rect.left_bottom() + egui::vec2(8.0, -1.0), response.rect.right_bottom() - egui::vec2(8.0, 1.0)],
+                                    [
+                                        response.rect.left_bottom() + egui::vec2(8.0, -1.0),
+                                        response.rect.right_bottom() - egui::vec2(8.0, 1.0),
+                                    ],
                                     egui::Stroke::new(2.0, crate::chrome::accent(ui)),
                                 );
                             }
@@ -2180,94 +2216,217 @@ impl App {
                                 filter = index;
                             }
                         }
+                        let search_hint = self.tr("Search files");
                         ui.add(
                             egui::TextEdit::singleline(&mut self.query)
-                                .hint_text("Поиск файлов")
+                                .hint_text(search_hint)
                                 .desired_width((width - 380.0).clamp(120.0, 220.0))
                                 .margin(egui::Margin::symmetric(10, 6)),
                         );
-                        if crate::chrome::icon_button(ui, crate::chrome::Icon::Open, "Открыть файл · Ctrl+O", true).clicked() {
+                        if crate::chrome::icon_button(
+                            ui,
+                            crate::chrome::Icon::Open,
+                            self.tr("Open a file · Ctrl+O"),
+                            true,
+                        )
+                        .clicked()
+                        {
                             self.send(Job::PickOpen);
                         }
                     });
                     ui.horizontal_wrapped(|ui| {
-                        for (index, label) in ["Все файлы", "Docs", "Sheets", "Slides"].into_iter().enumerate() {
+                        for (index, label) in [self.tr("All files"), "Docs", "Sheets", "Slides"]
+                            .into_iter()
+                            .enumerate()
+                        {
                             ui.selectable_value(&mut kind_filter, index, label);
                         }
-                        if !self.query.is_empty() && crate::chrome::tool(ui, "×", "Очистить поиск", false).clicked() {
+                        if !self.query.is_empty()
+                            && crate::chrome::tool(ui, "×", self.tr("Clear search"), false)
+                                .clicked()
+                        {
                             self.query.clear();
                         }
                     });
                     ui.add_space(6.0);
-                    let list: Vec<PathBuf> = if filter % 2 == 1 { self.settings.pinned.clone() } else { self.settings.recent.clone() };
+                    let list: Vec<PathBuf> = if filter % 2 == 1 {
+                        self.settings.pinned.clone()
+                    } else {
+                        self.settings.recent.clone()
+                    };
                     let q = self.query.trim().to_lowercase();
-                    let shown: Vec<&PathBuf> = list.iter().filter(|p| {
-                        p.to_string_lossy().to_lowercase().contains(&q)
-                            && (kind_filter == 0 || file_kind(p) == Some(kind_filter))
-                    }).collect();
+                    let shown: Vec<&PathBuf> = list
+                        .iter()
+                        .filter(|p| {
+                            p.to_string_lossy().to_lowercase().contains(&q)
+                                && (kind_filter == 0 || file_kind(p) == Some(kind_filter))
+                        })
+                        .collect();
                     if shown.is_empty() {
                         ui.add_space(24.0);
                         ui.vertical_centered(|ui| {
-                            ui.label(egui::RichText::new(if !q.is_empty() || kind_filter != 0 { "Ничего не найдено" } else if filter % 2 == 1 { "Нет закреплённых файлов" } else { "Здесь появятся ваши файлы" }).strong());
-                            ui.label(egui::RichText::new(if !q.is_empty() || kind_filter != 0 { "Измените имя, путь или тип файла." } else if filter % 2 == 1 { "Откройте ··· рядом с файлом и выберите «Закрепить»." } else { "Создайте файл или перетащите его в окно." }).color(crate::chrome::muted(ui)));
+                            ui.label(
+                                egui::RichText::new(if !q.is_empty() || kind_filter != 0 {
+                                    self.tr("Nothing found")
+                                } else if filter % 2 == 1 {
+                                    self.tr("No pinned files")
+                                } else {
+                                    self.tr("Your files will appear here")
+                                })
+                                .strong(),
+                            );
+                            ui.label(
+                                egui::RichText::new(if !q.is_empty() || kind_filter != 0 {
+                                    self.tr("Change the name, path or file type.")
+                                } else if filter % 2 == 1 {
+                                    self.tr("Open ··· next to a file and choose «Pin».")
+                                } else {
+                                    self.tr("Create a file or drag it into the window.")
+                                })
+                                .color(crate::chrome::muted(ui)),
+                            );
                         });
                     } else {
                         ui.horizontal(|ui| {
                             ui.add_space(52.0);
-                            ui.label(egui::RichText::new("Имя").size(11.5).color(crate::chrome::muted(ui)));
+                            ui.label(
+                                egui::RichText::new(self.tr("Name"))
+                                    .size(11.5)
+                                    .color(crate::chrome::muted(ui)),
+                            );
                         });
                         ui.add_space(2.0);
                     }
                     for p in shown {
                         let pin = self.settings.pinned.contains(p);
+                        let unpin_label = self.tr("Unpin");
+                        let pin_label = self.tr("Pin");
+                        let remove_label = self.tr("Remove from list");
+                        let actions_label = self.tr("File actions");
                         let row = ui.allocate_ui(egui::vec2(width, 60.0), |ui| {
-                            let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 60.0), egui::Sense::click());
-                            response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), p.display().to_string()));
+                            let (rect, response) = ui
+                                .allocate_exact_size(egui::vec2(width, 60.0), egui::Sense::click());
+                            response.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::WidgetType::Button,
+                                    ui.is_enabled(),
+                                    p.display().to_string(),
+                                )
+                            });
                             let hovered = ui.rect_contains_pointer(rect);
                             if hovered || response.has_focus() {
-                                ui.painter().rect_filled(rect, 6.0, crate::chrome::hover_fill(ui));
+                                ui.painter()
+                                    .rect_filled(rect, 6.0, crate::chrome::hover_fill(ui));
                             }
                             let (glyph, _) = file_badge(p);
-                            let color = crate::chrome::accent_for(match file_kind(p) { Some(2) => "sheets", Some(3) => "slides", _ => "docs" }, ui.visuals().dark_mode);
-                            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(egui::vec2(12.0, 8.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+                            let color = crate::chrome::accent_for(
+                                match file_kind(p) {
+                                    Some(2) => "sheets",
+                                    Some(3) => "slides",
+                                    _ => "docs",
+                                },
+                                ui.visuals().dark_mode,
+                            );
+                            let mut child = ui.new_child(
+                                egui::UiBuilder::new()
+                                    .max_rect(rect.shrink2(egui::vec2(12.0, 8.0)))
+                                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                            );
                             crate::chrome::badge(&mut child, glyph, color, 28.0);
                             child.add_space(10.0);
                             child.vertical(|ui| {
                                 ui.set_width((width - 122.0).max(40.0));
                                 ui.spacing_mut().item_spacing.y = 0.0;
-                                ui.add(egui::Label::new(egui::RichText::new(p.file_name().map(|s| s.to_string_lossy()).unwrap_or_default()).size(13.5)).truncate());
-                                ui.add(egui::Label::new(egui::RichText::new(p.parent().map(|d| d.display().to_string()).unwrap_or_default()).color(crate::chrome::muted(ui)).size(11.0)).truncate());
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(
+                                            p.file_name()
+                                                .map(|s| s.to_string_lossy())
+                                                .unwrap_or_default(),
+                                        )
+                                        .size(13.5),
+                                    )
+                                    .truncate(),
+                                );
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(
+                                            p.parent()
+                                                .map(|d| d.display().to_string())
+                                                .unwrap_or_default(),
+                                        )
+                                        .color(crate::chrome::muted(ui))
+                                        .size(11.0),
+                                    )
+                                    .truncate(),
+                                );
                             });
                             let mut action = None;
-                            child.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.menu_button("···", |ui| {
-                                    if ui.button(if pin { "Открепить" } else { "Закрепить" }).clicked() { action = Some("pin"); ui.close(); }
-                                    if ui.button("Убрать из списка").clicked() { action = Some("remove"); ui.close(); }
-                                }).response.on_hover_text("Действия с файлом");
-                                if pin { ui.weak("★"); }
-                            });
+                            child.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.menu_button("···", |ui| {
+                                        if ui
+                                            .button(if pin { unpin_label } else { pin_label })
+                                            .clicked()
+                                        {
+                                            action = Some("pin");
+                                            ui.close();
+                                        }
+                                        if ui.button(remove_label).clicked() {
+                                            action = Some("remove");
+                                            ui.close();
+                                        }
+                                    })
+                                    .response
+                                    .on_hover_text(actions_label);
+                                    if pin {
+                                        ui.weak("★");
+                                    }
+                                },
+                            );
                             (response, action)
                         });
                         let (response, action) = row.inner;
                         match action {
                             Some("pin") => {
-                                if let Err(error) = self.settings.toggle_pin(p.clone()) { self.error = error; }
-                                if let Err(e) = self.worker.save_settings(self.settings.clone()) { self.error = e; }
+                                if let Err(error) = self.settings.toggle_pin(p.clone()) {
+                                    self.error = error;
+                                }
+                                if let Err(e) = self.worker.save_settings(self.settings.clone()) {
+                                    self.error = e;
+                                }
                             }
                             Some(_) => {
                                 self.settings.recent.retain(|v| v != p);
                                 self.settings.pinned.retain(|v| v != p);
-                                if let Err(e) = self.worker.save_settings(self.settings.clone()) { self.error = e; }
+                                if let Err(e) = self.worker.save_settings(self.settings.clone()) {
+                                    self.error = e;
+                                }
                             }
                             None => {
-                                if response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(p.display().to_string()).clicked() {
+                                if response
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                    .on_hover_text(p.display().to_string())
+                                    .clicked()
+                                {
                                     self.send(Job::Open(p.clone()));
                                 }
                             }
                         }
                     }
                     ui.add_space(28.0);
-                    ui.label(egui::RichText::new(format!("TrineDocs {} · поддержка всех возможностей Microsoft Office пока неполная.", env!("CARGO_PKG_VERSION"))).color(crate::chrome::muted(ui)).size(11.0));
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "TrineDocs {} · {}",
+                            env!("CARGO_PKG_VERSION"),
+                            self.tr(
+                                "Support for all Microsoft Office features is not complete yet."
+                            )
+                        ))
+                        .color(crate::chrome::muted(ui))
+                        .size(11.0),
+                    );
                 });
             });
         });
@@ -2281,14 +2440,14 @@ impl App {
             let mut open = true;
             let mut refresh = false;
             let mut navigate = None;
-            egui::Window::new("Проверка документа")
+            egui::Window::new(self.tr("Document check"))
                 .open(&mut open)
                 .default_width(520.0)
                 .show(ctx, |ui| {
                     if self.inspection.is_some() {
                         ui.horizontal(|ui| {
                             ui.spinner();
-                            ui.label("Проверяем документ…");
+                            ui.label(self.tr("Checking the document…"));
                         });
                     }
                     if let Some(result) = &self.inspection_result {
@@ -2299,17 +2458,18 @@ impl App {
                             .iter()
                             .any(|tab| tab.id == result.id && tab.version == result.version);
                         if !unchanged {
-                            ui.label("Документ изменён или закрыт после проверки.");
+                            ui.label(self.tr("The document changed or closed after the check."));
                         }
                         ui.separator();
                         ui.horizontal(|ui| {
+                            let search_hint = self.tr("Search by location and description");
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.inspector_query)
-                                    .hint_text("Поиск по месту и описанию")
+                                    .hint_text(search_hint)
                                     .char_limit(160)
                                     .desired_width(260.0),
                             );
-                            if ui.button("Сбросить").clicked() {
+                            if ui.button(self.tr("Reset")).clicked() {
                                 self.inspector_query.clear();
                                 self.inspector_category = Default::default();
                             }
@@ -2326,13 +2486,13 @@ impl App {
                                         );
                                     }
                                 });
-                            if ui.button("Копировать отчёт").clicked() {
+                            if ui.button(self.tr("Copy the report")).clicked() {
                                 ctx.copy_text(result.copy_report(
                                     &self.inspector_query,
                                     self.inspector_category,
                                     unchanged,
                                 ));
-                                self.status = "Отчёт проверки скопирован".into();
+                                self.status = self.tr("Check report copied").into();
                             }
                         });
                         let findings = result
@@ -2345,11 +2505,11 @@ impl App {
                                 result.report.findings.len()
                             ));
                             if findings.is_empty() {
-                                ui.label("По этому фильтру замечаний нет.");
+                                ui.label(self.tr("No findings for this filter."));
                             }
                         }
                         if result.report.findings.is_empty() {
-                            ui.label("По поддерживаемым проверкам замечаний нет.");
+                            ui.label(self.tr("No findings for the supported checks."));
                         }
                         egui::ScrollArea::vertical()
                             .max_height(420.0)
@@ -2390,7 +2550,7 @@ impl App {
                             self.active.is_some()
                                 && self.inspection.is_none()
                                 && self.pending.is_none(),
-                            egui::Button::new("Проверить текущий документ"),
+                            egui::Button::new(self.tr("Check the current document")),
                         )
                         .clicked();
                 });
@@ -2406,7 +2566,7 @@ impl App {
         }
         if !self.error.is_empty() {
             let error = self.error.clone();
-            egui::Window::new("Сообщение")
+            egui::Window::new(self.tr("Message"))
                 .collapsible(false)
                 .resizable(false)
                 .show(ctx, |ui| {
@@ -2417,19 +2577,19 @@ impl App {
                 });
         }
         if let Some(client) = self.clients.first().cloned() {
-            egui::Window::new("Разрешить MCP-клиент?")
+            egui::Window::new(self.tr("Allow the MCP client?"))
                 .collapsible(false)
                 .show(ctx, |ui| {
                     ui.label(format!("Клиент: {client}"));
-                    ui.label(
-                        "Чтение и правка открытых документов. Файлы на диске — через интерфейс.",
-                    );
+                    ui.label(self.tr(
+                        "Read and edit open documents. Files on disk go through the interface.",
+                    ));
                     ui.horizontal(|ui| {
-                        if ui.button("Разрешить").clicked() {
+                        if ui.button(self.tr("Allow")).clicked() {
                             self.allowed.insert(client.clone());
                             self.clients.remove(&client);
                         }
-                        if ui.button("Запретить").clicked() {
+                        if ui.button(self.tr("Deny")).clicked() {
                             self.clients.remove(&client);
                             self.client_access.deny(&client);
                         }
@@ -2437,20 +2597,20 @@ impl App {
                 });
         }
         if !self.recoveries.is_empty() {
-            egui::Window::new("Восстановление")
+            egui::Window::new(self.tr("Recovery"))
                 .collapsible(false)
                 .show(ctx, |ui| {
                     for s in self.recoveries.clone() {
                         ui.horizontal(|ui| {
                             ui.label(&s.title);
-                            if ui.button("Восстановить").clicked()
+                            if ui.button(self.tr("Recover")).clicked()
                                 && let Err(error) = self.restore_snapshot(&s)
                             {
                                 self.error = error;
                             }
                         });
                     }
-                    if ui.button("Удалить снимки").clicked() {
+                    if ui.button(self.tr("Delete snapshots")).clicked() {
                         for s in &self.recoveries {
                             self.recovery.clear(s.id);
                         }
@@ -2459,30 +2619,44 @@ impl App {
                 });
         }
         if let Some(id) = self.disk_changed {
-            egui::Window::new("Файл изменён на диске").collapsible(false).show(ctx,|ui|{
-            ui.label("Перезагрузка заменит текущие правки. Для их сохранения используйте «Сохранить копию».");ui.horizontal(|ui|{
-                if ui.button("Перезагрузить").clicked() { self.reload(id); }
-                if ui.button("Оставить правки").clicked(){if let Some(observed) = self.observed_stamps.get(&id).copied() { self.stamps.insert(id, observed); self.disk_changed=None; } else { self.status="Дождитесь повторной проверки файла".into(); }}
-            });
-        });
+            egui::Window::new(self.tr("The file changed on disk"))
+                .collapsible(false)
+                .show(ctx, |ui| {
+                    ui.label(self.tr(
+                        "Reloading replaces the current edits. Use “Save a copy” to keep them.",
+                    ));
+                    ui.horizontal(|ui| {
+                        if ui.button(self.tr("Reload")).clicked() {
+                            self.reload(id);
+                        }
+                        if ui.button(self.tr("Keep the edits")).clicked() {
+                            if let Some(observed) = self.observed_stamps.get(&id).copied() {
+                                self.stamps.insert(id, observed);
+                                self.disk_changed = None;
+                            } else {
+                                self.status = self.tr("Wait for the file check to repeat").into();
+                            }
+                        }
+                    });
+                });
         }
         if self.pending.is_some() {
             let mut action = 0;
             egui::Modal::new(egui::Id::new("confirmation")).show(ctx,|ui|{
             ui.set_max_width(520.0);
-            ui.heading("Подтверждение");
+            ui.heading(self.tr("Confirmation"));
             ui.add_space(8.0);
             match self.pending.as_ref(){Some(Pending::Unlock{path,marker,..})=>{
                 ui.label(format!("Файл: {}", path.file_name().map(|v| v.to_string_lossy()).unwrap_or_default()));
-                ui.label(if marker.is_some() { "Удалить оставшийся lock-маркер? Закройте этот файл в других программах. Активная блокировка TrineDocs остаётся защищённой." } else { "Lock-маркер уже отсутствует. Получить блокировку для сохранения?" });
-                ui.horizontal(|ui| { if ui.button("Разблокировать сохранение").clicked(){action=1}
-                if ui.button("Отмена").clicked(){action=3} });
-            },Some(Pending::Register(p))=>{ui.label(format!("Добавить сервер trinedocs в {}",p.path.display()));ui.label("Остальные записи сохранятся. Существующая запись trinedocs не заменяется.");ui.monospace(&p.change);ui.horizontal(|ui|{if ui.button("Добавить").clicked(){action=1}
-if ui.button("Отмена").clicked(){action=3}});},Some(Pending::SaveFormat{id,..})=>{if let Some(t)=self.tabs.iter().find(|t|t.id==*id){match &t.document{Document::Docs(d)=>{for loss in &d.losses{ui.label(loss);}},Document::Slides(d)=>{for loss in d.export_warnings(){ui.label(loss);}},_=>{}}}ui.label("Экспорт сохраняет только возможности выбранного формата. Форматирование и объекты могут измениться или исчезнуть. Для редактируемой копии выберите .docx, .xlsx или .pptx; ограничения Office-экспорта также остаются.");ui.horizontal(|ui|{if ui.button("Продолжить").clicked(){action=1}
-if ui.button("Отмена").clicked(){action=3}});}
-            _=>{ui.label("Сохранить изменения?");ui.horizontal(|ui|{if ui.button("Сохранить").clicked(){action=1}
-if ui.button("Не сохранять").clicked(){action=2}
-if ui.button("Отмена").clicked(){action=3}});}}
+                ui.label(if marker.is_some() { self.tr("Delete the remaining lock marker? Close this file in other programs. The active TrineDocs lock stays protected.") } else { self.tr("The lock marker is already gone. Take the lock for saving?") });
+                ui.horizontal(|ui| { if ui.button(self.tr("Unlock saving")).clicked(){action=1}
+                if ui.button(self.tr("Cancel")).clicked(){action=3} });
+            },Some(Pending::Register(p))=>{ui.label(format!("Добавить сервер trinedocs в {}",p.path.display()));ui.label(self.tr("The other entries are kept. The existing trinedocs entry is not replaced."));ui.monospace(&p.change);ui.horizontal(|ui|{if ui.button(self.tr("Add")).clicked(){action=1}
+if ui.button(self.tr("Cancel")).clicked(){action=3}});},Some(Pending::SaveFormat{id,..})=>{if let Some(t)=self.tabs.iter().find(|t|t.id==*id){match &t.document{Document::Docs(d)=>{for loss in &d.losses{ui.label(loss);}},Document::Slides(d)=>{for loss in d.export_warnings(){ui.label(loss);}},_=>{}}}ui.label(self.tr("Export keeps only what the chosen format supports. Formatting and objects may change or disappear. For an editable copy choose .docx, .xlsx or .pptx; the Office export limits remain."));ui.horizontal(|ui|{if ui.button(self.tr("Continue")).clicked(){action=1}
+if ui.button(self.tr("Cancel")).clicked(){action=3}});}
+            _=>{ui.label(self.tr("Save changes?"));ui.horizontal(|ui|{if ui.button(self.tr("Save")).clicked(){action=1}
+if ui.button(self.tr("Discard")).clicked(){action=2}
+if ui.button(self.tr("Cancel")).clicked(){action=3}});}}
         });
             if action != 0
                 && let Some(p) = self.pending.take()
@@ -2503,7 +2677,9 @@ if ui.button("Отмена").clicked(){action=3}});}}
                                 expected: self.stamps.get(&id).copied().flatten(),
                             });
                         } else {
-                            self.error = "Документ изменился или занят файловой операцией".into();
+                            self.error = self
+                                .tr("The document changed or is busy with a file operation")
+                                .into();
                         }
                     }
                     (Pending::Register(p), 1) => self.send(Job::ApplyRegistration(p)),
@@ -2554,25 +2730,37 @@ if ui.button("Отмена").clicked(){action=3}});}}
         if self.show_settings {
             let mut open = true;
             let mut changed = false;
-            egui::Window::new("Настройки")
+            let language_label = self.tr("Language");
+            let russian_label = self.tr("Russian");
+            let theme_label = self.tr("Theme");
+            let theme_labels = [
+                ("system", self.tr("System")),
+                ("light", self.tr("Light")),
+                ("dark", self.tr("Dark")),
+            ];
+            let scale_label = self.tr("Scale");
+            let backup_label = self.tr("Backup .bak");
+            let motion_label = self.tr("Reduced motion");
+            let mcp_label = self.tr("MCP: local clients");
+            egui::Window::new(self.tr("Settings"))
                 .open(&mut open)
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label("Язык");
+                        ui.label(language_label);
                         changed |= ui
-                            .selectable_value(&mut self.settings.language, "ru".into(), "Русский")
+                            .selectable_value(
+                                &mut self.settings.language,
+                                "ru".into(),
+                                russian_label,
+                            )
                             .changed();
                         changed |= ui
                             .selectable_value(&mut self.settings.language, "en".into(), "English")
                             .changed();
                     });
                     ui.horizontal(|ui| {
-                        ui.label("Тема");
-                        for (v, l) in [
-                            ("system", "Системная"),
-                            ("light", "Светлая"),
-                            ("dark", "Тёмная"),
-                        ] {
+                        ui.label(theme_label);
+                        for (v, l) in theme_labels {
                             changed |= ui
                                 .selectable_value(&mut self.settings.theme, v.into(), l)
                                 .changed();
@@ -2580,19 +2768,17 @@ if ui.button("Отмена").clicked(){action=3}});}}
                     });
                     changed |= ui
                         .add(
-                            egui::Slider::new(&mut self.settings.scale, 0.75..=2.0).text("Масштаб"),
+                            egui::Slider::new(&mut self.settings.scale, 0.75..=2.0)
+                                .text(scale_label),
                         )
                         .changed();
                     changed |= ui
-                        .checkbox(&mut self.settings.backup, "Резервная копия .bak")
+                        .checkbox(&mut self.settings.backup, backup_label)
                         .changed();
                     changed |= ui
-                        .checkbox(&mut self.settings.reduced_motion, "Уменьшить движение")
+                        .checkbox(&mut self.settings.reduced_motion, motion_label)
                         .changed();
-                    if ui
-                        .checkbox(&mut self.settings.mcp, "MCP: локальные клиенты")
-                        .changed()
-                    {
+                    if ui.checkbox(&mut self.settings.mcp, mcp_label).changed() {
                         changed = true;
                         self.allowed.clear();
                         self.clients.clear();
@@ -2615,7 +2801,7 @@ if ui.button("Отмена").clicked(){action=3}});}}
                             }
                         }
                     }
-                    if ui.button("Скопировать конфиг MCP").clicked() {
+                    if ui.button(self.tr("Copy MCP config")).clicked() {
                         let shim = std::env::current_exe()
                             .ok()
                             .map(|p| p.with_file_name("trinedocs-mcp.exe"))
@@ -2625,7 +2811,7 @@ if ui.button("Отмена").clicked(){action=3}});}}
                                 .to_string(),
                         );
                     }
-                    ui.label("Регистрация MCP с предпросмотром:");
+                    ui.label(self.tr("MCP registration with preview:"));
                     for client in [
                         crate::mcp::register::Client::Codex,
                         crate::mcp::register::Client::Claude,
@@ -2647,7 +2833,7 @@ if ui.button("Отмена").clicked(){action=3}});}}
         }
         if self.palette {
             let mut open = true;
-            egui::Window::new("Команды")
+            egui::Window::new(self.tr("Commands"))
                 .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
@@ -2667,10 +2853,11 @@ if ui.button("Отмена").clicked(){action=3}});}}
                     let enter = focused
                         && ctx
                             .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+                    let query_hint = self.tr("Find an action…");
                     let response = ui.add(
                         egui::TextEdit::singleline(&mut self.palette_query)
                             .id(query_id)
-                            .hint_text("Найти действие…")
+                            .hint_text(query_hint)
                             .desired_width(400.0),
                     );
                     if self.palette_focus {
@@ -2680,7 +2867,11 @@ if ui.button("Отмена").clicked(){action=3}});}}
                     if response.changed() {
                         self.palette_selected = 0;
                     }
-                    let commands = palette_commands(self.current().is_some(), &self.palette_query);
+                    let commands = palette_commands(
+                        self.current().is_some(),
+                        &self.palette_query,
+                        &self.settings.language,
+                    );
                     if !commands.is_empty() {
                         self.palette_selected = self.palette_selected.min(commands.len() - 1);
                         if down {
@@ -2707,7 +2898,7 @@ if ui.button("Отмена").clicked(){action=3}});}}
                         }
                     }
                     if commands.is_empty() {
-                        ui.weak("Команды не найдены");
+                        ui.weak(self.tr("No commands found"));
                     }
                     if let Some(key) = picked {
                         match key {
@@ -2764,8 +2955,12 @@ impl eframe::App for App {
             } {
                 Ok(Some(document)) => {
                     self.tabs.clear();
-                    let mut t =
-                        Tab::new(self.next_id, document, "Проверка интерфейса".into(), None);
+                    let mut t = Tab::new(
+                        self.next_id,
+                        document,
+                        self.tr("Interface check").into(),
+                        None,
+                    );
                     self.next_id += 1;
                     t.saved_version = 0;
                     self.active = Some(t.id);
@@ -2835,39 +3030,34 @@ impl eframe::App for App {
                         }
                         if let Some(t) = self.current() {
                             ui.separator();
-                            ui.menu_button(
-                                "Сохранить / экспортировать…",
-                                |ui| {
-                                    let formats: &[&str] = match &t.document {
-                                        Document::Docs(_) => {
-                                            &["docx", "pdf", "odt", "txt", "md", "html"]
-                                        }
-                                        Document::Sheets(_) => {
-                                            &["xlsx", "pdf", "csv", "tsv", "html"]
-                                        }
-                                        Document::Slides(_) => &["pptx", "pdf", "png"],
-                                    };
-                                    for ext in formats {
-                                        let label = t
-                                            .document
-                                            .save_formats()
-                                            .iter()
-                                            .find(|(e, _)| e == ext)
-                                            .map(|(_, l)| *l)
-                                            .unwrap_or(ext);
-                                        if ui.button(format!("{label}  ·  .{ext}")).clicked() {
-                                            command = Some(*ext);
-                                            ui.close();
-                                        }
+                            ui.menu_button(self.tr("Save / export…"), |ui| {
+                                let formats: &[&str] = match &t.document {
+                                    Document::Docs(_) => {
+                                        &["docx", "pdf", "odt", "txt", "md", "html"]
                                     }
-                                },
-                            );
+                                    Document::Sheets(_) => &["xlsx", "pdf", "csv", "tsv", "html"],
+                                    Document::Slides(_) => &["pptx", "pdf", "png"],
+                                };
+                                for ext in formats {
+                                    let label = t
+                                        .document
+                                        .save_formats()
+                                        .iter()
+                                        .find(|(e, _)| e == ext)
+                                        .map(|(_, l)| *l)
+                                        .unwrap_or(ext);
+                                    if ui.button(format!("{label}  ·  .{ext}")).clicked() {
+                                        command = Some(*ext);
+                                        ui.close();
+                                    }
+                                }
+                            });
                         }
                     });
                     if crate::chrome::icon_button(
                         ui,
                         crate::chrome::Icon::Open,
-                        "Открыть · Ctrl+O",
+                        self.tr("Open · Ctrl+O"),
                         true,
                     )
                     .clicked()
@@ -2877,7 +3067,7 @@ impl eframe::App for App {
                     if crate::chrome::icon_button(
                         ui,
                         crate::chrome::Icon::Save,
-                        "Сохранить · Ctrl+S",
+                        self.tr("Save · Ctrl+S"),
                         self.active.is_some(),
                     )
                     .clicked()
@@ -2889,7 +3079,7 @@ impl eframe::App for App {
                     if crate::chrome::icon_button(
                         ui,
                         crate::chrome::Icon::Undo,
-                        "Отменить · Ctrl+Z",
+                        self.tr("Undo · Ctrl+Z"),
                         can_undo,
                     )
                     .clicked()
@@ -2899,7 +3089,7 @@ impl eframe::App for App {
                     if crate::chrome::icon_button(
                         ui,
                         crate::chrome::Icon::Redo,
-                        "Повторить · Ctrl+Y",
+                        self.tr("Redo · Ctrl+Y"),
                         can_redo,
                     )
                     .clicked()
@@ -2916,14 +3106,14 @@ impl eframe::App for App {
                             if ui
                                 .add_enabled(
                                     self.current().is_some() && self.inspection.is_none(),
-                                    egui::Button::new("Проверить документ"),
+                                    egui::Button::new(self.tr("Check the document")),
                                 )
                                 .clicked()
                             {
                                 command = Some("inspect");
                                 ui.close();
                             }
-                            if ui.button("Поиск команд · Ctrl+K").clicked() {
+                            if ui.button(self.tr("Find commands · Ctrl+K")).clicked() {
                                 self.queue_palette_click(&ctx);
                                 ui.close();
                             }
@@ -2931,9 +3121,9 @@ impl eframe::App for App {
                             let dark = ui.visuals().dark_mode;
                             if ui
                                 .button(if dark {
-                                    "Светлая тема"
+                                    self.tr("Light theme")
                                 } else {
-                                    "Тёмная тема"
+                                    self.tr("Dark theme")
                                 })
                                 .clicked()
                             {
@@ -2946,14 +3136,14 @@ impl eframe::App for App {
                             }
                         })
                         .response
-                        .on_hover_text("Настройки и команды");
+                        .on_hover_text(self.tr("Settings and commands"));
                         if ui
                             .add(
-                                egui::Button::new("Ассистент")
+                                egui::Button::new(self.tr("Assistant"))
                                     .selected(self.show_ai)
                                     .frame_when_inactive(false),
                             )
-                            .on_hover_text("AI-чат и изменения · Ctrl+Shift+A")
+                            .on_hover_text(self.tr("AI chat and changes · Ctrl+Shift+A"))
                             .clicked()
                         {
                             self.show_ai = !self.show_ai;
@@ -2962,7 +3152,7 @@ impl eframe::App for App {
                             if crate::chrome::icon_button(
                                 ui,
                                 crate::chrome::Icon::Search,
-                                "Поиск команд · Ctrl+K",
+                                self.tr("Find commands · Ctrl+K"),
                                 true,
                             )
                             .clicked()
@@ -2973,8 +3163,11 @@ impl eframe::App for App {
                             .add_sized(
                                 [210.0, 28.0],
                                 egui::Button::new(
-                                    egui::RichText::new("Поиск команд    Ctrl+K")
-                                        .color(crate::chrome::muted(ui)),
+                                    egui::RichText::new(format!(
+                                        "{}    Ctrl+K",
+                                        self.tr("Find commands")
+                                    ))
+                                    .color(crate::chrome::muted(ui)),
                                 )
                                 .fill(ui.visuals().panel_fill),
                             )
@@ -2993,7 +3186,7 @@ impl eframe::App for App {
                             ui.spacing_mut().item_spacing.x = 4.0;
                             let home = doc_tab(
                                 ui,
-                                "Главная",
+                                self.tr("Home"),
                                 self.active.is_none(),
                                 egui::Color32::TRANSPARENT,
                                 false,
@@ -3031,7 +3224,7 @@ impl eframe::App for App {
                                     let close = crate::chrome::icon_button(
                                         ui,
                                         crate::chrome::Icon::Close,
-                                        "Закрыть документ",
+                                        self.tr("Close the document"),
                                         true,
                                     );
                                     ui.add_space(6.0);
@@ -3059,21 +3252,22 @@ impl eframe::App for App {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if let Some(tab) = self.current() {
                             if tab.read_only {
-                                ui.weak("Только чтение");
+                                ui.weak(self.tr("Read only"));
                             }
                             if tab.save_locked {
-                                ui.weak("Файл занят")
-                                    .on_hover_text("Правки можно сохранить в отдельную копию.");
+                                ui.weak(self.tr("File is locked")).on_hover_text(
+                                    self.tr("Edits can be saved to a separate copy."),
+                                );
                             }
                             ui.label(
                                 egui::RichText::new(if self.saving.contains(&tab.id) {
-                                    "Сохранение…"
+                                    self.tr("Saving…")
                                 } else if tab.dirty() {
-                                    "Не сохранено"
+                                    self.tr("Not saved")
                                 } else if tab.path.is_none() {
-                                    "Новый файл"
+                                    self.tr("New file")
                                 } else {
-                                    "Сохранено"
+                                    self.tr("Saved")
                                 })
                                 .small()
                                 .color(crate::chrome::muted(ui)),
@@ -3108,9 +3302,9 @@ impl eframe::App for App {
         if let Some(id) = self.current().filter(|t| t.save_locked).map(|t| t.id) {
             egui::Panel::top("file-lock").frame(egui::Frame::new().fill(ui.visuals().window_fill).inner_margin(egui::Margin::symmetric(12, 7))).show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    ui.label("Файл занят. Редактирование доступно; исходный файл защищён от перезаписи.");
-                    if ui.button("Сохранить копию…").clicked() { command = Some("copy"); }
-                    if ui.button("Блокировка…").clicked() { self.deferred.push((id, "unlock")); }
+                    ui.label(self.tr("The file is locked for writing. Editing stays available; the original file is protected from being overwritten."));
+                    if ui.button(self.tr("Save a copy…")).clicked() { command = Some("copy"); }
+                    if ui.button(self.tr("Lock…")).clicked() { self.deferred.push((id, "unlock")); }
                 });
             });
         }
@@ -3143,12 +3337,12 @@ impl eframe::App for App {
                 .frame(crate::chrome::sidebar_frame(ui))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("Ассистент").strong());
+                        ui.label(egui::RichText::new(self.tr("Assistant")).strong());
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if crate::chrome::icon_button(
                                 ui,
                                 crate::chrome::Icon::Close,
-                                "Закрыть панель ассистента · Ctrl+Shift+A",
+                                self.tr("Close the assistant panel · Ctrl+Shift+A"),
                                 true,
                             )
                             .clicked()
@@ -3161,9 +3355,10 @@ impl eframe::App for App {
                     let changes = if pending_changes > 0 {
                         format!("Изменения · {pending_changes}")
                     } else {
-                        "Изменения".into()
+                        self.tr("Changes").into()
                     };
-                    crate::chrome::tabs(ui, &mut self.ai_tab, &["Чат", &changes]);
+                    let chat_label = self.tr("Chat");
+                    crate::chrome::tabs(ui, &mut self.ai_tab, &[chat_label, &changes]);
                     ui.add_space(6.0);
                     if !self.workspace_jobs.is_empty() {
                         egui::CollapsingHeader::new(format!(
@@ -3179,11 +3374,11 @@ impl eframe::App for App {
                                     for task in self.workspace_jobs.iter().rev().take(12) {
                                         let status = task.status();
                                         let label = match task.state() {
-                                            "preparing" => "Подготовка",
-                                            "completed" => "Применено",
-                                            "preview" => "Предпросмотр",
-                                            "cancelled" => "Отменено",
-                                            _ => "Не применено",
+                                            "preparing" => self.tr("Preparing"),
+                                            "completed" => self.tr("Applied"),
+                                            "preview" => self.tr("Preview"),
+                                            "cancelled" => self.tr("Cancelled"),
+                                            _ => self.tr("Not applied"),
                                         };
                                         ui.label(format!(
                                             "{label} · документов {}",
@@ -3219,12 +3414,12 @@ impl eframe::App for App {
                         if pending_changes == 0 {
                             ui.add_space(16.0);
                             ui.label(
-                                egui::RichText::new("Нет непринятых правок AI.")
+                                egui::RichText::new(self.tr("No unaccepted AI changes."))
                                     .color(crate::chrome::muted(ui)),
                             );
                         }
                         let mut accept_all = false;
-                        if pending_changes > 1 && ui.button("Принять все").clicked() {
+                        if pending_changes > 1 && ui.button(self.tr("Accept all")).clicked() {
                             accept_all = true;
                         }
                         egui::ScrollArea::vertical()
@@ -3235,13 +3430,13 @@ impl eframe::App for App {
                                     if !c.accepted {
                                         ui.add(egui::Label::new(&c.label).wrap());
                                         ui.horizontal(|ui| {
-                                            if ui.button("Принять").clicked()
+                                            if ui.button(self.tr("Accept")).clicked()
                                                 && let Some(v) =
                                                     t.ai.iter_mut().find(|v| v.id == c.id)
                                             {
                                                 v.accepted = true;
                                             }
-                                            if ui.button("Откатить").clicked() {
+                                            if ui.button(self.tr("Reject")).clicked() {
                                                 reject = Some(c.id)
                                             }
                                         });
@@ -3295,7 +3490,7 @@ impl eframe::App for App {
                     if changed {
                         if let Err(e) = t.apply(Op::Replace {
                             document: d,
-                            label: "Редактирование".into(),
+                            label: self.tr("Editing").into(),
                             author: Author::User,
                             base_version: None,
                         }) {
@@ -3461,7 +3656,9 @@ impl eframe::App for App {
             || !self.reloading.is_empty();
         if ctx.input(|i| i.viewport().close_requested()) && close_busy && !self.allow_exit {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.status = "Завершите диалог или файловую операцию перед закрытием".into();
+            self.status = self
+                .tr("Finish the dialog or the file operation before closing")
+                .into();
         }
         if ctx.input(|i| i.viewport().close_requested()) && !close_busy {
             let ids: Vec<_> = self.tabs.iter().map(|t| t.id).collect();
@@ -3551,7 +3748,7 @@ fn new_card(
     painter.text(
         rect.min + egui::vec2(16.0, 81.0),
         egui::Align2::LEFT_TOP,
-        "Создать",
+        self.tr("Create"),
         egui::FontId::proportional(11.0),
         crate::chrome::muted(ui),
     );
@@ -3930,8 +4127,8 @@ mod shell_input_tests {
         assert!(app.show_settings);
         assert!(!app.palette);
         assert_eq!(text(&app), before);
-        assert!(palette_commands(false, "сохранить").is_empty());
-        assert!(palette_commands(true, "несуществующая команда").is_empty());
+        assert!(palette_commands(false, "сохранить", "ru").is_empty());
+        assert!(palette_commands(true, "несуществующая команда", "ru").is_empty());
         Ok(())
     }
 
@@ -4012,7 +4209,7 @@ mod shell_input_tests {
             media_jobs: Vec::new(),
             pending: None,
             close_after_save: None,
-            status: "Готово".into(),
+            status: self.tr("Ready").into(),
             error: font_error,
             show_settings: false,
             show_inspector: false,
@@ -4746,6 +4943,27 @@ mod shell_input_tests {
         assert!(!text(&app).contains("needle"));
         assert_eq!(app.palette_query, "needle");
         Ok(())
+    }
+    #[test]
+    fn the_language_setting_switches_the_shell_text() -> Result<(), String> {
+        let mut app = fixture()?;
+        app.settings.language = "en".into();
+        assert_eq!(app.tr("Settings"), "Settings");
+        assert_eq!(app.tr("Recent"), "Recent");
+        app.settings.language = "ru".into();
+        assert_eq!(app.tr("Settings"), "Настройки");
+        assert_eq!(app.tr("Recent"), "Недавние");
+        Ok(())
+    }
+    #[test]
+    fn the_palette_search_follows_the_visible_language() {
+        assert!(!palette_commands(true, "сохранить", "ru").is_empty());
+        assert!(
+            palette_commands(true, "save", "en")
+                .iter()
+                .any(|(_, label)| label.contains("Save"))
+        );
+        assert!(palette_commands(true, "сохранить", "en").is_empty());
     }
     #[test]
     fn opening_the_palette_starts_with_an_empty_query() -> Result<(), String> {
