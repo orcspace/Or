@@ -5625,7 +5625,9 @@ mod phase200_cashflow_defect {
             );
         }
         assert_eq!(number(&book, "=FV(1,2000,-1,1)")?, -1.0);
-        assert!((number(&book, "=PV(-0.5,1060,0,1e-308)")? / -1.2353653155963783e11 - 1.0).abs() < 1e-9);
+        assert!(
+            (number(&book, "=PV(-0.5,1060,0,1e-308)")? / -1.2353653155963783e11 - 1.0).abs() < 1e-9
+        );
         Ok(())
     }
 }
