@@ -3421,6 +3421,7 @@ fn library_grid(value: xlfn::base::Value) -> CalcResult<Grid> {
                 rows: array.rows,
                 cols: array.cols,
                 reference: false,
+                origin: None,
             })
         }
         other => Ok(Grid::scalar(engine_value(&other))),
@@ -4535,7 +4536,6 @@ mod defect_batch_two {
     #[test]
     fn mixed_date_time_text_preserves_each_contract() -> Result<(),String> {
         let book=Book::default();
-        let id=book.active_id();
         let date=date_serial(2024,1,15);
         assert_eq!(number(&book,"=DATEVALUE(\"2024-01-15 12:30\")")?,date);
         assert!((number(&book,"=TIMEVALUE(\"2024-01-15 12:30\")")?-12.5/24.0).abs()<1e-12);

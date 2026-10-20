@@ -2468,7 +2468,7 @@ mod hundred_chat_content_tests {
         let ctx=egui::Context::default();crate::fonts::install(&ctx)?;let mut result=None;
         let _=ctx.run_ui(egui::RawInput::default(),|ui| {result=Some(inline(ui,"plain **bold**"));});
         let job=result.unwrap_or_default();
-        assert!(job.sections.iter().any(|section|&job.text[section.byte_range.clone()]=="bold"
+        assert!(job.sections.iter().any(|section|&job.text[section.byte_range.start.0..section.byte_range.end.0]=="bold"
             && section.format.font_id.family==egui::FontFamily::Name("bold".into())));Ok(())
     }
     #[test]

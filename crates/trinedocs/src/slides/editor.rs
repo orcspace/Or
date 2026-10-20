@@ -4025,15 +4025,13 @@ mod phase200_editor_tests {
     #[test]
     fn slide_property_text_focus_does_not_transfer_to_another_slide() {
         let ctx=egui::Context::default();let mut a="Slide A".to_string();let mut b="Slide B".to_string();let mut field_id=None;
-        let _=ctx.run(egui::RawInput::default(),|ctx|{
-            egui::CentralPanel::default().show(ctx,|ui|{
-                field_id=Some(ui.id().with(("slide-property",1_u64,"title")));
-                slide_property_text(ui,&mut a,1,"title","");
-            });
+        let _=ctx.run_ui(egui::RawInput::default(),|ui|{
+            field_id=Some(ui.id().with(("slide-property",1_u64,"title")));
+            slide_property_text(ui,&mut a,1,"title","");
         });
         if let Some(id)=field_id {ctx.memory_mut(|memory|memory.request_focus(id));}
-        let _=ctx.run(egui::RawInput{events:vec![egui::Event::Text("wrong slide".into())],..Default::default()},|ctx|{
-            egui::CentralPanel::default().show(ctx,|ui|{slide_property_text(ui,&mut b,2,"title","");});
+        let _=ctx.run_ui(egui::RawInput{events:vec![egui::Event::Text("wrong slide".into())],..Default::default()},|ui|{
+            slide_property_text(ui,&mut b,2,"title","");
         });
         assert_eq!(b,"Slide B");
     }

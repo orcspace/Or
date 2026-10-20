@@ -1528,9 +1528,9 @@ fn read_charts(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(),
         let mut kind = ChartKind::Column;
         let mut refs = Vec::new();
         let mut header_refs = Vec::new();
-()=>`        let mut category_refs = Vec::new();
+        let mut category_refs = Vec::new();
         let mut value_refs = Vec::new();
-        let mut plot_types=0usize;`
+        let mut plot_types=0usize;
         let mut in_categories = false;
         let mut title = String::new();
         let mut title_refs=Vec::new();
@@ -1543,7 +1543,7 @@ fn read_charts(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(),
             match event {
                 Event::Start(e) | Event::Empty(e) => {
                     let tag = local(&e);
-()=>`                    if in_plot_area && tag.ends_with("Chart") {
+                    if in_plot_area && tag.ends_with("Chart") {
                         if !matches!(tag.as_str(),"barChart"|"lineChart"|"areaChart"|"pieChart"|"doughnutChart"|"scatterChart") {
                             return Err(format!("Тип диаграммы {tag} пока не поддерживается; импорт остановлен без замены на столбчатую"));
                         }
@@ -1551,7 +1551,7 @@ fn read_charts(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(),
                         if plot_types>1 {return Err("Комбинированные диаграммы пока не поддерживаются".into());}
                     }
                     match tag.as_str() {
-                        "plotArea" if !empty` => in_plot_area = true,
+                        "plotArea" if !empty => in_plot_area = true,
                         "cat"|"xVal" if !empty => in_categories = true,
                         "tx" if !in_title && !empty => in_series_name = true,
                         "title" if !in_plot_area && !empty => in_title = true,
@@ -1627,20 +1627,20 @@ fn read_charts(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(),
                 range.r1 = range.r1.max(r.r1);
                 range.c1 = range.c1.max(r.c1);
             }
-()=>`            let data_columns:std::collections::BTreeSet<_>=refs.iter().map(|(_,range)|range.c0).collect();
+            let data_columns:std::collections::BTreeSet<_>=refs.iter().map(|(_,range)|range.c0).collect();
             if refs.iter().any(|(_,part)|part.c0!=part.c1||part.r0!=range.r0||part.r1!=range.r1)
                 || data_columns.len() as u32!=range.c1-range.c0+1
                 || category_refs.iter().any(|(_,part)|part.c0!=range.c0) {
                 return Err("Несмежные или горизонтальные источники диаграммы пока не поддерживаются; импорт остановлен без включения посторонних ячеек".into());
             }
-            let has_headers=range.r0>0` && header_refs.iter().any(|(source,header)|
+            let has_headers=range.r0>0 && header_refs.iter().any(|(source,header)|
                 source.as_ref().is_none_or(|source|source.to_lowercase()==sheet.to_lowercase())
                     && header.r0==header.r1 && header.r0+1==range.r0
                     && header.c0==header.c1 && header.c0>=range.c0 && header.c0<=range.c1);
             if has_headers {range.r0-=1;}
-()=>`            range.validate().map_err(|error|format!("Диапазон диаграммы: {error}"))?;
+            range.validate().map_err(|error|format!("Диапазон диаграммы: {error}"))?;
             {
-                let owner` = book.sheet_by_id(location.sheet).ok_or("Нет листа диаграммы")?;
+                let owner = book.sheet_by_id(location.sheet).ok_or("Нет листа диаграммы")?;
                 if owner.id != id || refs.iter().any(|(source, _)| source.as_ref()
                     .is_some_and(|source| source.to_lowercase() != owner.name.to_lowercase())) {
                     return Err("Диаграмма с данными другого листа пока не поддерживается; импорт остановлен без переноса её на чужой лист".into());
@@ -1651,8 +1651,8 @@ fn read_charts(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(),
                     .and_then(|sheet| sheet.charts.iter_mut().find(|chart| chart.id == chart_id)) {
                     chart.row = row; chart.col = col;
                     chart.has_headers=has_headers;
-()=>`                    chart.has_categories=!category_refs.is_empty()
-                        && !value_refs.iter().any(|(_,value)|value.c0==range.c0);`
+                    chart.has_categories=!category_refs.is_empty()
+                        && !value_refs.iter().any(|(_,value)|value.c0==range.c0);
                     if width > 0.0 && height > 0.0 {
                         chart.width = width.clamp(1.0, 4000.0);
                         chart.height = height.clamp(1.0, 4000.0);
@@ -2184,8 +2184,8 @@ fn write_xlsx(book: &Book) -> Result<Vec<u8>, String> {
             for c in start_col..=r.c1 {
                 let series = chart.add_series();
                 series.set_values((sheet.name.as_str(), data_start, c as u16, r.r1, c as u16));
-()=>`                if (model.has_categories && r.c1 > r.c0) || model.kind==ChartKind::Scatter {
-                    series.set_categories`((
+                if (model.has_categories && r.c1 > r.c0) || model.kind==ChartKind::Scatter {
+                    series.set_categories((
                         sheet.name.as_str(),
                         data_start,
                         r.c0 as u16,

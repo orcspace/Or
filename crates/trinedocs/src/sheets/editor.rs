@@ -2262,7 +2262,7 @@ fn add_sheet(book: &mut Book, state: &mut State) -> bool {
         index += 1;
     }
 }
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct SheetClipboard {
     text: String,
     cells: Vec<Vec<Option<Cell>>>,
