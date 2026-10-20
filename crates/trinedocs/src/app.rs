@@ -33,7 +33,7 @@ enum Pending {
         export: bool,
     },
 }
-fn consume_shell_key(ctx:&egui::Context,modifiers:egui::Modifiers,key:egui::Key)->bool {
+fn consume_shell_key(ctx: &egui::Context, modifiers: egui::Modifiers, key: egui::Key) -> bool {
     ctx.input_mut(|input| {
         let mut found=false;
         input.events.retain(|event| {
@@ -1407,11 +1407,12 @@ impl App {
                 }
             });
     }
-    fn queue_client_approval(&mut self,client:String)->Result<(),String> {
-        if !self.clients.contains(&client) && self.clients.len()>=128 {
+    fn queue_client_approval(&mut self, client: String) -> Result<(), String> {
+        if !self.clients.contains(&client) && self.clients.len() >= 128 {
             return Err("too_large: уже ожидают128 клиентов MCP; завершите запросы доступа".into());
         }
-        self.clients.insert(client);Ok(())
+        self.clients.insert(client);
+        Ok(())
     }
     fn mcp_requests(&mut self, ctx: &egui::Context) {
         for key in self.client_access.reap() {
@@ -1440,10 +1441,14 @@ impl App {
                 continue;
             }
             if !crate::mcp::tools::names().contains(&r.tool.as_str()) {
-                let _=r.reply.send(Err("unsupported_feature: неизвестный инструмент MCP".into()));continue;
+                let _ = r
+                    .reply
+                    .send(Err("unsupported_feature: неизвестный инструмент MCP".into()));
+                continue;
             }
-            if let Err(error)=crate::mcp::tools::validate_args(&r.tool,&r.args) {
-                let _=r.reply.send(Err(error));continue;
+            if let Err(error) = crate::mcp::tools::validate_args(&r.tool, &r.args) {
+                let _ = r.reply.send(Err(error));
+                continue;
             }
             if r.tool == "request_access" {
                 let result = (|| -> Result<Value, String> {
@@ -1464,8 +1469,11 @@ impl App {
                             json!({"client_access":null,"status":"allowed","expires_in_seconds":0}),
                         );
                     }
-                    if token.is_none() && self.clients.len()>=128 {
-                        return Err("too_large: уже ожидают128 клиентов MCP; завершите запросы доступа".into());
+                    if token.is_none() && self.clients.len() >= 128 {
+                        return Err(
+                            "too_large: уже ожидают128 клиентов MCP; завершите запросы доступа"
+                                .into(),
+                        );
                     }
                     let access = self.client_access.request(&r.client, token)?;
                     let status = if access.denied {
@@ -1506,8 +1514,9 @@ impl App {
                 }
             }
             if !self.allowed.contains(&r.client) && !self.chat.owns(&r.client) {
-                let result=self.queue_client_approval(r.client).and_then(|_|Err(
-                    "needs_confirmation: разрешите клиент в окне TrineDocs".into()));
+                let result = self.queue_client_approval(r.client).and_then(|_| {
+                    Err("needs_confirmation: разрешите клиент в окне TrineDocs".into())
+                });
                 let _ = r.reply.send(result);
                 continue;
             }
@@ -1579,9 +1588,10 @@ impl App {
                 "save_document" | "close_document" | "open_document" | "export"
             ) && dry_run
             {
-                let result=self.preflight_file_request(&r.tool,&r.args)
-                    .map(|_|json!({"applied":false}));
-                let _=r.reply.send(result);
+                let result = self
+                    .preflight_file_request(&r.tool, &r.args)
+                    .map(|_| json!({"applied":false}));
+                let _ = r.reply.send(result);
                 continue;
             }
             if crate::mcp::media::is_background(&r.tool) {
@@ -1687,26 +1697,56 @@ impl App {
         }
     }
     /// Starts a design-guide, image or export tool on a worker thread (ADR-0027).
-    fn preflight_file_request(&self,tool:&str,args:&Value)->Result<(),String> {
-        if tool=="open_document" {
-            let path=args.get("path").and_then(Value::as_str).filter(|path|!path.trim().is_empty())
+    fn preflight_file_request(&self, tool: &str, args: &Value) -> Result<(), String> {
+        if tool == "open_document" {
+            let path = args
+                .get("path")
+                .and_then(Value::as_str)
+                .filter(|path| !path.trim().is_empty())
                 .ok_or("invalid_args: требуется непустой path")?;
-            if path.chars().any(|ch|ch=='\0') {return Err("invalid_args: недопустимый path".into());}
+            if path.chars().any(|ch| ch == '\0') {
+                return Err("invalid_args: недопустимый path".into());
+            }
             return Err("needs_confirmation: открытие пути выполняется через меню Файл".into());
         }
-        let id=args.get("document_id").and_then(Value::as_u64).ok_or("invalid_args: требуется document_id")?;
-        let tab=self.tabs.iter().find(|tab|tab.id==id).ok_or("not_found: документ не открыт")?;
-        if tool=="export" {
-            let ext=args.get("format_extension").and_then(Value::as_str).unwrap_or_else(||tab.document.office_extension());
-            let ext=ext.trim_start_matches('.').to_ascii_lowercase();
-            if !tab.document.save_formats().iter().any(|(format,_)|*format==ext) {
+        let id = args
+            .get("document_id")
+            .and_then(Value::as_u64)
+            .ok_or("invalid_args: требуется document_id")?;
+        let tab = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == id)
+            .ok_or("not_found: документ не открыт")?;
+        if tool == "export" {
+            let ext = args
+                .get("format_extension")
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| tab.document.office_extension());
+            let ext = ext.trim_start_matches('.').to_ascii_lowercase();
+            if !tab
+                .document
+                .save_formats()
+                .iter()
+                .any(|(format, _)| *format == ext)
+            {
                 return Err("invalid_args: неподдерживаемый format_extension".into());
             }
-        }else if tool=="save_document" {
-            if tab.read_only {return Err("read_only: документ защищён от правки".into());}
-            if tab.save_locked {return Err("file_locked: сохраните копию или снимите блокировку".into());}
-            if tab.path.is_none(){return Err("needs_path: сначала выберите путь через интерфейс".into());}
-            if self.picking.contains(&id)||self.saving.contains(&id)||self.reloading.contains_key(&id)||self.mcp_saves.contains_key(&id) {
+        } else if tool == "save_document" {
+            if tab.read_only {
+                return Err("read_only: документ защищён от правки".into());
+            }
+            if tab.save_locked {
+                return Err("file_locked: сохраните копию или снимите блокировку".into());
+            }
+            if tab.path.is_none() {
+                return Err("needs_path: сначала выберите путь через интерфейс".into());
+            }
+            if self.picking.contains(&id)
+                || self.saving.contains(&id)
+                || self.reloading.contains_key(&id)
+                || self.mcp_saves.contains_key(&id)
+            {
                 return Err("busy: дождитесь файловой операции".into());
             }
         }
@@ -1812,9 +1852,13 @@ impl App {
                 continue;
             }
             if !self.settings.mcp
-                || (self.chat.was_ours(&request.client)&&!self.chat.owns(&request.client))
-                || (!self.allowed.contains(&request.client)&&!self.chat.owns(&request.client)) {
-                let _=request.reply.send(Err("permission_denied: доступ MCP отозван".into()));continue;
+                || (self.chat.was_ours(&request.client) && !self.chat.owns(&request.client))
+                || (!self.allowed.contains(&request.client) && !self.chat.owns(&request.client))
+            {
+                let _ = request
+                    .reply
+                    .send(Err("permission_denied: доступ MCP отозван".into()));
+                continue;
             }
             let result = match output {
                 Err(error) => Err(error),
@@ -2003,20 +2047,23 @@ impl App {
             return;
         }
         let cmd = egui::Modifiers::COMMAND;
-        if consume_shell_key(ctx,cmd|egui::Modifiers::SHIFT,egui::Key::A) {
+        if consume_shell_key(ctx, cmd | egui::Modifiers::SHIFT, egui::Key::A) {
             self.show_ai = !self.show_ai;
         }
-        if consume_shell_key(ctx,cmd,egui::Key::O) {
+        if consume_shell_key(ctx, cmd, egui::Key::O) {
             self.send(Job::PickOpen);
         }
-        if consume_shell_key(ctx,cmd|egui::Modifiers::SHIFT,egui::Key::S)
-            && let Some(id)=self.active {self.deferred.push((id,"saveas"));}
-        if consume_shell_key(ctx,cmd,egui::Key::S)
+        if consume_shell_key(ctx, cmd | egui::Modifiers::SHIFT, egui::Key::S)
+            && let Some(id) = self.active
+        {
+            self.deferred.push((id, "saveas"));
+        }
+        if consume_shell_key(ctx, cmd, egui::Key::S)
             && let Some(id) = self.active
         {
             self.deferred.push((id, "save"));
         }
-        if consume_shell_key(ctx,cmd,egui::Key::W)
+        if consume_shell_key(ctx, cmd, egui::Key::W)
             && let Some(id) = self.active
         {
             self.deferred.push((id, "close"));
@@ -2024,7 +2071,7 @@ impl App {
         let palette_boundary = ctx.input(|i| i.events.iter().position(|e| matches!(e, egui::Event::Key { key: egui::Key::K, pressed: true, repeat:false, modifiers, .. } if (modifiers.command || modifiers.ctrl)&&!modifiers.alt&&!modifiers.shift)));
         if let Some(boundary) = palette_boundary {
             if self.palette {
-                consume_shell_key(ctx,cmd,egui::Key::K);
+                consume_shell_key(ctx, cmd, egui::Key::K);
                 self.palette = false;
                 ctx.memory_mut(|m| m.surrender_focus(egui::Id::new("command-palette-query")));
             } else {
@@ -2037,18 +2084,25 @@ impl App {
             self.palette = false;
         }
         if !ctx.text_edit_focused() {
-            if consume_shell_key(ctx,cmd|egui::Modifiers::SHIFT,egui::Key::Z)
-                && let Some(id)=self.active {self.deferred.push((id,"redo"));}
+            if consume_shell_key(ctx, cmd | egui::Modifiers::SHIFT, egui::Key::Z)
+                && let Some(id) = self.active
+            {
+                self.deferred.push((id, "redo"));
+            }
             for (key, action) in [(egui::Key::Z, "undo"), (egui::Key::Y, "redo")] {
-                if consume_shell_key(ctx,cmd,key)
+                if consume_shell_key(ctx, cmd, key)
                     && let Some(id) = self.active
                 {
                     self.deferred.push((id, action));
                 }
             }
         }
-        let backwards=consume_shell_key(ctx,egui::Modifiers::CTRL|egui::Modifiers::SHIFT,egui::Key::Tab);
-        if (backwards||consume_shell_key(ctx,egui::Modifiers::CTRL,egui::Key::Tab))
+        let backwards = consume_shell_key(
+            ctx,
+            egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
+            egui::Key::Tab,
+        );
+        if (backwards || consume_shell_key(ctx, egui::Modifiers::CTRL, egui::Key::Tab))
             && !self.tabs.is_empty()
         {
             let index = self
@@ -2056,7 +2110,15 @@ impl App {
                 .iter()
                 .position(|t| Some(t.id) == self.active)
                 .unwrap_or(self.tabs.len() - 1);
-            if let Some(id) = self.tabs.get(if backwards {(index+self.tabs.len()-1)%self.tabs.len()}else{(index+1)%self.tabs.len()}).map(|t| t.id) {
+            if let Some(id) = self
+                .tabs
+                .get(if backwards {
+                    (index + self.tabs.len() - 1) % self.tabs.len()
+                } else {
+                    (index + 1) % self.tabs.len()
+                })
+                .map(|t| t.id)
+            {
                 self.deferred.push((id, "activate"));
             }
         }
@@ -3266,7 +3328,7 @@ impl eframe::App for App {
             match action {
                 "activate_external" => external_activation = Some(id),
                 "save" => self.save(id, false, false, false, None),
-                "saveas"=>self.save(id,false,false,true,None),
+                "saveas" => self.save(id, false, false, true, None),
                 "close" => self.close(id),
                 "unlock" => self.request_unlock(id),
                 "activate" | "home" => {
@@ -4984,84 +5046,204 @@ mod shell_input_tests {
         assert!(!crate::mcp::workspace::batchable("inspect_document"));
         Ok(())
     }
-    fn hundred_shortcut_frame(app:&mut App,key:egui::Key,modifiers:egui::Modifiers,repeat:bool) {
-        let ctx=app.editor_ctx.clone();
-        let _=ctx.run_ui(egui::RawInput{events:vec![egui::Event::Key{key,physical_key:None,pressed:true,repeat,modifiers}],..Default::default()},
-            |ui|app.shortcuts(ui.ctx()));
+    fn hundred_shortcut_frame(
+        app: &mut App,
+        key: egui::Key,
+        modifiers: egui::Modifiers,
+        repeat: bool,
+    ) {
+        let ctx = app.editor_ctx.clone();
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat,
+                    modifiers,
+                }],
+                ..Default::default()
+            },
+            |ui| app.shortcuts(ui.ctx()),
+        );
     }
     #[test]
-    fn shift_save_routes_to_save_as_without_overwriting_the_current_path()->Result<(),String> {
-        let mut app=fixture()?;
-        hundred_shortcut_frame(&mut app,egui::Key::S,egui::Modifiers::CTRL|egui::Modifiers::COMMAND|egui::Modifiers::SHIFT,false);
-        assert_eq!(app.deferred,vec![(10,"saveas")]);Ok(())
+    fn shift_save_routes_to_save_as_without_overwriting_the_current_path() -> Result<(), String> {
+        let mut app = fixture()?;
+        hundred_shortcut_frame(
+            &mut app,
+            egui::Key::S,
+            egui::Modifiers::CTRL | egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+            false,
+        );
+        assert_eq!(app.deferred, vec![(10, "saveas")]);
+        Ok(())
     }
     #[test]
-    fn reverse_tab_switching_uses_the_previous_document()->Result<(),String> {
-        let mut app=fixture()?;app.tabs.push(Tab::new(12,Document::create("docs")?,"Third".into(),None));
-        hundred_shortcut_frame(&mut app,egui::Key::Tab,egui::Modifiers::CTRL|egui::Modifiers::SHIFT,false);
-        assert_eq!(app.deferred,vec![(12,"activate")]);Ok(())
+    fn reverse_tab_switching_uses_the_previous_document() -> Result<(), String> {
+        let mut app = fixture()?;
+        app.tabs.push(Tab::new(
+            12,
+            Document::create("docs")?,
+            "Third".into(),
+            None,
+        ));
+        hundred_shortcut_frame(
+            &mut app,
+            egui::Key::Tab,
+            egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
+            false,
+        );
+        assert_eq!(app.deferred, vec![(12, "activate")]);
+        Ok(())
     }
     #[test]
-    fn shift_undo_routes_to_redo_instead_of_undo()->Result<(),String> {
-        let mut app=fixture()?;
-        hundred_shortcut_frame(&mut app,egui::Key::Z,egui::Modifiers::CTRL|egui::Modifiers::COMMAND|egui::Modifiers::SHIFT,false);
-        assert_eq!(app.deferred,vec![(10,"redo")]);Ok(())
+    fn shift_undo_routes_to_redo_instead_of_undo() -> Result<(), String> {
+        let mut app = fixture()?;
+        hundred_shortcut_frame(
+            &mut app,
+            egui::Key::Z,
+            egui::Modifiers::CTRL | egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+            false,
+        );
+        assert_eq!(app.deferred, vec![(10, "redo")]);
+        Ok(())
     }
     #[test]
-    fn altgr_combinations_do_not_trigger_shell_commands()->Result<(),String> {
-        for key in [egui::Key::S,egui::Key::K,egui::Key::O,egui::Key::W] {
-            let mut app=fixture()?;
-            hundred_shortcut_frame(&mut app,key,egui::Modifiers::CTRL|egui::Modifiers::COMMAND|egui::Modifiers::ALT,false);
-            assert!(app.deferred.is_empty());assert!(!app.palette);assert!(!app.opening);
-        }Ok(())
+    fn altgr_combinations_do_not_trigger_shell_commands() -> Result<(), String> {
+        for key in [egui::Key::S, egui::Key::K, egui::Key::O, egui::Key::W] {
+            let mut app = fixture()?;
+            hundred_shortcut_frame(
+                &mut app,
+                key,
+                egui::Modifiers::CTRL | egui::Modifiers::COMMAND | egui::Modifiers::ALT,
+                false,
+            );
+            assert!(app.deferred.is_empty());
+            assert!(!app.palette);
+            assert!(!app.opening);
+        }
+        Ok(())
     }
     #[test]
-    fn repeating_the_palette_shortcut_does_not_toggle_the_palette()->Result<(),String> {
-        let mut app=fixture()?;
-        hundred_shortcut_frame(&mut app,egui::Key::K,egui::Modifiers::CTRL|egui::Modifiers::COMMAND,true);
-        assert!(!app.palette);assert!(app.palette_tail.is_none());Ok(())
+    fn repeating_the_palette_shortcut_does_not_toggle_the_palette() -> Result<(), String> {
+        let mut app = fixture()?;
+        hundred_shortcut_frame(
+            &mut app,
+            egui::Key::K,
+            egui::Modifiers::CTRL | egui::Modifiers::COMMAND,
+            true,
+        );
+        assert!(!app.palette);
+        assert!(app.palette_tail.is_none());
+        Ok(())
     }
     #[test]
-    fn dry_run_of_file_tools_checks_real_arguments_and_preconditions()->Result<(),String> {
-        let app=fixture()?;
-        assert!(app.preflight_file_request("export",&json!({})).is_err());
-        assert!(app.preflight_file_request("export",&json!({"document_id":10,"format_extension":"exe"})).is_err());
-        assert!(app.preflight_file_request("save_document",&json!({"document_id":10})).is_err());
-        assert!(app.preflight_file_request("close_document",&json!({"document_id":10})).is_ok());
-        assert!(app.preflight_file_request("export",&json!({"document_id":10,"format_extension":"pdf"})).is_ok());Ok(())
+    fn dry_run_of_file_tools_checks_real_arguments_and_preconditions() -> Result<(), String> {
+        let app = fixture()?;
+        assert!(app.preflight_file_request("export", &json!({})).is_err());
+        assert!(
+            app.preflight_file_request(
+                "export",
+                &json!({"document_id":10,"format_extension":"exe"})
+            )
+            .is_err()
+        );
+        assert!(
+            app.preflight_file_request("save_document", &json!({"document_id":10}))
+                .is_err()
+        );
+        assert!(
+            app.preflight_file_request("close_document", &json!({"document_id":10}))
+                .is_ok()
+        );
+        assert!(
+            app.preflight_file_request(
+                "export",
+                &json!({"document_id":10,"format_extension":"pdf"})
+            )
+            .is_ok()
+        );
+        Ok(())
     }
     #[test]
-    fn finished_media_replies_are_rejected_after_access_is_revoked()->Result<(),String> {
-        let mut app=fixture()?;app.settings.mcp=true;
-        let (reply,mut received)=tokio::sync::oneshot::channel();
-        let (sender,result)=std::sync::mpsc::channel();
-        sender.send(Ok(crate::mcp::media::Output::Reply(json!({"private":"result"})))).map_err(|e|e.to_string())?;
-        app.media_jobs.push(MediaJob{request:crate::mcp::BridgeRequest{tool:"export".into(),args:json!({"document_id":10}),client:"revoked".into(),reply,deadline:Instant::now()+std::time::Duration::from_secs(10)},result});
-        let ctx=app.editor_ctx.clone();app.finish_media_jobs(&ctx);
-        assert!(received.try_recv().map_err(|e|e.to_string())?.is_err());Ok(())
+    fn finished_media_replies_are_rejected_after_access_is_revoked() -> Result<(), String> {
+        let mut app = fixture()?;
+        app.settings.mcp = true;
+        let (reply, mut received) = tokio::sync::oneshot::channel();
+        let (sender, result) = std::sync::mpsc::channel();
+        sender
+            .send(Ok(crate::mcp::media::Output::Reply(
+                json!({"private":"result"}),
+            )))
+            .map_err(|e| e.to_string())?;
+        app.media_jobs.push(MediaJob {
+            request: crate::mcp::BridgeRequest {
+                tool: "export".into(),
+                args: json!({"document_id":10}),
+                client: "revoked".into(),
+                reply,
+                deadline: Instant::now() + std::time::Duration::from_secs(10),
+            },
+            result,
+        });
+        let ctx = app.editor_ctx.clone();
+        app.finish_media_jobs(&ctx);
+        assert!(received.try_recv().map_err(|e| e.to_string())?.is_err());
+        Ok(())
     }
 
     #[test]
-    fn invalid_unknown_client_requests_do_not_create_approval_prompts()->Result<(),String> {
-        let mut app=fixture()?;app.allowed.clear();app.clients.clear();
-        assert!(mcp_roundtrip_as(&mut app,"Unknown","no_such_tool",json!({})).is_err_and(|error|error.starts_with("unsupported_feature:")));
-        assert!(app.clients.is_empty());
-        assert!(mcp_roundtrip_as(&mut app,"Unknown","docs_insert_text",json!({"document_id":"bad"})).is_err_and(|error|error.starts_with("invalid_args:")));
-        assert!(app.clients.is_empty());
-        assert!(mcp_roundtrip_as(&mut app,"Unknown","list_documents",json!({})).is_err_and(|error|error.starts_with("needs_confirmation:")));
-        assert_eq!(app.clients.len(),1);Ok(())
-    }
-    #[test]
-    fn pending_client_approvals_are_bounded_and_existing_requests_can_retry()->Result<(),String> {
-        let mut app=fixture()?;app.allowed.clear();app.clients=(0..128).map(|index|format!("Pending{index}")).collect();
-        assert!(mcp_roundtrip_as(&mut app,"Overflow","list_documents",json!({})).is_err_and(|error|error.starts_with("too_large:")));
-        assert_eq!(app.clients.len(),128);
-        assert!(mcp_roundtrip_as(&mut app,"Pending0","list_documents",json!({})).is_err_and(|error|error.starts_with("needs_confirmation:")));
-        assert_eq!(app.clients.len(),128);
-        assert!(mcp_roundtrip_as(&mut app,"Stateless","request_access",json!({})).is_err_and(|error|error.starts_with("too_large:")));
+    fn invalid_unknown_client_requests_do_not_create_approval_prompts() -> Result<(), String> {
+        let mut app = fixture()?;
+        app.allowed.clear();
         app.clients.clear();
-        let access=mcp_roundtrip_as(&mut app,"Stateless","request_access",json!({}))?;
-        assert_eq!(access["status"],"pending");assert_eq!(app.clients.len(),1);Ok(())
+        assert!(
+            mcp_roundtrip_as(&mut app, "Unknown", "no_such_tool", json!({}))
+                .is_err_and(|error| error.starts_with("unsupported_feature:"))
+        );
+        assert!(app.clients.is_empty());
+        assert!(
+            mcp_roundtrip_as(
+                &mut app,
+                "Unknown",
+                "docs_insert_text",
+                json!({"document_id":"bad"})
+            )
+            .is_err_and(|error| error.starts_with("invalid_args:"))
+        );
+        assert!(app.clients.is_empty());
+        assert!(
+            mcp_roundtrip_as(&mut app, "Unknown", "list_documents", json!({}))
+                .is_err_and(|error| error.starts_with("needs_confirmation:"))
+        );
+        assert_eq!(app.clients.len(), 1);
+        Ok(())
     }
-
+    #[test]
+    fn pending_client_approvals_are_bounded_and_existing_requests_can_retry() -> Result<(), String>
+    {
+        let mut app = fixture()?;
+        app.allowed.clear();
+        app.clients = (0..128).map(|index| format!("Pending{index}")).collect();
+        assert!(
+            mcp_roundtrip_as(&mut app, "Overflow", "list_documents", json!({}))
+                .is_err_and(|error| error.starts_with("too_large:"))
+        );
+        assert_eq!(app.clients.len(), 128);
+        assert!(
+            mcp_roundtrip_as(&mut app, "Pending0", "list_documents", json!({}))
+                .is_err_and(|error| error.starts_with("needs_confirmation:"))
+        );
+        assert_eq!(app.clients.len(), 128);
+        assert!(
+            mcp_roundtrip_as(&mut app, "Stateless", "request_access", json!({}))
+                .is_err_and(|error| error.starts_with("too_large:"))
+        );
+        app.clients.clear();
+        let access = mcp_roundtrip_as(&mut app, "Stateless", "request_access", json!({}))?;
+        assert_eq!(access["status"], "pending");
+        assert_eq!(app.clients.len(), 1);
+        Ok(())
+    }
 }

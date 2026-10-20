@@ -950,12 +950,20 @@ pub fn dispatch(
 
 /// Worker-only model path: retain every touched ID for workspace totals.
 /// External callers always use dispatch and its bounded response.
-pub(super) fn prepare_operation(tabs:&mut Vec<Tab>,next_id:&mut u64,name:&str,args:&Value,client:&str)->Result<Value,String> {
-    if !super::workspace::batchable(name) {return Err("unsupported_feature: операция не подходит для пакета".into());}
-    dispatch_inner(tabs,next_id,name,args,client,false)
+pub(super) fn prepare_operation(
+    tabs: &mut Vec<Tab>,
+    next_id: &mut u64,
+    name: &str,
+    args: &Value,
+    client: &str,
+) -> Result<Value, String> {
+    if !super::workspace::batchable(name) {
+        return Err("unsupported_feature: операция не подходит для пакета".into());
+    }
+    dispatch_inner(tabs, next_id, name, args, client, false)
 }
 
-fn slide_metadata(slide: &crate::slides::model::Slide, offset:usize, count:usize) -> Value {
+fn slide_metadata(slide: &crate::slides::model::Slide, offset: usize, count: usize) -> Value {
     let elements: Vec<Value> = slide
         .elements
         .iter()
@@ -986,37 +994,75 @@ fn slide_metadata(slide: &crate::slides::model::Slide, offset:usize, count:usize
     })
 }
 
-fn paragraph_window(paragraph:&crate::docs::model::Paragraph,offset:usize,count:usize)->Result<Value,String> {
-    let total=paragraph.len();let mut cursor=0usize;let end=offset.saturating_add(count);
-    let mut runs=Vec::new();
+fn paragraph_window(
+    paragraph: &crate::docs::model::Paragraph,
+    offset: usize,
+    count: usize,
+) -> Result<Value, String> {
+    let total = paragraph.len();
+    let mut cursor = 0usize;
+    let end = offset.saturating_add(count);
+    let mut runs = Vec::new();
     for run in &paragraph.runs {
-        let length=run.text.chars().count();
-        let from=offset.saturating_sub(cursor).min(length);
-        let to=end.saturating_sub(cursor).min(length);
-        if from<to {runs.push(crate::docs::model::Run{text:run.text.chars().skip(from).take(to-from).collect(),format:run.format.clone()});}
-        cursor=cursor.saturating_add(length);
-        if cursor>=end {break;}
+        let length = run.text.chars().count();
+        let from = offset.saturating_sub(cursor).min(length);
+        let to = end.saturating_sub(cursor).min(length);
+        if from < to {
+            runs.push(crate::docs::model::Run {
+                text: run.text.chars().skip(from).take(to - from).collect(),
+                format: run.format.clone(),
+            });
+        }
+        cursor = cursor.saturating_add(length);
+        if cursor >= end {
+            break;
+        }
     }
-    let mut out=serde_json::to_value(paragraph).map_err(|error|error.to_string())?;
-    out["runs"]=json!(runs);out["text_offset"]=json!(offset);out["text_page_size"]=json!(count);out["total_chars"]=json!(total);
-    out["text_truncated"]=json!(offset>0 || end<total);Ok(out)
+    let mut out = serde_json::to_value(paragraph).map_err(|error| error.to_string())?;
+    out["runs"] = json!(runs);
+    out["text_offset"] = json!(offset);
+    out["text_page_size"] = json!(count);
+    out["total_chars"] = json!(total);
+    out["text_truncated"] = json!(offset > 0 || end < total);
+    Ok(out)
 }
-fn preview_operation(tab:&Tab,op:Op,edits:Option<Vec<crate::docs::model::TextEditDelta>>)->Result<bool,String> {
+fn preview_operation(
+    tab: &Tab,
+    op: Op,
+    edits: Option<Vec<crate::docs::model::TextEditDelta>>,
+) -> Result<bool, String> {
     // Only clone the history entry used by this operation.
-    let mut preview=Tab::new(tab.id,tab.document.clone(),tab.title.clone(),tab.path.clone());
-    preview.version=tab.version;preview.saved_version=tab.saved_version;preview.read_only=tab.read_only;
-    preview.pending_docs_edits=tab.pending_docs_edits.clone();
-    if matches!(&op,Op::Undo) {preview.undo=tab.undo.last().cloned().into_iter().collect();}
-    if matches!(&op,Op::Redo) {preview.redo=tab.redo.last().cloned().into_iter().collect();}
-    preview.apply_with_docs_edits(op,edits)?;
-    Ok(preview.version!=tab.version)
+    let mut preview = Tab::new(
+        tab.id,
+        tab.document.clone(),
+        tab.title.clone(),
+        tab.path.clone(),
+    );
+    preview.version = tab.version;
+    preview.saved_version = tab.saved_version;
+    preview.read_only = tab.read_only;
+    preview.pending_docs_edits = tab.pending_docs_edits.clone();
+    if matches!(&op, Op::Undo) {
+        preview.undo = tab.undo.last().cloned().into_iter().collect();
+    }
+    if matches!(&op, Op::Redo) {
+        preview.redo = tab.redo.last().cloned().into_iter().collect();
+    }
+    preview.apply_with_docs_edits(op, edits)?;
+    Ok(preview.version != tab.version)
 }
 
-fn set_result_ids(result:&mut Value,ids:Vec<u64>,bounded:bool) {
-    let mut seen=std::collections::HashSet::new();
-    let ids:Vec<_>=ids.into_iter().filter(|id|seen.insert(*id)).collect();
-    result["changed_ids"]=json!(ids.iter().take(if bounded {256}else{usize::MAX}).copied().collect::<Vec<_>>());
-    result["changed_ids_count"]=json!(ids.len());result["changed_ids_truncated"]=json!(bounded && ids.len()>256);
+fn set_result_ids(result: &mut Value, ids: Vec<u64>, bounded: bool) {
+    let mut seen = std::collections::HashSet::new();
+    let ids: Vec<_> = ids.into_iter().filter(|id| seen.insert(*id)).collect();
+    result["changed_ids"] = json!(
+        ids.iter()
+            .take(if bounded { 256 } else { usize::MAX })
+            .copied()
+            .collect::<Vec<_>>()
+    );
+    result["changed_ids_count"] = json!(ids.len());
+    result["changed_ids_truncated"] = json!(bounded && ids.len() > 256);
 }
 
 pub fn validate_args(name: &str, a: &Value) -> Result<(), String> {
@@ -1108,11 +1154,14 @@ fn dispatch_inner(
         );
     }
     if name == "app_status" || name == "list_documents" {
-        let offset=n(a,"index",0)?;let count=n(a,"count",100)?.clamp(1,100);
-        return Ok(json!({"documents":tabs.iter().skip(offset).take(count).map(|t|json!({
+        let offset = n(a, "index", 0)?;
+        let count = n(a, "count", 100)?.clamp(1, 100);
+        return Ok(
+            json!({"documents":tabs.iter().skip(offset).take(count).map(|t|json!({
             "id":t.id,"title":t.title,"kind":t.document.kind(),"version":t.version,
             "dirty":t.dirty(),"read_only":t.read_only,"save_locked":t.save_locked
-        })).collect::<Vec<_>>(),"version":env!("CARGO_PKG_VERSION"),"offset":offset,"page_size":count,"total":tabs.len()}));
+        })).collect::<Vec<_>>(),"version":env!("CARGO_PKG_VERSION"),"offset":offset,"page_size":count,"total":tabs.len()}),
+        );
     }
     if !read_only(name) {
         if a.get("mode")
@@ -1132,9 +1181,11 @@ fn dispatch_inner(
         }
     }
     if name == "create_document" {
-        let id=*next_id;
-        let following=next_id.checked_add(1).ok_or("ID переполнен")?;
-        if id==0 || tabs.iter().any(|tab|tab.id==id) {return Err("conflict: недопустимый или занятый ID документа".into());}
+        let id = *next_id;
+        let following = next_id.checked_add(1).ok_or("ID переполнен")?;
+        if id == 0 || tabs.iter().any(|tab| tab.id == id) {
+            return Err("conflict: недопустимый или занятый ID документа".into());
+        }
         if a.get("mode").and_then(Value::as_str) == Some("dry_run") {
             Document::create(s(a, "kind")?)?;
             return Ok(json!({"applied":false}));
@@ -1233,17 +1284,30 @@ fn dispatch_inner(
         let count = n(a, "count", maximum)?.clamp(1, maximum);
         let content = match &t.document {
             Document::Docs(d) => {
+                let wanted = a.get("paragraph_id").and_then(Value::as_u64);
+                if wanted.is_some_and(|id| !d.paragraphs.iter().any(|paragraph| paragraph.id == id))
                 {
-    let wanted=a.get("paragraph_id").and_then(Value::as_u64);
-    if wanted.is_some_and(|id|!d.paragraphs.iter().any(|paragraph|paragraph.id==id)) {return Err("not_found: абзац не найден".into());}
-    let window=wanted.is_some()||a.get("characters").is_some()||a.get("offset").is_some();
-    let offset=n(a,"offset",0)?;let characters=n(a,"characters",4096)?.clamp(1,16384);
-    let paragraphs=d.paragraphs.iter().filter(|paragraph|wanted.is_none_or(|id|paragraph.id==id))
-        .skip(start).take(count).map(|paragraph|if window {paragraph_window(paragraph,offset,characters)}
-            else {serde_json::to_value(paragraph).map_err(|error|error.to_string())})
-        .collect::<Result<Vec<_>,String>>()?;
-    json!({"kind":"docs","paragraphs":paragraphs,"total":d.paragraphs.len()})
-}
+                    return Err("not_found: абзац не найден".into());
+                }
+                let window =
+                    wanted.is_some() || a.get("characters").is_some() || a.get("offset").is_some();
+                let offset = n(a, "offset", 0)?;
+                let characters = n(a, "characters", 4096)?.clamp(1, 16384);
+                let paragraphs = d
+                    .paragraphs
+                    .iter()
+                    .filter(|paragraph| wanted.is_none_or(|id| paragraph.id == id))
+                    .skip(start)
+                    .take(count)
+                    .map(|paragraph| {
+                        if window {
+                            paragraph_window(paragraph, offset, characters)
+                        } else {
+                            serde_json::to_value(paragraph).map_err(|error| error.to_string())
+                        }
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                json!({"kind":"docs","paragraphs":paragraphs,"total":d.paragraphs.len()})
             }
             Document::Sheets(b) => {
                 let sh = b
@@ -1256,13 +1320,14 @@ fn dispatch_inner(
                 json!({"kind":"sheets","sheet_id":sh.id,"cells":sh.cells.iter().skip(start).take(count).collect::<Vec<_>>(),"total":sh.cells.len()})
             }
             Document::Slides(d) => {
-                {
-    let wanted=a.get("slide_id").and_then(Value::as_u64);
-    if wanted.is_some_and(|id|d.slide(id).is_none()) {return Err("not_found: слайд не найден".into());}
-    let element_offset=n(a,"element_index",0)?;let element_count=n(a,"element_count",100)?.clamp(1,100);
-    json!({"kind":"slides","slides":d.slides.iter().filter(|slide|wanted.is_none_or(|id|slide.id==id))
+                let wanted = a.get("slide_id").and_then(Value::as_u64);
+                if wanted.is_some_and(|id| d.slide(id).is_none()) {
+                    return Err("not_found: слайд не найден".into());
+                }
+                let element_offset = n(a, "element_index", 0)?;
+                let element_count = n(a, "element_count", 100)?.clamp(1, 100);
+                json!({"kind":"slides","slides":d.slides.iter().filter(|slide|wanted.is_none_or(|id|slide.id==id))
         .skip(start).take(count).map(|slide|slide_metadata(slide,element_offset,element_count)).collect::<Vec<_>>(),"total":d.slides.len()})
-}
             }
         };
         let result = json!({"document_id":t.id,"version":t.version,"content":content,"offset":start,"page_size":count});
@@ -1280,7 +1345,7 @@ fn dispatch_inner(
             return Err("permission_denied: агент может отменять только свой последний шаг".into());
         }
         if a.get("mode").and_then(Value::as_str) == Some("dry_run") {
-            preview_operation(t,if name=="undo" {Op::Undo}else{Op::Redo},None)?;
+            preview_operation(t, if name == "undo" { Op::Undo } else { Op::Redo }, None)?;
             return Ok(json!({"applied":false,"version":t.version}));
         }
         t.apply(if name == "undo" { Op::Undo } else { Op::Redo })?;
@@ -1295,12 +1360,14 @@ fn dispatch_inner(
         if name == "docs_read_objects" {
             let start = n(a, "index", 0)?;
             let count = n(a, "count", 20)?.clamp(1, 50);
-            let row_start=n(a,"row",0)?;
-            let row_count=n(a,"rows",20)?.clamp(1,100);
-            let column_start=n(a,"col",0)?;
-            let column_count=n(a,"columns",64)?.clamp(1,256);
-            let table_id=a.get("table_id").and_then(Value::as_u64);
-            if table_id.is_some_and(|id|!d.tables.iter().any(|table|table.id==id)) {return Err("not_found: таблица не найдена".into());}
+            let row_start = n(a, "row", 0)?;
+            let row_count = n(a, "rows", 20)?.clamp(1, 100);
+            let column_start = n(a, "col", 0)?;
+            let column_count = n(a, "columns", 64)?.clamp(1, 256);
+            let table_id = a.get("table_id").and_then(Value::as_u64);
+            if table_id.is_some_and(|id| !d.tables.iter().any(|table| table.id == id)) {
+                return Err("not_found: таблица не найдена".into());
+            }
             let tables: Vec<Value> = d
                 .tables
                 .iter()
@@ -1370,7 +1437,8 @@ fn dispatch_inner(
         }
         if name == "sheets_read_objects" {
             let sh = b.sheet_by_id(id(a, "sheet_id")?).ok_or("Лист не найден")?;
-            let offset=n(a,"index",0)?;let count=n(a,"count",100)?.clamp(1,100);
+            let offset = n(a, "index", 0)?;
+            let count = n(a, "count", 100)?.clamp(1, 100);
             return Ok(json!({
                 "sheet_id": sh.id,
                 "name": sh.name,
@@ -1427,7 +1495,10 @@ fn dispatch_inner(
                 return Err("invalid_args: требуются row и col".into());
             }
             let mut result = crate::sheets::formula::explain(
-                b, id(a, "sheet_id")?, u(a, "row", 0)?, u(a, "col", 0)?,
+                b,
+                id(a, "sheet_id")?,
+                u(a, "row", 0)?,
+                u(a, "col", 0)?,
             )?;
             result["version"] = json!(t.version);
             result["document_id"] = json!(t.id);
@@ -1733,12 +1804,16 @@ fn dispatch_inner(
         }
         (Document::Sheets(b), "sheets_write_range") => {
             let values: Vec<Vec<String>> = parse(a, "values")?;
-            let sid=id(a,"sheet_id")?;let row=u(a,"row",0)?;let col=u(a,"col",0)?;
-            b.set_range(sid,row,col,&values)?;
-            if let Some(sheet)=b.sheet_by_id(sid) {
-                for (r,line) in values.iter().enumerate() {
+            let sid = id(a, "sheet_id")?;
+            let row = u(a, "row", 0)?;
+            let col = u(a, "col", 0)?;
+            b.set_range(sid, row, col, &values)?;
+            if let Some(sheet) = b.sheet_by_id(sid) {
+                for (r, line) in values.iter().enumerate() {
                     for c in 0..line.len() {
-                        if let Some(cell)=sheet.cell(row+r as u32,col+c as u32) {changed_ids.push(cell.id);}
+                        if let Some(cell) = sheet.cell(row + r as u32, col + c as u32) {
+                            changed_ids.push(cell.id);
+                        }
                     }
                 }
             }
@@ -1765,7 +1840,10 @@ fn dispatch_inner(
                         crate::sheets::model::Range::new(row, col, row, col),
                         format,
                     )?;
-                    if let Some(cell)=b.sheet_by_id(sheet).and_then(|sheet|sheet.cell(row,col)) {changed_ids.push(cell.id);}
+                    if let Some(cell) = b.sheet_by_id(sheet).and_then(|sheet| sheet.cell(row, col))
+                    {
+                        changed_ids.push(cell.id);
+                    }
                 }
             }
         }
@@ -2624,12 +2702,21 @@ fn dispatch_inner(
         return Err("unsupported_feature: mode поддерживает apply и dry_run".into());
     }
     doc.validate()?;
-    if changed_ids.is_empty() && doc!=t.document {
-        if matches!(&doc,Document::Sheets(_)) {
-            if let Some(sheet)=a.get("sheet_id").and_then(Value::as_u64) {changed_ids.push(sheet);}
-        }else if let Document::Slides(deck)=&doc {
-            if let Some(id)=a.get("element_id").or_else(||a.get("slide_id")).and_then(Value::as_u64) {changed_ids.push(id);}
-            else if name=="slides_set_theme" {changed_ids.extend(deck.slides.iter().map(|slide|slide.id));}
+    if changed_ids.is_empty() && doc != t.document {
+        if matches!(&doc, Document::Sheets(_)) {
+            if let Some(sheet) = a.get("sheet_id").and_then(Value::as_u64) {
+                changed_ids.push(sheet);
+            }
+        } else if let Document::Slides(deck) = &doc {
+            if let Some(id) = a
+                .get("element_id")
+                .or_else(|| a.get("slide_id"))
+                .and_then(Value::as_u64)
+            {
+                changed_ids.push(id);
+            } else if name == "slides_set_theme" {
+                changed_ids.extend(deck.slides.iter().map(|slide| slide.id));
+            }
         }
     }
     validate_replacement_ids(&t.document, &doc)?;
@@ -2640,11 +2727,28 @@ fn dispatch_inner(
         return Err(format!("conflict: текущая версия {}", t.version));
     }
     if a.get("mode").and_then(Value::as_str) == Some("dry_run") {
-        let would_change=preview_operation(t,Op::Replace{document:doc,label:format!("AI: {name}"),
-            author:Author::Agent{name:client.to_string()},base_version:a.get("base_version").and_then(Value::as_u64)},
-            exact_docs_edits.then_some(docs_edits))?;
+        let would_change = preview_operation(
+            t,
+            Op::Replace {
+                document: doc,
+                label: format!("AI: {name}"),
+                author: Author::Agent {
+                    name: client.to_string(),
+                },
+                base_version: a.get("base_version").and_then(Value::as_u64),
+            },
+            exact_docs_edits.then_some(docs_edits),
+        )?;
         let mut result = json!({"applied":false,"would_change":would_change,"version":t.version});
-        set_result_ids(&mut result,if would_change {changed_ids}else{Vec::new()},bounded_ids);
+        set_result_ids(
+            &mut result,
+            if would_change {
+                changed_ids
+            } else {
+                Vec::new()
+            },
+            bounded_ids,
+        );
         if !notes.is_empty() {
             result["warnings"] = json!(notes);
         }
@@ -2663,7 +2767,15 @@ fn dispatch_inner(
         exact_docs_edits.then_some(docs_edits),
     )?;
     let mut result = json!({"applied":t.version != before_version,"version":t.version,"undo_group_id":(t.version != before_version).then_some(t.version)});
-    set_result_ids(&mut result,if t.version!=before_version {changed_ids}else{Vec::new()},bounded_ids);
+    set_result_ids(
+        &mut result,
+        if t.version != before_version {
+            changed_ids
+        } else {
+            Vec::new()
+        },
+        bounded_ids,
+    );
     if !notes.is_empty() {
         result["warnings"] = json!(notes);
     }
@@ -4234,7 +4346,7 @@ mod batch03_tests {
             text: "Caption".into(),
             ..Default::default()
         });
-        let value = slide_metadata(&slide,0,100);
+        let value = slide_metadata(&slide, 0, 100);
         assert_eq!(
             value["elements"][0]["kind"]["image"]["bytes_len"],
             2_000_000
@@ -4800,34 +4912,58 @@ mod review04_tests {
 mod formula_passport_contract_tests {
     use super::*;
     #[test]
-    fn passport_contract_requires_coordinates_and_keeps_read_only_documents_unchanged() -> Result<(),String> {
+    fn passport_contract_requires_coordinates_and_keeps_read_only_documents_unchanged()
+    -> Result<(), String> {
         assert!(read_only("sheets_explain_formula"));
-        let tool=definitions().into_iter().find(|tool|tool.name=="sheets_explain_formula").ok_or("schema")?;
-        let schema=serde_json::to_value(tool).map_err(|e|e.to_string())?;
-        let required=schema["inputSchema"]["required"].as_array().ok_or("required")?;
-        for field in ["document_id","sheet_id","row","col"] {assert!(required.contains(&json!(field)));}
-        assert_eq!(schema["annotations"]["readOnlyHint"],true);
-        let mut book=crate::sheets::model::Book::default();
-        let sheet=book.active_id();
-        book.set_cell(sheet,0,0,"=1+2")?;
-        let original=Document::Sheets(book);
-        let mut tab=Tab::new(1,original.clone(),"Book".into(),None);
-        tab.read_only=true;
-        let mut tabs=vec![tab];
-        let mut next=2;
-        let result=dispatch(&mut tabs,&mut next,"sheets_explain_formula",
-            &json!({"document_id":1,"sheet_id":sheet,"row":0,"col":0}),"reader")?;
-        assert_eq!(result["display"],"3");
-        assert_eq!(result["version"],0);
+        let tool = definitions()
+            .into_iter()
+            .find(|tool| tool.name == "sheets_explain_formula")
+            .ok_or("schema")?;
+        let schema = serde_json::to_value(tool).map_err(|e| e.to_string())?;
+        let required = schema["inputSchema"]["required"]
+            .as_array()
+            .ok_or("required")?;
+        for field in ["document_id", "sheet_id", "row", "col"] {
+            assert!(required.contains(&json!(field)));
+        }
+        assert_eq!(schema["annotations"]["readOnlyHint"], true);
+        let mut book = crate::sheets::model::Book::default();
+        let sheet = book.active_id();
+        book.set_cell(sheet, 0, 0, "=1+2")?;
+        let original = Document::Sheets(book);
+        let mut tab = Tab::new(1, original.clone(), "Book".into(), None);
+        tab.read_only = true;
+        let mut tabs = vec![tab];
+        let mut next = 2;
+        let result = dispatch(
+            &mut tabs,
+            &mut next,
+            "sheets_explain_formula",
+            &json!({"document_id":1,"sheet_id":sheet,"row":0,"col":0}),
+            "reader",
+        )?;
+        assert_eq!(result["display"], "3");
+        assert_eq!(result["version"], 0);
         for args in [
             json!({"document_id":1,"sheet_id":sheet,"col":0}),
             json!({"document_id":1,"sheet_id":sheet,"row":0,"col":16384}),
             json!({"document_id":1,"sheet_id":9999,"row":0,"col":0}),
-        ] {assert!(dispatch(&mut tabs,&mut next,"sheets_explain_formula",&args,"reader").is_err());}
-        assert_eq!(tabs[0].document,original);
-        assert_eq!(tabs[0].version,0);
+        ] {
+            assert!(
+                dispatch(
+                    &mut tabs,
+                    &mut next,
+                    "sheets_explain_formula",
+                    &args,
+                    "reader"
+                )
+                .is_err()
+            );
+        }
+        assert_eq!(tabs[0].document, original);
+        assert_eq!(tabs[0].version, 0);
         assert!(tabs[0].undo.is_empty() && tabs[0].redo.is_empty());
-        assert_eq!(next,2);
+        assert_eq!(next, 2);
         Ok(())
     }
 }
@@ -4836,186 +4972,488 @@ mod formula_passport_contract_tests {
 mod additional_hundred_read_metadata_tests {
     use super::*;
     #[test]
-    fn docs_object_metadata_exposes_table_grid_and_layout()->Result<(),String> {
-        let mut doc=crate::docs::model::Doc::from_text("table");doc.add_table(doc.paragraphs[0].id,1,2)?;
-        let table=&mut doc.tables[0];table.borderless=true;table.cell_margin=[1.0,2.0,3.0,4.0];
-        table.rows[0].truncate(1);table.rows[0][0].span=2;table.rows[0][0].v_align=crate::docs::model::VAlign::Bottom;
-        let mut tabs=vec![Tab::new(1,Document::Docs(doc),"Doc".into(),None)];let mut next=2;
-        let out=dispatch(&mut tabs,&mut next,"docs_read_objects",&json!({"document_id":1}),"audit")?;
-        assert_eq!(out["tables"][0]["borderless"],true);assert_eq!(out["tables"][0]["grid_columns"],2);
-        assert_eq!(out["tables"][0]["rows"][0][0]["span"],2);
-        assert_eq!(out["tables"][0]["rows"][0][0]["v_align"],json!(crate::docs::model::VAlign::Bottom));Ok(())
+    fn docs_object_metadata_exposes_table_grid_and_layout() -> Result<(), String> {
+        let mut doc = crate::docs::model::Doc::from_text("table");
+        doc.add_table(doc.paragraphs[0].id, 1, 2)?;
+        let table = &mut doc.tables[0];
+        table.borderless = true;
+        table.cell_margin = [1.0, 2.0, 3.0, 4.0];
+        table.rows[0].truncate(1);
+        table.rows[0][0].span = 2;
+        table.rows[0][0].v_align = crate::docs::model::VAlign::Bottom;
+        let mut tabs = vec![Tab::new(1, Document::Docs(doc), "Doc".into(), None)];
+        let mut next = 2;
+        let out = dispatch(
+            &mut tabs,
+            &mut next,
+            "docs_read_objects",
+            &json!({"document_id":1}),
+            "audit",
+        )?;
+        assert_eq!(out["tables"][0]["borderless"], true);
+        assert_eq!(out["tables"][0]["grid_columns"], 2);
+        assert_eq!(out["tables"][0]["rows"][0][0]["span"], 2);
+        assert_eq!(
+            out["tables"][0]["rows"][0][0]["v_align"],
+            json!(crate::docs::model::VAlign::Bottom)
+        );
+        Ok(())
     }
     #[test]
-    fn slides_read_distinguishes_transparent_shape_fills()->Result<(),String> {
-        let mut deck=crate::slides::model::Deck::empty();let slide=deck.add_slide("blank");
-        let object=deck.add_element(slide,crate::slides::model::ElementKind::Rect)?;
-        deck.slide_mut(slide).and_then(|slide|slide.element_mut(object)).ok_or("shape")?.fill_visible=false;
-        let mut tabs=vec![Tab::new(1,Document::Slides(deck),"Deck".into(),None)];let mut next=2;
-        let out=dispatch(&mut tabs,&mut next,"slides_read",&json!({"document_id":1}),"audit")?;
-        assert_eq!(out["content"]["slides"][0]["elements"][0]["fill_visible"],false);Ok(())
+    fn slides_read_distinguishes_transparent_shape_fills() -> Result<(), String> {
+        let mut deck = crate::slides::model::Deck::empty();
+        let slide = deck.add_slide("blank");
+        let object = deck.add_element(slide, crate::slides::model::ElementKind::Rect)?;
+        deck.slide_mut(slide)
+            .and_then(|slide| slide.element_mut(object))
+            .ok_or("shape")?
+            .fill_visible = false;
+        let mut tabs = vec![Tab::new(1, Document::Slides(deck), "Deck".into(), None)];
+        let mut next = 2;
+        let out = dispatch(
+            &mut tabs,
+            &mut next,
+            "slides_read",
+            &json!({"document_id":1}),
+            "audit",
+        )?;
+        assert_eq!(
+            out["content"]["slides"][0]["elements"][0]["fill_visible"],
+            false
+        );
+        Ok(())
     }
     #[test]
-    fn docs_object_cells_can_be_read_in_bounded_row_and_column_pages()->Result<(),String> {
-        let mut doc=crate::docs::model::Doc::from_text("table");let table=doc.add_table(doc.paragraphs[0].id,3,3)?;
-        doc.set_cell_text(table,2,1,"target")?;
-        let mut tabs=vec![Tab::new(1,Document::Docs(doc),"Doc".into(),None)];let mut next=2;
-        let out=dispatch(&mut tabs,&mut next,"docs_read_objects",&json!({"document_id":1,"table_id":table,"row":2,"rows":1,"col":1,"columns":1}),"audit")?;
-        assert_eq!(out["tables"][0]["total_rows"],3);assert_eq!(out["tables"][0]["row_offset"],2);
-        assert_eq!(out["tables"][0]["rows"][0][0]["text"],"target");
-        assert_eq!(out["tables"][0]["rows"].as_array().map(Vec::len),Some(1));Ok(())
+    fn docs_object_cells_can_be_read_in_bounded_row_and_column_pages() -> Result<(), String> {
+        let mut doc = crate::docs::model::Doc::from_text("table");
+        let table = doc.add_table(doc.paragraphs[0].id, 3, 3)?;
+        doc.set_cell_text(table, 2, 1, "target")?;
+        let mut tabs = vec![Tab::new(1, Document::Docs(doc), "Doc".into(), None)];
+        let mut next = 2;
+        let out = dispatch(
+            &mut tabs,
+            &mut next,
+            "docs_read_objects",
+            &json!({"document_id":1,"table_id":table,"row":2,"rows":1,"col":1,"columns":1}),
+            "audit",
+        )?;
+        assert_eq!(out["tables"][0]["total_rows"], 3);
+        assert_eq!(out["tables"][0]["row_offset"], 2);
+        assert_eq!(out["tables"][0]["rows"][0][0]["text"], "target");
+        assert_eq!(out["tables"][0]["rows"].as_array().map(Vec::len), Some(1));
+        Ok(())
     }
     #[test]
-    fn sheet_objects_honour_pagination_for_geometry_and_images()->Result<(),String> {
-        let mut book=crate::sheets::model::Book::default();let sheet=book.active_id();
-        for row in 0..250 {book.sheets[0].row_heights.insert(row,30.0);}
-        let mut tabs=vec![Tab::new(1,Document::Sheets(book),"Book".into(),None)];let mut next=2;
-        let out=dispatch(&mut tabs,&mut next,"sheets_read_objects",&json!({"document_id":1,"sheet_id":sheet,"index":100,"count":2}),"audit")?;
-        assert_eq!(out["total_row_heights"],250);assert_eq!(out["row_heights"].as_object().map(|map|map.len()),Some(2));
-        assert!(out["row_heights"].get("100").is_some());assert!(out["row_heights"].get("0").is_none());Ok(())
+    fn sheet_objects_honour_pagination_for_geometry_and_images() -> Result<(), String> {
+        let mut book = crate::sheets::model::Book::default();
+        let sheet = book.active_id();
+        for row in 0..250 {
+            book.sheets[0].row_heights.insert(row, 30.0);
+        }
+        let mut tabs = vec![Tab::new(1, Document::Sheets(book), "Book".into(), None)];
+        let mut next = 2;
+        let out = dispatch(
+            &mut tabs,
+            &mut next,
+            "sheets_read_objects",
+            &json!({"document_id":1,"sheet_id":sheet,"index":100,"count":2}),
+            "audit",
+        )?;
+        assert_eq!(out["total_row_heights"], 250);
+        assert_eq!(out["row_heights"].as_object().map(|map| map.len()), Some(2));
+        assert!(out["row_heights"].get("100").is_some());
+        assert!(out["row_heights"].get("0").is_none());
+        Ok(())
     }
     #[test]
-    fn batch_shape_format_can_change_fill_visibility()->Result<(),String> {
-        let schema=definitions().into_iter().find(|tool|tool.name=="slides_format_text").ok_or("tool")?;
-        assert!(schema.input_schema.get("properties").and_then(|value|value.get("format")).and_then(|value|value.get("properties")).and_then(|value|value.get("fill_visible")).is_some());
-        let mut deck=crate::slides::model::Deck::empty();let slide=deck.add_slide("blank");let shape=deck.add_element(slide,crate::slides::model::ElementKind::Rect)?;
-        let mut tabs=vec![Tab::new(1,Document::Slides(deck),"Deck".into(),None)];let mut next=2;
-        dispatch(&mut tabs,&mut next,"slides_format_text",&json!({"document_id":1,"slide_id":slide,"element_ids":[shape],"format":{"fill_visible":false}}),"audit")?;
-        assert!(matches!(&tabs[0].document,Document::Slides(deck) if !deck.slides[0].elements[0].fill_visible));Ok(())
+    fn batch_shape_format_can_change_fill_visibility() -> Result<(), String> {
+        let schema = definitions()
+            .into_iter()
+            .find(|tool| tool.name == "slides_format_text")
+            .ok_or("tool")?;
+        assert!(
+            schema
+                .input_schema
+                .get("properties")
+                .and_then(|value| value.get("format"))
+                .and_then(|value| value.get("properties"))
+                .and_then(|value| value.get("fill_visible"))
+                .is_some()
+        );
+        let mut deck = crate::slides::model::Deck::empty();
+        let slide = deck.add_slide("blank");
+        let shape = deck.add_element(slide, crate::slides::model::ElementKind::Rect)?;
+        let mut tabs = vec![Tab::new(1, Document::Slides(deck), "Deck".into(), None)];
+        let mut next = 2;
+        dispatch(
+            &mut tabs,
+            &mut next,
+            "slides_format_text",
+            &json!({"document_id":1,"slide_id":slide,"element_ids":[shape],"format":{"fill_visible":false}}),
+            "audit",
+        )?;
+        assert!(
+            matches!(&tabs[0].document,Document::Slides(deck) if !deck.slides[0].elements[0].fill_visible)
+        );
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod two_hundred_mcp_regressions {
     use super::*;
-    fn picture()->Result<Vec<u8>,String> {
-        let mut bytes=std::io::Cursor::new(Vec::new());
-        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(1,1,image::Rgba([1,2,3,128])))
-            .write_to(&mut bytes,image::ImageFormat::Png).map_err(|error|error.to_string())?;
+    fn picture() -> Result<Vec<u8>, String> {
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            1,
+            1,
+            image::Rgba([1, 2, 3, 128]),
+        ))
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .map_err(|error| error.to_string())?;
         Ok(bytes.into_inner())
     }
     #[test]
-    fn retired_sheet_picture_ids_cannot_be_reintroduced_by_model_replacement()->Result<(),String> {
-        let mut book=crate::sheets::model::Book::default();let sheet=book.active_id();
-        let retired=book.add_image(sheet,0,0,picture()?)?;book.delete_image(sheet,retired)?;
-        let current=Document::Sheets(book.clone());let fresh=book.add_image(sheet,0,0,picture()?)?;
-        book.sheet_by_id_mut(sheet).ok_or("sheet")?.images.iter_mut().find(|image|image.id==fresh).ok_or("image")?.id=retired;
-        let replacement=Document::Sheets(book);replacement.validate()?;
-        let mut tabs=vec![Tab::new(1,current.clone(),"Book".into(),None)];let mut next=2;
-        assert!(dispatch(&mut tabs,&mut next,"replace_document_model",
-            &json!({"document_id":1,"base_version":0,"model":replacement}),"audit").is_err());
-        assert_eq!(tabs[0].document,current);assert_eq!(tabs[0].version,0);Ok(())
+    fn retired_sheet_picture_ids_cannot_be_reintroduced_by_model_replacement() -> Result<(), String>
+    {
+        let mut book = crate::sheets::model::Book::default();
+        let sheet = book.active_id();
+        let retired = book.add_image(sheet, 0, 0, picture()?)?;
+        book.delete_image(sheet, retired)?;
+        let current = Document::Sheets(book.clone());
+        let fresh = book.add_image(sheet, 0, 0, picture()?)?;
+        book.sheet_by_id_mut(sheet)
+            .ok_or("sheet")?
+            .images
+            .iter_mut()
+            .find(|image| image.id == fresh)
+            .ok_or("image")?
+            .id = retired;
+        let replacement = Document::Sheets(book);
+        replacement.validate()?;
+        let mut tabs = vec![Tab::new(1, current.clone(), "Book".into(), None)];
+        let mut next = 2;
+        assert!(
+            dispatch(
+                &mut tabs,
+                &mut next,
+                "replace_document_model",
+                &json!({"document_id":1,"base_version":0,"model":replacement}),
+                "audit"
+            )
+            .is_err()
+        );
+        assert_eq!(tabs[0].document, current);
+        assert_eq!(tabs[0].version, 0);
+        Ok(())
     }
     #[test]
-    fn legacy_lists_honour_offsets_and_page_sizes()->Result<(),String> {
-        let mut tabs=Vec::new();for id in 1..=3 {tabs.push(Tab::new(id,Document::create("docs")?,format!("D{id}"),None));}
-        let mut next=4;
-        for name in ["list_documents","app_status"] {
-            let out=dispatch(&mut tabs,&mut next,name,&json!({"index":1,"count":1}),"audit")?;
-            assert_eq!(out["documents"].as_array().map(Vec::len),Some(1));assert_eq!(out["documents"][0]["id"],2);assert_eq!(out["total"],3);
+    fn legacy_lists_honour_offsets_and_page_sizes() -> Result<(), String> {
+        let mut tabs = Vec::new();
+        for id in 1..=3 {
+            tabs.push(Tab::new(
+                id,
+                Document::create("docs")?,
+                format!("D{id}"),
+                None,
+            ));
         }
-        let mut book=crate::sheets::model::Book::default();let second=book.add_sheet("B")?;book.add_sheet("C")?;
-        tabs=vec![Tab::new(1,Document::Sheets(book),"B".into(),None)];
-        let out=dispatch(&mut tabs,&mut next,"sheets_list",&json!({"document_id":1,"index":1,"count":1}),"audit")?;
-        assert_eq!(out["sheets"].as_array().map(Vec::len),Some(1));assert_eq!(out["sheets"][0]["id"],second);assert_eq!(out["total"],3);
-        let mut deck=crate::slides::model::Deck::empty();deck.add_slide("blank");let second=deck.add_slide("blank");deck.add_slide("blank");
-        tabs=vec![Tab::new(1,Document::Slides(deck),"D".into(),None)];
-        let out=dispatch(&mut tabs,&mut next,"slides_list",&json!({"document_id":1,"index":1,"count":1}),"audit")?;
-        assert_eq!(out["slides"].as_array().map(Vec::len),Some(1));assert_eq!(out["slides"][0]["id"],second);assert_eq!(out["total"],3);Ok(())
+        let mut next = 4;
+        for name in ["list_documents", "app_status"] {
+            let out = dispatch(
+                &mut tabs,
+                &mut next,
+                name,
+                &json!({"index":1,"count":1}),
+                "audit",
+            )?;
+            assert_eq!(out["documents"].as_array().map(Vec::len), Some(1));
+            assert_eq!(out["documents"][0]["id"], 2);
+            assert_eq!(out["total"], 3);
+        }
+        let mut book = crate::sheets::model::Book::default();
+        let second = book.add_sheet("B")?;
+        book.add_sheet("C")?;
+        tabs = vec![Tab::new(1, Document::Sheets(book), "B".into(), None)];
+        let out = dispatch(
+            &mut tabs,
+            &mut next,
+            "sheets_list",
+            &json!({"document_id":1,"index":1,"count":1}),
+            "audit",
+        )?;
+        assert_eq!(out["sheets"].as_array().map(Vec::len), Some(1));
+        assert_eq!(out["sheets"][0]["id"], second);
+        assert_eq!(out["total"], 3);
+        let mut deck = crate::slides::model::Deck::empty();
+        deck.add_slide("blank");
+        let second = deck.add_slide("blank");
+        deck.add_slide("blank");
+        tabs = vec![Tab::new(1, Document::Slides(deck), "D".into(), None)];
+        let out = dispatch(
+            &mut tabs,
+            &mut next,
+            "slides_list",
+            &json!({"document_id":1,"index":1,"count":1}),
+            "audit",
+        )?;
+        assert_eq!(out["slides"].as_array().map(Vec::len), Some(1));
+        assert_eq!(out["slides"][0]["id"], second);
+        assert_eq!(out["total"], 3);
+        Ok(())
     }
     #[test]
-    fn long_docs_paragraphs_have_unicode_and_format_preserving_windows()->Result<(),String> {
-        let mut doc=crate::docs::model::Doc::from_text(&"🙂".repeat(300000));let paragraph=doc.paragraphs[0].id;
+    fn long_docs_paragraphs_have_unicode_and_format_preserving_windows() -> Result<(), String> {
+        let mut doc = crate::docs::model::Doc::from_text(&"🙂".repeat(300000));
+        let paragraph = doc.paragraphs[0].id;
         doc.paragraphs[0].set_style("Heading1");
-        let mut tabs=vec![Tab::new(1,Document::Docs(doc),"Long".into(),None)];let mut next=2;
-        assert!(dispatch(&mut tabs,&mut next,"docs_read",&json!({"document_id":1,"count":1}),"audit").is_err());
-        let out=dispatch(&mut tabs,&mut next,"docs_read",&json!({"document_id":1,"paragraph_id":paragraph,"offset":1,"characters":3}),"audit")?;
-        let value=&out["content"]["paragraphs"][0];
-        assert_eq!(value["runs"][0]["text"],"🙂🙂🙂");assert_eq!(value["runs"][0]["format"]["bold"],true);
-        assert_eq!(value["text_offset"],1);assert_eq!(value["total_chars"],300000);assert_eq!(value["text_truncated"],true);
-        let outline=dispatch(&mut tabs,&mut next,"docs_get_outline",&json!({"document_id":1}),"audit")?;
-        assert_eq!(outline["paragraphs"][0]["total_chars"],300000);
-        assert_eq!(outline["paragraphs"][0]["text"].as_str().map(|text|text.chars().count()),Some(512));
-        assert_eq!(tabs[0].version,0);assert!(tabs[0].undo.is_empty());Ok(())
+        let mut tabs = vec![Tab::new(1, Document::Docs(doc), "Long".into(), None)];
+        let mut next = 2;
+        assert!(
+            dispatch(
+                &mut tabs,
+                &mut next,
+                "docs_read",
+                &json!({"document_id":1,"count":1}),
+                "audit"
+            )
+            .is_err()
+        );
+        let out = dispatch(
+            &mut tabs,
+            &mut next,
+            "docs_read",
+            &json!({"document_id":1,"paragraph_id":paragraph,"offset":1,"characters":3}),
+            "audit",
+        )?;
+        let value = &out["content"]["paragraphs"][0];
+        assert_eq!(value["runs"][0]["text"], "🙂🙂🙂");
+        assert_eq!(value["runs"][0]["format"]["bold"], true);
+        assert_eq!(value["text_offset"], 1);
+        assert_eq!(value["total_chars"], 300000);
+        assert_eq!(value["text_truncated"], true);
+        let outline = dispatch(
+            &mut tabs,
+            &mut next,
+            "docs_get_outline",
+            &json!({"document_id":1}),
+            "audit",
+        )?;
+        assert_eq!(outline["paragraphs"][0]["total_chars"], 300000);
+        assert_eq!(
+            outline["paragraphs"][0]["text"]
+                .as_str()
+                .map(|text| text.chars().count()),
+            Some(512)
+        );
+        assert_eq!(tabs[0].version, 0);
+        assert!(tabs[0].undo.is_empty());
+        Ok(())
     }
     #[test]
-    fn large_slides_can_be_read_in_bounded_element_pages()->Result<(),String> {
-        let mut deck=crate::slides::model::Deck::empty();let slide=deck.add_slide("blank");
-        let mut ids=Vec::new();for _ in 0..300 {
-            let id=deck.add_element(slide,crate::slides::model::ElementKind::Text)?;
-            deck.slide_mut(slide).and_then(|slide|slide.element_mut(id)).ok_or("element")?.text="x".repeat(4096);ids.push(id);
+    fn large_slides_can_be_read_in_bounded_element_pages() -> Result<(), String> {
+        let mut deck = crate::slides::model::Deck::empty();
+        let slide = deck.add_slide("blank");
+        let mut ids = Vec::new();
+        for _ in 0..300 {
+            let id = deck.add_element(slide, crate::slides::model::ElementKind::Text)?;
+            deck.slide_mut(slide)
+                .and_then(|slide| slide.element_mut(id))
+                .ok_or("element")?
+                .text = "x".repeat(4096);
+            ids.push(id);
         }
-        let mut tabs=vec![Tab::new(1,Document::Slides(deck),"Deck".into(),None)];let mut next=2;
-        let out=dispatch(&mut tabs,&mut next,"slides_read",&json!({"document_id":1,"slide_id":slide,"element_index":5,"element_count":2}),"audit")?;
-        let value=&out["content"]["slides"][0];assert_eq!(value["elements"].as_array().map(Vec::len),Some(2));
-        assert_eq!(value["elements"][0]["id"],ids[5]);assert_eq!(value["total_elements"],300);assert_eq!(value["element_offset"],5);
-        assert!(dispatch(&mut tabs,&mut next,"slides_read",&json!({"document_id":1,"slide_id":999999}),"audit").is_err());Ok(())
+        let mut tabs = vec![Tab::new(1, Document::Slides(deck), "Deck".into(), None)];
+        let mut next = 2;
+        let out = dispatch(
+            &mut tabs,
+            &mut next,
+            "slides_read",
+            &json!({"document_id":1,"slide_id":slide,"element_index":5,"element_count":2}),
+            "audit",
+        )?;
+        let value = &out["content"]["slides"][0];
+        assert_eq!(value["elements"].as_array().map(Vec::len), Some(2));
+        assert_eq!(value["elements"][0]["id"], ids[5]);
+        assert_eq!(value["total_elements"], 300);
+        assert_eq!(value["element_offset"], 5);
+        assert!(
+            dispatch(
+                &mut tabs,
+                &mut next,
+                "slides_read",
+                &json!({"document_id":1,"slide_id":999999}),
+                "audit"
+            )
+            .is_err()
+        );
+        Ok(())
     }
     #[test]
-    fn bulk_edit_results_bound_ids_and_report_the_full_count()->Result<(),String> {
-        let mut book=crate::sheets::model::Book::default();let sheet=book.active_id();
-        for row in 0..400 {book.set_input(sheet,row,0,"a")?;}book.recalculate();
-        let mut tabs=vec![Tab::new(1,Document::Sheets(book),"Book".into(),None)];let mut next=2;
-        let out=dispatch(&mut tabs,&mut next,"sheets_replace_all",
-            &json!({"document_id":1,"sheet_id":sheet,"query":"a","replacement":"b"}),"audit")?;
-        assert_eq!(out["applied"],true);assert_eq!(out["changed_ids"].as_array().map(Vec::len),Some(256));
-        assert_eq!(out["changed_ids_count"],400);assert_eq!(out["changed_ids_truncated"],true);
-        let internal=prepare_operation(&mut tabs,&mut next,"sheets_replace_all",
-            &json!({"document_id":1,"sheet_id":sheet,"query":"b","replacement":"c"}),"audit")?;
-        assert_eq!(internal["changed_ids"].as_array().map(Vec::len),Some(400));
-        assert_eq!(internal["changed_ids_count"],400);assert_eq!(internal["changed_ids_truncated"],false);
-        if let Document::Sheets(book)=&tabs[0].document {assert_eq!(book.sheets[0].cell(399,0).map(|cell|cell.input.as_str()),Some("c"));}
-        else {return Err("book".into());}Ok(())
-    }
-    #[test]
-    fn range_and_object_mutations_identify_the_affected_entities()->Result<(),String> {
-        let book=crate::sheets::model::Book::default();let sheet=book.active_id();
-        let mut tabs=vec![Tab::new(1,Document::Sheets(book),"Book".into(),None)];let mut next=2;
-        let out=dispatch(&mut tabs,&mut next,"sheets_write_range",
-            &json!({"document_id":1,"sheet_id":sheet,"values":[["a","b"]]}),"audit")?;
-        assert_eq!(out["changed_ids_count"],2);let ids=out["changed_ids"].clone();
-        let formatted=dispatch(&mut tabs,&mut next,"sheets_set_format",
-            &json!({"document_id":1,"sheet_id":sheet,"r0":0,"c0":0,"r1":0,"c1":1,"format":{"bold":true}}),"audit")?;
-        assert_eq!(formatted["changed_ids"],ids);
-        let mut deck=crate::slides::model::Deck::empty();let slide=deck.add_slide("blank");
-        tabs=vec![Tab::new(1,Document::Slides(deck),"D".into(),None)];
-        let args=json!({"document_id":1,"slide_id":slide,"notes":"speaker"});
-        let out=dispatch(&mut tabs,&mut next,"slides_set_notes",&args,"audit")?;assert_eq!(out["changed_ids"],json!([slide]));
-        let out=dispatch(&mut tabs,&mut next,"slides_set_notes",&args,"audit")?;assert_eq!(out["applied"],false);assert_eq!(out["changed_ids_count"],0);Ok(())
-    }
-    #[test]
-    fn dry_runs_apply_the_same_allocator_and_commit_preconditions()->Result<(),String> {
-        for counter in [0,u64::MAX] {
-            let mut tabs=Vec::new();let mut next=counter;
-            assert!(dispatch(&mut tabs,&mut next,"create_document",&json!({"kind":"docs","mode":"dry_run"}),"audit").is_err());
-            assert!(tabs.is_empty());assert_eq!(next,counter);
+    fn bulk_edit_results_bound_ids_and_report_the_full_count() -> Result<(), String> {
+        let mut book = crate::sheets::model::Book::default();
+        let sheet = book.active_id();
+        for row in 0..400 {
+            book.set_input(sheet, row, 0, "a")?;
         }
-        let doc=crate::docs::model::Doc::from_text("A");let paragraph=doc.paragraphs[0].id;
-        let mut tabs=vec![Tab::new(1,Document::Docs(doc),"D".into(),None)];let mut next=2;
-        tabs[0].version=u64::MAX;let before=tabs[0].document.clone();
-        assert!(dispatch(&mut tabs,&mut next,"docs_insert_text",
-            &json!({"document_id":1,"paragraph_id":paragraph,"text":"B","mode":"dry_run"}),"audit").is_err());
-        assert_eq!(tabs[0].document,before);assert!(tabs[0].undo.is_empty());
-        tabs[0].version=0;
-        dispatch(&mut tabs,&mut next,"docs_insert_text",&json!({"document_id":1,"paragraph_id":paragraph,"text":"B"}),"audit")?;
-        tabs[0].pending_docs_edits=None;let before=tabs[0].document.clone();
-        assert!(dispatch(&mut tabs,&mut next,"undo",&json!({"document_id":1,"mode":"dry_run"}),"audit").is_err());
-        assert_eq!(tabs[0].document,before);assert_eq!(tabs[0].version,1);Ok(())
+        book.recalculate();
+        let mut tabs = vec![Tab::new(1, Document::Sheets(book), "Book".into(), None)];
+        let mut next = 2;
+        let out = dispatch(
+            &mut tabs,
+            &mut next,
+            "sheets_replace_all",
+            &json!({"document_id":1,"sheet_id":sheet,"query":"a","replacement":"b"}),
+            "audit",
+        )?;
+        assert_eq!(out["applied"], true);
+        assert_eq!(out["changed_ids"].as_array().map(Vec::len), Some(256));
+        assert_eq!(out["changed_ids_count"], 400);
+        assert_eq!(out["changed_ids_truncated"], true);
+        let internal = prepare_operation(
+            &mut tabs,
+            &mut next,
+            "sheets_replace_all",
+            &json!({"document_id":1,"sheet_id":sheet,"query":"b","replacement":"c"}),
+            "audit",
+        )?;
+        assert_eq!(internal["changed_ids"].as_array().map(Vec::len), Some(400));
+        assert_eq!(internal["changed_ids_count"], 400);
+        assert_eq!(internal["changed_ids_truncated"], false);
+        if let Document::Sheets(book) = &tabs[0].document {
+            assert_eq!(
+                book.sheets[0].cell(399, 0).map(|cell| cell.input.as_str()),
+                Some("c")
+            );
+        } else {
+            return Err("book".into());
+        }
+        Ok(())
     }
     #[test]
-    fn sheet_image_insertion_does_not_silently_change_explicit_arguments()->Result<(),String> {
-        let book=crate::sheets::model::Book::default();let sheet=book.active_id();let before=Document::Sheets(book);
-        let mut tabs=vec![Tab::new(1,before.clone(),"Book".into(),None)];let mut next=2;
-        for extra in [json!({"width":9000}),json!({"alt":"x".repeat(32768)})] {
-            let mut args=json!({"document_id":1,"sheet_id":sheet,"bytes":picture()?});
-            args.as_object_mut().ok_or("args")?.extend(extra.as_object().ok_or("extra")?.clone());
-            assert!(dispatch(&mut tabs,&mut next,"sheets_add_image",&args,"audit").is_err());
-            assert_eq!(tabs[0].document,before);assert_eq!(tabs[0].version,0);
+    fn range_and_object_mutations_identify_the_affected_entities() -> Result<(), String> {
+        let book = crate::sheets::model::Book::default();
+        let sheet = book.active_id();
+        let mut tabs = vec![Tab::new(1, Document::Sheets(book), "Book".into(), None)];
+        let mut next = 2;
+        let out = dispatch(
+            &mut tabs,
+            &mut next,
+            "sheets_write_range",
+            &json!({"document_id":1,"sheet_id":sheet,"values":[["a","b"]]}),
+            "audit",
+        )?;
+        assert_eq!(out["changed_ids_count"], 2);
+        let ids = out["changed_ids"].clone();
+        let formatted = dispatch(
+            &mut tabs,
+            &mut next,
+            "sheets_set_format",
+            &json!({"document_id":1,"sheet_id":sheet,"r0":0,"c0":0,"r1":0,"c1":1,"format":{"bold":true}}),
+            "audit",
+        )?;
+        assert_eq!(formatted["changed_ids"], ids);
+        let mut deck = crate::slides::model::Deck::empty();
+        let slide = deck.add_slide("blank");
+        tabs = vec![Tab::new(1, Document::Slides(deck), "D".into(), None)];
+        let args = json!({"document_id":1,"slide_id":slide,"notes":"speaker"});
+        let out = dispatch(&mut tabs, &mut next, "slides_set_notes", &args, "audit")?;
+        assert_eq!(out["changed_ids"], json!([slide]));
+        let out = dispatch(&mut tabs, &mut next, "slides_set_notes", &args, "audit")?;
+        assert_eq!(out["applied"], false);
+        assert_eq!(out["changed_ids_count"], 0);
+        Ok(())
+    }
+    #[test]
+    fn dry_runs_apply_the_same_allocator_and_commit_preconditions() -> Result<(), String> {
+        for counter in [0, u64::MAX] {
+            let mut tabs = Vec::new();
+            let mut next = counter;
+            assert!(
+                dispatch(
+                    &mut tabs,
+                    &mut next,
+                    "create_document",
+                    &json!({"kind":"docs","mode":"dry_run"}),
+                    "audit"
+                )
+                .is_err()
+            );
+            assert!(tabs.is_empty());
+            assert_eq!(next, counter);
         }
-        dispatch(&mut tabs,&mut next,"sheets_add_image",
-            &json!({"document_id":1,"sheet_id":sheet,"bytes":picture()?,"width":110,"alt":"Описание"}),"audit")?;
-        if let Document::Sheets(book)=&tabs[0].document {
-            let image=&book.sheets[0].images[0];assert_eq!((image.width,image.height),(110.0,110.0));assert_eq!(image.alt,"Описание");
-        }else{return Err("book".into());}Ok(())
+        let doc = crate::docs::model::Doc::from_text("A");
+        let paragraph = doc.paragraphs[0].id;
+        let mut tabs = vec![Tab::new(1, Document::Docs(doc), "D".into(), None)];
+        let mut next = 2;
+        tabs[0].version = u64::MAX;
+        let before = tabs[0].document.clone();
+        assert!(
+            dispatch(
+                &mut tabs,
+                &mut next,
+                "docs_insert_text",
+                &json!({"document_id":1,"paragraph_id":paragraph,"text":"B","mode":"dry_run"}),
+                "audit"
+            )
+            .is_err()
+        );
+        assert_eq!(tabs[0].document, before);
+        assert!(tabs[0].undo.is_empty());
+        tabs[0].version = 0;
+        dispatch(
+            &mut tabs,
+            &mut next,
+            "docs_insert_text",
+            &json!({"document_id":1,"paragraph_id":paragraph,"text":"B"}),
+            "audit",
+        )?;
+        tabs[0].pending_docs_edits = None;
+        let before = tabs[0].document.clone();
+        assert!(
+            dispatch(
+                &mut tabs,
+                &mut next,
+                "undo",
+                &json!({"document_id":1,"mode":"dry_run"}),
+                "audit"
+            )
+            .is_err()
+        );
+        assert_eq!(tabs[0].document, before);
+        assert_eq!(tabs[0].version, 1);
+        Ok(())
+    }
+    #[test]
+    fn sheet_image_insertion_does_not_silently_change_explicit_arguments() -> Result<(), String> {
+        let book = crate::sheets::model::Book::default();
+        let sheet = book.active_id();
+        let before = Document::Sheets(book);
+        let mut tabs = vec![Tab::new(1, before.clone(), "Book".into(), None)];
+        let mut next = 2;
+        for extra in [json!({"width":9000}), json!({"alt":"x".repeat(32768)})] {
+            let mut args = json!({"document_id":1,"sheet_id":sheet,"bytes":picture()?});
+            args.as_object_mut()
+                .ok_or("args")?
+                .extend(extra.as_object().ok_or("extra")?.clone());
+            assert!(dispatch(&mut tabs, &mut next, "sheets_add_image", &args, "audit").is_err());
+            assert_eq!(tabs[0].document, before);
+            assert_eq!(tabs[0].version, 0);
+        }
+        dispatch(
+            &mut tabs,
+            &mut next,
+            "sheets_add_image",
+            &json!({"document_id":1,"sheet_id":sheet,"bytes":picture()?,"width":110,"alt":"Описание"}),
+            "audit",
+        )?;
+        if let Document::Sheets(book) = &tabs[0].document {
+            let image = &book.sheets[0].images[0];
+            assert_eq!((image.width, image.height), (110.0, 110.0));
+            assert_eq!(image.alt, "Описание");
+        } else {
+            return Err("book".into());
+        }
+        Ok(())
     }
 }

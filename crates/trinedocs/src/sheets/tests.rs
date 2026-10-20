@@ -2098,8 +2098,7 @@ fn html_export_omits_hidden_sheets_rows_and_columns() -> Result<(), String> {
     book.set_input(hidden, 0, 0, "private-value")?;
     book.sheet_by_id_mut(hidden).ok_or("sheet")?.hidden = true;
     book.active = 0;
-    let html =
-        String::from_utf8(super::io::write(&book, "html")?).map_err(|e| e.to_string())?;
+    let html = String::from_utf8(super::io::write(&book, "html")?).map_err(|e| e.to_string())?;
     assert!(html.contains("public"));
     for secret in [
         "private-row",

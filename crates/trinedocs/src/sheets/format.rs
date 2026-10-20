@@ -39,7 +39,10 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
     }
     let sections = split_sections(code);
     let negative = *number < 0.0;
-    let conditional = sections.iter().take(2).any(|section| condition(section,*number).is_some());
+    let conditional = sections
+        .iter()
+        .take(2)
+        .any(|section| condition(section, *number).is_some());
     let section = selected_numeric_section(&sections, *number);
     let Some(section) = section else {
         return String::new();
@@ -60,14 +63,20 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
     let bare = outside_quotes(&lower);
     if bare
         .chars()
-        .any(|c| matches!(c, 'y' | 'm' | 'd' | 'h' | 's')) || bare.contains("a/p")
+        .any(|c| matches!(c, 'y' | 'm' | 'd' | 'h' | 's'))
+        || bare.contains("a/p")
     {
-        return date_display(numeric, &section,ru);
+        return date_display(numeric, &section, ru);
     }
     let percent = bare.chars().filter(|c| *c == '%').count();
     if bare.split_once('/').is_some_and(|(left, right)| {
-        left.chars().last().is_some_and(|ch| matches!(ch, '0' | '#' | '?'))
-            && right.chars().next().is_some_and(|ch| ch.is_ascii_digit() || matches!(ch, '#' | '?'))
+        left.chars()
+            .last()
+            .is_some_and(|ch| matches!(ch, '0' | '#' | '?'))
+            && right
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_digit() || matches!(ch, '#' | '?'))
     }) {
         let (left, right) = bare.split_once('/').unwrap_or(("", ""));
         let denominator = right
@@ -80,7 +89,9 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
         let mixed = left.split_whitespace().count() > 1;
         let sign = if numeric < 0.0 { "-" } else { "" };
         let n = decimal_scale(numeric.abs(), 2 * percent as i32);
-        if !n.is_finite() {return "#NUM!".into();}
+        if !n.is_finite() {
+            return "#NUM!".into();
+        }
         let whole = if mixed { n.floor() } else { 0.0 };
         let fraction = n - whole;
         let max_den = 10u32.pow(
@@ -94,23 +105,56 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
         let candidates = denominator.map_or(1..=max_den, |den| den..=den);
         for den in candidates {
             let numerator = round_half_away(fraction * f64::from(den), 0);
-            if !numerator.is_finite() { continue; }
+            if !numerator.is_finite() {
+                continue;
+            }
             let diff = (fraction - numerator / f64::from(den)).abs();
             if diff < best.2 {
                 best = (numerator, den, diff);
             }
         }
-        if !best.2.is_finite() { return "#NUM!".into(); }
-        let body=if mixed && best.0==0.0 {format!("{sign}{whole:.0}")}
-            else if mixed && best.0==f64::from(best.1) {format!("{sign}{:.0}",whole+1.0)}
-            else {format!("{sign}{}{:.0}/{}",
-                if mixed && whole!=0.0 {format!("{whole:.0} ")}else{String::new()},best.0,best.1)};
-        let tokens=outside_tokens(&section);
-        let start=tokens.iter().find(|(_,c)|matches!(c,'0'|'#'|'?')).map(|(i,_)|*i).unwrap_or(0);
-        let slash=tokens.iter().find(|(_,c)|*c=='/').map(|(i,_)|*i).unwrap_or(0);
-        let end=section[slash+1..].char_indices().take_while(|(_,c)|c.is_ascii_digit() || matches!(c,'?'|'#'))
-            .last().map(|(i,c)|slash+1+i+c.len_utf8()).unwrap_or(slash+1);
-        return format!("{}{}{}",unquote(&section[..start]),body,unquote(&section[end..]));
+        if !best.2.is_finite() {
+            return "#NUM!".into();
+        }
+        let body = if mixed && best.0 == 0.0 {
+            format!("{sign}{whole:.0}")
+        } else if mixed && best.0 == f64::from(best.1) {
+            format!("{sign}{:.0}", whole + 1.0)
+        } else {
+            format!(
+                "{sign}{}{:.0}/{}",
+                if mixed && whole != 0.0 {
+                    format!("{whole:.0} ")
+                } else {
+                    String::new()
+                },
+                best.0,
+                best.1
+            )
+        };
+        let tokens = outside_tokens(&section);
+        let start = tokens
+            .iter()
+            .find(|(_, c)| matches!(c, '0' | '#' | '?'))
+            .map(|(i, _)| *i)
+            .unwrap_or(0);
+        let slash = tokens
+            .iter()
+            .find(|(_, c)| *c == '/')
+            .map(|(i, _)| *i)
+            .unwrap_or(0);
+        let end = section[slash + 1..]
+            .char_indices()
+            .take_while(|(_, c)| c.is_ascii_digit() || matches!(c, '?' | '#'))
+            .last()
+            .map(|(i, c)| slash + 1 + i + c.len_utf8())
+            .unwrap_or(slash + 1);
+        return format!(
+            "{}{}{}",
+            unquote(&section[..start]),
+            body,
+            unquote(&section[end..])
+        );
     }
     let mut n = numeric;
     let tokens = outside_tokens(&section);
@@ -131,12 +175,19 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
     };
     let mut pattern = section.get(start..end).unwrap_or("0").to_string();
     let tail = section.get(end..).unwrap_or("");
-    let decimal=outside_tokens(&pattern).into_iter().find(|(_,c)|*c=='.').map(|(i,_)|i);
-    let inner_scale=decimal.map(|i|pattern[..i].chars().rev().take_while(|c|*c==',').count()).unwrap_or(0);
-    if let Some(decimal)=decimal && inner_scale>0 {
-        pattern.replace_range(decimal-inner_scale..decimal,"");
+    let decimal = outside_tokens(&pattern)
+        .into_iter()
+        .find(|(_, c)| *c == '.')
+        .map(|(i, _)| i);
+    let inner_scale = decimal
+        .map(|i| pattern[..i].chars().rev().take_while(|c| *c == ',').count())
+        .unwrap_or(0);
+    if let Some(decimal) = decimal
+        && inner_scale > 0
+    {
+        pattern.replace_range(decimal - inner_scale..decimal, "");
     }
-    let scale = tail.chars().take_while(|c| *c == ',').count()+inner_scale;
+    let scale = tail.chars().take_while(|c| *c == ',').count() + inner_scale;
     n = decimal_scale(n, 2 * percent as i32 - 3 * scale as i32);
     if !n.is_finite() {
         return "#NUM!".into();
@@ -153,7 +204,7 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
     let integer_pattern = pattern.split(['.', 'E', 'e']).next().unwrap_or("");
     let minimum_digits = integer_pattern.chars().filter(|c| *c == '0').count();
     let fixed = || numeric_pattern(n, &decimal_pattern, minimum_digits);
-    let rendered = if let Some(masked)=integer_literal_mask(n,&pattern) {
+    let rendered = if let Some(masked) = integer_literal_mask(n, &pattern) {
         masked
     } else if let Some(exponent) = pattern.to_uppercase().find('E') {
         let digits = pattern
@@ -193,10 +244,22 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
 }
 /// Apply only the net decimal exponent; never form an infinite scale factor.
 fn decimal_scale(mut value: f64, mut exponent: i32) -> f64 {
-    while exponent >= 3 { value *= 1000.0; exponent -= 3; }
-    while exponent <= -3 { value /= 1000.0; exponent += 3; }
-    while exponent > 0 { value *= 10.0; exponent -= 1; }
-    while exponent < 0 { value /= 10.0; exponent += 1; }
+    while exponent >= 3 {
+        value *= 1000.0;
+        exponent -= 3;
+    }
+    while exponent <= -3 {
+        value /= 1000.0;
+        exponent += 3;
+    }
+    while exponent > 0 {
+        value *= 10.0;
+        exponent -= 1;
+    }
+    while exponent < 0 {
+        value /= 10.0;
+        exponent += 1;
+    }
     value
 }
 /// Rounds half away from zero like Excel (Rust's formatter rounds ties to even, and binary
@@ -330,7 +393,13 @@ fn split_sections(code: &str) -> Vec<String> {
     let mut escape = false;
     let mut skip = false;
     for c in code.chars() {
-        if skip { if let Some(last)=out.last_mut() {last.push(c);} skip=false; continue; }
+        if skip {
+            if let Some(last) = out.last_mut() {
+                last.push(c);
+            }
+            skip = false;
+            continue;
+        }
         if c == ';' && !quote && !escape {
             out.push(String::new());
             continue;
@@ -341,7 +410,9 @@ fn split_sections(code: &str) -> Vec<String> {
         if c == '"' && !escape {
             quote = !quote;
         }
-        if !quote && !escape && matches!(c,'_'|'*') {skip=true;}
+        if !quote && !escape && matches!(c, '_' | '*') {
+            skip = true;
+        }
         escape = c == '\\' && !escape;
     }
     out
@@ -415,7 +486,11 @@ fn numeric_pattern(number: f64, decimals: &str, minimum_digits: usize) -> String
         }
         let fraction = text[dot + 1..dot + 1 + significant].to_string();
         text.truncate(dot);
-        let padding = decimals.chars().skip(significant).filter(|c| *c == '?').count();
+        let padding = decimals
+            .chars()
+            .skip(significant)
+            .filter(|c| *c == '?')
+            .count();
         if significant > 0 || padding > 0 {
             text.push('.');
             text.push_str(&fraction);
@@ -429,7 +504,9 @@ fn numeric_pattern(number: f64, decimals: &str, minimum_digits: usize) -> String
         text.insert_str(sign, &"0".repeat(minimum_digits - digits));
     } else if minimum_digits == 0 && text.get(sign..end) == Some("0") {
         text.remove(sign);
-        if text == "-" { text.clear(); }
+        if text == "-" {
+            text.clear();
+        }
     }
     text
 }
@@ -446,29 +523,51 @@ fn text_section(code: &str, value: &str) -> String {
     result.push_str(&unquote(&code[start..]));
     result
 }
-fn selected_numeric_section(sections:&[String], number:f64)->Option<&String> {
-    let conditional=sections.iter().take(2).any(|section|condition(section,number).is_some());
+fn selected_numeric_section(sections: &[String], number: f64) -> Option<&String> {
+    let conditional = sections
+        .iter()
+        .take(2)
+        .any(|section| condition(section, number).is_some());
     if conditional {
-        sections.iter().take(3).find(|section|condition(section,number).unwrap_or(true))
-    } else if number==0.0 && sections.len()>2 {sections.get(2)}
-    else if number<0.0 && sections.len()>1 {sections.get(1)}
-    else {sections.first()}
+        sections
+            .iter()
+            .take(3)
+            .find(|section| condition(section, number).unwrap_or(true))
+    } else if number == 0.0 && sections.len() > 2 {
+        sections.get(2)
+    } else if number < 0.0 && sections.len() > 1 {
+        sections.get(1)
+    } else {
+        sections.first()
+    }
 }
 /// Named number-format colors override the cell's font color only in the chosen section.
-pub fn color(value:&Value,code:&str)->Option<[u8;3]> {
-    let sections=split_sections(code);
-    let section=match value {
-        Value::Number(number)=>selected_numeric_section(&sections,*number)?,
-        Value::Text(_)=>sections.get(3).or_else(||sections.first().filter(|section|outside_quotes(section).contains('@')))?,
-        _=>return None,
+pub fn color(value: &Value, code: &str) -> Option<[u8; 3]> {
+    let sections = split_sections(code);
+    let section = match value {
+        Value::Number(number) => selected_numeric_section(&sections, *number)?,
+        Value::Text(_) => sections.get(3).or_else(|| {
+            sections
+                .first()
+                .filter(|section| outside_quotes(section).contains('@'))
+        })?,
+        _ => return None,
     };
-    let tokens=outside_quotes(section);
+    let tokens = outside_quotes(section);
     for tail in tokens.split('[').skip(1) {
-        let Some((name,_))=tail.split_once(']') else {continue;};
-        let color=match name.to_ascii_lowercase().as_str() {
-            "black"=>[0,0,0],"blue"=>[0,0,255],"cyan"=>[0,255,255],"green"=>[0,255,0],
-            "magenta"=>[255,0,255],"red"=>[255,0,0],"white"=>[255,255,255],"yellow"=>[255,255,0],
-            _=>continue,
+        let Some((name, _)) = tail.split_once(']') else {
+            continue;
+        };
+        let color = match name.to_ascii_lowercase().as_str() {
+            "black" => [0, 0, 0],
+            "blue" => [0, 0, 255],
+            "cyan" => [0, 255, 255],
+            "green" => [0, 255, 0],
+            "magenta" => [255, 0, 255],
+            "red" => [255, 0, 0],
+            "white" => [255, 255, 255],
+            "yellow" => [255, 255, 0],
+            _ => continue,
         };
         return Some(color);
     }
@@ -550,13 +649,19 @@ fn date_display(serial: f64, code: &str, ru: bool) -> String {
         return "#NUM!".into();
     }
     let date_tokens = outside_quotes(&code.to_ascii_lowercase());
-    let fraction_digits=["s.","s]."].iter().filter_map(|pattern| {
-        date_tokens.split_once(pattern).map(|(_,tail)| tail.chars().take_while(|c|*c=='0').count().min(9))
-    }).max().unwrap_or(0);
-    let scale=10f64.powi(fraction_digits as i32);
-    let units=(serial.fract()*86400.0*scale).round();
-    let seconds=(units/scale).floor() as u32;
-    let fraction=(units-f64::from(seconds)*scale).round() as u64;
+    let fraction_digits = ["s.", "s]."]
+        .iter()
+        .filter_map(|pattern| {
+            date_tokens
+                .split_once(pattern)
+                .map(|(_, tail)| tail.chars().take_while(|c| *c == '0').count().min(9))
+        })
+        .max()
+        .unwrap_or(0);
+    let scale = 10f64.powi(fraction_digits as i32);
+    let units = (serial.fract() * 86400.0 * scale).round();
+    let seconds = (units / scale).floor() as u32;
+    let fraction = (units - f64::from(seconds) * scale).round() as u64;
     let has_time = date_tokens.chars().any(|c| c == 'h' || c == 's');
     let has_date = date_tokens.chars().any(|c| c == 'y' || c == 'd');
     let date_serial = serial.floor()
@@ -598,13 +703,20 @@ fn date_display(serial: f64, code: &str, ru: bool) -> String {
             continue;
         }
         if matches!(c, '_' | '*') {
-            if c == '_' { out.push(' '); }
+            if c == '_' {
+                out.push(' ');
+            }
             i = (i + 2).min(chars.len());
             continue;
         }
-        if chars[i..].iter().take(3).collect::<String>().eq_ignore_ascii_case("A/P") {
-            out.push(if hour<12 {'A'}else{'P'});
-            i+=3;
+        if chars[i..]
+            .iter()
+            .take(3)
+            .collect::<String>()
+            .eq_ignore_ascii_case("A/P")
+        {
+            out.push(if hour < 12 { 'A' } else { 'P' });
+            i += 3;
             continue;
         }
         let remaining = chars[i..].iter().take(5).collect::<String>();
@@ -631,7 +743,7 @@ fn date_display(serial: f64, code: &str, ru: bool) -> String {
                 previous = lower.chars().next().unwrap_or(' ');
                 i += rest.chars().count() + 2;
                 if lower.starts_with('s') {
-                    append_time_fraction(&mut out,&chars,&mut i,fraction,fraction_digits,ru);
+                    append_time_fraction(&mut out, &chars, &mut i, fraction, fraction_digits, ru);
                 }
                 continue;
             }
@@ -647,7 +759,9 @@ fn date_display(serial: f64, code: &str, ru: bool) -> String {
             }
             let count = i - start;
             let next = outside_quotes(&chars[i..].iter().collect::<String>())
-                .chars().find(|v|v.is_ascii_alphabetic()).map(|v|v.to_ascii_lowercase());
+                .chars()
+                .find(|v| v.is_ascii_alphabetic())
+                .map(|v| v.to_ascii_lowercase());
             let minutes = token == 'm' && (previous == 'h' || next == Some('s'));
             let n = match token {
                 'y' => {
@@ -693,12 +807,24 @@ fn date_display(serial: f64, code: &str, ru: bool) -> String {
                         "Saturday",
                     ]
                 };
-                let russian=if count==3 {
-                    ["вс","пн","вт","ср","чт","пт","сб"]
+                let russian = if count == 3 {
+                    ["вс", "пн", "вт", "ср", "чт", "пт", "сб"]
                 } else {
-                    ["воскресенье","понедельник","вторник","среда","четверг","пятница","суббота"]
+                    [
+                        "воскресенье",
+                        "понедельник",
+                        "вторник",
+                        "среда",
+                        "четверг",
+                        "пятница",
+                        "суббота",
+                    ]
                 };
-                out.push_str(if ru {russian.get(weekday).copied().unwrap_or("")} else {names.get(weekday).copied().unwrap_or("")});
+                out.push_str(if ru {
+                    russian.get(weekday).copied().unwrap_or("")
+                } else {
+                    names.get(weekday).copied().unwrap_or("")
+                });
             } else if token == 'm' && !minutes && count >= 3 {
                 let names = if count == 3 {
                     [
@@ -721,16 +847,50 @@ fn date_display(serial: f64, code: &str, ru: bool) -> String {
                         "December",
                     ]
                 };
-                let day_number=date_tokens.split(|c|c!='d').any(|run| !run.is_empty() && run.len()<=2);
-                let russian=if count==3 {
-                    ["янв","фев","мар","апр","май","июн","июл","авг","сен","окт","ноя","дек"]
+                let day_number = date_tokens
+                    .split(|c| c != 'd')
+                    .any(|run| !run.is_empty() && run.len() <= 2);
+                let russian = if count == 3 {
+                    [
+                        "янв", "фев", "мар", "апр", "май", "июн", "июл", "авг", "сен", "окт",
+                        "ноя", "дек",
+                    ]
                 } else if day_number {
-                    ["января","февраля","марта","апреля","мая","июня","июля","августа","сентября","октября","ноября","декабря"]
+                    [
+                        "января",
+                        "февраля",
+                        "марта",
+                        "апреля",
+                        "мая",
+                        "июня",
+                        "июля",
+                        "августа",
+                        "сентября",
+                        "октября",
+                        "ноября",
+                        "декабря",
+                    ]
                 } else {
-                    ["январь","февраль","март","апрель","май","июнь","июль","август","сентябрь","октябрь","ноябрь","декабрь"]
+                    [
+                        "январь",
+                        "февраль",
+                        "март",
+                        "апрель",
+                        "май",
+                        "июнь",
+                        "июль",
+                        "август",
+                        "сентябрь",
+                        "октябрь",
+                        "ноябрь",
+                        "декабрь",
+                    ]
                 };
-                let name = if ru {russian.get((m-1) as usize).copied().unwrap_or("")}
-                    else {names.get((m - 1) as usize).copied().unwrap_or("")};
+                let name = if ru {
+                    russian.get((m - 1) as usize).copied().unwrap_or("")
+                } else {
+                    names.get((m - 1) as usize).copied().unwrap_or("")
+                };
                 if count == 5 {
                     out.extend(name.chars().take(1));
                 } else {
@@ -744,8 +904,8 @@ fn date_display(serial: f64, code: &str, ru: bool) -> String {
             } else {
                 out.push_str(&n.to_string());
             }
-            if token=='s' {
-                append_time_fraction(&mut out,&chars,&mut i,fraction,fraction_digits,ru);
+            if token == 's' {
+                append_time_fraction(&mut out, &chars, &mut i, fraction, fraction_digits, ru);
             }
             previous = token;
         } else {
@@ -953,64 +1113,124 @@ mod tests {
     }
 }
 
-fn append_time_fraction(out: &mut String,chars: &[char],index: &mut usize,fraction: u64,precision: usize,ru: bool) {
-    if chars.get(*index)!=Some(&'.') {return;}
-    let digits=chars[*index+1..].iter().take_while(|c|**c=='0').count().min(9);
-    if digits==0 {return;}
-    let value=if precision>=digits {fraction/10u64.pow((precision-digits) as u32)}
-        else {fraction*10u64.pow((digits-precision) as u32)};
-    out.push(if ru {','}else{'.'});
-    out.push_str(&format!("{value:0width$}",width=digits));
-    *index+=digits+1;
+fn append_time_fraction(
+    out: &mut String,
+    chars: &[char],
+    index: &mut usize,
+    fraction: u64,
+    precision: usize,
+    ru: bool,
+) {
+    if chars.get(*index) != Some(&'.') {
+        return;
+    }
+    let digits = chars[*index + 1..]
+        .iter()
+        .take_while(|c| **c == '0')
+        .count()
+        .min(9);
+    if digits == 0 {
+        return;
+    }
+    let value = if precision >= digits {
+        fraction / 10u64.pow((precision - digits) as u32)
+    } else {
+        fraction * 10u64.pow((digits - precision) as u32)
+    };
+    out.push(if ru { ',' } else { '.' });
+    out.push_str(&format!("{value:0width$}", width = digits));
+    *index += digits + 1;
 }
 #[cfg(test)]
 mod format_defect_tests {
     use super::*;
     #[test]
     fn short_am_pm_format_is_a_clock_token() {
-        assert_eq!(display(&Value::Number(0.75),"h:mm A/P",false),"6:00 P");
-        assert_eq!(display(&Value::Number(0.25),"A/P",false),"A");
+        assert_eq!(display(&Value::Number(0.75), "h:mm A/P", false), "6:00 P");
+        assert_eq!(display(&Value::Number(0.25), "A/P", false), "A");
     }
     #[test]
     fn fractional_seconds_are_formatted_and_carried_at_the_requested_precision() {
-        assert_eq!(display(&Value::Number(56.789/86400.0),"ss.000",false),"56.789");
-        assert_eq!(display(&Value::Number(59.96/86400.0),"mm:ss.0",false),"01:00.0");
-        assert_eq!(display(&Value::Number(1.0+0.125/86400.0),"[s].000",false),"86400.125");
+        assert_eq!(
+            display(&Value::Number(56.789 / 86400.0), "ss.000", false),
+            "56.789"
+        );
+        assert_eq!(
+            display(&Value::Number(59.96 / 86400.0), "mm:ss.0", false),
+            "01:00.0"
+        );
+        assert_eq!(
+            display(&Value::Number(1.0 + 0.125 / 86400.0), "[s].000", false),
+            "86400.125"
+        );
     }
     #[test]
     fn russian_calendar_tokens_follow_the_workbook_locale() {
-        let date=super::super::formula::date_serial(2024,1,1);
-        assert_eq!(display(&Value::Number(date),"dddd",true),"понедельник");
-        assert_eq!(display(&Value::Number(date),"d mmmm yyyy",true),"1 января 2024");
-        assert_eq!(display(&Value::Number(date),"mmmm",false),"January");
-        assert_eq!(display(&Value::Number(2958465.999999),"yyyy-mm-dd",false),"9999-12-31");
+        let date = super::super::formula::date_serial(2024, 1, 1);
+        assert_eq!(display(&Value::Number(date), "dddd", true), "понедельник");
+        assert_eq!(
+            display(&Value::Number(date), "d mmmm yyyy", true),
+            "1 января 2024"
+        );
+        assert_eq!(display(&Value::Number(date), "mmmm", false), "January");
+        assert_eq!(
+            display(&Value::Number(2958465.999999), "yyyy-mm-dd", false),
+            "9999-12-31"
+        );
     }
 }
 
-fn integer_literal_mask(number: f64,pattern: &str) -> Option<String> {
-    if !pattern.contains(['"','\\']) {return None;}
-    let mut parts=Vec::new();
-    let (mut quoted,mut escaped)=(false,false);
+fn integer_literal_mask(number: f64, pattern: &str) -> Option<String> {
+    if !pattern.contains(['"', '\\']) {
+        return None;
+    }
+    let mut parts = Vec::new();
+    let (mut quoted, mut escaped) = (false, false);
     for ch in pattern.chars() {
-        if escaped {parts.push((false,ch));escaped=false;continue;}
-        if ch=='"' {quoted=!quoted;continue;}
-        if !quoted && ch=='\\' {escaped=true;continue;}
-        if quoted {parts.push((false,ch));}
-        else if matches!(ch,'0'|'#'|'?') {parts.push((true,ch));}
-        else if matches!(ch,'('|')'|' '|'-'|'+') {parts.push((false,ch));}
-        else {return None;}
+        if escaped {
+            parts.push((false, ch));
+            escaped = false;
+            continue;
+        }
+        if ch == '"' {
+            quoted = !quoted;
+            continue;
+        }
+        if !quoted && ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if quoted {
+            parts.push((false, ch));
+        } else if matches!(ch, '0' | '#' | '?') {
+            parts.push((true, ch));
+        } else if matches!(ch, '(' | ')' | ' ' | '-' | '+') {
+            parts.push((false, ch));
+        } else {
+            return None;
+        }
     }
-    let mut digits:Vec<_>=fixed(number.abs(),0).chars().collect();
-    let mut out=Vec::new();
-    for (slot,ch) in parts.into_iter().rev() {
+    let mut digits: Vec<_> = fixed(number.abs(), 0).chars().collect();
+    let mut out = Vec::new();
+    for (slot, ch) in parts.into_iter().rev() {
         if slot {
-            if let Some(digit)=digits.pop() {out.push(digit);}
-            else if ch=='0' {out.push('0');}
-            else if ch=='?' {out.push(' ');}
-        } else {out.push(ch);}
+            if let Some(digit) = digits.pop() {
+                out.push(digit);
+            } else if ch == '0' {
+                out.push('0');
+            } else if ch == '?' {
+                out.push(' ');
+            }
+        } else {
+            out.push(ch);
+        }
     }
-    while let Some(digit)=digits.pop() {out.push(digit);}
-    if number<0.0 {out.push('-');}
+    while let Some(digit) = digits.pop() {
+        out.push(digit);
+    }
+    if number < 0.0 {
+        out.push('-');
+    }
     Some(out.into_iter().rev().collect())
 }
 #[cfg(test)]
@@ -1018,29 +1238,50 @@ mod second_format_defects {
     use super::*;
     #[test]
     fn spacing_and_fill_arguments_do_not_split_format_sections() {
-        assert_eq!(split_sections("0_;"),vec!["0_;".to_string()]);
-        assert_eq!(split_sections("0*;;(0)"),vec!["0*;".to_string(),"(0)".to_string()]);
+        assert_eq!(split_sections("0_;"), vec!["0_;".to_string()]);
+        assert_eq!(
+            split_sections("0*;;(0)"),
+            vec!["0*;".to_string(), "(0)".to_string()]
+        );
     }
     #[test]
     fn integer_format_keeps_embedded_literal_masks() {
-        assert_eq!(display(&Value::Number(1234.0),r#"00"-"00"#,false),"12-34");
-        assert_eq!(display(&Value::Number(1234567.0),r#"(000) 00"-"00"#,false),"(123) 45-67");
-        assert_eq!(display(&Value::Number(42.0),r#"00"-"00"#,false),"00-42");
+        assert_eq!(
+            display(&Value::Number(1234.0), r#"00"-"00"#, false),
+            "12-34"
+        );
+        assert_eq!(
+            display(&Value::Number(1234567.0), r#"(000) 00"-"00"#, false),
+            "(123) 45-67"
+        );
+        assert_eq!(display(&Value::Number(42.0), r#"00"-"00"#, false), "00-42");
     }
     #[test]
     fn scaling_commas_before_a_decimal_are_applied() {
-        assert_eq!(display(&Value::Number(12345.0),"0,.0",false),"12.3");
-        assert_eq!(display(&Value::Number(12345000.0),r#"0,,.00" M""#,false),"12.35 M");
+        assert_eq!(display(&Value::Number(12345.0), "0,.0", false), "12.3");
+        assert_eq!(
+            display(&Value::Number(12345000.0), r#"0,,.00" M""#, false),
+            "12.35 M"
+        );
     }
     #[test]
     fn fraction_formats_keep_percentages_and_literal_affixes() {
-        assert_eq!(display(&Value::Number(0.125),"# ?/?%",false),"12 1/2%");
-        assert_eq!(display(&Value::Number(1.25),r##""$"# ?/?" kg""##,false),"$1 1/4 kg");
+        assert_eq!(display(&Value::Number(0.125), "# ?/?%", false), "12 1/2%");
+        assert_eq!(
+            display(&Value::Number(1.25), r##""$"# ?/?" kg""##, false),
+            "$1 1/4 kg"
+        );
     }
     #[test]
     fn quoted_words_cannot_change_month_tokens_into_minutes() {
-        assert_eq!(display(&Value::Number(super::super::formula::date_serial(2024,1,15)),
-            r#"mm" seconds""#,false),"01 seconds");
+        assert_eq!(
+            display(
+                &Value::Number(super::super::formula::date_serial(2024, 1, 15)),
+                r#"mm" seconds""#,
+                false
+            ),
+            "01 seconds"
+        );
     }
 }
 
@@ -1049,8 +1290,14 @@ mod hundred_format_tests {
     use super::*;
     #[test]
     fn bracketed_general_keeps_numeric_rendering() {
-        assert_eq!(display(&Value::Number(1234.5), "[Red]General", false), "1234.5");
-        assert_eq!(display(&Value::Number(12.5), "[>=10][Blue]General;0", true), "12,5");
+        assert_eq!(
+            display(&Value::Number(1234.5), "[Red]General", false),
+            "1234.5"
+        );
+        assert_eq!(
+            display(&Value::Number(12.5), "[>=10][Blue]General;0", true),
+            "12,5"
+        );
     }
     #[test]
     fn question_decimal_slots_reserve_spaces_instead_of_zeroes() {
@@ -1062,7 +1309,10 @@ mod hundred_format_tests {
     #[test]
     fn date_spacing_and_fill_arguments_are_not_calendar_tokens() {
         let serial = super::super::formula::date_serial(2024, 1, 15);
-        assert_eq!(display(&Value::Number(serial), "yyyy_m-mm", false), "2024 -01");
+        assert_eq!(
+            display(&Value::Number(serial), "yyyy_m-mm", false),
+            "2024 -01"
+        );
         assert_eq!(display(&Value::Number(serial), "yyyy*mmm", false), "202401");
     }
 }
@@ -1072,23 +1322,29 @@ mod phase200_format_defects {
     use super::*;
     #[test]
     fn numeric_scaling_keeps_finite_results_without_infinite_scale_factors() {
-        let code=format!("0.00E+00{}", "%".repeat(155));
-        assert!(display(&Value::Number(1e-300),&code,false).starts_with("1.00E+10"));
-        let code=format!("0.00E+00{}", ",".repeat(110));
-        assert_eq!(display(&Value::Number(1e308),&code,false),"1.00E-22");
-        assert_eq!(display(&Value::Number(1e308),"0.00E+00,,%",false),"1.00E+304%");
-        assert_eq!(display(&Value::Number(0.0),&format!("0{}", "%".repeat(200)),false),format!("0{}", "%".repeat(200)));
+        let code = format!("0.00E+00{}", "%".repeat(155));
+        assert!(display(&Value::Number(1e-300), &code, false).starts_with("1.00E+10"));
+        let code = format!("0.00E+00{}", ",".repeat(110));
+        assert_eq!(display(&Value::Number(1e308), &code, false), "1.00E-22");
+        assert_eq!(
+            display(&Value::Number(1e308), "0.00E+00,,%", false),
+            "1.00E+304%"
+        );
+        assert_eq!(
+            display(&Value::Number(0.0), &format!("0{}", "%".repeat(200)), false),
+            format!("0{}", "%".repeat(200))
+        );
     }
     #[test]
     fn fraction_masks_accept_zero_and_hash_numerator_placeholders() {
-        assert_eq!(display(&Value::Number(1.5),"0/0",false),"3/2");
-        assert_eq!(display(&Value::Number(1.5),"#/#",false),"3/2");
-        assert_eq!(display(&Value::Number(1.5),"0/8",false),"12/8");
+        assert_eq!(display(&Value::Number(1.5), "0/0", false), "3/2");
+        assert_eq!(display(&Value::Number(1.5), "#/#", false), "3/2");
+        assert_eq!(display(&Value::Number(1.5), "0/8", false), "12/8");
     }
     #[test]
     fn unrepresentable_fraction_numerators_never_fall_back_to_zero() {
-        assert_eq!(display(&Value::Number(1e308),"?/8",false),"#NUM!");
-        assert_eq!(display(&Value::Number(0.0),"?/8",false),"0/8");
+        assert_eq!(display(&Value::Number(1e308), "?/8", false), "#NUM!");
+        assert_eq!(display(&Value::Number(0.0), "?/8", false), "0/8");
     }
 }
 
@@ -1097,12 +1353,15 @@ mod phase200_number_color_defect {
     use super::*;
     #[test]
     fn chosen_number_format_section_supplies_its_own_color() {
-        let code="[Blue]0;[Red](0);[Green]0;[Magenta]@";
-        assert_eq!(color(&Value::Number(-2.0),code),Some([255,0,0]));
-        assert_eq!(color(&Value::Number(2.0),code),Some([0,0,255]));
-        assert_eq!(color(&Value::Number(0.0),code),Some([0,255,0]));
-        assert_eq!(color(&Value::Text("x".into()),code),Some([255,0,255]));
-        assert_eq!(color(&Value::Number(2.0),"[>5][Red]0;[Blue]0"),Some([0,0,255]));
-        assert_eq!(color(&Value::Number(2.0),"\"[Red]\"0"),None);
+        let code = "[Blue]0;[Red](0);[Green]0;[Magenta]@";
+        assert_eq!(color(&Value::Number(-2.0), code), Some([255, 0, 0]));
+        assert_eq!(color(&Value::Number(2.0), code), Some([0, 0, 255]));
+        assert_eq!(color(&Value::Number(0.0), code), Some([0, 255, 0]));
+        assert_eq!(color(&Value::Text("x".into()), code), Some([255, 0, 255]));
+        assert_eq!(
+            color(&Value::Number(2.0), "[>5][Red]0;[Blue]0"),
+            Some([0, 0, 255])
+        );
+        assert_eq!(color(&Value::Number(2.0), "\"[Red]\"0"), None);
     }
 }

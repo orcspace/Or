@@ -29,7 +29,7 @@ struct State {
     rename_sheet_id: Option<u64>,
     selected_image: Option<u64>,
     selected_chart: Option<u64>,
-    chart_drag: Option<(u64,Vec2)>,
+    chart_drag: Option<(u64, Vec2)>,
     image_job: Option<ImageJob>,
     image_target: Option<(u64, u32, u32)>,
     hint_selected: usize,
@@ -174,8 +174,15 @@ fn toolbar(
                     ("Формулы и исходный ввод", PasteMode::Inputs),
                     ("Только форматы", PasteMode::Formats),
                 ] {
-                    let available = ui.ctx().data(|data| data.get_temp::<SheetClipboard>(clipboard_id()).is_some());
-                    if command_action(ui.add_enabled(available, egui::Button::new(label)), book, state, &mut changed) {
+                    let available = ui
+                        .ctx()
+                        .data(|data| data.get_temp::<SheetClipboard>(clipboard_id()).is_some());
+                    if command_action(
+                        ui.add_enabled(available, egui::Button::new(label)),
+                        book,
+                        state,
+                        &mut changed,
+                    ) {
                         let transpose = state.paste_transpose;
                         changed |= result(state, paste_special(ui.ctx(), book, mode, transpose));
                         ui.close();
@@ -585,11 +592,23 @@ fn toolbar(
                     let col = book.selection.col;
                     let mut width = book
                         .active_sheet()
-                        .map(|sheet|sheet.widths.get(&col).copied().unwrap_or(sheet.default_col_width))
+                        .map(|sheet| {
+                            sheet
+                                .widths
+                                .get(&col)
+                                .copied()
+                                .unwrap_or(sheet.default_col_width)
+                        })
                         .unwrap_or(96.0);
                     let mut height = book
                         .active_sheet()
-                        .map(|sheet|sheet.row_heights.get(&row).copied().unwrap_or(sheet.default_row_height))
+                        .map(|sheet| {
+                            sheet
+                                .row_heights
+                                .get(&row)
+                                .copied()
+                                .unwrap_or(sheet.default_row_height)
+                        })
                         .unwrap_or(26.0);
                     ui.horizontal(|ui| {
                         ui.label("Ширина столбца");
@@ -700,15 +719,32 @@ fn dimension_menu(ui: &mut egui::Ui, book: &mut Book, state: &mut State, changed
     visibility_menu(ui, book, state, changed);
 }
 fn hide_axis(book: &mut Book, row: u32, col: u32, rows: bool) -> bool {
-    let previous=(row,col);
-    let Some(sheet)=book.active_sheet_mut() else {return false;};
-    let (index,maximum,hidden)=if rows {(row,MAX_ROWS,&mut sheet.hidden_rows)} else {(col,MAX_COLS,&mut sheet.hidden_cols)};
-    if !hidden.insert(index) { return false; }
-    let next=visible_index(index,maximum,1,hidden).or_else(||visible_index(index,maximum,-1,hidden));
-    let Some(next)=next else { hidden.remove(&index);return false; };
-    let requested=if rows {(next,col)}else{(row,next)};
-    let (row,col)=jump_target(sheet,previous,requested);
-    book.selection=Selection{row,col,anchor_row:row,anchor_col:col};
+    let previous = (row, col);
+    let Some(sheet) = book.active_sheet_mut() else {
+        return false;
+    };
+    let (index, maximum, hidden) = if rows {
+        (row, MAX_ROWS, &mut sheet.hidden_rows)
+    } else {
+        (col, MAX_COLS, &mut sheet.hidden_cols)
+    };
+    if !hidden.insert(index) {
+        return false;
+    }
+    let next = visible_index(index, maximum, 1, hidden)
+        .or_else(|| visible_index(index, maximum, -1, hidden));
+    let Some(next) = next else {
+        hidden.remove(&index);
+        return false;
+    };
+    let requested = if rows { (next, col) } else { (row, next) };
+    let (row, col) = jump_target(sheet, previous, requested);
+    book.selection = Selection {
+        row,
+        col,
+        anchor_row: row,
+        anchor_col: col,
+    };
     true
 }
 fn visibility_menu(ui: &mut egui::Ui, book: &mut Book, state: &mut State, changed: &mut bool) {
@@ -774,7 +810,7 @@ fn apply_focus_request(book: &mut Book, state: &mut State, request: (u64, u32, u
         .map(|cell| cell.input.clone())
         .unwrap_or_default();
     state.selected_image = None;
-            state.selected_chart = None;
+    state.selected_chart = None;
     state.scroll_to_selection = true;
     state.error.clear();
     true
@@ -1164,51 +1200,93 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
     if !state.error.is_empty() {
         ui.colored_label(Color32::from_rgb(200, 60, 50), &state.error);
     }
-    if close_find_on_escape(ui,&mut state) {
-        ui.memory_mut(|memory|memory.request_focus(canvas_id));
+    if close_find_on_escape(ui, &mut state) {
+        ui.memory_mut(|memory| memory.request_focus(canvas_id));
     }
     if state.find_open {
-        egui::Frame::new().fill(ui.visuals().faint_bg_color).inner_margin(8.0)
-            .corner_radius(5.0).show(ui,|ui| {
-                let find_id=state_id.with("find");
-                let search_key=ui.is_enabled() && ui.memory(|m|m.has_focus(find_id))
-                    && ui.input_mut(|input|input.consume_key(input.modifiers,Key::Enter));
-                let backwards=ui.input(|input|input.modifiers.shift);
-                let mut direction=None;
+        egui::Frame::new()
+            .fill(ui.visuals().faint_bg_color)
+            .inner_margin(8.0)
+            .corner_radius(5.0)
+            .show(ui, |ui| {
+                let find_id = state_id.with("find");
+                let search_key = ui.is_enabled()
+                    && ui.memory(|m| m.has_focus(find_id))
+                    && ui.input_mut(|input| input.consume_key(input.modifiers, Key::Enter));
+                let backwards = ui.input(|input| input.modifiers.shift);
+                let mut direction = None;
                 ui.horizontal_wrapped(|ui| {
                     ui.strong("Найти");
-                    if ui.add(egui::TextEdit::singleline(&mut state.find).desired_width(150.0)
-                        .id(find_id).hint_text("Текст или формула")).changed() {
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut state.find)
+                                .desired_width(150.0)
+                                .id(find_id)
+                                .hint_text("Текст или формула"),
+                        )
+                        .changed()
+                    {
                         state.find_message.clear();
                     }
-                    if ui.button("← Назад").on_hover_text("Shift+Enter").clicked(){direction=Some(true);}
-                    if ui.button("Далее →").on_hover_text("Enter").clicked(){direction=Some(false);}
-                    if ui.checkbox(&mut state.find_case,"Учитывать регистр").changed() {
+                    if ui.button("← Назад").on_hover_text("Shift+Enter").clicked() {
+                        direction = Some(true);
+                    }
+                    if ui.button("Далее →").on_hover_text("Enter").clicked() {
+                        direction = Some(false);
+                    }
+                    if ui
+                        .checkbox(&mut state.find_case, "Учитывать регистр")
+                        .changed()
+                    {
                         state.find_message.clear();
                     }
-                    if ui.button("Закрыть").on_hover_text("Esc").clicked(){
-                        state.find_open=false;
-                        ui.memory_mut(|memory|memory.request_focus(canvas_id));
+                    if ui.button("Закрыть").on_hover_text("Esc").clicked() {
+                        state.find_open = false;
+                        ui.memory_mut(|memory| memory.request_focus(canvas_id));
                     }
                 });
-                if search_key {direction=Some(backwards);}
-                if let Some(backwards)=direction {
-                    changed|=commit(book,&mut state);
-                    if !state.editing {find_step(book,&mut state,backwards);}
+                if search_key {
+                    direction = Some(backwards);
+                }
+                if let Some(backwards) = direction {
+                    changed |= commit(book, &mut state);
+                    if !state.editing {
+                        find_step(book, &mut state, backwards);
+                    }
                 }
                 ui.horizontal_wrapped(|ui| {
                     ui.label("Заменить на");
-                    ui.add(egui::TextEdit::singleline(&mut state.replace).desired_width(150.0)
-                        .id(state_id.with("replace")).hint_text("Новый текст"));
-                    if command_action(ui.add_enabled(!state.find.is_empty(),egui::Button::new("Заменить все")),book,&mut state,&mut changed) {
-                        match book.replace_all_with_case(id,&state.find,&state.replace,state.find_case) {
-                            Ok(count)=>{changed|=count>0;state.error.clear();state.find_message=format!("Изменено ячеек: {count}");}
-                            Err(error)=>state.error=error,
+                    ui.add(
+                        egui::TextEdit::singleline(&mut state.replace)
+                            .desired_width(150.0)
+                            .id(state_id.with("replace"))
+                            .hint_text("Новый текст"),
+                    );
+                    if command_action(
+                        ui.add_enabled(!state.find.is_empty(), egui::Button::new("Заменить все")),
+                        book,
+                        &mut state,
+                        &mut changed,
+                    ) {
+                        match book.replace_all_with_case(
+                            id,
+                            &state.find,
+                            &state.replace,
+                            state.find_case,
+                        ) {
+                            Ok(count) => {
+                                changed |= count > 0;
+                                state.error.clear();
+                                state.find_message = format!("Изменено ячеек: {count}");
+                            }
+                            Err(error) => state.error = error,
                         }
                     }
                     ui.small("Замена изменяет исходный текст ячеек.");
                 });
-                if !state.find_message.is_empty() {ui.small(&state.find_message);}
+                if !state.find_message.is_empty() {
+                    ui.small(&state.find_message);
+                }
             });
     }
     let loaded = ui
@@ -1346,19 +1424,22 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
             let c0 = axis_index(
                 (viewport.min.x - 48.0).max(0.0),
                 cols,
-                sheet.default_col_width, &sheet.widths,
+                sheet.default_col_width,
+                &sheet.widths,
                 &sheet.hidden_cols,
             );
             let r0 = axis_index(
                 (viewport.min.y - 28.0).max(0.0),
                 rows,
-                sheet.default_row_height, &sheet.row_heights,
+                sheet.default_row_height,
+                &sheet.row_heights,
                 &sheet.hidden_rows,
             );
             let c1 = axis_index(
                 viewport.max.x,
                 cols,
-                sheet.default_col_width, &sheet.widths,
+                sheet.default_col_width,
+                &sheet.widths,
                 &sheet.hidden_cols,
             )
             .saturating_add(2)
@@ -1366,7 +1447,8 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
             let r1 = axis_index(
                 viewport.max.y,
                 rows,
-                sheet.default_row_height, &sheet.row_heights,
+                sheet.default_row_height,
+                &sheet.row_heights,
                 &sheet.hidden_rows,
             )
             .saturating_add(2)
@@ -1450,12 +1532,19 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                 let right = fmt.align == Align::Right
                     || (fmt.align == Align::General
                         && cell.is_some_and(|c| matches!(c.value, Value::Number(_))));
-                let number_color=cell.and_then(|cell|super::format::color(&cell.value,&fmt.number));
-                let text_color = if let Some(rgb)=number_color {color(rgb)}
-                    else if ui.visuals().dark_mode && fmt.color == [28,32,38] {ui.visuals().text_color()}
-                    else {color(fmt.color)};
+                let number_color =
+                    cell.and_then(|cell| super::format::color(&cell.value, &fmt.number));
+                let text_color = if let Some(rgb) = number_color {
+                    color(rgb)
+                } else if ui.visuals().dark_mode && fmt.color == [28, 32, 38] {
+                    ui.visuals().text_color()
+                } else {
+                    color(fmt.color)
+                };
                 let clipped = painter.with_clip_rect(cell_rect.shrink(2.0));
-                clipped.add(cell_text_shape(ui, cell_rect, &fmt, text, text_color, right));
+                clipped.add(cell_text_shape(
+                    ui, cell_rect, &fmt, text, text_color, right,
+                ));
                 if (r, c) == (row, col) {
                     painter.rect_stroke(
                         cell_rect,
@@ -1467,57 +1556,100 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
             }
             if response.clicked() {
                 state.selected_image = None;
-            state.selected_chart = None;
+                state.selected_chart = None;
             }
-            let mut chart_edit=None;
-            let mut chart_clicked=false;
+            let mut chart_edit = None;
+            let mut chart_clicked = false;
             for chart in &sheet.charts {
-                let chart_rect=floating_chart_rect(sheet,origin,chart);
-                if !ui.clip_rect().intersects(chart_rect) {continue;}
-                paint_chart(ui,sheet,chart,chart_rect);
+                let chart_rect = floating_chart_rect(sheet, origin, chart);
+                if !ui.clip_rect().intersects(chart_rect) {
+                    continue;
+                }
+                paint_chart(ui, sheet, chart, chart_rect);
                 #[cfg(test)]
-                state.test_controls.insert(format!("chart-{}",chart.id),chart_rect);
-                let response=ui.interact(chart_rect,state_id.with(("chart",chart.id)),Sense::click_and_drag());
-                if response.clicked()||response.drag_started() {
-                    state.selected_chart=Some(chart.id);state.selected_image=None;chart_clicked=true;
-                    ui.memory_mut(|memory|memory.request_focus(canvas_id));
+                state
+                    .test_controls
+                    .insert(format!("chart-{}", chart.id), chart_rect);
+                let response = ui.interact(
+                    chart_rect,
+                    state_id.with(("chart", chart.id)),
+                    Sense::click_and_drag(),
+                );
+                if response.clicked() || response.drag_started() {
+                    state.selected_chart = Some(chart.id);
+                    state.selected_image = None;
+                    chart_clicked = true;
+                    ui.memory_mut(|memory| memory.request_focus(canvas_id));
                 }
-                if response.drag_started() && let Some(pointer)=response.interact_pointer_pos() {
-                    state.chart_drag=Some((chart.id,pointer-chart_rect.min));
+                if response.drag_started()
+                    && let Some(pointer) = response.interact_pointer_pos()
+                {
+                    state.chart_drag = Some((chart.id, pointer - chart_rect.min));
                 }
-                if response.dragged() && let Some((id,offset))=state.chart_drag
-                    && id==chart.id && let Some(pointer)=response.interact_pointer_pos() {
-                    chart_edit=Some((chart.id,Rect::from_min_size(pointer-offset,chart_rect.size())));
+                if response.dragged()
+                    && let Some((id, offset)) = state.chart_drag
+                    && id == chart.id
+                    && let Some(pointer) = response.interact_pointer_pos()
+                {
+                    chart_edit = Some((
+                        chart.id,
+                        Rect::from_min_size(pointer - offset, chart_rect.size()),
+                    ));
                 }
-                if response.drag_stopped() {state.chart_drag=None;}
-                if state.selected_chart==Some(chart.id) {
-                    let accent=crate::chrome::accent(ui);
-                    painter.rect_stroke(chart_rect,0.0,Stroke::new(1.5,accent),StrokeKind::Outside);
-                    let handle=Rect::from_center_size(chart_rect.max,Vec2::splat(9.0));
-                    painter.rect_filled(handle,1.0,accent);
-                    let handle_response=ui.interact(handle,state_id.with(("chart-size",chart.id)),Sense::drag())
+                if response.drag_stopped() {
+                    state.chart_drag = None;
+                }
+                if state.selected_chart == Some(chart.id) {
+                    let accent = crate::chrome::accent(ui);
+                    painter.rect_stroke(
+                        chart_rect,
+                        0.0,
+                        Stroke::new(1.5, accent),
+                        StrokeKind::Outside,
+                    );
+                    let handle = Rect::from_center_size(chart_rect.max, Vec2::splat(9.0));
+                    painter.rect_filled(handle, 1.0, accent);
+                    let handle_response = ui
+                        .interact(
+                            handle,
+                            state_id.with(("chart-size", chart.id)),
+                            Sense::drag(),
+                        )
                         .on_hover_cursor(egui::CursorIcon::ResizeNwSe);
                     if handle_response.dragged() {
-                        let size=(chart_rect.size()+handle_response.drag_delta()).clamp(Vec2::splat(1.0),Vec2::splat(4000.0));
-                        chart_edit=Some((chart.id,Rect::from_min_size(chart_rect.min,size)));
+                        let size = (chart_rect.size() + handle_response.drag_delta())
+                            .clamp(Vec2::splat(1.0), Vec2::splat(4000.0));
+                        chart_edit = Some((chart.id, Rect::from_min_size(chart_rect.min, size)));
                     }
                 }
             }
-            if chart_clicked||chart_edit.is_some() {changed|=commit(book,&mut state);}
-            if !state.editing && let Some((chart,target))=chart_edit && let Some(sheet)=book.active_sheet_mut() {
-                changed|=place_chart(sheet,chart,target.min-origin,target.size());
+            if chart_clicked || chart_edit.is_some() {
+                changed |= commit(book, &mut state);
             }
-            let Some(sheet)=book.active_sheet() else {return;};
+            if !state.editing
+                && let Some((chart, target)) = chart_edit
+                && let Some(sheet) = book.active_sheet_mut()
+            {
+                changed |= place_chart(sheet, chart, target.min - origin, target.size());
+            }
+            let Some(sheet) = book.active_sheet() else {
+                return;
+            };
             let mut image_edit = None;
             for image in &sheet.images {
                 let image_rect = Rect::from_min_size(
                     origin
                         + Vec2::new(
-                            48.0 + axis_pos(image.col, sheet.default_col_width, &sheet.widths, &sheet.hidden_cols)
-                                + image.x_offset,
+                            48.0 + axis_pos(
+                                image.col,
+                                sheet.default_col_width,
+                                &sheet.widths,
+                                &sheet.hidden_cols,
+                            ) + image.x_offset,
                             28.0 + axis_pos(
                                 image.row,
-                                sheet.default_row_height, &sheet.row_heights,
+                                sheet.default_row_height,
+                                &sheet.row_heights,
                                 &sheet.hidden_rows,
                             ) + image.y_offset,
                         ),
@@ -1559,8 +1691,11 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                         )
                         .on_hover_cursor(egui::CursorIcon::ResizeNwSe);
                     if handle_response.dragged() {
-                        let size = constrained_image_size(image_rect.size(),
-                            image_rect.size()+handle_response.drag_delta(),ui.input(|input|input.modifiers.shift));
+                        let size = constrained_image_size(
+                            image_rect.size(),
+                            image_rect.size() + handle_response.drag_delta(),
+                            ui.input(|input| input.modifiers.shift),
+                        );
                         image_edit = Some((image.id, Rect::from_min_size(image_rect.min, size)));
                     }
                 }
@@ -1582,7 +1717,11 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                     (
                         c,
                         cell_rect(sheet, origin, viewport, 0, c, frozen_r, frozen_c).left(),
-                        sheet.widths.get(&c).copied().unwrap_or(sheet.default_col_width),
+                        sheet
+                            .widths
+                            .get(&c)
+                            .copied()
+                            .unwrap_or(sheet.default_col_width),
                     )
                 })
                 .collect();
@@ -1627,7 +1766,11 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                     continue;
                 }
                 let y = cell_rect(sheet, origin, viewport, r, 0, frozen_r, frozen_c).top();
-                let h = sheet.row_heights.get(&r).copied().unwrap_or(sheet.default_row_height);
+                let h = sheet
+                    .row_heights
+                    .get(&r)
+                    .copied()
+                    .unwrap_or(sheet.default_row_height);
                 let header = Rect::from_min_size(
                     Pos2::new(origin.x + viewport.min.x, y),
                     Vec2::new(48.0, h),
@@ -1658,36 +1801,50 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                     let r = axis_index(
                         local.y - 28.0,
                         rows,
-                        sheet.default_row_height, &sheet.row_heights,
+                        sheet.default_row_height,
+                        &sheet.row_heights,
                         &sheet.hidden_rows,
                     )
                     .min(rows - 1);
                     let c = axis_index(
                         local.x - 48.0,
                         cols,
-                        sheet.default_col_width, &sheet.widths,
+                        sheet.default_col_width,
+                        &sheet.widths,
                         &sheet.hidden_cols,
                     )
                     .min(cols - 1);
                     let r = if local.y - viewport.min.y
-                        < 28.0 + axis_pos(frozen_r, sheet.default_row_height, &sheet.row_heights, &sheet.hidden_rows)
-                    {
+                        < 28.0
+                            + axis_pos(
+                                frozen_r,
+                                sheet.default_row_height,
+                                &sheet.row_heights,
+                                &sheet.hidden_rows,
+                            ) {
                         axis_index(
                             local.y - viewport.min.y - 28.0,
                             rows,
-                            sheet.default_row_height, &sheet.row_heights,
+                            sheet.default_row_height,
+                            &sheet.row_heights,
                             &sheet.hidden_rows,
                         )
                     } else {
                         r
                     };
                     let c = if local.x - viewport.min.x
-                        < 48.0 + axis_pos(frozen_c, sheet.default_col_width, &sheet.widths, &sheet.hidden_cols)
-                    {
+                        < 48.0
+                            + axis_pos(
+                                frozen_c,
+                                sheet.default_col_width,
+                                &sheet.widths,
+                                &sheet.hidden_cols,
+                            ) {
                         axis_index(
                             local.x - viewport.min.x - 48.0,
                             cols,
-                            sheet.default_col_width, &sheet.widths,
+                            sheet.default_col_width,
+                            &sheet.widths,
                             &sheet.hidden_cols,
                         )
                     } else {
@@ -1817,11 +1974,11 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                             if key == Key::Delete || key == Key::Backspace {
                                 if let Some(image) = state.selected_image.take() {
                                     changed |= result(&mut state, book.delete_image(id, image));
-                                } else if let Some(chart)=state.selected_chart.take() {
-                                    if let Some(sheet)=book.active_sheet_mut() {
-                                        let previous=sheet.charts.len();
-                                        sheet.charts.retain(|item|item.id!=chart);
-                                        changed|=previous!=sheet.charts.len();
+                                } else if let Some(chart) = state.selected_chart.take() {
+                                    if let Some(sheet) = book.active_sheet_mut() {
+                                        let previous = sheet.charts.len();
+                                        sheet.charts.retain(|item| item.id != chart);
+                                        changed |= previous != sheet.charts.len();
                                     }
                                 } else {
                                     changed |= clear(book, &mut state);
@@ -2067,15 +2224,23 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                 }
             });
         });
-    let range=book.selection.range();
-    if statistics_range_valid(range) && let Some(sheet)=book.active_sheet() {
-        let (sum,mean,nonempty)=selection_statistics(sheet,range);
+    let range = book.selection.range();
+    if statistics_range_valid(range)
+        && let Some(sheet) = book.active_sheet()
+    {
+        let (sum, mean, nonempty) = selection_statistics(sheet, range);
         ui.horizontal_wrapped(|ui| {
-            ui.small(format!("Выделено: {}:{}  ·  Заполнено: {nonempty}",
-                address(range.r0,range.c0),address(range.r1,range.c1)));
+            ui.small(format!(
+                "Выделено: {}:{}  ·  Заполнено: {nonempty}",
+                address(range.r0, range.c0),
+                address(range.r1, range.c1)
+            ));
             ui.separator();
-            ui.small(format!("Сумма: {}  ·  Среднее: {}",
-                statistic_text(sum,book.locale_ru),statistic_text(mean,book.locale_ru)));
+            ui.small(format!(
+                "Сумма: {}  ·  Среднее: {}",
+                statistic_text(sum, book.locale_ru),
+                statistic_text(mean, book.locale_ru)
+            ));
         });
     }
     if state.passport_open {
@@ -2086,17 +2251,29 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
             .default_width(560.0)
             .show(ui.ctx(), |ui| {
                 ui.label("Сохранённые значения; пересчёт и изменение книги не выполняются.");
-                match super::formula::explain(book, book.active_id(), book.selection.row, book.selection.col) {
+                match super::formula::explain(
+                    book,
+                    book.active_id(),
+                    book.selection.row,
+                    book.selection.col,
+                ) {
                     Ok(passport) => {
                         let report = serde_json::to_string_pretty(&passport).unwrap_or_default();
                         if ui.button("Копировать отчёт").clicked() {
                             ui.ctx().copy_text(report.clone());
                         }
-                        egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
-                            ui.add(egui::Label::new(egui::RichText::new(report).monospace()).selectable(true));
-                        });
+                        egui::ScrollArea::vertical()
+                            .max_height(420.0)
+                            .show(ui, |ui| {
+                                ui.add(
+                                    egui::Label::new(egui::RichText::new(report).monospace())
+                                        .selectable(true),
+                                );
+                            });
                     }
-                    Err(error) => { ui.label(error); }
+                    Err(error) => {
+                        ui.label(error);
+                    }
                 }
             });
         state.passport_open = open;
@@ -2282,21 +2459,41 @@ fn capture_clipboard(book: &Book, cut: bool) -> Result<SheetClipboard, String> {
     loop {
         let old = range;
         for merge in &sheet.merges {
-            if merge.r0 <= range.r1 && range.r0 <= merge.r1 && merge.c0 <= range.c1 && range.c0 <= merge.c1 {
-                range = Range::new(range.r0.min(merge.r0), range.c0.min(merge.c0),
-                    range.r1.max(merge.r1), range.c1.max(merge.c1));
+            if merge.r0 <= range.r1
+                && range.r0 <= merge.r1
+                && merge.c0 <= range.c1
+                && range.c0 <= merge.c1
+            {
+                range = Range::new(
+                    range.r0.min(merge.r0),
+                    range.c0.min(merge.c0),
+                    range.r1.max(merge.r1),
+                    range.c1.max(merge.c1),
+                );
             }
         }
         range.validate()?;
-        if range == old { break; }
+        if range == old {
+            break;
+        }
     }
     if cut && range != selected_range {
         return Err("Для вырезания выделите объединённые области полностью".into());
     }
     let rows = book.read_range(id, range.r0, range.c0, range.r1, range.c1)?;
-    let merges = sheet.merges.iter().filter(|merge| range.contains(merge.r0, merge.c0)
-        && range.contains(merge.r1, merge.c1))
-        .map(|merge| Range::new(merge.r0-range.r0, merge.c0-range.c0, merge.r1-range.r0, merge.c1-range.c0)).collect();
+    let merges = sheet
+        .merges
+        .iter()
+        .filter(|merge| range.contains(merge.r0, merge.c0) && range.contains(merge.r1, merge.c1))
+        .map(|merge| {
+            Range::new(
+                merge.r0 - range.r0,
+                merge.c0 - range.c0,
+                merge.r1 - range.r0,
+                merge.c1 - range.c0,
+            )
+        })
+        .collect();
     Ok(SheetClipboard {
         text: super::io::to_csv(&rows, '\t'),
         cells: (range.r0..=range.r1)
@@ -2347,14 +2544,24 @@ fn paste_cells_with(
 ) -> Result<(), String> {
     let source_rows = clipboard.cells.len();
     let source_cols = clipboard.cells.first().map(Vec::len).unwrap_or(0);
-    if source_rows == 0 || source_cols == 0 { return Ok(()); }
+    if source_rows == 0 || source_cols == 0 {
+        return Ok(());
+    }
     if clipboard.cells.iter().any(|line| line.len() != source_cols)
-        || clipboard.merges.iter().any(|merge| merge.r0 > merge.r1 || merge.c0 > merge.c1
-            || merge.r1 >= source_rows as u32 || merge.c1 >= source_cols as u32)
+        || clipboard.merges.iter().any(|merge| {
+            merge.r0 > merge.r1
+                || merge.c0 > merge.c1
+                || merge.r1 >= source_rows as u32
+                || merge.c1 >= source_cols as u32
+        })
     {
         return Err("Недопустимый внутренний буфер".into());
     }
-    let (rows, cols) = if transpose { (source_cols, source_rows) } else { (source_rows, source_cols) };
+    let (rows, cols) = if transpose {
+        (source_cols, source_rows)
+    } else {
+        (source_rows, source_cols)
+    };
     if u64::from(row) + rows as u64 > u64::from(MAX_ROWS)
         || u64::from(col) + cols as u64 > u64::from(MAX_COLS)
         || rows.saturating_mul(cols) > super::model::MAX_RANGE_CELLS
@@ -2369,20 +2576,28 @@ fn paste_cells_with(
             let (sr, sc) = if transpose { (c, r) } else { (r, c) };
             let original = clipboard.cells[sr][sc].as_ref();
             let input = if mode == PasteMode::Formats {
-                target.cell(row+r as u32, col+c as u32).map(|cell| cell.input.clone()).unwrap_or_default()
+                target
+                    .cell(row + r as u32, col + c as u32)
+                    .map(|cell| cell.input.clone())
+                    .unwrap_or_default()
             } else if mode == PasteMode::Values {
-                original.map(|cell| value_input(&cell.value)).unwrap_or_default()
+                original
+                    .map(|cell| value_input(&cell.value))
+                    .unwrap_or_default()
             } else {
-                original.map(|cell| {
-                    if clipboard.cut { cell.input.clone() }
-                    else {
-                        super::formula::shift_references(
-                            &cell.input,
-                            i64::from(row) + r as i64 - i64::from(clipboard.row) - sr as i64,
-                            i64::from(col) + c as i64 - i64::from(clipboard.col) - sc as i64,
-                        )
-                    }
-                }).unwrap_or_default()
+                original
+                    .map(|cell| {
+                        if clipboard.cut {
+                            cell.input.clone()
+                        } else {
+                            super::formula::shift_references(
+                                &cell.input,
+                                i64::from(row) + r as i64 - i64::from(clipboard.row) - sr as i64,
+                                i64::from(col) + c as i64 - i64::from(clipboard.col) - sc as i64,
+                            )
+                        }
+                    })
+                    .unwrap_or_default()
             };
             line.push(input);
         }
@@ -2390,29 +2605,49 @@ fn paste_cells_with(
     }
     let mut candidate = book.clone();
     if mode == PasteMode::All && !clipboard.merges.is_empty() {
-        let destination = Range::new(row, col, row+rows as u32-1, col+cols as u32-1);
-        let incoming: Vec<Range> = clipboard.merges.iter().map(|merge| {
-            let local = if transpose { Range::new(merge.c0, merge.r0, merge.c1, merge.r1) } else { *merge };
-            Range::new(row+local.r0, col+local.c0, row+local.r1, col+local.c1)
-        }).collect();
-        if target.merges.iter().any(|merge| merge.r0 <= destination.r1 && destination.r0 <= merge.r1
-            && merge.c0 <= destination.c1 && destination.c0 <= merge.c1 && !incoming.contains(merge)) {
+        let destination = Range::new(row, col, row + rows as u32 - 1, col + cols as u32 - 1);
+        let incoming: Vec<Range> = clipboard
+            .merges
+            .iter()
+            .map(|merge| {
+                let local = if transpose {
+                    Range::new(merge.c0, merge.r0, merge.c1, merge.r1)
+                } else {
+                    *merge
+                };
+                Range::new(
+                    row + local.r0,
+                    col + local.c0,
+                    row + local.r1,
+                    col + local.c1,
+                )
+            })
+            .collect();
+        if target.merges.iter().any(|merge| {
+            merge.r0 <= destination.r1
+                && destination.r0 <= merge.r1
+                && merge.c0 <= destination.c1
+                && destination.c0 <= merge.c1
+                && !incoming.contains(merge)
+        }) {
             return Err("Вставка пересекает несовпадающую объединённую область".into());
         }
         candidate.unmerge(sheet, destination)?;
     }
     if mode == PasteMode::Formats {
-        let range = Range::new(row, col, row+rows as u32-1, col+cols as u32-1);
+        let range = Range::new(row, col, row + rows as u32 - 1, col + cols as u32 - 1);
         if target.merges.iter().any(|merge| {
-            merge.r0 <= range.r1 && range.r0 <= merge.r1
-                && merge.c0 <= range.c1 && range.c0 <= merge.c1
-                && (rows*cols > 1 || (row,col) != (merge.r0,merge.c0))
+            merge.r0 <= range.r1
+                && range.r0 <= merge.r1
+                && merge.c0 <= range.c1
+                && range.c0 <= merge.c1
+                && (rows * cols > 1 || (row, col) != (merge.r0, merge.c0))
         }) {
             return Err("Вставка затрагивает объединённые ячейки".into());
         }
-        for (r,line) in values.iter().enumerate() {
-            for (c,input) in line.iter().enumerate() {
-                candidate.set_input(sheet,row+r as u32,col+c as u32,input)?;
+        for (r, line) in values.iter().enumerate() {
+            for (c, input) in line.iter().enumerate() {
+                candidate.set_input(sheet, row + r as u32, col + c as u32, input)?;
             }
         }
     } else {
@@ -2424,7 +2659,7 @@ fn paste_cells_with(
             for c in 0..cols {
                 let (sr, sc) = if transpose { (c, r) } else { (r, c) };
                 let original = clipboard.cells[sr][sc].as_ref();
-                let key = address(row+r as u32, col+c as u32);
+                let key = address(row + r as u32, col + c as u32);
                 if mode == PasteMode::All && original.is_none() {
                     target.cells.remove(&key);
                 } else if let Some(cell) = target.cells.get_mut(&key) {
@@ -2435,9 +2670,23 @@ fn paste_cells_with(
     }
     if mode == PasteMode::All {
         for merge in &clipboard.merges {
-            let local = if transpose { Range::new(merge.c0, merge.r0, merge.c1, merge.r1) } else { *merge };
-            if local.r1 >= rows as u32 || local.c1 >= cols as u32 { return Err("Повреждённый буфер объединений".into()); }
-            candidate.merge(sheet, Range::new(row+local.r0, col+local.c0, row+local.r1, col+local.c1))?;
+            let local = if transpose {
+                Range::new(merge.c0, merge.r0, merge.c1, merge.r1)
+            } else {
+                *merge
+            };
+            if local.r1 >= rows as u32 || local.c1 >= cols as u32 {
+                return Err("Повреждённый буфер объединений".into());
+            }
+            candidate.merge(
+                sheet,
+                Range::new(
+                    row + local.r0,
+                    col + local.c0,
+                    row + local.r1,
+                    col + local.c1,
+                ),
+            )?;
         }
     }
     candidate.validate()?;
@@ -2450,23 +2699,28 @@ fn paste_special(
     mode: PasteMode,
     transpose: bool,
 ) -> Result<(), String> {
-    let mut clipboard = ctx.data_mut(|data| data.get_temp::<SheetClipboard>(clipboard_id()))
+    let mut clipboard = ctx
+        .data_mut(|data| data.get_temp::<SheetClipboard>(clipboard_id()))
         .ok_or("Сначала скопируйте ячейки в TrineDocs")?;
-    let (sheet,row,col)=(book.active_id(),book.selection.row,book.selection.col);
-    paste_cells_with(book,sheet,row,col,&clipboard,mode,transpose)?;
-    if clipboard.cut && mode!=PasteMode::Formats {
-        clipboard.cut=false;
-        clipboard.row=row;
-        clipboard.col=col;
+    let (sheet, row, col) = (book.active_id(), book.selection.row, book.selection.col);
+    paste_cells_with(book, sheet, row, col, &clipboard, mode, transpose)?;
+    if clipboard.cut && mode != PasteMode::Formats {
+        clipboard.cut = false;
+        clipboard.row = row;
+        clipboard.col = col;
         if transpose {
-            clipboard.merges = clipboard.merges.iter().map(|range| Range::new(range.c0, range.r0, range.c1, range.r1)).collect();
-            let rows=clipboard.cells.len();
-            let cols=clipboard.cells.first().map(Vec::len).unwrap_or(0);
-            clipboard.cells=(0..cols).map(|c|
-                (0..rows).map(|r|clipboard.cells[r][c].clone()).collect()
-            ).collect();
+            clipboard.merges = clipboard
+                .merges
+                .iter()
+                .map(|range| Range::new(range.c0, range.r0, range.c1, range.r1))
+                .collect();
+            let rows = clipboard.cells.len();
+            let cols = clipboard.cells.first().map(Vec::len).unwrap_or(0);
+            clipboard.cells = (0..cols)
+                .map(|c| (0..rows).map(|r| clipboard.cells[r][c].clone()).collect())
+                .collect();
         }
-        ctx.data_mut(|data|data.insert_temp(clipboard_id(),clipboard));
+        ctx.data_mut(|data| data.insert_temp(clipboard_id(), clipboard));
     }
     Ok(())
 }
@@ -2600,60 +2854,133 @@ fn grid_size(sheet: &Sheet, rows: u32, cols: u32) -> (f32, f32) {
         .map(|merge| merge.c1.saturating_add(1))
         .max()
         .unwrap_or(0);
-    let mut width = axis_pos(cols.max(col_end), sheet.default_col_width, &sheet.widths, &sheet.hidden_cols) + 48.0;
+    let mut width = axis_pos(
+        cols.max(col_end),
+        sheet.default_col_width,
+        &sheet.widths,
+        &sheet.hidden_cols,
+    ) + 48.0;
     let mut height = axis_pos(
         rows.max(row_end),
-        sheet.default_row_height, &sheet.row_heights,
+        sheet.default_row_height,
+        &sheet.row_heights,
         &sheet.hidden_rows,
     ) + 28.0;
     for image in &sheet.images {
         width = width.max(
-            48.0 + axis_pos(image.col, sheet.default_col_width, &sheet.widths, &sheet.hidden_cols)
-                + image.x_offset
+            48.0 + axis_pos(
+                image.col,
+                sheet.default_col_width,
+                &sheet.widths,
+                &sheet.hidden_cols,
+            ) + image.x_offset
                 + image.width
                 + 16.0,
         );
         height = height.max(
-            28.0 + axis_pos(image.row, sheet.default_row_height, &sheet.row_heights, &sheet.hidden_rows)
-                + image.y_offset
+            28.0 + axis_pos(
+                image.row,
+                sheet.default_row_height,
+                &sheet.row_heights,
+                &sheet.hidden_rows,
+            ) + image.y_offset
                 + image.height
                 + 16.0,
         );
     }
     for chart in &sheet.charts {
-        let rect=floating_chart_rect(sheet,Pos2::ZERO,chart);
-        width=width.max(rect.max.x+16.0);height=height.max(rect.max.y+16.0);
+        let rect = floating_chart_rect(sheet, Pos2::ZERO, chart);
+        width = width.max(rect.max.x + 16.0);
+        height = height.max(rect.max.y + 16.0);
     }
     (width, height)
 }
-fn floating_chart_rect(sheet:&Sheet,origin:Pos2,chart:&super::model::Chart)->Rect {
-    Rect::from_min_size(origin+Vec2::new(48.0+axis_pos(chart.col,sheet.default_col_width,&sheet.widths,&sheet.hidden_cols),
-        28.0+axis_pos(chart.row,sheet.default_row_height,&sheet.row_heights,&sheet.hidden_rows)),Vec2::new(chart.width,chart.height))
+fn floating_chart_rect(sheet: &Sheet, origin: Pos2, chart: &super::model::Chart) -> Rect {
+    Rect::from_min_size(
+        origin
+            + Vec2::new(
+                48.0 + axis_pos(
+                    chart.col,
+                    sheet.default_col_width,
+                    &sheet.widths,
+                    &sheet.hidden_cols,
+                ),
+                28.0 + axis_pos(
+                    chart.row,
+                    sheet.default_row_height,
+                    &sheet.row_heights,
+                    &sheet.hidden_rows,
+                ),
+            ),
+        Vec2::new(chart.width, chart.height),
+    )
 }
-fn place_chart(sheet:&mut Sheet,id:u64,local:Vec2,size:Vec2)->bool {
-    let col=axis_index((local.x-48.0).max(0.0),MAX_COLS,sheet.default_col_width,&sheet.widths,&sheet.hidden_cols);
-    let row=axis_index((local.y-28.0).max(0.0),MAX_ROWS,sheet.default_row_height,&sheet.row_heights,&sheet.hidden_rows);
-    let Some(chart)=sheet.charts.iter_mut().find(|chart|chart.id==id) else {return false;};
-    let (width,height)=(size.x.clamp(1.0,4000.0),size.y.clamp(1.0,4000.0));
-    let changed=(chart.row,chart.col,chart.width,chart.height)!=(row,col,width,height);
-    chart.row=row;chart.col=col;chart.width=width;chart.height=height;
+fn place_chart(sheet: &mut Sheet, id: u64, local: Vec2, size: Vec2) -> bool {
+    let col = axis_index(
+        (local.x - 48.0).max(0.0),
+        MAX_COLS,
+        sheet.default_col_width,
+        &sheet.widths,
+        &sheet.hidden_cols,
+    );
+    let row = axis_index(
+        (local.y - 28.0).max(0.0),
+        MAX_ROWS,
+        sheet.default_row_height,
+        &sheet.row_heights,
+        &sheet.hidden_rows,
+    );
+    let Some(chart) = sheet.charts.iter_mut().find(|chart| chart.id == id) else {
+        return false;
+    };
+    let (width, height) = (size.x.clamp(1.0, 4000.0), size.y.clamp(1.0, 4000.0));
+    let changed = (chart.row, chart.col, chart.width, chart.height) != (row, col, width, height);
+    chart.row = row;
+    chart.col = col;
+    chart.width = width;
+    chart.height = height;
     changed
 }
 fn constrained_image_size(original: Vec2, requested: Vec2, keep_ratio: bool) -> Vec2 {
-    if !keep_ratio { return requested.clamp(Vec2::splat(16.0),Vec2::splat(8000.0)); }
-    let minimum=(1.0/original.x).max(1.0/original.y);
-    let maximum=(8000.0/original.x).min(8000.0/original.y);
-    original*(requested.x/original.x).clamp(minimum,maximum)
+    if !keep_ratio {
+        return requested.clamp(Vec2::splat(16.0), Vec2::splat(8000.0));
+    }
+    let minimum = (1.0 / original.x).max(1.0 / original.y);
+    let maximum = (8000.0 / original.x).min(8000.0 / original.y);
+    original * (requested.x / original.x).clamp(minimum, maximum)
 }
 /// Moves/resizes a picture; `local` is its top-left corner relative to the grid origin.
 fn place_image(sheet: &mut Sheet, image: u64, local: Vec2, size: Vec2) {
     let x = (local.x - 48.0).max(0.0);
     let y = (local.y - 28.0).max(0.0);
-    let col = axis_index(x, MAX_COLS, sheet.default_col_width, &sheet.widths, &sheet.hidden_cols);
-    let row = axis_index(y, MAX_ROWS, sheet.default_row_height, &sheet.row_heights, &sheet.hidden_rows);
-    let x_offset = (x - axis_pos(col, sheet.default_col_width, &sheet.widths, &sheet.hidden_cols)).clamp(0.0, 4000.0);
-    let y_offset =
-        (y - axis_pos(row, sheet.default_row_height, &sheet.row_heights, &sheet.hidden_rows)).clamp(0.0, 4000.0);
+    let col = axis_index(
+        x,
+        MAX_COLS,
+        sheet.default_col_width,
+        &sheet.widths,
+        &sheet.hidden_cols,
+    );
+    let row = axis_index(
+        y,
+        MAX_ROWS,
+        sheet.default_row_height,
+        &sheet.row_heights,
+        &sheet.hidden_rows,
+    );
+    let x_offset = (x - axis_pos(
+        col,
+        sheet.default_col_width,
+        &sheet.widths,
+        &sheet.hidden_cols,
+    ))
+    .clamp(0.0, 4000.0);
+    let y_offset = (y - axis_pos(
+        row,
+        sheet.default_row_height,
+        &sheet.row_heights,
+        &sheet.hidden_rows,
+    ))
+    .clamp(0.0, 4000.0);
     if let Some(picture) = sheet.images.iter_mut().find(|i| i.id == image) {
         picture.row = row;
         picture.col = col;
@@ -2772,16 +3099,24 @@ fn cell_rect(
     frozen_rows: u32,
     frozen_cols: u32,
 ) -> Rect {
-    let x = 48.0
-        + axis_pos(col, sheet.default_col_width, &sheet.widths, &sheet.hidden_cols)
-        + if col < frozen_cols {
+    let x =
+        48.0 + axis_pos(
+            col,
+            sheet.default_col_width,
+            &sheet.widths,
+            &sheet.hidden_cols,
+        ) + if col < frozen_cols {
             viewport.min.x
         } else {
             0.0
         };
-    let y = 28.0
-        + axis_pos(row, sheet.default_row_height, &sheet.row_heights, &sheet.hidden_rows)
-        + if row < frozen_rows {
+    let y =
+        28.0 + axis_pos(
+            row,
+            sheet.default_row_height,
+            &sheet.row_heights,
+            &sheet.hidden_rows,
+        ) + if row < frozen_rows {
             viewport.min.y
         } else {
             0.0
@@ -2789,8 +3124,16 @@ fn cell_rect(
     Rect::from_min_size(
         origin + Vec2::new(x, y),
         Vec2::new(
-            sheet.widths.get(&col).copied().unwrap_or(sheet.default_col_width),
-            sheet.row_heights.get(&row).copied().unwrap_or(sheet.default_row_height),
+            sheet
+                .widths
+                .get(&col)
+                .copied()
+                .unwrap_or(sheet.default_col_width),
+            sheet
+                .row_heights
+                .get(&row)
+                .copied()
+                .unwrap_or(sheet.default_row_height),
         ),
     )
 }
@@ -2815,11 +3158,32 @@ fn cell_area(
         .iter()
         .find(|merge| merge.r0 == row && merge.c0 == col)
     {
-        rect.max.x = rect.min.x + axis_pos(merge.c1 + 1, sheet.default_col_width, &sheet.widths, &sheet.hidden_cols)
-            - axis_pos(merge.c0, sheet.default_col_width, &sheet.widths, &sheet.hidden_cols);
+        rect.max.x = rect.min.x
+            + axis_pos(
+                merge.c1 + 1,
+                sheet.default_col_width,
+                &sheet.widths,
+                &sheet.hidden_cols,
+            )
+            - axis_pos(
+                merge.c0,
+                sheet.default_col_width,
+                &sheet.widths,
+                &sheet.hidden_cols,
+            );
         rect.max.y = rect.min.y
-            + axis_pos(merge.r1 + 1, sheet.default_row_height, &sheet.row_heights, &sheet.hidden_rows)
-            - axis_pos(merge.r0, sheet.default_row_height, &sheet.row_heights, &sheet.hidden_rows);
+            + axis_pos(
+                merge.r1 + 1,
+                sheet.default_row_height,
+                &sheet.row_heights,
+                &sheet.hidden_rows,
+            )
+            - axis_pos(
+                merge.r0,
+                sheet.default_row_height,
+                &sheet.row_heights,
+                &sheet.hidden_rows,
+            );
     }
     rect
 }
@@ -2885,18 +3249,44 @@ fn chart_fraction(value: f64, low: f64, high: f64) -> f32 {
 }
 
 fn pie_fractions(values: &[f64]) -> Vec<f32> {
-    let scale=values.iter().copied().filter(|value|value.is_finite()).fold(0.0,f64::max);
-    if scale<=0.0 { return vec![0.0;values.len()]; }
-    let scaled:Vec<_>=values.iter().map(|value|if value.is_finite(){value.max(0.0)/scale}else{0.0}).collect();
-    let total=scaled.iter().sum::<f64>();
-    scaled.into_iter().map(|value|(value/total) as f32).collect()
+    let scale = values
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite())
+        .fold(0.0, f64::max);
+    if scale <= 0.0 {
+        return vec![0.0; values.len()];
+    }
+    let scaled: Vec<_> = values
+        .iter()
+        .map(|value| {
+            if value.is_finite() {
+                value.max(0.0) / scale
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    let total = scaled.iter().sum::<f64>();
+    scaled
+        .into_iter()
+        .map(|value| (value / total) as f32)
+        .collect()
 }
 fn paint_chart(ui: &egui::Ui, sheet: &Sheet, chart: &super::model::Chart, rect: Rect) {
     let painter = ui.painter().with_clip_rect(rect);
     painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
     let r = chart.range;
-    let start = if chart.has_headers && r.r1 > r.r0 { r.r0 + 1 } else { r.r0 };
-    let first_col = if chart.has_categories && r.c1 > r.c0 { r.c0 + 1 } else { r.c0 };
+    let start = if chart.has_headers && r.r1 > r.r0 {
+        r.r0 + 1
+    } else {
+        r.r0
+    };
+    let first_col = if chart.has_categories && r.c1 > r.c0 {
+        r.c0 + 1
+    } else {
+        r.c0
+    };
     let palette = [
         Color32::from_rgb(35, 150, 100),
         Color32::from_rgb(52, 110, 220),
@@ -2921,17 +3311,27 @@ fn paint_chart(ui: &egui::Ui, sheet: &Sheet, chart: &super::model::Chart, rect: 
     if first.is_empty() {
         return;
     }
-    if rect.width()>32.0 && rect.height()>36.0 {
-        painter.text(rect.min+Vec2::new(8.0,8.0),Align2::LEFT_TOP,&chart.title,FontId::proportional(12.0),ui.visuals().text_color());
+    if rect.width() > 32.0 && rect.height() > 36.0 {
+        painter.text(
+            rect.min + Vec2::new(8.0, 8.0),
+            Align2::LEFT_TOP,
+            &chart.title,
+            FontId::proportional(12.0),
+            ui.visuals().text_color(),
+        );
     }
     let mut plot = rect.shrink2(Vec2::new(30.0, 18.0));
-    plot.min.y+=18.0;
-    if plot.width()<=0.0||plot.height()<=0.0 {return;}
+    plot.min.y += 18.0;
+    if plot.width() <= 0.0 || plot.height() <= 0.0 {
+        return;
+    }
     let (lo, hi) = chart_bounds(series.iter().flatten().copied(), true);
     let y = |v: f64| plot.bottom() - chart_fraction(v, lo, hi) * plot.height();
     if matches!(chart.kind, ChartKind::Pie | ChartKind::Doughnut) {
-        let fractions=pie_fractions(first);
-        if fractions.iter().all(|value|*value==0.0) {return;}
+        let fractions = pie_fractions(first);
+        if fractions.iter().all(|value| *value == 0.0) {
+            return;
+        }
         let radius = plot.height().min(plot.width()) / 2.0;
         let center = plot.center();
         let mut angle = -std::f32::consts::FRAC_PI_2;
@@ -4117,7 +4517,10 @@ mod clipboard_review_tests {
             bytes: vec![4, 5, 6],
             ..image.clone()
         };
-        assert_ne!(image_texture_id(1, &image), image_texture_id(1, &replacement));
+        assert_ne!(
+            image_texture_id(1, &image),
+            image_texture_id(1, &replacement)
+        );
         assert_eq!(
             image_texture_id(1, &image),
             image_texture_id(1, &image.clone())
@@ -4131,83 +4534,161 @@ mod paste_special_tests {
     fn values_paste_preserves_exact_types_without_copying_formats() -> Result<(), String> {
         let mut book = Book::default();
         let id = book.active_id();
-        for (col,input) in ["=1/3", "'001", "TRUE", "=1/0"].iter().enumerate() {
+        for (col, input) in ["=1/3", "'001", "TRUE", "=1/0"].iter().enumerate() {
             book.set_input(id, 0, col as u32, input)?;
         }
-        book.set_format(id, Range::new(0,0,0,0), CellFormat { number:"0.00".into(), ..CellFormat::default() })?;
+        book.set_format(
+            id,
+            Range::new(0, 0, 0, 0),
+            CellFormat {
+                number: "0.00".into(),
+                ..CellFormat::default()
+            },
+        )?;
         book.recalculate();
-        book.selection = Selection { anchor_col:3, ..Selection::default() };
+        book.selection = Selection {
+            anchor_col: 3,
+            ..Selection::default()
+        };
         let clipboard = capture_clipboard(&book, false)?;
         paste_cells_with(&mut book, id, 2, 0, &clipboard, PasteMode::Values, false)?;
         let sheet = book.active_sheet().ok_or("sheet")?;
         for col in 0..4 {
-            assert_eq!(sheet.cell(0,col).map(|c| &c.value), sheet.cell(2,col).map(|c| &c.value));
+            assert_eq!(
+                sheet.cell(0, col).map(|c| &c.value),
+                sheet.cell(2, col).map(|c| &c.value)
+            );
         }
-        assert_eq!(sheet.cell(2,0).ok_or("pasted")?.fmt.number, CellFormat::default().number);
-        assert!(!sheet.cell(2,0).ok_or("pasted")?.input.starts_with('='));
+        assert_eq!(
+            sheet.cell(2, 0).ok_or("pasted")?.fmt.number,
+            CellFormat::default().number
+        );
+        assert!(!sheet.cell(2, 0).ok_or("pasted")?.input.starts_with('='));
         Ok(())
     }
     #[test]
-    fn transposed_inputs_use_each_source_coordinate_and_formats_keep_values() -> Result<(), String> {
+    fn transposed_inputs_use_each_source_coordinate_and_formats_keep_values() -> Result<(), String>
+    {
         let mut book = Book::default();
         let id = book.active_id();
         book.set_input(id, 0, 0, "=C1")?;
         book.set_input(id, 0, 1, "=D1")?;
-        book.set_format(id, Range::new(0,0,0,0), CellFormat { bold:true, ..CellFormat::default() })?;
-        book.selection = Selection { anchor_col:1, ..Selection::default() };
+        book.set_format(
+            id,
+            Range::new(0, 0, 0, 0),
+            CellFormat {
+                bold: true,
+                ..CellFormat::default()
+            },
+        )?;
+        book.selection = Selection {
+            anchor_col: 1,
+            ..Selection::default()
+        };
         let clipboard = capture_clipboard(&book, false)?;
         paste_cells_with(&mut book, id, 2, 0, &clipboard, PasteMode::Inputs, true)?;
-        assert_eq!(book.active_sheet().and_then(|s| s.cell(2,0)).map(|c| c.input.as_str()), Some("=C3"));
-        assert_eq!(book.active_sheet().and_then(|s| s.cell(3,0)).map(|c| c.input.as_str()), Some("=C4"));
+        assert_eq!(
+            book.active_sheet()
+                .and_then(|s| s.cell(2, 0))
+                .map(|c| c.input.as_str()),
+            Some("=C3")
+        );
+        assert_eq!(
+            book.active_sheet()
+                .and_then(|s| s.cell(3, 0))
+                .map(|c| c.input.as_str()),
+            Some("=C4")
+        );
         book.set_input(id, 5, 0, "keep")?;
         paste_cells_with(&mut book, id, 5, 0, &clipboard, PasteMode::Formats, false)?;
-        let cell = book.active_sheet().and_then(|s| s.cell(5,0)).ok_or("cell")?;
+        let cell = book
+            .active_sheet()
+            .and_then(|s| s.cell(5, 0))
+            .ok_or("cell")?;
         assert_eq!(cell.input, "keep");
         assert!(cell.fmt.bold);
         let before = book.clone();
-        assert!(paste_cells_with(&mut book, id, MAX_ROWS-1, 0, &clipboard, PasteMode::Values, true).is_err());
+        assert!(
+            paste_cells_with(
+                &mut book,
+                id,
+                MAX_ROWS - 1,
+                0,
+                &clipboard,
+                PasteMode::Values,
+                true
+            )
+            .is_err()
+        );
         assert_eq!(book, before);
         Ok(())
     }
 }
 
-fn close_find_on_escape(ui:&mut egui::Ui,state:&mut State)->bool {
-    if state.find_open && ui.is_enabled()
-        && ui.input_mut(|input|input.consume_key(input.modifiers,Key::Escape)) {
-        state.find_open=false;true
-    }else{false}
+fn close_find_on_escape(ui: &mut egui::Ui, state: &mut State) -> bool {
+    if state.find_open
+        && ui.is_enabled()
+        && ui.input_mut(|input| input.consume_key(input.modifiers, Key::Escape))
+    {
+        state.find_open = false;
+        true
+    } else {
+        false
+    }
 }
-fn find_step(book:&mut Book,state:&mut State,backwards:bool) {
-    match book.find_positions(book.active_id(),&state.find,state.find_case) {
-        Ok(found)=>{
-            if found.is_empty(){state.find_message="Совпадений нет".into();return;}
-            let current=(book.selection.row,book.selection.col);
-            let index=if backwards {
-                found.iter().rposition(|position|*position<current).unwrap_or(found.len()-1)
-            }else{
-                found.iter().position(|position|*position>current).unwrap_or(0)
+fn find_step(book: &mut Book, state: &mut State, backwards: bool) {
+    match book.find_positions(book.active_id(), &state.find, state.find_case) {
+        Ok(found) => {
+            if found.is_empty() {
+                state.find_message = "Совпадений нет".into();
+                return;
+            }
+            let current = (book.selection.row, book.selection.col);
+            let index = if backwards {
+                found
+                    .iter()
+                    .rposition(|position| *position < current)
+                    .unwrap_or(found.len() - 1)
+            } else {
+                found
+                    .iter()
+                    .position(|position| *position > current)
+                    .unwrap_or(0)
             };
-            let (row,col)=&found[index];
-            book.selection=Selection{row:*row,col:*col,anchor_row:*row,anchor_col:*col};
-            state.scroll_to_selection=true;state.error.clear();
-            state.find_message=format!("Совпадение {} из {}",index+1,found.len());
+            let (row, col) = &found[index];
+            book.selection = Selection {
+                row: *row,
+                col: *col,
+                anchor_row: *row,
+                anchor_col: *col,
+            };
+            state.scroll_to_selection = true;
+            state.error.clear();
+            state.find_message = format!("Совпадение {} из {}", index + 1, found.len());
         }
-        Err(error)=>state.error=error,
+        Err(error) => state.error = error,
     }
 }
 fn statistics_range_valid(range: Range) -> bool {
     range.r0 <= range.r1 && range.c0 <= range.c1 && range.r1 < MAX_ROWS && range.c1 < MAX_COLS
 }
-fn selection_statistics(sheet:&Sheet,range:Range)->(Option<f64>,Option<f64>,usize) {
-    let mut numbers=Vec::new();let mut nonempty=0;
+fn selection_statistics(sheet: &Sheet, range: Range) -> (Option<f64>, Option<f64>, usize) {
+    let mut numbers = Vec::new();
+    let mut nonempty = 0;
     let mut take = |cell: &Cell| {
-        if cell.value != Value::Empty { nonempty += 1; }
-        if let Value::Number(value) = cell.value { numbers.push(value); }
+        if cell.value != Value::Empty {
+            nonempty += 1;
+        }
+        if let Value::Number(value) = cell.value {
+            numbers.push(value);
+        }
     };
     if range.validate().is_ok() {
         for r in range.r0..=range.r1 {
             for c in range.c0..=range.c1 {
-                if let Some(cell) = sheet.cell(r, c) { take(cell); }
+                if let Some(cell) = sheet.cell(r, c) {
+                    take(cell);
+                }
             }
         }
     } else {
@@ -4219,48 +4700,71 @@ fn selection_statistics(sheet:&Sheet,range:Range)->(Option<f64>,Option<f64>,usiz
             }
         }
     }
-    if numbers.is_empty(){return (Some(0.0),None,nonempty);}
-    let scale=numbers.iter().map(|value|value.abs()).fold(0.0,f64::max);
-    if scale==0.0{return (Some(0.0),Some(0.0),nonempty);}
-    let (mut normalized,mut compensation)=(0.0,0.0);
-    for value in &numbers {
-        let next=value/scale-compensation;
-        let total=normalized+next;
-        compensation=(total-normalized)-next;normalized=total;
+    if numbers.is_empty() {
+        return (Some(0.0), None, nonempty);
     }
-    let sum=normalized*scale;
-    let mean=(normalized/numbers.len() as f64)*scale;
-    (sum.is_finite().then_some(sum),Some(mean),nonempty)
+    let scale = numbers.iter().map(|value| value.abs()).fold(0.0, f64::max);
+    if scale == 0.0 {
+        return (Some(0.0), Some(0.0), nonempty);
+    }
+    let (mut normalized, mut compensation) = (0.0, 0.0);
+    for value in &numbers {
+        let next = value / scale - compensation;
+        let total = normalized + next;
+        compensation = (total - normalized) - next;
+        normalized = total;
+    }
+    let sum = normalized * scale;
+    let mean = (normalized / numbers.len() as f64) * scale;
+    (sum.is_finite().then_some(sum), Some(mean), nonempty)
 }
-fn statistic_text(value:Option<f64>,ru:bool)->String {
-    value.map(|value|super::format::display(&Value::Number(value),"General",ru))
-        .unwrap_or_else(||"—".into())
+fn statistic_text(value: Option<f64>, ru: bool) -> String {
+    value
+        .map(|value| super::format::display(&Value::Number(value), "General", ru))
+        .unwrap_or_else(|| "—".into())
 }
 #[cfg(test)]
 mod additional_search_status_tests {
     use super::*;
     #[test]
-    fn selection_mean_stays_finite_when_the_sum_overflows()->Result<(),String> {
-        let mut book=Book::default();let id=book.active_id();
-        book.set_cell(id,0,0,"1e308")?;book.set_cell(id,0,1,"1e308")?;
-        let sheet=book.active_sheet().ok_or("sheet")?;
-        let (sum,mean,count)=selection_statistics(sheet,Range::new(0,0,0,1));
-        assert_eq!(sum,None);assert_eq!(mean,Some(1e308));assert_eq!(count,2);Ok(())
+    fn selection_mean_stays_finite_when_the_sum_overflows() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.set_cell(id, 0, 0, "1e308")?;
+        book.set_cell(id, 0, 1, "1e308")?;
+        let sheet = book.active_sheet().ok_or("sheet")?;
+        let (sum, mean, count) = selection_statistics(sheet, Range::new(0, 0, 0, 1));
+        assert_eq!(sum, None);
+        assert_eq!(mean, Some(1e308));
+        assert_eq!(count, 2);
+        Ok(())
     }
     #[test]
     fn status_numbers_keep_small_values_and_the_workbook_locale() {
-        assert_eq!(statistic_text(Some(0.00001),true),"0,00001");
-        assert_eq!(statistic_text(Some(1.25),true),"1,25");
-        assert_eq!(statistic_text(Some(1.25),false),"1.25");
+        assert_eq!(statistic_text(Some(0.00001), true), "0,00001");
+        assert_eq!(statistic_text(Some(1.25), true), "1,25");
+        assert_eq!(statistic_text(Some(1.25), false), "1.25");
     }
     #[test]
     fn escape_closes_the_find_bar_and_consumes_the_key() {
-        let ctx=egui::Context::default();let mut state=State{find_open:true,..State::default()};
-        let input=egui::RawInput{events:vec![egui::Event::Key{key:Key::Escape,physical_key:None,
-            pressed:true,repeat:false,modifiers:egui::Modifiers::NONE}],..Default::default()};
-        let _=ctx.run_ui(input,|ui|{
-            assert!(close_find_on_escape(ui,&mut state));
-            assert!(!ui.input(|input|input.key_pressed(Key::Escape)));
+        let ctx = egui::Context::default();
+        let mut state = State {
+            find_open: true,
+            ..State::default()
+        };
+        let input = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ui| {
+            assert!(close_find_on_escape(ui, &mut state));
+            assert!(!ui.input(|input| input.key_pressed(Key::Escape)));
         });
         assert!(!state.find_open);
     }
@@ -4278,8 +4782,16 @@ mod hundred_statistics_tests {
         book.set_cell(id, 0, 1, "100")?;
         let column = Range::new(0, 0, MAX_ROWS - 1, 0);
         assert!(statistics_range_valid(column));
-        assert_eq!(selection_statistics(book.active_sheet().ok_or("sheet")?, column), (Some(30.0), Some(15.0), 2));
-        assert!(statistics_range_valid(Range::new(0, 0, MAX_ROWS - 1, MAX_COLS - 1)));
+        assert_eq!(
+            selection_statistics(book.active_sheet().ok_or("sheet")?, column),
+            (Some(30.0), Some(15.0), 2)
+        );
+        assert!(statistics_range_valid(Range::new(
+            0,
+            0,
+            MAX_ROWS - 1,
+            MAX_COLS - 1
+        )));
         Ok(())
     }
 }
@@ -4294,19 +4806,33 @@ fn cell_text_shape(
 ) -> egui::epaint::TextShape {
     let family = crate::fonts::egui_family(ui.ctx(), &fmt.font, fmt.bold, fmt.italic);
     let font = FontId::new(fmt.size * 1.333, family);
-    let width = if fmt.wrap { (rect.width() - 10.0).max(1.0) } else { f32::INFINITY };
+    let width = if fmt.wrap {
+        (rect.width() - 10.0).max(1.0)
+    } else {
+        f32::INFINITY
+    };
     let mut job = egui::text::LayoutJob::simple(text, font, text_color, width);
     for section in &mut job.sections {
-        if fmt.underline { section.format.underline = Stroke::new(1.0, text_color); }
-        if fmt.strike { section.format.strikethrough = Stroke::new(1.0, text_color); }
+        if fmt.underline {
+            section.format.underline = Stroke::new(1.0, text_color);
+        }
+        if fmt.strike {
+            section.format.strikethrough = Stroke::new(1.0, text_color);
+        }
     }
     let galley = ui.painter().layout_job(job);
     let x = if fmt.align == Align::Center || fmt.rotation != 0 {
         rect.center().x - galley.size().x / 2.0
-    } else if right { rect.right() - 5.0 - galley.size().x }
-    else { rect.left() + 5.0 };
-    let y = if fmt.wrap && fmt.rotation == 0 { rect.top() + 3.0 }
-        else { rect.center().y - galley.size().y / 2.0 };
+    } else if right {
+        rect.right() - 5.0 - galley.size().x
+    } else {
+        rect.left() + 5.0
+    };
+    let y = if fmt.wrap && fmt.rotation == 0 {
+        rect.top() + 3.0
+    } else {
+        rect.center().y - galley.size().y / 2.0
+    };
     egui::epaint::TextShape::new(Pos2::new(x, y), galley, text_color)
         .with_angle_and_anchor(-f32::from(fmt.rotation).to_radians(), Align2::CENTER_CENTER)
 }
@@ -4314,7 +4840,9 @@ fn current_region(sheet: &Sheet, row: u32, col: u32) -> Option<Range> {
     let mut by_row: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
     let mut by_col: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
     for (key, cell) in &sheet.cells {
-        if cell.input.is_empty() { continue; }
+        if cell.input.is_empty() {
+            continue;
+        }
         if let Some((r, c)) = super::model::parse_address(key) {
             by_row.entry(r).or_default().insert(c);
             by_col.entry(c).or_default().insert(r);
@@ -4323,26 +4851,53 @@ fn current_region(sheet: &Sheet, row: u32, col: u32) -> Option<Range> {
     let mut range = Range::new(row, col, row, col);
     loop {
         let old = range;
-        let row_has = |r, range: &Range| by_row.get(&r)
-            .is_some_and(|cols| cols.range(range.c0.saturating_sub(1)..=(range.c1+1).min(MAX_COLS-1)).next().is_some());
-        let col_has = |c, range: &Range| by_col.get(&c)
-            .is_some_and(|rows| rows.range(range.r0.saturating_sub(1)..=(range.r1+1).min(MAX_ROWS-1)).next().is_some());
-        if range.r0 > 0 && row_has(range.r0 - 1, &range) { range.r0 -= 1; }
-        if range.r1 + 1 < MAX_ROWS && row_has(range.r1 + 1, &range) { range.r1 += 1; }
-        if range.c0 > 0 && col_has(range.c0 - 1, &range) { range.c0 -= 1; }
-        if range.c1 + 1 < MAX_COLS && col_has(range.c1 + 1, &range) { range.c1 += 1; }
-        if range == old { break; }
+        let row_has = |r, range: &Range| {
+            by_row.get(&r).is_some_and(|cols| {
+                cols.range(range.c0.saturating_sub(1)..=(range.c1 + 1).min(MAX_COLS - 1))
+                    .next()
+                    .is_some()
+            })
+        };
+        let col_has = |c, range: &Range| {
+            by_col.get(&c).is_some_and(|rows| {
+                rows.range(range.r0.saturating_sub(1)..=(range.r1 + 1).min(MAX_ROWS - 1))
+                    .next()
+                    .is_some()
+            })
+        };
+        if range.r0 > 0 && row_has(range.r0 - 1, &range) {
+            range.r0 -= 1;
+        }
+        if range.r1 + 1 < MAX_ROWS && row_has(range.r1 + 1, &range) {
+            range.r1 += 1;
+        }
+        if range.c0 > 0 && col_has(range.c0 - 1, &range) {
+            range.c0 -= 1;
+        }
+        if range.c1 + 1 < MAX_COLS && col_has(range.c1 + 1, &range) {
+            range.c1 += 1;
+        }
+        if range == old {
+            break;
+        }
     }
-    by_row.range(range.r0..=range.r1)
-        .any(|(_, cols)| cols.range(range.c0..=range.c1).next().is_some()).then_some(range)
+    by_row
+        .range(range.r0..=range.r1)
+        .any(|(_, cols)| cols.range(range.c0..=range.c1).next().is_some())
+        .then_some(range)
 }
 fn select_current_region(book: &mut Book) {
-    let region = book.active_sheet()
+    let region = book
+        .active_sheet()
         .and_then(|sheet| current_region(sheet, book.selection.row, book.selection.col));
-    let range = region.filter(|range| *range != book.selection.range())
+    let range = region
+        .filter(|range| *range != book.selection.range())
         .unwrap_or_else(|| Range::new(0, 0, MAX_ROWS - 1, MAX_COLS - 1));
     book.selection = Selection {
-        row: range.r1, col: range.c1, anchor_row: range.r0, anchor_col: range.c0,
+        row: range.r1,
+        col: range.c1,
+        anchor_row: range.r0,
+        anchor_col: range.c0,
     };
 }
 #[cfg(test)]
@@ -4352,10 +4907,19 @@ mod hundred_cell_ui_tests {
     fn cell_rotation_reaches_the_native_text_shape() -> Result<(), String> {
         let ctx = egui::Context::default();
         crate::fonts::install(&ctx)?;
-        let fmt = CellFormat { rotation: 45, ..CellFormat::default() };
+        let fmt = CellFormat {
+            rotation: 45,
+            ..CellFormat::default()
+        };
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            let shape = cell_text_shape(ui, Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, 30.0)),
-                &fmt, "Angle".into(), Color32::BLACK, false);
+            let shape = cell_text_shape(
+                ui,
+                Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, 30.0)),
+                &fmt,
+                "Angle".into(),
+                Color32::BLACK,
+                false,
+            );
             assert!((shape.angle + std::f32::consts::FRAC_PI_4).abs() < 1e-6);
         });
         Ok(())
@@ -4364,10 +4928,21 @@ mod hundred_cell_ui_tests {
     fn decorations_follow_the_text_galley_instead_of_the_cell_edges() -> Result<(), String> {
         let ctx = egui::Context::default();
         crate::fonts::install(&ctx)?;
-        let fmt = CellFormat { underline: true, strike: true, wrap: true, ..CellFormat::default() };
+        let fmt = CellFormat {
+            underline: true,
+            strike: true,
+            wrap: true,
+            ..CellFormat::default()
+        };
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            let shape = cell_text_shape(ui, Rect::from_min_size(Pos2::ZERO, Vec2::new(200.0, 60.0)),
-                &fmt, "Short".into(), Color32::RED, false);
+            let shape = cell_text_shape(
+                ui,
+                Rect::from_min_size(Pos2::ZERO, Vec2::new(200.0, 60.0)),
+                &fmt,
+                "Short".into(),
+                Color32::RED,
+                false,
+            );
             assert!(shape.galley.size().x < 100.0);
             for section in &shape.galley.job.sections {
                 assert_eq!(section.format.underline, Stroke::new(1.0, Color32::RED));
@@ -4383,16 +4958,27 @@ mod hundred_cell_ui_tests {
         for (r, c) in [(1, 1), (1, 2), (2, 1), (2, 2), (7, 4)] {
             book.set_input(id, r, c, "1")?;
         }
-        book.selection = Selection { row: 1, col: 1, anchor_row: 1, anchor_col: 1 };
+        book.selection = Selection {
+            row: 1,
+            col: 1,
+            anchor_row: 1,
+            anchor_col: 1,
+        };
         select_current_region(&mut book);
         assert_eq!(book.selection.range(), Range::new(1, 1, 2, 2));
         select_current_region(&mut book);
-        assert_eq!(book.selection.range(), Range::new(0, 0, MAX_ROWS - 1, MAX_COLS - 1));
+        assert_eq!(
+            book.selection.range(),
+            Range::new(0, 0, MAX_ROWS - 1, MAX_COLS - 1)
+        );
         let mut diagonal = Book::default();
         let id = diagonal.active_id();
         diagonal.set_input(id, 10, 10, "a")?;
         diagonal.set_input(id, 11, 11, "b")?;
-        assert_eq!(current_region(diagonal.active_sheet().ok_or("sheet")?, 10, 10), Some(Range::new(10, 10, 11, 11)));
+        assert_eq!(
+            current_region(diagonal.active_sheet().ok_or("sheet")?, 10, 10),
+            Some(Range::new(10, 10, 11, 11))
+        );
         Ok(())
     }
 }
@@ -4410,10 +4996,19 @@ mod hundred_merge_clipboard_tests {
         assert_eq!(clipboard.merges, vec![Range::new(0, 0, 0, 1)]);
         assert!(capture_clipboard(&book, true).is_err());
         paste_cells_with(&mut book, id, 3, 3, &clipboard, PasteMode::All, true)?;
-        assert!(book.active_sheet().ok_or("sheet")?.merges.contains(&Range::new(3, 3, 4, 3)));
+        assert!(
+            book.active_sheet()
+                .ok_or("sheet")?
+                .merges
+                .contains(&Range::new(3, 3, 4, 3))
+        );
         paste_cells_with(&mut book, id, 3, 3, &clipboard, PasteMode::All, true)?;
-        assert_eq!(book.active_sheet().and_then(|sheet| sheet.cell(3, 3)).map(|cell| cell.value.clone()),
-            Some(Value::Text("Title".into())));
+        assert_eq!(
+            book.active_sheet()
+                .and_then(|sheet| sheet.cell(3, 3))
+                .map(|cell| cell.value.clone()),
+            Some(Value::Text("Title".into()))
+        );
         let before = book.clone();
         assert!(paste_cells_with(&mut book, id, 0, 1, &clipboard, PasteMode::All, false).is_err());
         assert_eq!(book, before);
@@ -4426,40 +5021,50 @@ mod phase200_editor_defects {
     use super::*;
     #[test]
     fn visible_merged_content_keeps_a_hidden_anchor_in_render_and_navigation() {
-        let mut sheet=Sheet::default();
-        sheet.merges.push(Range::new(0,0,1,1));
-        sheet.hidden_rows.insert(0);sheet.hidden_cols.insert(0);
-        let viewport=Rect::from_min_size(Pos2::ZERO,Vec2::new(400.0,300.0));
-        let cells=visible_cells(&sheet,Pos2::ZERO,viewport,0..5,0..5,(0,0),viewport);
-        assert!(cells.contains(&(0,0)));
-        assert_eq!(jump_target(&sheet,(5,5),(1,1)),(0,0));
+        let mut sheet = Sheet::default();
+        sheet.merges.push(Range::new(0, 0, 1, 1));
+        sheet.hidden_rows.insert(0);
+        sheet.hidden_cols.insert(0);
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 300.0));
+        let cells = visible_cells(&sheet, Pos2::ZERO, viewport, 0..5, 0..5, (0, 0), viewport);
+        assert!(cells.contains(&(0, 0)));
+        assert_eq!(jump_target(&sheet, (5, 5), (1, 1)), (0, 0));
         sheet.hidden_rows.insert(1);
-        assert!(!visible_cells(&sheet,Pos2::ZERO,viewport,0..5,0..5,(0,0),viewport).contains(&(0,0)));
+        assert!(
+            !visible_cells(&sheet, Pos2::ZERO, viewport, 0..5, 0..5, (0, 0), viewport)
+                .contains(&(0, 0))
+        );
     }
     #[test]
     fn hiding_an_active_axis_moves_focus_to_a_visible_cell() {
-        let mut book=Book::default();
-        assert!(hide_axis(&mut book,0,0,true));
-        assert_eq!((book.selection.row,book.selection.col),(1,0));
-        assert!(hide_axis(&mut book,1,0,false));
-        assert_eq!((book.selection.row,book.selection.col),(1,1));
-        assert_eq!(book.selection.range(),Range::new(1,1,1,1));
+        let mut book = Book::default();
+        assert!(hide_axis(&mut book, 0, 0, true));
+        assert_eq!((book.selection.row, book.selection.col), (1, 0));
+        assert!(hide_axis(&mut book, 1, 0, false));
+        assert_eq!((book.selection.row, book.selection.col), (1, 1));
+        assert_eq!(book.selection.range(), Range::new(1, 1, 1, 1));
     }
     #[test]
     fn pie_fractions_remain_finite_for_large_and_tiny_values() {
-        for values in [[1e308,1e308],[1e39,3e39],[1e-300,3e-300]] {
-            let fractions=pie_fractions(&values);
-            assert!(fractions.iter().all(|value|value.is_finite()));
-            assert!((fractions.iter().sum::<f32>()-1.0).abs()<1e-6);
+        for values in [[1e308, 1e308], [1e39, 3e39], [1e-300, 3e-300]] {
+            let fractions = pie_fractions(&values);
+            assert!(fractions.iter().all(|value| value.is_finite()));
+            assert!((fractions.iter().sum::<f32>() - 1.0).abs() < 1e-6);
         }
-        assert_eq!(pie_fractions(&[0.0,-1.0]),vec![0.0,0.0]);
+        assert_eq!(pie_fractions(&[0.0, -1.0]), vec![0.0, 0.0]);
     }
     #[test]
     fn proportional_image_resize_obeys_both_dimension_limits() {
-        assert_eq!(constrained_image_size(Vec2::new(4000.0,2000.0),Vec2::new(12000.0,6000.0),true),Vec2::new(8000.0,4000.0));
-        let tiny=constrained_image_size(Vec2::new(1.0,8000.0),Vec2::ZERO,true);
-        assert_eq!(tiny,Vec2::new(1.0,8000.0));
-        assert_eq!(constrained_image_size(Vec2::new(100.0,100.0),Vec2::new(9000.0,20.0),false),Vec2::new(8000.0,20.0));
+        assert_eq!(
+            constrained_image_size(Vec2::new(4000.0, 2000.0), Vec2::new(12000.0, 6000.0), true),
+            Vec2::new(8000.0, 4000.0)
+        );
+        let tiny = constrained_image_size(Vec2::new(1.0, 8000.0), Vec2::ZERO, true);
+        assert_eq!(tiny, Vec2::new(1.0, 8000.0));
+        assert_eq!(
+            constrained_image_size(Vec2::new(100.0, 100.0), Vec2::new(9000.0, 20.0), false),
+            Vec2::new(8000.0, 20.0)
+        );
     }
 }
 
@@ -4467,17 +5072,30 @@ mod phase200_editor_defects {
 mod phase200_floating_chart_defect {
     use super::*;
     #[test]
-    fn native_charts_use_their_model_anchor_and_remain_editable() -> Result<(),String> {
-        let mut book=Book::default();let id=book.active_id();
-        let chart=book.add_chart(id,ChartKind::Column,Range::new(0,0,1,1),"Floating")?;
-        let sheet=book.active_sheet_mut().ok_or("sheet")?;
-        assert!(place_chart(sheet,chart,Vec2::new(48.0+80.0*96.0,28.0+2000.0*26.0),Vec2::new(500.0,300.0)));
-        let model=sheet.charts.iter().find(|item|item.id==chart).ok_or("chart")?;
-        assert_eq!((model.row,model.col,model.width,model.height),(2000,80,500.0,300.0));
-        let rect=floating_chart_rect(sheet,Pos2::ZERO,model);
-        let (width,height)=grid_size(sheet,50,20);
-        assert!(width>=rect.max.x+16.0&&height>=rect.max.y+16.0);
-        assert!(!place_chart(sheet,chart,rect.min.to_vec2(),rect.size()));
+    fn native_charts_use_their_model_anchor_and_remain_editable() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        let chart = book.add_chart(id, ChartKind::Column, Range::new(0, 0, 1, 1), "Floating")?;
+        let sheet = book.active_sheet_mut().ok_or("sheet")?;
+        assert!(place_chart(
+            sheet,
+            chart,
+            Vec2::new(48.0 + 80.0 * 96.0, 28.0 + 2000.0 * 26.0),
+            Vec2::new(500.0, 300.0)
+        ));
+        let model = sheet
+            .charts
+            .iter()
+            .find(|item| item.id == chart)
+            .ok_or("chart")?;
+        assert_eq!(
+            (model.row, model.col, model.width, model.height),
+            (2000, 80, 500.0, 300.0)
+        );
+        let rect = floating_chart_rect(sheet, Pos2::ZERO, model);
+        let (width, height) = grid_size(sheet, 50, 20);
+        assert!(width >= rect.max.x + 16.0 && height >= rect.max.y + 16.0);
+        assert!(!place_chart(sheet, chart, rect.min.to_vec2(), rect.size()));
         Ok(())
     }
 }

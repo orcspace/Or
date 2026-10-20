@@ -746,7 +746,9 @@ impl Parser {
 fn bounded_expression_depth(expr: &Expr) -> CalcResult<()> {
     let mut pending = vec![(expr, 1usize)];
     while let Some((expr, depth)) = pending.pop() {
-        if depth > 128 { return Err("#NUM!".into()); }
+        if depth > 128 {
+            return Err("#NUM!".into());
+        }
         match expr {
             Expr::Unary(_, value) => pending.push((value, depth + 1)),
             Expr::Binary(_, left, right) => {
@@ -780,7 +782,7 @@ struct Grid {
     rows: usize,
     cols: usize,
     reference: bool,
-    origin: Option<(usize,u32,u32)>,
+    origin: Option<(usize, u32, u32)>,
 }
 impl Grid {
     fn scalar(value: Value) -> Self {
@@ -850,7 +852,7 @@ impl<'a> Engine<'a> {
             materialized: 0,
             budget_exhausted: false,
             cached_text: 0,
-            cache_text_limit: 64*1024*1024,
+            cache_text_limit: 64 * 1024 * 1024,
             spilled: HashMap::new(),
             blocked: HashSet::new(),
             arrays: HashMap::new(),
@@ -868,7 +870,13 @@ impl<'a> Engine<'a> {
         if let Some(value) = self.cache.get(&key) {
             return value.clone();
         }
-        if self.book.sheets.get(sheet).and_then(|s|s.cell(row,col)).is_none() {
+        if self
+            .book
+            .sheets
+            .get(sheet)
+            .and_then(|s| s.cell(row, col))
+            .is_none()
+        {
             // An empty cell shows the value an array formula spilled into it, if any.
             return self.spilled.get(&key).cloned().unwrap_or_default();
         }
@@ -910,11 +918,16 @@ impl<'a> Engine<'a> {
         self.visiting.remove(&key);
         // A limit reached through another cell is transient: that cell may fit as a root.
         if !self.budget_exhausted {
-            let bytes=match &value {Value::Text(text)=>text.len(),_=>0};
-            if self.cached_text.saturating_add(bytes)>self.cache_text_limit {
-                value=Value::Error("#NUM!".into());
-            } else {self.cached_text+=bytes;}
-            self.cache.insert(key,value.clone());
+            let bytes = match &value {
+                Value::Text(text) => text.len(),
+                _ => 0,
+            };
+            if self.cached_text.saturating_add(bytes) > self.cache_text_limit {
+                value = Value::Error("#NUM!".into());
+            } else {
+                self.cached_text += bytes;
+            }
+            self.cache.insert(key, value.clone());
         }
         value
     }
@@ -964,7 +977,7 @@ impl<'a> Engine<'a> {
                     rows: (range.r1 - range.r0 + 1) as usize,
                     cols: (range.c1 - range.c0 + 1) as usize,
                     reference: true,
-                    origin: Some((target,range.r0,range.c0)),
+                    origin: Some((target, range.r0, range.c0)),
                 })
             }
             Expr::Name(n) => {
@@ -1196,9 +1209,15 @@ impl<'a> Engine<'a> {
             };
         }
         if matches!(name, "ROWS" | "COLUMNS") {
-            if args.len() != 1 { return Err("#VALUE!".into()); }
+            if args.len() != 1 {
+                return Err("#VALUE!".into());
+            }
             if let Some((_, range)) = self.reference(&args[0], 0)? {
-                let size = if name == "ROWS" { range.r1 - range.r0 + 1 } else { range.c1 - range.c0 + 1 };
+                let size = if name == "ROWS" {
+                    range.r1 - range.r0 + 1
+                } else {
+                    range.c1 - range.c0 + 1
+                };
                 return Ok(Grid::scalar(Value::Number(f64::from(size))));
             }
         }
@@ -1220,9 +1239,13 @@ impl<'a> Engine<'a> {
                     range.c0 + 1
                 }))));
             }
-            let grid=self.eval(&args[0],sheet,row,col)?;
-            if let Some((_,row,col))=grid.origin {
-                return Ok(Grid::scalar(Value::Number(f64::from(if name=="ROW" {row+1}else{col+1}))));
+            let grid = self.eval(&args[0], sheet, row, col)?;
+            if let Some((_, row, col)) = grid.origin {
+                return Ok(Grid::scalar(Value::Number(f64::from(if name == "ROW" {
+                    row + 1
+                } else {
+                    col + 1
+                }))));
             }
             return Err("#VALUE!".into());
         }
@@ -1256,7 +1279,8 @@ impl<'a> Engine<'a> {
                 expr
             };
             let mut value = self.eval(expr, sheet, row, col);
-            if matches!(name, "SUMIF" | "AVERAGEIF") && index == 2
+            if matches!(name, "SUMIF" | "AVERAGEIF")
+                && index == 2
                 && let Ok(grid) = &value
                 && let Some((target, r0, c0)) = grid.origin
                 && let Some(criteria) = evaluated.first()
@@ -1269,12 +1293,17 @@ impl<'a> Engine<'a> {
                 let target = self.book.sheets.get(target).ok_or("#REF!")?.name.clone();
                 value = self.eval(&Expr::Reference(Some(target), range), sheet, row, col);
             }
-            if name == "SUBTOTAL" && index > 0 && let Ok(grid) = &mut value
+            if name == "SUBTOTAL"
+                && index > 0
+                && let Ok(grid) = &mut value
                 && let Some((target, r0, c0)) = grid.origin
             {
-                let hidden = evaluated.first().and_then(|code| code.number().ok())
+                let hidden = evaluated
+                    .first()
+                    .and_then(|code| code.number().ok())
                     .is_some_and(|code| code >= 100.0);
-                let range = Range::new(r0, c0, r0 + grid.rows as u32 - 1, c0 + grid.cols as u32 - 1);
+                let range =
+                    Range::new(r0, c0, r0 + grid.rows as u32 - 1, c0 + grid.cols as u32 - 1);
                 let target = self.book.sheets.get(target).ok_or("#REF!")?.name.clone();
                 self.skip_subtotal_cells(grid, Some(&target), &range, sheet, hidden);
             }
@@ -1610,10 +1639,17 @@ impl<'a> Engine<'a> {
                                     .and_then(|s| s.cell(r.r0, r.c0))
                                     .is_some_and(|c| c.input.starts_with('=')),
                             )
-                        } else if let Some((sheet,row,col))=a[0].origin {
-                            boolean(self.book.sheets.get(sheet).and_then(|sheet|sheet.cell(row,col))
-                                .is_some_and(|cell|cell.input.starts_with('=')))
-                        }else{boolean(false)}
+                        } else if let Some((sheet, row, col)) = a[0].origin {
+                            boolean(
+                                self.book
+                                    .sheets
+                                    .get(sheet)
+                                    .and_then(|sheet| sheet.cell(row, col))
+                                    .is_some_and(|cell| cell.input.starts_with('=')),
+                            )
+                        } else {
+                            boolean(false)
+                        }
                     }
                     "N" => num(match value {
                         Value::Number(v) => v,
@@ -1694,10 +1730,16 @@ impl<'a> Engine<'a> {
             "ROUND" | "ROUNDUP" | "ROUNDDOWN" | "TRUNC" => {
                 arity(if name == "TRUNC" { 1 } else { 2 }, 2)?;
                 let digits = default_n(1, 0.0)?.trunc();
-                let value=n(0)?;
-                if digits>308.0 {return num(value);}
-                if digits< -308.0 {
-                    return if name=="ROUNDUP" && value!=0.0 {Err("#NUM!".into())} else {num(0.0)};
+                let value = n(0)?;
+                if digits > 308.0 {
+                    return num(value);
+                }
+                if digits < -308.0 {
+                    return if name == "ROUNDUP" && value != 0.0 {
+                        Err("#NUM!".into())
+                    } else {
+                        num(0.0)
+                    };
                 }
                 let scale = 10f64.powf(digits);
                 let x = value * scale;
@@ -1733,9 +1775,12 @@ impl<'a> Engine<'a> {
                 match name {
                     "POWER" => num(power(x, y)?),
                     "LOG" => {
-                        if x<=0.0 || y<=0.0 || y==1.0 {Err("#NUM!".into())}
-                        else {num(x.log(y))}
-                    },
+                        if x <= 0.0 || y <= 0.0 || y == 1.0 {
+                            Err("#NUM!".into())
+                        } else {
+                            num(x.log(y))
+                        }
+                    }
                     "ATAN2" => {
                         if x == 0.0 && y == 0.0 {
                             Err("#DIV/0!".into())
@@ -1747,10 +1792,14 @@ impl<'a> Engine<'a> {
                         if y == 0.0 {
                             Err("#DIV/0!".into())
                         } else {
-                            let remainder=x % y;
-                            num(if remainder==0.0 {0.0}
-                                else if remainder.is_sign_negative()!=y.is_sign_negative() {remainder+y}
-                                else {remainder})
+                            let remainder = x % y;
+                            num(if remainder == 0.0 {
+                                0.0
+                            } else if remainder.is_sign_negative() != y.is_sign_negative() {
+                                remainder + y
+                            } else {
+                                remainder
+                            })
                         }
                     }
                     "QUOTIENT" => {
@@ -1766,8 +1815,12 @@ impl<'a> Engine<'a> {
                         } else if y == 0.0 {
                             num(0.0)
                         } else {
-                            let ratio=x/y;
-                            num(if ratio.is_finite() {super::format::round_scaled(ratio)*y}else{x})
+                            let ratio = x / y;
+                            num(if ratio.is_finite() {
+                                super::format::round_scaled(ratio) * y
+                            } else {
+                                x
+                            })
                         }
                     }
                     _ => {
@@ -1778,7 +1831,9 @@ impl<'a> Engine<'a> {
                             if x > 0.0 && y < 0.0 {
                                 return Err("#NUM!".into());
                             }
-                            if !(x/y).is_finite() {return num(x);}
+                            if !(x / y).is_finite() {
+                                return num(x);
+                            }
                             let ratio = super::format::snap(x / y);
                             return num(if name == "CEILING" {
                                 ratio.ceil() * y
@@ -1787,7 +1842,9 @@ impl<'a> Engine<'a> {
                             });
                         }
                         let sig = y.abs();
-                        if !(x/sig).is_finite() {return num(x);}
+                        if !(x / sig).is_finite() {
+                            return num(x);
+                        }
                         let ratio = super::format::snap(x / sig);
                         let away = default_n(2, 0.0)? != 0.0 && x < 0.0;
                         num(if name.starts_with("CEILING") {
@@ -1870,15 +1927,15 @@ impl<'a> Engine<'a> {
                 if a.iter().any(|g| g.rows != a[0].rows || g.cols != a[0].cols) {
                     return Err("#VALUE!".into());
                 }
-                let mut terms=Vec::with_capacity(count);
-                let mut factors=Vec::with_capacity(a.len());
+                let mut terms = Vec::with_capacity(count);
+                let mut factors = Vec::with_capacity(a.len());
                 for i in 0..count {
                     factors.clear();
                     for grid in a {
                         factors.push(match grid.values.get(i) {
-                            Some(Value::Number(value))=>*value,
-                            Some(Value::Error(error))=>return Err(error.clone()),
-                            _=>0.0,
+                            Some(Value::Number(value)) => *value,
+                            Some(Value::Error(error)) => return Err(error.clone()),
+                            _ => 0.0,
                         });
                     }
                     terms.push(balanced_product(&factors));
@@ -2034,12 +2091,17 @@ impl<'a> Engine<'a> {
                 arity(2, 2)?;
                 let s = text(0)?;
                 let count = n(1)?.trunc();
-                if count < 0.0 || (!s.is_empty() && count > 32767.0) || s.len().saturating_mul(count as usize) > 32767
+                if count < 0.0
+                    || (!s.is_empty() && count > 32767.0)
+                    || s.len().saturating_mul(count as usize) > 32767
                 {
                     return Err("#VALUE!".into());
                 }
-                if s.is_empty() { string(String::new()) }
-                else { string(s.repeat(count as usize)) }
+                if s.is_empty() {
+                    string(String::new())
+                } else {
+                    string(s.repeat(count as usize))
+                }
             }
             "EXACT" => {
                 arity(2, 2)?;
@@ -2124,8 +2186,8 @@ impl<'a> Engine<'a> {
                                 .chars()
                                 .count()
                         })
-                } else if !needle.contains(['*','?','~']) {
-                    literal_search(&chars[offset..],&needle)
+                } else if !needle.contains(['*', '?', '~']) {
+                    literal_search(&chars[offset..], &needle)
                 } else {
                     wildcard_search(&needle, &chars[offset..], 1_000_000)?
                 };
@@ -2137,7 +2199,11 @@ impl<'a> Engine<'a> {
                 if name == "VALUE" {
                     return num(value_text(&raw, self.book.locale_ru)?);
                 }
-                let mut s = raw.trim().chars().filter(|c| !matches!(*c, ' ' | '\u{a0}')).collect::<String>();
+                let mut s = raw
+                    .trim()
+                    .chars()
+                    .filter(|c| !matches!(*c, ' ' | '\u{a0}'))
+                    .collect::<String>();
                 let mut percent = 0usize;
                 while s.ends_with('%') {
                     s.pop();
@@ -2192,7 +2258,9 @@ impl<'a> Engine<'a> {
                     };
                 }
                 let mut value = s.parse::<f64>().map_err(|_| "#VALUE!")?;
-                for _ in 0..percent { value /= 100.0; }
+                for _ in 0..percent {
+                    value /= 100.0;
+                }
                 num(value)
             }
             "TEXT" => {
@@ -2265,14 +2333,31 @@ impl<'a> Engine<'a> {
                 if r < 0.0 || c < 0.0 || r > a[0].rows as f64 || c > a[0].cols as f64 {
                     return Err("#REF!".into());
                 }
-                let (r0, r1) = if r == 0.0 { (0, a[0].rows) } else { (r as usize-1, r as usize) };
-                let (c0, c1) = if c == 0.0 { (0, a[0].cols) } else { (c as usize-1, c as usize) };
+                let (r0, r1) = if r == 0.0 {
+                    (0, a[0].rows)
+                } else {
+                    (r as usize - 1, r as usize)
+                };
+                let (c0, c1) = if c == 0.0 {
+                    (0, a[0].cols)
+                } else {
+                    (c as usize - 1, c as usize)
+                };
                 let mut values = Vec::new();
                 for row in r0..r1 {
-                    for col in c0..c1 { values.push(a[0].at(row,col)?); }
+                    for col in c0..c1 {
+                        values.push(a[0].at(row, col)?);
+                    }
                 }
-                Ok(Grid { values, rows:r1-r0, cols:c1-c0, reference:a[0].reference,
-                    origin:a[0].origin.map(|(sheet,row,col)|(sheet,row+r0 as u32,col+c0 as u32)) })
+                Ok(Grid {
+                    values,
+                    rows: r1 - r0,
+                    cols: c1 - c0,
+                    reference: a[0].reference,
+                    origin: a[0]
+                        .origin
+                        .map(|(sheet, row, col)| (sheet, row + r0 as u32, col + c0 as u32)),
+                })
             }
             "MATCH" | "XMATCH" => {
                 arity(2, if name == "MATCH" { 3 } else { 4 })?;
@@ -2293,7 +2378,9 @@ impl<'a> Engine<'a> {
                 let search = search_value as i32;
                 let vals = &a[1].values;
                 if name == "XMATCH" && search.abs() == 2 && mode != 2 {
-                    return num(binary_lookup(vals, &needle, mode, search).ok_or("#N/A")? as f64+1.0);
+                    return num(
+                        binary_lookup(vals, &needle, mode, search).ok_or("#N/A")? as f64 + 1.0,
+                    );
                 }
                 let mut best = None;
                 let mut indices: Vec<_> = (0..vals.len()).collect();
@@ -2347,7 +2434,9 @@ impl<'a> Engine<'a> {
                 let index = n(2)?.trunc();
                 let vertical = name == "VLOOKUP";
                 let table = &a[1];
-                if index < 1.0 { return Err("#VALUE!".into()); }
+                if index < 1.0 {
+                    return Err("#VALUE!".into());
+                }
                 if index > if vertical { table.cols } else { table.rows } as f64 {
                     return Err("#REF!".into());
                 }
@@ -2383,7 +2472,9 @@ impl<'a> Engine<'a> {
                 arity(3, 6)?;
                 let vertical = a[1].cols == 1 && a[1].rows == a[2].rows;
                 let horizontal = a[1].rows == 1 && a[1].cols == a[2].cols;
-                if !vertical && !horizontal { return Err("#VALUE!".into()); }
+                if !vertical && !horizontal {
+                    return Err("#VALUE!".into());
+                }
                 let mode_value = default_n(4, 0.0)?;
                 let search_value = default_n(5, 1.0)?;
                 if a[1].rows > 1 && a[1].cols > 1
@@ -2402,10 +2493,14 @@ impl<'a> Engine<'a> {
                     if let Some(i) = binary_lookup(&a[1].values, &needle, mode, search) {
                         return lookup_result(&a[2], i, vertical);
                     }
-                    return if let Some(fallback) = args.get(3)
-                        .filter(|expr| !matches!(expr, Expr::Literal(Value::Empty))) {
+                    return if let Some(fallback) = args
+                        .get(3)
+                        .filter(|expr| !matches!(expr, Expr::Literal(Value::Empty)))
+                    {
                         self.eval(fallback, sheet, row, col)
-                    } else { Err("#N/A".into()) };
+                    } else {
+                        Err("#N/A".into())
+                    };
                 }
                 let mut indices: Vec<_> = (0..a[1].values.len()).collect();
                 if search < 0 {
@@ -2487,8 +2582,8 @@ impl<'a> Engine<'a> {
                     return Err("#NUM!".into());
                 }
                 let (y, m, d) = serial_date(serial);
-                let tolerance = (serial.abs()*f64::EPSILON*86400.0*2.0).min(1e-4);
-                let sec = (serial.fract()*86400.0+tolerance).floor().min(86399.0) as i64;
+                let tolerance = (serial.abs() * f64::EPSILON * 86400.0 * 2.0).min(1e-4);
+                let sec = (serial.fract() * 86400.0 + tolerance).floor().min(86399.0) as i64;
                 num(match name {
                     "YEAR" => y as f64,
                     "MONTH" => m as f64,
@@ -2669,28 +2764,39 @@ impl<'a> Engine<'a> {
                 let third = n(2)?;
                 let fourth = default_n(3, 0.0)?;
                 // Scale large cash flows down; leave small ones unscaled to retain tiny quotients.
-                let cash_scale=third.abs().max(fourth.abs()).max(1.0);
-                let (third,fourth)=(third/cash_scale,fourth/cash_scale);
+                let cash_scale = third.abs().max(fourth.abs()).max(1.0);
+                let (third, fourth) = (third / cash_scale, fourth / cash_scale);
                 let kind = if default_n(4, 0.0)? == 0.0 { 0.0 } else { 1.0 };
                 if periods == 0.0 && (name == "PMT") {
                     return Err("#DIV/0!".into());
                 }
-                if rate>0.0 && periods>0.0 && rate.ln_1p()*periods>700.0 && matches!(name,"PMT"|"PV") {
-                    let exponent=-rate.ln_1p()*periods;
-                    let discounted_future=exponential_scale(fourth,exponent);
-                    let difference=-exponent.exp_m1();
-                    return if name=="PMT" {
-                        num(-(third+discounted_future)*(rate/(1.0+rate*kind))/difference*cash_scale)
-                    }else {
-                        num(-(third*((1.0+rate*kind)/rate)*difference+discounted_future)*cash_scale)
+                if rate > 0.0
+                    && periods > 0.0
+                    && rate.ln_1p() * periods > 700.0
+                    && matches!(name, "PMT" | "PV")
+                {
+                    let exponent = -rate.ln_1p() * periods;
+                    let discounted_future = exponential_scale(fourth, exponent);
+                    let difference = -exponent.exp_m1();
+                    return if name == "PMT" {
+                        num(-(third + discounted_future) * (rate / (1.0 + rate * kind))
+                            / difference
+                            * cash_scale)
+                    } else {
+                        num(-(third * ((1.0 + rate * kind) / rate) * difference
+                            + discounted_future)
+                            * cash_scale)
                     };
                 }
                 let growth = growth(rate, periods);
                 let annuity = annuity(rate, periods, kind);
-                if name=="FV" && !growth.is_finite() && rate> -1.0 && rate!=0.0 {
-                    let payments=third*((1.0+rate*kind)/rate);
-                    let coefficient=-fourth-payments;
-                    return num(exponential_scale(coefficient*cash_scale,rate.ln_1p()*periods)+payments*cash_scale);
+                if name == "FV" && !growth.is_finite() && rate > -1.0 && rate != 0.0 {
+                    let payments = third * ((1.0 + rate * kind) / rate);
+                    let coefficient = -fourth - payments;
+                    return num(exponential_scale(
+                        coefficient * cash_scale,
+                        rate.ln_1p() * periods,
+                    ) + payments * cash_scale);
                 }
                 num((match name {
                     "PMT" => {
@@ -2708,7 +2814,7 @@ impl<'a> Engine<'a> {
                         }
                     }
                     _ => (-fourth) * growth - third * annuity,
-                })*cash_scale)
+                }) * cash_scale)
             }
             "NPV" => {
                 arity(2, 255)?;
@@ -2717,13 +2823,27 @@ impl<'a> Engine<'a> {
                 if rate == -1.0 {
                     return Err("#DIV/0!".into());
                 }
-                let discounted=vals.iter().enumerate().map(|(index,value)| {
-                    if *value==0.0 {return 0.0;}
-                    let base=1.0+rate;
-                    let logarithm=if rate> -1.0 {rate.ln_1p()}else{base.abs().ln()};
-                    let sign=if base<0.0 && (index+1)%2==1 {-value.signum()}else{value.signum()};
-                    sign*(value.abs().ln()-logarithm*(index+1) as f64).exp()
-                }).collect::<Vec<_>>();
+                let discounted = vals
+                    .iter()
+                    .enumerate()
+                    .map(|(index, value)| {
+                        if *value == 0.0 {
+                            return 0.0;
+                        }
+                        let base = 1.0 + rate;
+                        let logarithm = if rate > -1.0 {
+                            rate.ln_1p()
+                        } else {
+                            base.abs().ln()
+                        };
+                        let sign = if base < 0.0 && (index + 1) % 2 == 1 {
+                            -value.signum()
+                        } else {
+                            value.signum()
+                        };
+                        sign * (value.abs().ln() - logarithm * (index + 1) as f64).exp()
+                    })
+                    .collect::<Vec<_>>();
                 num(scaled_sum(&discounted))
             }
             "IRR" => {
@@ -2802,7 +2922,9 @@ impl<'a> Engine<'a> {
                 let kind = if default_n(4, 0.0)? == 0.0 { 0.0 } else { 1.0 };
                 // NPER is invariant when every cash flow is scaled by the same factor.
                 let scale = payment.abs().max(present.abs()).max(future.abs());
-                if scale == 0.0 { return Err("#NUM!".into()); }
+                if scale == 0.0 {
+                    return Err("#NUM!".into());
+                }
                 let (payment, present, future) = (payment / scale, present / scale, future / scale);
                 if rate == 0.0 {
                     if payment == 0.0 {
@@ -2832,7 +2954,9 @@ impl<'a> Engine<'a> {
                     return Err("#NUM!".into());
                 }
                 let scale = payment.abs().max(present.abs()).max(future.abs());
-                if scale == 0.0 { return Err("#NUM!".into()); }
+                if scale == 0.0 {
+                    return Err("#NUM!".into());
+                }
                 let (payment, present, future) = (payment / scale, present / scale, future / scale);
                 let balance = |r: f64| -> f64 {
                     present * growth(r, periods) + payment * annuity(r, periods, kind) + future
@@ -2861,8 +2985,8 @@ impl<'a> Engine<'a> {
                 let periods = n(2)?;
                 let present = n(3)?;
                 let future = default_n(4, 0.0)?;
-                let cash_scale=present.abs().max(future.abs()).max(1.0);
-                let (present,future)=(present/cash_scale,future/cash_scale);
+                let cash_scale = present.abs().max(future.abs()).max(1.0);
+                let (present, future) = (present / cash_scale, future / cash_scale);
                 let kind = if default_n(5, 0.0)? == 0.0 { 0.0 } else { 1.0 };
                 if period < 1.0 || period > periods || rate <= -1.0 {
                     return Err("#NUM!".into());
@@ -2888,7 +3012,7 @@ impl<'a> Engine<'a> {
                     interest
                 } else {
                     payment - interest
-                })*cash_scale)
+                }) * cash_scale)
             }
             "MAXIFS" | "MINIFS" => {
                 if a.len() < 3 || a.len().is_multiple_of(2) {
@@ -2918,7 +3042,11 @@ impl<'a> Engine<'a> {
                     }
                     match value {
                         Value::Number(_) | Value::Empty => {
-                            let x = if let Value::Number(x) = value { *x } else { 0.0 };
+                            let x = if let Value::Number(x) = value {
+                                *x
+                            } else {
+                                0.0
+                            };
                             best = Some(match best {
                                 Some(b) if name == "MAXIFS" => b.max(x),
                                 Some(b) => b.min(x),
@@ -2947,9 +3075,11 @@ impl<'a> Engine<'a> {
                 vals.sort_by(f64::total_cmp);
                 let trim = (vals.len() as f64 * percent).floor() as usize / 2;
                 let kept = &vals[trim..vals.len() - trim];
-                let scale = kept.iter().copied().map(f64::abs).fold(0.0,f64::max);
-                num(if scale == 0.0 { 0.0 } else {
-                    kept.iter().map(|value| value/scale).sum::<f64>()/kept.len() as f64*scale
+                let scale = kept.iter().copied().map(f64::abs).fold(0.0, f64::max);
+                num(if scale == 0.0 {
+                    0.0
+                } else {
+                    kept.iter().map(|value| value / scale).sum::<f64>() / kept.len() as f64 * scale
                 })
             }
             "SKEW" | "KURT" => {
@@ -2960,9 +3090,11 @@ impl<'a> Engine<'a> {
                 if count < minimum {
                     return Err("#DIV/0!".into());
                 }
-                let scale = vals.iter().copied().map(f64::abs).fold(0.0,f64::max);
-                if scale == 0.0 { return Err("#DIV/0!".into()); }
-                let vals: Vec<_> = vals.iter().map(|value| value/scale).collect();
+                let scale = vals.iter().copied().map(f64::abs).fold(0.0, f64::max);
+                if scale == 0.0 {
+                    return Err("#DIV/0!".into());
+                }
+                let vals: Vec<_> = vals.iter().map(|value| value / scale).collect();
                 let mean = vals.iter().sum::<f64>() / count;
                 let sd =
                     (vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (count - 1.0)).sqrt();
@@ -3026,9 +3158,20 @@ impl<'a> Engine<'a> {
                         correlation
                     });
                 }
-                let scale_y = pairs.iter().map(|p| p.0.abs()).fold(0.0,f64::max).max(f64::MIN_POSITIVE);
-                let scale_x = pairs.iter().map(|p| p.1.abs()).fold(0.0,f64::max).max(f64::MIN_POSITIVE);
-                let pairs: Vec<_> = pairs.iter().map(|(y,x)| (y/scale_y,x/scale_x)).collect();
+                let scale_y = pairs
+                    .iter()
+                    .map(|p| p.0.abs())
+                    .fold(0.0, f64::max)
+                    .max(f64::MIN_POSITIVE);
+                let scale_x = pairs
+                    .iter()
+                    .map(|p| p.1.abs())
+                    .fold(0.0, f64::max)
+                    .max(f64::MIN_POSITIVE);
+                let pairs: Vec<_> = pairs
+                    .iter()
+                    .map(|(y, x)| (y / scale_y, x / scale_x))
+                    .collect();
                 let mean_y = pairs.iter().map(|p| p.0).sum::<f64>() / count;
                 let mean_x = pairs.iter().map(|p| p.1).sum::<f64>() / count;
                 let sxy = pairs
@@ -3038,26 +3181,30 @@ impl<'a> Engine<'a> {
                 let sxx = pairs.iter().map(|p| (p.1 - mean_x).powi(2)).sum::<f64>();
                 let syy = pairs.iter().map(|p| (p.0 - mean_y).powi(2)).sum::<f64>();
                 match name {
-                    "COVAR" | "COVARIANCE.P" => num(scaled_product(sxy/count,scale_y,scale_x)),
+                    "COVAR" | "COVARIANCE.P" => num(scaled_product(sxy / count, scale_y, scale_x)),
                     "COVARIANCE.S" => {
                         if pairs.len() < 2 {
                             Err("#DIV/0!".into())
                         } else {
-                            num(scaled_product(sxy/(count-1.0),scale_y,scale_x))
+                            num(scaled_product(sxy / (count - 1.0), scale_y, scale_x))
                         }
                     }
                     "SLOPE" | "INTERCEPT" => {
                         if sxx == 0.0 {
                             return Err("#DIV/0!".into());
                         }
-                        let normalized_slope = sxy/sxx;
+                        let normalized_slope = sxy / sxx;
                         num(if name == "SLOPE" {
-                            let ratio=scale_y/scale_x;
-                            if normalized_slope == 0.0 { 0.0 }
-                            else if ratio.is_finite() && ratio != 0.0 { normalized_slope*ratio }
-                            else { (normalized_slope*scale_y)/scale_x }
+                            let ratio = scale_y / scale_x;
+                            if normalized_slope == 0.0 {
+                                0.0
+                            } else if ratio.is_finite() && ratio != 0.0 {
+                                normalized_slope * ratio
+                            } else {
+                                (normalized_slope * scale_y) / scale_x
+                            }
                         } else {
-                            (mean_y-normalized_slope*mean_x)*scale_y
+                            (mean_y - normalized_slope * mean_x) * scale_y
                         })
                     }
                     _ => {
@@ -3102,7 +3249,9 @@ impl<'a> Engine<'a> {
                 if needle.is_empty() {
                     return string(if (name == "TEXTBEFORE") == (instance > 0.0) {
                         String::new()
-                    } else { chars.iter().collect() });
+                    } else {
+                        chars.iter().collect()
+                    });
                 } else {
                     if instance > 0.0 {
                         let mut i = 0;
@@ -3157,15 +3306,20 @@ impl<'a> Engine<'a> {
                 }
             }
             "ROMAN" => {
-                arity(1,2)?;
-                let value=n(0)?.trunc();
-                if !(0.0..=3999.0).contains(&value) {return Err("#VALUE!".into());}
-                let form=match a.get(1).map(Grid::first) {
-                    Some(Value::Bool(true))=>0.0,Some(Value::Bool(false))=>4.0,
-                    _=>default_n(1,0.0)?.trunc(),
+                arity(1, 2)?;
+                let value = n(0)?.trunc();
+                if !(0.0..=3999.0).contains(&value) {
+                    return Err("#VALUE!".into());
+                }
+                let form = match a.get(1).map(Grid::first) {
+                    Some(Value::Bool(true)) => 0.0,
+                    Some(Value::Bool(false)) => 4.0,
+                    _ => default_n(1, 0.0)?.trunc(),
                 };
-                if !(0.0..=4.0).contains(&form) {return Err("#VALUE!".into());}
-                string(roman_form(value as u32,form as usize))
+                if !(0.0..=4.0).contains(&form) {
+                    return Err("#VALUE!".into());
+                }
+                string(roman_form(value as u32, form as usize))
             }
             "ARABIC" => {
                 arity(1, 1)?;
@@ -3435,10 +3589,12 @@ fn ansi_encoding(ru: bool) -> &'static encoding_rs::Encoding {
     }
 }
 fn time_text_serial(source: &str) -> CalcResult<f64> {
-    if let Some((date,time)) = split_date_time(source.trim()) {
-        date_text_serial(date,false).or_else(|_| date_text_serial(date,true))?;
+    if let Some((date, time)) = split_date_time(source.trim()) {
+        date_text_serial(date, false).or_else(|_| date_text_serial(date, true))?;
         clock_text_serial(time)
-    } else { clock_text_serial(source) }
+    } else {
+        clock_text_serial(source)
+    }
 }
 fn clock_text_serial(source: &str) -> CalcResult<f64> {
     let input = source.trim().to_ascii_uppercase();
@@ -3460,23 +3616,31 @@ fn clock_text_serial(source: &str) -> CalcResult<f64> {
     let minute = vals.get(1).copied().unwrap_or(0.0);
     let second = vals.get(2).copied().unwrap_or(0.0);
     if vals.iter().any(|v| !v.is_finite() || *v < 0.0)
-        || hour.fract() != 0.0 || minute.fract() != 0.0
+        || hour.fract() != 0.0
+        || minute.fract() != 0.0
         || hour > if afternoon.is_some() { 12.0 } else { 23.0 }
-        || minute >= 60.0 || second >= 60.0 {
+        || minute >= 60.0
+        || second >= 60.0
+    {
         return Err("#VALUE!".into());
     }
     if let Some(afternoon) = afternoon {
         hour = hour % 12.0 + if afternoon { 12.0 } else { 0.0 };
     }
-    Ok((hour*3600.0+minute*60.0+second)/86400.0)
+    Ok((hour * 3600.0 + minute * 60.0 + second) / 86400.0)
 }
 fn value_text(source: &str, ru: bool) -> CalcResult<f64> {
     let text = source.trim();
-    if let Some((date,time)) = split_date_time(text)
-        && let (Ok(date),Ok(time)) = (date_text_serial(date,ru),clock_text_serial(time)) {
-        return Ok(date+time);
+    if let Some((date, time)) = split_date_time(text)
+        && let (Ok(date), Ok(time)) = (date_text_serial(date, ru), clock_text_serial(time))
+    {
+        return Ok(date + time);
     }
-    let numeric = text.trim_end_matches('%').replace(',',".").parse::<f64>().is_ok();
+    let numeric = text
+        .trim_end_matches('%')
+        .replace(',', ".")
+        .parse::<f64>()
+        .is_ok();
     if !numeric && let Ok(date) = date_text_serial(text, ru) {
         return Ok(date);
     }
@@ -3563,34 +3727,65 @@ fn working_days(first: i64, last: i64, holidays: &std::collections::BTreeSet<i64
 }
 fn difference_quotient(left: f64, right: f64, divisor: f64) -> f64 {
     let difference = left - right;
-    if difference.is_finite() { difference / divisor }
-    else { (left * 0.5 - right * 0.5) / divisor * 2.0 }
+    if difference.is_finite() {
+        difference / divisor
+    } else {
+        (left * 0.5 - right * 0.5) / divisor * 2.0
+    }
 }
 fn conventional_irr(values: &[f64]) -> Option<f64> {
     let nonzero: Vec<_> = values.iter().filter(|value| **value != 0.0).collect();
-    if nonzero.windows(2).filter(|pair| pair[0].is_sign_negative() != pair[1].is_sign_negative()).count() != 1 {
+    if nonzero
+        .windows(2)
+        .filter(|pair| pair[0].is_sign_negative() != pair[1].is_sign_negative())
+        .count()
+        != 1
+    {
         return None;
     }
-    let terms: Vec<_> = values.iter().enumerate().filter(|(_, value)| **value != 0.0)
-        .map(|(index, value)| (index as f64, value.abs().ln(), value.signum())).collect();
+    let terms: Vec<_> = values
+        .iter()
+        .enumerate()
+        .filter(|(_, value)| **value != 0.0)
+        .map(|(index, value)| (index as f64, value.abs().ln(), value.signum()))
+        .collect();
     let residual = |log_rate: f64| {
-        let maximum = terms.iter().map(|(index, log_value, _)| log_value - index * log_rate)
+        let maximum = terms
+            .iter()
+            .map(|(index, log_value, _)| log_value - index * log_rate)
             .fold(f64::NEG_INFINITY, f64::max);
-        terms.iter().map(|(index, log_value, sign)| sign * (log_value - index * log_rate - maximum).exp()).sum::<f64>()
+        terms
+            .iter()
+            .map(|(index, log_value, sign)| sign * (log_value - index * log_rate - maximum).exp())
+            .sum::<f64>()
     };
     let (mut low, mut high) = ((f64::EPSILON * 0.5).ln(), f64::MAX.ln());
     let low_sign = residual(low).signum();
     let upper = residual(high);
-    if upper == 0.0 { return finite(high.exp_m1()).ok(); }
-    if low_sign == upper.signum() { return None; }
+    if upper == 0.0 {
+        return finite(high.exp_m1()).ok();
+    }
+    if low_sign == upper.signum() {
+        return None;
+    }
     for _ in 0..256 {
         let middle = low + (high - low) * 0.5;
-        if middle == low || middle == high { break; }
+        if middle == low || middle == high {
+            break;
+        }
         let value = residual(middle);
-        if value == 0.0 { return finite(middle.exp_m1()).ok().filter(|rate| *rate > -1.0); }
-        if value.signum() == low_sign { low = middle; } else { high = middle; }
+        if value == 0.0 {
+            return finite(middle.exp_m1()).ok().filter(|rate| *rate > -1.0);
+        }
+        if value.signum() == low_sign {
+            low = middle;
+        } else {
+            high = middle;
+        }
     }
-    finite((low + (high - low) * 0.5).exp_m1()).ok().filter(|rate| *rate > -1.0)
+    finite((low + (high - low) * 0.5).exp_m1())
+        .ok()
+        .filter(|rate| *rate > -1.0)
 }
 fn growth(rate: f64, periods: f64) -> f64 {
     if rate > -1.0 {
@@ -3615,68 +3810,93 @@ fn interpolate(low: f64, high: f64, fraction: f64) -> f64 {
         low * (1.0 - fraction) + high * fraction
     }
 }
-fn split_date_time(source: &str) -> Option<(&str,&str)> {
-    for (offset,ch) in source.char_indices() {
-        if ch != 'T' && !ch.is_whitespace() { continue; }
-        let time = source[offset+ch.len_utf8()..].trim();
+fn split_date_time(source: &str) -> Option<(&str, &str)> {
+    for (offset, ch) in source.char_indices() {
+        if ch != 'T' && !ch.is_whitespace() {
+            continue;
+        }
+        let time = source[offset + ch.len_utf8()..].trim();
         let token = time.split_whitespace().next().unwrap_or("");
         if token.contains(':') {
-            return Some((source[..offset].trim(),time));
+            return Some((source[..offset].trim(), time));
         }
     }
     None
 }
 fn date_text_serial(source: &str, locale_ru: bool) -> CalcResult<f64> {
     let source = source.trim();
-    let date = if let Some((date,time)) = split_date_time(source) {
+    let date = if let Some((date, time)) = split_date_time(source) {
         clock_text_serial(time)?;
         date
-    } else { source };
-    if date.starts_with('-') { return Err("#VALUE!".into()); }
-    let pieces: Vec<_> = date.split(['-', '/', '.', ' ']).filter(|piece| !piece.is_empty()).collect();
-    if !(2..=3).contains(&pieces.len()) { return Err("#VALUE!".into()); }
+    } else {
+        source
+    };
+    if date.starts_with('-') {
+        return Err("#VALUE!".into());
+    }
+    let pieces: Vec<_> = date
+        .split(['-', '/', '.', ' '])
+        .filter(|piece| !piece.is_empty())
+        .collect();
+    if !(2..=3).contains(&pieces.len()) {
+        return Err("#VALUE!".into());
+    }
     let month_name = |source: &str| -> Option<i64> {
         Some(match source.to_lowercase().as_str() {
-            "jan"|"january"|"янв"|"январь"|"января" => 1,
-            "feb"|"february"|"фев"|"февраль"|"февраля" => 2,
-            "mar"|"march"|"мар"|"март"|"марта" => 3,
-            "apr"|"april"|"апр"|"апрель"|"апреля" => 4,
-            "may"|"май"|"мая" => 5,
-            "jun"|"june"|"июн"|"июнь"|"июня" => 6,
-            "jul"|"july"|"июл"|"июль"|"июля" => 7,
-            "aug"|"august"|"авг"|"август"|"августа" => 8,
-            "sep"|"sept"|"september"|"сен"|"сентябрь"|"сентября" => 9,
-            "oct"|"october"|"окт"|"октябрь"|"октября" => 10,
-            "nov"|"november"|"ноя"|"ноябрь"|"ноября" => 11,
-            "dec"|"december"|"дек"|"декабрь"|"декабря" => 12,
+            "jan" | "january" | "янв" | "январь" | "января" => 1,
+            "feb" | "february" | "фев" | "февраль" | "февраля" => 2,
+            "mar" | "march" | "мар" | "март" | "марта" => 3,
+            "apr" | "april" | "апр" | "апрель" | "апреля" => 4,
+            "may" | "май" | "мая" => 5,
+            "jun" | "june" | "июн" | "июнь" | "июня" => 6,
+            "jul" | "july" | "июл" | "июль" | "июля" => 7,
+            "aug" | "august" | "авг" | "август" | "августа" => 8,
+            "sep" | "sept" | "september" | "сен" | "сентябрь" | "сентября" => 9,
+            "oct" | "october" | "окт" | "октябрь" | "октября" => 10,
+            "nov" | "november" | "ноя" | "ноябрь" | "ноября" => 11,
+            "dec" | "december" | "дек" | "декабрь" | "декабря" => 12,
             _ => return None,
         })
     };
     let integer = |piece: &str| piece.parse::<i64>().map_err(|_| "#VALUE!".to_string());
     let explicit_year = pieces.get(2).copied();
-    let year_token = if pieces[0].len() == 4 && pieces.len() == 3 { Some(pieces[0]) } else { explicit_year };
-    let (mut year,month,day) = if pieces[0].len() == 4 && pieces.len() == 3 {
-        (integer(pieces[0])?,integer(pieces[1])?,integer(pieces[2])?)
+    let year_token = if pieces[0].len() == 4 && pieces.len() == 3 {
+        Some(pieces[0])
     } else {
-        let year = explicit_year.map(integer).transpose()?.unwrap_or_else(|| i64::from(chrono::Local::now().year()));
+        explicit_year
+    };
+    let (mut year, month, day) = if pieces[0].len() == 4 && pieces.len() == 3 {
+        (
+            integer(pieces[0])?,
+            integer(pieces[1])?,
+            integer(pieces[2])?,
+        )
+    } else {
+        let year = explicit_year
+            .map(integer)
+            .transpose()?
+            .unwrap_or_else(|| i64::from(chrono::Local::now().year()));
         if let Some(month) = month_name(pieces[0]) {
-            (year,month,integer(pieces[1])?)
+            (year, month, integer(pieces[1])?)
         } else if let Some(month) = month_name(pieces[1]) {
-            (year,month,integer(pieces[0])?)
+            (year, month, integer(pieces[0])?)
         } else if locale_ru {
-            (year,integer(pieces[1])?,integer(pieces[0])?)
+            (year, integer(pieces[1])?, integer(pieces[0])?)
         } else {
-            (year,integer(pieces[0])?,integer(pieces[1])?)
+            (year, integer(pieces[0])?, integer(pieces[1])?)
         }
     };
     if year_token.is_some_and(|piece| piece.len() <= 2) && (0..100).contains(&year) {
         year += if year <= 29 { 2000 } else { 1900 };
     }
-    if !(1900..=9999).contains(&year) || !(1..=12).contains(&month)
-        || day < 1 || day > days_in_month(year,month) {
+    if !(1900..=9999).contains(&year)
+        || !(1..=12).contains(&month)
+        || day < 1
+        || day > days_in_month(year, month)
+    {
         return Err("#VALUE!".into());
     }
-    Ok(date_serial(year,month,day))
+    Ok(date_serial(year, month, day))
 }
 
 fn contains_subtotal(expr: &Expr) -> bool {
@@ -3815,7 +4035,9 @@ fn lookup_equal(value: &Value, needle: &Value, wildcards: bool) -> bool {
 #[cfg(test)]
 fn wildcard_prefix(pattern: &str, text: &str) -> bool {
     let mut p: Vec<char> = pattern.chars().collect();
-    if p.iter().rev().take_while(|ch|**ch=='~').count()%2==1 {p.push('~');}
+    if p.iter().rev().take_while(|ch| **ch == '~').count() % 2 == 1 {
+        p.push('~');
+    }
     p.push('*');
     wildcard(&p, &text.chars().collect::<Vec<_>>())
 }
@@ -3825,11 +4047,14 @@ fn wildcard(pattern: &[char], text: &[char]) -> bool {
     let mut star = None;
     let mut mark = 0;
     while ti < text.len() {
-        let escaped=pattern.get(pi)==Some(&'~')
-            && pattern.get(pi+1).is_some_and(|ch|matches!(ch,'*'|'?'|'~'));
-        if escaped && pattern.get(pi+1)==text.get(ti) {
-            pi+=2;ti+=1;
-        } else if !escaped && (pattern.get(pi)==Some(&'?') || pattern.get(pi)==text.get(ti)) {
+        let escaped = pattern.get(pi) == Some(&'~')
+            && pattern
+                .get(pi + 1)
+                .is_some_and(|ch| matches!(ch, '*' | '?' | '~'));
+        if escaped && pattern.get(pi + 1) == text.get(ti) {
+            pi += 2;
+            ti += 1;
+        } else if !escaped && (pattern.get(pi) == Some(&'?') || pattern.get(pi) == text.get(ti)) {
             pi += 1;
             ti += 1;
         } else if pattern.get(pi) == Some(&'*') {
@@ -3930,7 +4155,7 @@ fn conditional(name: &str, a: &[Grid]) -> CalcResult<f64> {
     }) {
         return Err("#VALUE!".into());
     }
-    let mut values=Vec::new();
+    let mut values = Vec::new();
     let mut result = 0.0;
     let mut matched = 0;
     for i in 0..sum.values.len() {
@@ -3952,13 +4177,17 @@ fn conditional(name: &str, a: &[Grid]) -> CalcResult<f64> {
         if matched == 0 {
             Err("#DIV/0!".into())
         } else {
-            let scale=values.iter().map(|value|value.abs()).fold(0.0,f64::max);
-            Ok(if scale==0.0 {0.0}else {
-                scaled_sum(&values.iter().map(|value|value/scale).collect::<Vec<_>>())/f64::from(matched)*scale
+            let scale = values.iter().map(|value| value.abs()).fold(0.0, f64::max);
+            Ok(if scale == 0.0 {
+                0.0
+            } else {
+                scaled_sum(&values.iter().map(|value| value / scale).collect::<Vec<_>>())
+                    / f64::from(matched)
+                    * scale
             })
         }
     } else {
-        Ok(if count {result}else{scaled_sum(&values)})
+        Ok(if count { result } else { scaled_sum(&values) })
     }
 }
 const ROMAN: [(u32, &str); 13] = [
@@ -4232,17 +4461,26 @@ pub fn explain(book: &Book, sheet: u64, row: u32, col: u32) -> Result<serde_json
     let input = cell.map(|cell| cell.input.as_str()).unwrap_or("");
     let value = cell.map(|cell| &cell.value).unwrap_or(&Value::Empty);
     let kind = match value {
-        Value::Empty => "empty", Value::Number(_) => "number", Value::Text(_) => "text",
-        Value::Bool(_) => "boolean", Value::Error(_) => "error",
+        Value::Empty => "empty",
+        Value::Number(_) => "number",
+        Value::Text(_) => "text",
+        Value::Bool(_) => "boolean",
+        Value::Error(_) => "error",
     };
     struct Walk<'a> {
-        book: &'a Book, sheet: u64, dependencies: Vec<serde_json::Value>,
-        names: HashSet<String>, omitted: usize,
+        book: &'a Book,
+        sheet: u64,
+        dependencies: Vec<serde_json::Value>,
+        names: HashSet<String>,
+        omitted: usize,
     }
     impl Walk<'_> {
         fn push(&mut self, value: serde_json::Value) {
-            if self.dependencies.len() < 64 { self.dependencies.push(value); }
-            else { self.omitted += 1; }
+            if self.dependencies.len() < 64 {
+                self.dependencies.push(value);
+            } else {
+                self.omitted += 1;
+            }
         }
         fn visit(&mut self, expr: &Expr, depth: usize) {
             if depth >= 32 || self.dependencies.len() >= 64 {
@@ -4252,14 +4490,20 @@ pub fn explain(book: &Book, sheet: u64, row: u32, col: u32) -> Result<serde_json
             match expr {
                 Expr::Reference(name, range) => {
                     let target = match name {
-                        Some(name) => self.book.sheets.iter().find(|s| s.name.to_lowercase() == name.to_lowercase()),
+                        Some(name) => self
+                            .book
+                            .sheets
+                            .iter()
+                            .find(|s| s.name.to_lowercase() == name.to_lowercase()),
                         None => self.book.sheet_by_id(self.sheet),
                     };
                     if let Some(target) = target {
                         let mut sample = Vec::new();
                         for r in range.r0..=range.r1 {
                             for c in range.c0..=range.c1 {
-                                if sample.len() == 4 { break; }
+                                if sample.len() == 4 {
+                                    break;
+                                }
                                 sample.push(json!({
                                     "address":address(r,c),
                                     "value_type":match target.cell(r,c).map(|cell| &cell.value) {
@@ -4273,7 +4517,9 @@ pub fn explain(book: &Book, sheet: u64, row: u32, col: u32) -> Result<serde_json
                                     "display":target.display(r,c,self.book.locale_ru).chars().take(120).collect::<String>()
                                 }));
                             }
-                            if sample.len() == 4 { break; }
+                            if sample.len() == 4 {
+                                break;
+                            }
                         }
                         self.push(json!({
                             "kind":"range","sheet_id":target.id,"sheet":target.name,
@@ -4281,38 +4527,64 @@ pub fn explain(book: &Book, sheet: u64, row: u32, col: u32) -> Result<serde_json
                             "cells":(u64::from(range.r1-range.r0)+1)*(u64::from(range.c1-range.c0)+1),
                             "hidden":target.hidden,"sample":sample
                         }));
-                    } else { self.push(json!({"kind":"range","sheet":name,"error":"#REF!"})); }
+                    } else {
+                        self.push(json!({"kind":"range","sheet":name,"error":"#REF!"}));
+                    }
                 }
                 Expr::Name(name) => {
                     if !self.names.insert(name.to_lowercase()) {
                         self.push(json!({"kind":"name","name":name,"status":"already_visited"}));
                         return;
                     }
-                    let definition = self.book.names.iter()
-                        .find(|(n,_)| n.to_lowercase() == name.to_lowercase())
-                        .map(|(_,input)| input.clone());
+                    let definition = self
+                        .book
+                        .names
+                        .iter()
+                        .find(|(n, _)| n.to_lowercase() == name.to_lowercase())
+                        .map(|(_, input)| input.clone());
                     if let Some(input) = definition {
                         self.push(json!({"kind":"name","name":name,"input":input.chars().take(256).collect::<String>()}));
                         match parse(&input) {
-                            Ok(expr) => self.visit(&expr, depth+1),
-                            Err(_) => self.push(json!({"kind":"name","name":name,"error":"invalid_formula"})),
+                            Ok(expr) => self.visit(&expr, depth + 1),
+                            Err(_) => self
+                                .push(json!({"kind":"name","name":name,"error":"invalid_formula"})),
                         }
-                    } else { self.push(json!({"kind":"name","name":name,"error":"#NAME?"})); }
+                    } else {
+                        self.push(json!({"kind":"name","name":name,"error":"#NAME?"}));
+                    }
                 }
-                Expr::Unary(_, expr) => self.visit(expr, depth+1),
-                Expr::Binary(_, a, b) => { self.visit(a, depth+1); self.visit(b, depth+1); }
-                Expr::Call(_, args) => { for expr in args { self.visit(expr, depth+1); } }
+                Expr::Unary(_, expr) => self.visit(expr, depth + 1),
+                Expr::Binary(_, a, b) => {
+                    self.visit(a, depth + 1);
+                    self.visit(b, depth + 1);
+                }
+                Expr::Call(_, args) => {
+                    for expr in args {
+                        self.visit(expr, depth + 1);
+                    }
+                }
                 Expr::Literal(_) => {}
             }
         }
     }
-    let mut walk = Walk { book, sheet, dependencies: Vec::new(), names: HashSet::new(), omitted: 0 };
+    let mut walk = Walk {
+        book,
+        sheet,
+        dependencies: Vec::new(),
+        names: HashSet::new(),
+        omitted: 0,
+    };
     let syntax_error = if input.starts_with('=') {
         match parse(input) {
-            Ok(expr) => { walk.visit(&expr, 0); None }
+            Ok(expr) => {
+                walk.visit(&expr, 0);
+                None
+            }
             Err(error) => Some(error),
         }
-    } else { None };
+    } else {
+        None
+    };
     Ok(json!({
         "sheet_id":sheet,"address":address(row,col),"input":input.chars().take(4096).collect::<String>(),
         "input_truncated":input.chars().count()>4096,"value_type":kind,
@@ -4337,7 +4609,10 @@ mod passport_tests {
         assert_eq!(report["value_type"], "number");
         assert_eq!(report["dependencies"][0]["name"], "Tax");
         assert_eq!(report["dependencies"][1]["range"], "A1:A1");
-        assert_eq!(report["dependencies"][1]["sample"][0]["value_type"], "number");
+        assert_eq!(
+            report["dependencies"][1]["sample"][0]["value_type"],
+            "number"
+        );
         assert_eq!(book, before);
         assert!(explain(&book, id, MAX_ROWS, 0).is_err());
         Ok(())
@@ -4357,214 +4632,327 @@ mod passport_tests {
 }
 
 fn lookup_result(grid: &Grid, index: usize, vertical: bool) -> CalcResult<Grid> {
-    let (rows, cols) = if vertical { (1,grid.cols) } else { (grid.rows,1) };
+    let (rows, cols) = if vertical {
+        (1, grid.cols)
+    } else {
+        (grid.rows, 1)
+    };
     let mut values = Vec::new();
     for row in 0..rows {
         for col in 0..cols {
-            values.push(if vertical { grid.at(index,col)? } else { grid.at(row,index)? });
+            values.push(if vertical {
+                grid.at(index, col)?
+            } else {
+                grid.at(row, index)?
+            });
         }
     }
-    Ok(Grid { values, rows, cols, reference:grid.reference,
-        origin:grid.origin.map(|(sheet,row,col)|(sheet,row+if vertical {index as u32}else{0},col+if vertical {0}else{index as u32})) })
+    Ok(Grid {
+        values,
+        rows,
+        cols,
+        reference: grid.reference,
+        origin: grid.origin.map(|(sheet, row, col)| {
+            (
+                sheet,
+                row + if vertical { index as u32 } else { 0 },
+                col + if vertical { 0 } else { index as u32 },
+            )
+        }),
+    })
 }
 fn binary_lookup(values: &[Value], needle: &Value, mode: i32, search: i32) -> Option<usize> {
-    let (mut low, mut high) = (0,values.len());
+    let (mut low, mut high) = (0, values.len());
     while low < high {
-        let middle = low+(high-low)/2;
-        let order = compare(&values[middle],needle);
+        let middle = low + (high - low) / 2;
+        let order = compare(&values[middle], needle);
         let order = if search < 0 { order.reverse() } else { order };
-        if order.is_eq() { return Some(middle); }
-        if order.is_lt() { low=middle+1; } else { high=middle; }
+        if order.is_eq() {
+            return Some(middle);
+        }
+        if order.is_lt() {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
     }
     let index = match (mode, search < 0) {
-        (-1,false) | (1,true) => low.checked_sub(1)?,
-        (1,false) | (-1,true) => low,
+        (-1, false) | (1, true) => low.checked_sub(1)?,
+        (1, false) | (-1, true) => low,
         _ => return None,
     };
-    values.get(index).filter(|value| lookup_kind(value,needle)).map(|_| index)
+    values
+        .get(index)
+        .filter(|value| lookup_kind(value, needle))
+        .map(|_| index)
 }
 
 #[cfg(test)]
 mod defect_batch_one {
     use super::*;
-    fn book() -> Result<Book,String> {
+    fn book() -> Result<Book, String> {
         let mut book = Book::default();
-        let id=book.active_id();
+        let id = book.active_id();
         for row in 0..3 {
-            book.set_input(id,row,0,&(row+1).to_string())?;
-            book.set_input(id,row,1,&((row+1)*10).to_string())?;
-            book.set_input(id,row,2,&((row+1)*100).to_string())?;
+            book.set_input(id, row, 0, &(row + 1).to_string())?;
+            book.set_input(id, row, 1, &((row + 1) * 10).to_string())?;
+            book.set_input(id, row, 2, &((row + 1) * 100).to_string())?;
         }
         Ok(book)
     }
     #[test]
-    fn index_arrays_and_reference_identity() -> Result<(),String> {
-        let mut book=book()?;
-        let id=book.active_id();
-        assert_eq!(evaluate(&book,id,"=SUM(INDEX(A1:B2,0,2))"),Value::Number(30.0));
-        assert_eq!(evaluate(&book,id,"=SUM(INDEX(A1:B2,2))"),Value::Number(22.0));
-        assert_eq!(evaluate(&book,id,"=SUM(INDEX(A1:B2,2,0))"),Value::Number(22.0));
-        book.set_input(id,0,0,"'3")?;
-        assert_eq!(evaluate(&book,id,"=SUM(INDEX(A1:A2,1))"),Value::Number(0.0));
+    fn index_arrays_and_reference_identity() -> Result<(), String> {
+        let mut book = book()?;
+        let id = book.active_id();
+        assert_eq!(
+            evaluate(&book, id, "=SUM(INDEX(A1:B2,0,2))"),
+            Value::Number(30.0)
+        );
+        assert_eq!(
+            evaluate(&book, id, "=SUM(INDEX(A1:B2,2))"),
+            Value::Number(22.0)
+        );
+        assert_eq!(
+            evaluate(&book, id, "=SUM(INDEX(A1:B2,2,0))"),
+            Value::Number(22.0)
+        );
+        book.set_input(id, 0, 0, "'3")?;
+        assert_eq!(
+            evaluate(&book, id, "=SUM(INDEX(A1:A2,1))"),
+            Value::Number(0.0)
+        );
         Ok(())
     }
     #[test]
-    fn lookup_index_error_and_array_return() -> Result<(),String> {
-        let book=book()?;
-        let id=book.active_id();
-        assert_eq!(evaluate(&book,id,"=VLOOKUP(1,A1:B2,0,FALSE)"),Value::Error("#VALUE!".into()));
-        assert_eq!(evaluate(&book,id,"=HLOOKUP(1,A1:B2,0,FALSE)"),Value::Error("#VALUE!".into()));
-        assert_eq!(evaluate(&book,id,"=SUM(XLOOKUP(2,A1:A2,B1:C2))"),Value::Number(220.0));
-        assert_eq!(evaluate(&book,id,"=SUM(XLOOKUP(10,A1:C1,A2:C3))"),Value::Number(50.0));
+    fn lookup_index_error_and_array_return() -> Result<(), String> {
+        let book = book()?;
+        let id = book.active_id();
+        assert_eq!(
+            evaluate(&book, id, "=VLOOKUP(1,A1:B2,0,FALSE)"),
+            Value::Error("#VALUE!".into())
+        );
+        assert_eq!(
+            evaluate(&book, id, "=HLOOKUP(1,A1:B2,0,FALSE)"),
+            Value::Error("#VALUE!".into())
+        );
+        assert_eq!(
+            evaluate(&book, id, "=SUM(XLOOKUP(2,A1:A2,B1:C2))"),
+            Value::Number(220.0)
+        );
+        assert_eq!(
+            evaluate(&book, id, "=SUM(XLOOKUP(10,A1:C1,A2:C3))"),
+            Value::Number(50.0)
+        );
         Ok(())
     }
     #[test]
-    fn type_arrays_and_empty_repetition() -> Result<(),String> {
-        let book=book()?;
-        let id=book.active_id();
-        assert_eq!(evaluate(&book,id,"=TYPE(A1:B2)"),Value::Number(64.0));
-        assert_eq!(evaluate(&book,id,"=REPT(\"\",40000)"),Value::Text(String::new()));
+    fn type_arrays_and_empty_repetition() -> Result<(), String> {
+        let book = book()?;
+        let id = book.active_id();
+        assert_eq!(evaluate(&book, id, "=TYPE(A1:B2)"), Value::Number(64.0));
+        assert_eq!(
+            evaluate(&book, id, "=REPT(\"\",40000)"),
+            Value::Text(String::new())
+        );
         Ok(())
     }
     #[test]
     fn empty_delimiters_match_immediately() {
-        let book=Book::default();
-        let id=book.active_id();
-        assert_eq!(evaluate(&book,id,"=TEXTBEFORE(\"abc\",\"\",2)"),Value::Text(String::new()));
-        assert_eq!(evaluate(&book,id,"=TEXTAFTER(\"abc\",\"\",-2)"),Value::Text(String::new()));
+        let book = Book::default();
+        let id = book.active_id();
+        assert_eq!(
+            evaluate(&book, id, "=TEXTBEFORE(\"abc\",\"\",2)"),
+            Value::Text(String::new())
+        );
+        assert_eq!(
+            evaluate(&book, id, "=TEXTAFTER(\"abc\",\"\",-2)"),
+            Value::Text(String::new())
+        );
     }
     #[test]
-    fn minifs_treats_matched_blanks_as_zero() -> Result<(),String> {
-        let mut book=Book::default();
-        let id=book.active_id();
-        book.set_input(id,1,0,"10")?;
-        book.set_input(id,0,1,"1")?;
-        book.set_input(id,1,1,"1")?;
-        assert_eq!(evaluate(&book,id,"=MINIFS(A1:A2,B1:B2,1)"),Value::Number(0.0));
-        book.set_input(id,1,0,"-10")?;
-        assert_eq!(evaluate(&book,id,"=MAXIFS(A1:A2,B1:B2,1)"),Value::Number(0.0));
+    fn minifs_treats_matched_blanks_as_zero() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.set_input(id, 1, 0, "10")?;
+        book.set_input(id, 0, 1, "1")?;
+        book.set_input(id, 1, 1, "1")?;
+        assert_eq!(
+            evaluate(&book, id, "=MINIFS(A1:A2,B1:B2,1)"),
+            Value::Number(0.0)
+        );
+        book.set_input(id, 1, 0, "-10")?;
+        assert_eq!(
+            evaluate(&book, id, "=MAXIFS(A1:A2,B1:B2,1)"),
+            Value::Number(0.0)
+        );
         Ok(())
     }
     #[test]
-    fn binary_lookup_modes() -> Result<(),String> {
-        let mut book=Book::default();
-        let id=book.active_id();
-        for (row,value) in [1,3,5].into_iter().enumerate() {
-            book.set_input(id,row as u32,0,&value.to_string())?;
-            book.set_input(id,row as u32,1,&(value*10).to_string())?;
+    fn binary_lookup_modes() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        for (row, value) in [1, 3, 5].into_iter().enumerate() {
+            book.set_input(id, row as u32, 0, &value.to_string())?;
+            book.set_input(id, row as u32, 1, &(value * 10).to_string())?;
         }
-        for (row,value) in [5,3,1].into_iter().enumerate() {
-            book.set_input(id,row as u32,2,&value.to_string())?;
+        for (row, value) in [5, 3, 1].into_iter().enumerate() {
+            book.set_input(id, row as u32, 2, &value.to_string())?;
         }
-        assert_eq!(evaluate(&book,id,"=XMATCH(3,A1:A3,0,2)"),Value::Number(2.0));
-        assert_eq!(evaluate(&book,id,"=XLOOKUP(4,A1:A3,B1:B3,,-1,2)"),Value::Number(30.0));
-        assert_eq!(evaluate(&book,id,"=XMATCH(4,C1:C3,-1,-2)"),Value::Number(2.0));
-        assert_eq!(evaluate(&book,id,"=XMATCH(1,C1:C3,0,-2)"),Value::Number(3.0));
+        assert_eq!(
+            evaluate(&book, id, "=XMATCH(3,A1:A3,0,2)"),
+            Value::Number(2.0)
+        );
+        assert_eq!(
+            evaluate(&book, id, "=XLOOKUP(4,A1:A3,B1:B3,,-1,2)"),
+            Value::Number(30.0)
+        );
+        assert_eq!(
+            evaluate(&book, id, "=XMATCH(4,C1:C3,-1,-2)"),
+            Value::Number(2.0)
+        );
+        assert_eq!(
+            evaluate(&book, id, "=XMATCH(1,C1:C3,0,-2)"),
+            Value::Number(3.0)
+        );
         Ok(())
     }
 }
 
 fn scaled_product(coefficient: f64, first: f64, second: f64) -> f64 {
-    if coefficient == 0.0 { return 0.0; }
-    let product=first*second;
-    if product.is_finite() && product != 0.0 { coefficient*product }
-    else if first.abs() >= second.abs() { (coefficient*first)*second }
-    else { (coefficient*second)*first }
+    if coefficient == 0.0 {
+        return 0.0;
+    }
+    let product = first * second;
+    if product.is_finite() && product != 0.0 {
+        coefficient * product
+    } else if first.abs() >= second.abs() {
+        (coefficient * first) * second
+    } else {
+        (coefficient * second) * first
+    }
 }
 #[cfg(test)]
 mod defect_batch_two {
     use super::*;
     #[test]
     fn optional_blank_references_and_numeric_value_text() {
-        let book=Book::default();
-        let id=book.active_id();
-        assert_eq!(evaluate(&book,id,"=LOG(100,A1)"),Value::Error("#NUM!".into()));
-        assert_eq!(evaluate(&book,id,"=LOG(100)"),Value::Number(2.0));
-        assert_eq!(evaluate(&book,id,"=VALUE(\"1.2\")"),Value::Number(1.2));
+        let book = Book::default();
+        let id = book.active_id();
+        assert_eq!(
+            evaluate(&book, id, "=LOG(100,A1)"),
+            Value::Error("#NUM!".into())
+        );
+        assert_eq!(evaluate(&book, id, "=LOG(100)"), Value::Number(2.0));
+        assert_eq!(evaluate(&book, id, "=VALUE(\"1.2\")"), Value::Number(1.2));
     }
     #[test]
     fn clock_fraction_and_last_day() {
-        let book=Book::default();
-        let id=book.active_id();
-        for (input,expected) in [
-            ("=SECOND(59.9/86400)",59.0),("=MINUTE(59.9/86400)",0.0),
-            ("=HOUR(86399.9/86400)",23.0),("=YEAR(2958465.999999)",9999.0),
-            ("=EDATE(2958465.5,0)",2958465.0)
-        ] { assert_eq!(evaluate(&book,id,input),Value::Number(expected),"{input}"); }
+        let book = Book::default();
+        let id = book.active_id();
+        for (input, expected) in [
+            ("=SECOND(59.9/86400)", 59.0),
+            ("=MINUTE(59.9/86400)", 0.0),
+            ("=HOUR(86399.9/86400)", 23.0),
+            ("=YEAR(2958465.999999)", 9999.0),
+            ("=EDATE(2958465.5,0)", 2958465.0),
+        ] {
+            assert_eq!(
+                evaluate(&book, id, input),
+                Value::Number(expected),
+                "{input}"
+            );
+        }
     }
-    fn number(book: &Book,input: &str) -> Result<f64,String> {
-        match evaluate(book,book.active_id(),input) {
+    fn number(book: &Book, input: &str) -> Result<f64, String> {
+        match evaluate(book, book.active_id(), input) {
             Value::Number(value) => Ok(value),
             value => Err(format!("{input}: {value:?}")),
         }
     }
     #[test]
-    fn large_statistics_remain_finite() -> Result<(),String> {
-        let mut book=Book::default();
-        let id=book.active_id();
-        for (row,value) in [1.0,2.0,4.0,8.0].into_iter().enumerate() {
-            book.set_input(id,row as u32,0,&value.to_string())?;
-            book.set_input(id,row as u32,1,&(value*1e200).to_string())?;
+    fn large_statistics_remain_finite() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        for (row, value) in [1.0, 2.0, 4.0, 8.0].into_iter().enumerate() {
+            book.set_input(id, row as u32, 0, &value.to_string())?;
+            book.set_input(id, row as u32, 1, &(value * 1e200).to_string())?;
         }
-        for function in ["SKEW","KURT"] {
-            let normal=number(&book,&format!("={function}(A1:A4)"))?;
-            let large=number(&book,&format!("={function}(B1:B4)"))?;
-            assert!((normal-large).abs()<1e-12);
+        for function in ["SKEW", "KURT"] {
+            let normal = number(&book, &format!("={function}(A1:A4)"))?;
+            let large = number(&book, &format!("={function}(B1:B4)"))?;
+            assert!((normal - large).abs() < 1e-12);
         }
-        book.set_input(id,0,2,"1e308")?;
-        book.set_input(id,1,2,"1e308")?;
-        assert_eq!(number(&book,"=TRIMMEAN(C1:C2,0)")?,1e308);
+        book.set_input(id, 0, 2, "1e308")?;
+        book.set_input(id, 1, 2, "1e308")?;
+        assert_eq!(number(&book, "=TRIMMEAN(C1:C2,0)")?, 1e308);
         Ok(())
     }
     #[test]
-    fn normalized_regression_statistics() -> Result<(),String> {
-        let mut book=Book::default();
-        let id=book.active_id();
-        for (row,value) in [1e200,2e200,3e200].into_iter().enumerate() {
-            book.set_input(id,row as u32,0,&value.to_string())?;
-            book.set_input(id,row as u32,1,&value.to_string())?;
+    fn normalized_regression_statistics() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        for (row, value) in [1e200, 2e200, 3e200].into_iter().enumerate() {
+            book.set_input(id, row as u32, 0, &value.to_string())?;
+            book.set_input(id, row as u32, 1, &value.to_string())?;
         }
-        assert!((number(&book,"=SLOPE(A1:A3,B1:B3)")?-1.0).abs()<1e-12);
-        assert_eq!(number(&book,"=INTERCEPT(A1:A3,B1:B3)")?,0.0);
-        for (row,value) in [1e154,2e154,3e154].into_iter().enumerate() {
-            book.set_input(id,row as u32,0,&value.to_string())?;
+        assert!((number(&book, "=SLOPE(A1:A3,B1:B3)")? - 1.0).abs() < 1e-12);
+        assert_eq!(number(&book, "=INTERCEPT(A1:A3,B1:B3)")?, 0.0);
+        for (row, value) in [1e154, 2e154, 3e154].into_iter().enumerate() {
+            book.set_input(id, row as u32, 0, &value.to_string())?;
         }
-        let covariance=number(&book,"=COVARIANCE.P(A1:A3,A1:A3)")?;
-        assert!((covariance/1e307-6.666666666666667).abs()<1e-12);
+        let covariance = number(&book, "=COVARIANCE.P(A1:A3,A1:A3)")?;
+        assert!((covariance / 1e307 - 6.666666666666667).abs() < 1e-12);
         Ok(())
     }
     #[test]
-    fn mixed_date_time_text_preserves_each_contract() -> Result<(),String> {
-        let book=Book::default();
-        let date=date_serial(2024,1,15);
-        assert_eq!(number(&book,"=DATEVALUE(\"2024-01-15 12:30\")")?,date);
-        assert!((number(&book,"=TIMEVALUE(\"2024-01-15 12:30\")")?-12.5/24.0).abs()<1e-12);
-        assert!((number(&book,"=VALUE(\"2024-01-15 12:30\")")?-(date+12.5/24.0)).abs()<1e-10);
+    fn mixed_date_time_text_preserves_each_contract() -> Result<(), String> {
+        let book = Book::default();
+        let date = date_serial(2024, 1, 15);
+        assert_eq!(number(&book, "=DATEVALUE(\"2024-01-15 12:30\")")?, date);
+        assert!((number(&book, "=TIMEVALUE(\"2024-01-15 12:30\")")? - 12.5 / 24.0).abs() < 1e-12);
+        assert!(
+            (number(&book, "=VALUE(\"2024-01-15 12:30\")")? - (date + 12.5 / 24.0)).abs() < 1e-10
+        );
         Ok(())
     }
     #[test]
-    fn named_months_and_short_years() -> Result<(),String> {
-        let mut book=Book::default();
-        book.locale_ru=false;
-        assert_eq!(number(&book,"=DAYS(\"15-MAR-2021\",\"1-FEB-2021\")")?,42.0);
-        assert_eq!(number(&book,"=DATEVALUE(\"1/15/24\")")?,date_serial(2024,1,15));
-        assert_eq!(number(&book,"=DATEVALUE(\"1/15/30\")")?,date_serial(1930,1,15));
-        book.locale_ru=true;
-        assert_eq!(number(&book,"=DATEVALUE(\"15 января 2024\")")?,date_serial(2024,1,15));
+    fn named_months_and_short_years() -> Result<(), String> {
+        let mut book = Book::default();
+        book.locale_ru = false;
+        assert_eq!(
+            number(&book, "=DAYS(\"15-MAR-2021\",\"1-FEB-2021\")")?,
+            42.0
+        );
+        assert_eq!(
+            number(&book, "=DATEVALUE(\"1/15/24\")")?,
+            date_serial(2024, 1, 15)
+        );
+        assert_eq!(
+            number(&book, "=DATEVALUE(\"1/15/30\")")?,
+            date_serial(1930, 1, 15)
+        );
+        book.locale_ru = true;
+        assert_eq!(
+            number(&book, "=DATEVALUE(\"15 января 2024\")")?,
+            date_serial(2024, 1, 15)
+        );
         Ok(())
     }
     #[test]
-    fn date_without_year_uses_current_year() -> Result<(),String> {
-        let book=Book::default();
-        let expected=date_serial(i64::from(chrono::Local::now().year()),3,15);
-        assert_eq!(number(&book,"=DATEVALUE(\"15-MAR\")")?,expected);
+    fn date_without_year_uses_current_year() -> Result<(), String> {
+        let book = Book::default();
+        let expected = date_serial(i64::from(chrono::Local::now().year()), 3, 15);
+        assert_eq!(number(&book, "=DATEVALUE(\"15-MAR\")")?, expected);
         Ok(())
     }
     #[test]
-    fn timevalue_keeps_fractional_seconds() -> Result<(),String> {
-        let book=Book::default();
-        assert!((number(&book,"=TIMEVALUE(\"12:34:56.5\")")?-45296.5/86400.0).abs()<1e-12);
-        assert_eq!(evaluate(&book,book.active_id(),"=TIMEVALUE(\"12:34:NaN\")"),Value::Error("#VALUE!".into()));
+    fn timevalue_keeps_fractional_seconds() -> Result<(), String> {
+        let book = Book::default();
+        assert!((number(&book, "=TIMEVALUE(\"12:34:56.5\")")? - 45296.5 / 86400.0).abs() < 1e-12);
+        assert_eq!(
+            evaluate(&book, book.active_id(), "=TIMEVALUE(\"12:34:NaN\")"),
+            Value::Error("#VALUE!".into())
+        );
         Ok(())
     }
 }
@@ -4574,200 +4962,325 @@ mod additional_calc_defect_tests {
     use super::*;
     #[test]
     fn extreme_rounding_precision_does_not_reject_finite_answers() {
-        let book=Book::default();let id=book.active_id();
-        for input in ["=ROUND(123,400)","=ROUNDUP(123,400)","=ROUNDDOWN(123,400)","=TRUNC(123,400)"] {
-            assert_eq!(evaluate(&book,id,input),Value::Number(123.0),"{input}");
+        let book = Book::default();
+        let id = book.active_id();
+        for input in [
+            "=ROUND(123,400)",
+            "=ROUNDUP(123,400)",
+            "=ROUNDDOWN(123,400)",
+            "=TRUNC(123,400)",
+        ] {
+            assert_eq!(evaluate(&book, id, input), Value::Number(123.0), "{input}");
         }
-        for input in ["=ROUND(123,-400)","=ROUNDDOWN(123,-400)","=TRUNC(123,-400)","=ROUNDUP(0,-400)"] {
-            assert_eq!(evaluate(&book,id,input),Value::Number(0.0),"{input}");
+        for input in [
+            "=ROUND(123,-400)",
+            "=ROUNDDOWN(123,-400)",
+            "=TRUNC(123,-400)",
+            "=ROUNDUP(0,-400)",
+        ] {
+            assert_eq!(evaluate(&book, id, input), Value::Number(0.0), "{input}");
         }
     }
     #[test]
     fn escaped_wildcards_do_not_fall_back_to_matching_a_literal_tilde() {
-        assert!(!wildcard(&"~*".chars().collect::<Vec<_>>(),&"~abc".chars().collect::<Vec<_>>()));
-        assert!(!wildcard(&"~?".chars().collect::<Vec<_>>(),&"~a".chars().collect::<Vec<_>>()));
-        assert!(wildcard(&"~*".chars().collect::<Vec<_>>(),&['*']));
-        assert!(wildcard_prefix("~","~tail"));
-        assert!(wildcard_prefix("~~","~tail"));
-        assert!(!wildcard_prefix("~*","~tail"));
+        assert!(!wildcard(
+            &"~*".chars().collect::<Vec<_>>(),
+            &"~abc".chars().collect::<Vec<_>>()
+        ));
+        assert!(!wildcard(
+            &"~?".chars().collect::<Vec<_>>(),
+            &"~a".chars().collect::<Vec<_>>()
+        ));
+        assert!(wildcard(&"~*".chars().collect::<Vec<_>>(), &['*']));
+        assert!(wildcard_prefix("~", "~tail"));
+        assert!(wildcard_prefix("~~", "~tail"));
+        assert!(!wildcard_prefix("~*", "~tail"));
     }
     #[test]
     fn empty_cells_do_not_accumulate_in_the_calculation_cache() {
-        let book=Book::default();let mut engine=Engine::new(&book);
-        for row in 0..10000 {assert_eq!(engine.root_cell(0,row,0),Value::Empty);}
+        let book = Book::default();
+        let mut engine = Engine::new(&book);
+        for row in 0..10000 {
+            assert_eq!(engine.root_cell(0, row, 0), Value::Empty);
+        }
         assert!(engine.cache.is_empty());
     }
     #[test]
-    fn independent_text_results_share_a_workbook_cache_budget() -> Result<(),String> {
-        let mut book=Book::default();let id=book.active_id();
-        book.set_input(id,0,0,"=REPT(\"x\",8)")?;
-        book.set_input(id,1,0,"=REPT(\"y\",8)")?;
-        let mut engine=Engine::new(&book);engine.cache_text_limit=12;
-        assert_eq!(engine.root_cell(0,0,0),Value::Text("xxxxxxxx".into()));
-        assert_eq!(engine.root_cell(0,1,0),Value::Error("#NUM!".into()));
-        assert_eq!(engine.cached_text,8);
-        assert_eq!(engine.root_cell(0,0,0),Value::Text("xxxxxxxx".into()));
+    fn independent_text_results_share_a_workbook_cache_budget() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.set_input(id, 0, 0, "=REPT(\"x\",8)")?;
+        book.set_input(id, 1, 0, "=REPT(\"y\",8)")?;
+        let mut engine = Engine::new(&book);
+        engine.cache_text_limit = 12;
+        assert_eq!(engine.root_cell(0, 0, 0), Value::Text("xxxxxxxx".into()));
+        assert_eq!(engine.root_cell(0, 1, 0), Value::Error("#NUM!".into()));
+        assert_eq!(engine.cached_text, 8);
+        assert_eq!(engine.root_cell(0, 0, 0), Value::Text("xxxxxxxx".into()));
         Ok(())
     }
 }
 
 /// Sum in a shared scale so a finite cancellation does not pass through infinity.
-fn scaled_sum(values:&[f64])->f64 {
-    if values.iter().any(|value|!value.is_finite()) {return values.iter().sum();}
-    let scale=values.iter().map(|value|value.abs()).fold(0.0,f64::max);
-    if scale==0.0{return 0.0;}
-    let (mut sum,mut correction)=(0.0,0.0);
-    for value in values {
-        let value=value/scale;
-        let next=sum+value;
-        correction+=if sum.abs()>=value.abs() {(sum-next)+value}else{(value-next)+sum};
-        sum=next;
+fn scaled_sum(values: &[f64]) -> f64 {
+    if values.iter().any(|value| !value.is_finite()) {
+        return values.iter().sum();
     }
-    (sum+correction)*scale
+    let scale = values.iter().map(|value| value.abs()).fold(0.0, f64::max);
+    if scale == 0.0 {
+        return 0.0;
+    }
+    let (mut sum, mut correction) = (0.0, 0.0);
+    for value in values {
+        let value = value / scale;
+        let next = sum + value;
+        correction += if sum.abs() >= value.abs() {
+            (sum - next) + value
+        } else {
+            (value - next) + sum
+        };
+        sum = next;
+    }
+    (sum + correction) * scale
 }
-fn balanced_product(values:&[f64])->f64 {
-    if values.iter().any(|value|*value==0.0) {return 0.0;}
-    let (mut mantissa,mut exponent,mut negative)=(1.0,0i64,false);
-    for value in values {
-        negative^=value.is_sign_negative();
-        let mut magnitude=value.abs();
-        let mut adjustment=0i64;
-        if magnitude<f64::MIN_POSITIVE {magnitude*=4503599627370496.0;adjustment=-52;}
-        let bits=magnitude.to_bits();
-        exponent+=i64::from(((bits>>52)&0x7ff) as u16)-1023+adjustment;
-        mantissa*=f64::from_bits((bits&0x000f_ffff_ffff_ffff)|(1023u64<<52));
-        if mantissa>=2.0 {mantissa*=0.5;exponent+=1;}
+fn balanced_product(values: &[f64]) -> f64 {
+    if values.iter().any(|value| *value == 0.0) {
+        return 0.0;
     }
-    let value=if exponent>1023 {f64::INFINITY}
-        else if exponent< -1075 {0.0}
-        else if exponent== -1075 {mantissa*0.5*f64::from_bits(1)}
-        else if exponent< -1022 {mantissa*f64::MIN_POSITIVE*f64::from_bits(((exponent+1022+1023) as u64)<<52)}
-        else {mantissa*f64::from_bits(((exponent+1023) as u64)<<52)};
-    if negative {-value}else{value}
+    let (mut mantissa, mut exponent, mut negative) = (1.0, 0i64, false);
+    for value in values {
+        negative ^= value.is_sign_negative();
+        let mut magnitude = value.abs();
+        let mut adjustment = 0i64;
+        if magnitude < f64::MIN_POSITIVE {
+            magnitude *= 4503599627370496.0;
+            adjustment = -52;
+        }
+        let bits = magnitude.to_bits();
+        exponent += i64::from(((bits >> 52) & 0x7ff) as u16) - 1023 + adjustment;
+        mantissa *= f64::from_bits((bits & 0x000f_ffff_ffff_ffff) | (1023u64 << 52));
+        if mantissa >= 2.0 {
+            mantissa *= 0.5;
+            exponent += 1;
+        }
+    }
+    let value = if exponent > 1023 {
+        f64::INFINITY
+    } else if exponent < -1075 {
+        0.0
+    } else if exponent == -1075 {
+        mantissa * 0.5 * f64::from_bits(1)
+    } else if exponent < -1022 {
+        mantissa * f64::MIN_POSITIVE * f64::from_bits(((exponent + 1022 + 1023) as u64) << 52)
+    } else {
+        mantissa * f64::from_bits(((exponent + 1023) as u64) << 52)
+    };
+    if negative { -value } else { value }
 }
 #[cfg(test)]
 mod next_arithmetic_defects {
     use super::*;
-    fn number(book:&Book,input:&str)->Result<f64,String> {
-        match evaluate(book,book.active_id(),input) {Value::Number(value)=>Ok(value),value=>Err(format!("{input}: {value:?}"))}
-    }
-    #[test]
-    fn modulo_does_not_overflow_a_discarded_quotient()->Result<(),String> {
-        let book=Book::default();
-        assert_eq!(number(&book,"=MOD(1e308,1)")?,0.0);
-        assert_eq!(number(&book,"=MOD(-3,2)")?,1.0);
-        assert_eq!(number(&book,"=MOD(3,-2)")?,-1.0);Ok(())
-    }
-    #[test]
-    fn rounding_to_tiny_multiples_keeps_already_integral_large_values()->Result<(),String> {
-        let book=Book::default();
-        for function in ["MROUND","CEILING","FLOOR","CEILING.MATH","FLOOR.PRECISE"] {
-            assert_eq!(number(&book,&format!("={function}(1e308,1e-308)"))?,1e308);
-        }Ok(())
-    }
-    #[test]
-    fn products_balance_large_and_small_factors_and_zero()->Result<(),String> {
-        let book=Book::default();
-        assert!((number(&book,"=PRODUCT(1e200,1e200,1e-200,1e-200)")?-1.0).abs()<1e-12);
-        assert_eq!(number(&book,"=SUMPRODUCT(1e308,1e308,0)")?,0.0);Ok(())
-    }
-    #[test]
-    fn aggregate_cancellation_does_not_overflow_a_finite_result()->Result<(),String> {
-        let mut book=Book::default();let id=book.active_id();
-        for (row,value) in ["1e308","1e308","-1e308"].iter().enumerate() {book.set_input(id,row as u32,0,value)?;}
-        assert_eq!(number(&book,"=SUM(A1:A3)")?,1e308);
-        assert_eq!(number(&book,"=SUMIF(A1:A3,\"<>0\")")?,1e308);
-        assert!((number(&book,"=AVERAGEIF(A1:A3,\"<>0\")")?/1e308-1.0/3.0).abs()<1e-12);Ok(())
-    }
-    #[test]
-    fn npv_keeps_a_finite_late_discounted_cash_flow()->Result<(),String> {
-        let mut book=Book::default();let id=book.active_id();
-        for row in 0..1023 {book.set_input(id,row,0,"0")?;}
-        book.set_input(id,1023,0,"1e308")?;
-        let value=number(&book,"=NPV(1,A1:A1024)")?;
-        assert!(value>0.55 && value<0.56);Ok(())
-    }
-    #[test]
-    fn annuity_payments_and_present_values_use_discounted_growth()->Result<(),String> {
-        let book=Book::default();
-        assert!((number(&book,"=PMT(0.1,10000,1)")?+0.1).abs()<1e-12);
-        assert!((number(&book,"=PV(0.1,10000,-1)")?-10.0).abs()<1e-12);Ok(())
-    }
-}
-
-fn exponential_scale(value:f64,logarithm:f64)->f64 {
-    if value==0.0 {return 0.0;}
-    value.signum()*(value.abs().ln()+logarithm).exp()
-}
-
-fn roman_form(mut value:u32,form:usize)->String {
-    if form==0 {
-        let mut out=String::new();
-        for (amount,symbol) in ROMAN {while value>=amount {out.push_str(symbol);value-=amount;}}
-        return out;
-    }
-    let symbols=[("I",1u32),("V",5),("X",10),("L",50),("C",100),("D",500),("M",1000)];
-    let mut choices=symbols.iter().map(|(symbol,value)|(*value,symbol.to_string())).collect::<Vec<_>>();
-    for high in 1..symbols.len() {
-        let classic=high-if high%2==0 {2}else{1};
-        for low in classic.saturating_sub(form)..=classic {
-            choices.push((symbols[high].1-symbols[low].1,format!("{}{}",symbols[low].0,symbols[high].0)));
+    fn number(book: &Book, input: &str) -> Result<f64, String> {
+        match evaluate(book, book.active_id(), input) {
+            Value::Number(value) => Ok(value),
+            value => Err(format!("{input}: {value:?}")),
         }
     }
-    choices.sort_by(|a,b|b.0.cmp(&a.0).then_with(||a.1.len().cmp(&b.1.len())));
-    let mut out=String::new();
-    for (amount,symbol) in choices {while value>=amount {out.push_str(&symbol);value-=amount;}}
+    #[test]
+    fn modulo_does_not_overflow_a_discarded_quotient() -> Result<(), String> {
+        let book = Book::default();
+        assert_eq!(number(&book, "=MOD(1e308,1)")?, 0.0);
+        assert_eq!(number(&book, "=MOD(-3,2)")?, 1.0);
+        assert_eq!(number(&book, "=MOD(3,-2)")?, -1.0);
+        Ok(())
+    }
+    #[test]
+    fn rounding_to_tiny_multiples_keeps_already_integral_large_values() -> Result<(), String> {
+        let book = Book::default();
+        for function in [
+            "MROUND",
+            "CEILING",
+            "FLOOR",
+            "CEILING.MATH",
+            "FLOOR.PRECISE",
+        ] {
+            assert_eq!(number(&book, &format!("={function}(1e308,1e-308)"))?, 1e308);
+        }
+        Ok(())
+    }
+    #[test]
+    fn products_balance_large_and_small_factors_and_zero() -> Result<(), String> {
+        let book = Book::default();
+        assert!((number(&book, "=PRODUCT(1e200,1e200,1e-200,1e-200)")? - 1.0).abs() < 1e-12);
+        assert_eq!(number(&book, "=SUMPRODUCT(1e308,1e308,0)")?, 0.0);
+        Ok(())
+    }
+    #[test]
+    fn aggregate_cancellation_does_not_overflow_a_finite_result() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        for (row, value) in ["1e308", "1e308", "-1e308"].iter().enumerate() {
+            book.set_input(id, row as u32, 0, value)?;
+        }
+        assert_eq!(number(&book, "=SUM(A1:A3)")?, 1e308);
+        assert_eq!(number(&book, "=SUMIF(A1:A3,\"<>0\")")?, 1e308);
+        assert!((number(&book, "=AVERAGEIF(A1:A3,\"<>0\")")? / 1e308 - 1.0 / 3.0).abs() < 1e-12);
+        Ok(())
+    }
+    #[test]
+    fn npv_keeps_a_finite_late_discounted_cash_flow() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        for row in 0..1023 {
+            book.set_input(id, row, 0, "0")?;
+        }
+        book.set_input(id, 1023, 0, "1e308")?;
+        let value = number(&book, "=NPV(1,A1:A1024)")?;
+        assert!(value > 0.55 && value < 0.56);
+        Ok(())
+    }
+    #[test]
+    fn annuity_payments_and_present_values_use_discounted_growth() -> Result<(), String> {
+        let book = Book::default();
+        assert!((number(&book, "=PMT(0.1,10000,1)")? + 0.1).abs() < 1e-12);
+        assert!((number(&book, "=PV(0.1,10000,-1)")? - 10.0).abs() < 1e-12);
+        Ok(())
+    }
+}
+
+fn exponential_scale(value: f64, logarithm: f64) -> f64 {
+    if value == 0.0 {
+        return 0.0;
+    }
+    value.signum() * (value.abs().ln() + logarithm).exp()
+}
+
+fn roman_form(mut value: u32, form: usize) -> String {
+    if form == 0 {
+        let mut out = String::new();
+        for (amount, symbol) in ROMAN {
+            while value >= amount {
+                out.push_str(symbol);
+                value -= amount;
+            }
+        }
+        return out;
+    }
+    let symbols = [
+        ("I", 1u32),
+        ("V", 5),
+        ("X", 10),
+        ("L", 50),
+        ("C", 100),
+        ("D", 500),
+        ("M", 1000),
+    ];
+    let mut choices = symbols
+        .iter()
+        .map(|(symbol, value)| (*value, symbol.to_string()))
+        .collect::<Vec<_>>();
+    for high in 1..symbols.len() {
+        let classic = high - if high % 2 == 0 { 2 } else { 1 };
+        for low in classic.saturating_sub(form)..=classic {
+            choices.push((
+                symbols[high].1 - symbols[low].1,
+                format!("{}{}", symbols[low].0, symbols[high].0),
+            ));
+        }
+    }
+    choices.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.len().cmp(&b.1.len())));
+    let mut out = String::new();
+    for (amount, symbol) in choices {
+        while value >= amount {
+            out.push_str(&symbol);
+            value -= amount;
+        }
+    }
     out
 }
 #[cfg(test)]
 mod next_reference_roman_tests {
     use super::*;
     #[test]
-    fn computed_references_keep_their_source_coordinates_and_formula_identity()->Result<(),String> {
-        let mut book=Book::default();let id=book.active_id();book.set_input(id,4,2,"=1+1")?;
-        for (formula,expected) in [("=ROW(INDEX(B4:D8,2,2))",Value::Number(5.0)),
-            ("=COLUMN(INDEX(B4:D8,2,2))",Value::Number(3.0)),
-            ("=ISFORMULA(INDEX(B4:D8,2,2))",Value::Bool(true)),
-            ("=ROW(CHOOSE(2,A1,C5))",Value::Number(5.0))] {
-            assert_eq!(evaluate(&book,id,formula),expected,"{formula}");
-        }Ok(())
+    fn computed_references_keep_their_source_coordinates_and_formula_identity() -> Result<(), String>
+    {
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.set_input(id, 4, 2, "=1+1")?;
+        for (formula, expected) in [
+            ("=ROW(INDEX(B4:D8,2,2))", Value::Number(5.0)),
+            ("=COLUMN(INDEX(B4:D8,2,2))", Value::Number(3.0)),
+            ("=ISFORMULA(INDEX(B4:D8,2,2))", Value::Bool(true)),
+            ("=ROW(CHOOSE(2,A1,C5))", Value::Number(5.0)),
+        ] {
+            assert_eq!(evaluate(&book, id, formula), expected, "{formula}");
+        }
+        Ok(())
     }
     #[test]
     fn roman_accepts_all_documented_forms_and_boolean_aliases() {
-        let book=Book::default();let id=book.active_id();
-        for (form,expected) in [("0","CDXCIX"),("1","LDVLIV"),("2","XDIX"),("3","VDIV"),("4","ID"),("TRUE","CDXCIX"),("FALSE","ID")] {
-            assert_eq!(evaluate(&book,id,&format!("=ROMAN(499,{form})")),Value::Text(expected.into()));
+        let book = Book::default();
+        let id = book.active_id();
+        for (form, expected) in [
+            ("0", "CDXCIX"),
+            ("1", "LDVLIV"),
+            ("2", "XDIX"),
+            ("3", "VDIV"),
+            ("4", "ID"),
+            ("TRUE", "CDXCIX"),
+            ("FALSE", "ID"),
+        ] {
+            assert_eq!(
+                evaluate(&book, id, &format!("=ROMAN(499,{form})")),
+                Value::Text(expected.into())
+            );
         }
     }
 }
 
-fn literal_search(source:&[char],needle:&str)->Option<usize> {
-    let mut folded=String::new();let mut offsets=Vec::new();
-    for (index,ch) in source.iter().enumerate() {
-        offsets.push((folded.len(),index));folded.extend(ch.to_lowercase());
+fn literal_search(source: &[char], needle: &str) -> Option<usize> {
+    let mut folded = String::new();
+    let mut offsets = Vec::new();
+    for (index, ch) in source.iter().enumerate() {
+        offsets.push((folded.len(), index));
+        folded.extend(ch.to_lowercase());
     }
-    let pattern=needle.chars().flat_map(char::to_lowercase).collect::<String>();
-    let found=folded.find(&pattern)?;
-    if offsets.is_empty(){return Some(0);}
-    let slot=offsets.partition_point(|(offset,_)|*offset<=found).saturating_sub(1);
-    offsets.get(slot).map(|(_,index)|*index)
+    let pattern = needle
+        .chars()
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    let found = folded.find(&pattern)?;
+    if offsets.is_empty() {
+        return Some(0);
+    }
+    let slot = offsets
+        .partition_point(|(offset, _)| *offset <= found)
+        .saturating_sub(1);
+    offsets.get(slot).map(|(_, index)| *index)
 }
 #[cfg(test)]
 mod next_search_formula_tests {
     use super::*;
     #[test]
     fn empty_find_text_does_not_allow_a_start_after_the_haystack() {
-        let book=Book::default();let id=book.active_id();
-        for input in ["=FIND(\"\",\"abc\",4)","=SEARCH(\"\",\"abc\",4)"] {
-            assert_eq!(evaluate(&book,id,input),Value::Error("#VALUE!".into()));
+        let book = Book::default();
+        let id = book.active_id();
+        for input in ["=FIND(\"\",\"abc\",4)", "=SEARCH(\"\",\"abc\",4)"] {
+            assert_eq!(evaluate(&book, id, input), Value::Error("#VALUE!".into()));
         }
-        assert_eq!(evaluate(&book,id,"=FIND(\"\",\"abc\",3)"),Value::Number(3.0));
+        assert_eq!(
+            evaluate(&book, id, "=FIND(\"\",\"abc\",3)"),
+            Value::Number(3.0)
+        );
     }
     #[test]
     fn literal_search_handles_long_misses_and_keeps_original_unicode_positions() {
-        let source="a".repeat(32767).chars().collect::<Vec<_>>();
-        assert_eq!(literal_search(&source,"missing"),None);
-        assert_eq!(literal_search(&"😀Привет".chars().collect::<Vec<_>>(),"ВЕТ"),Some(4));
+        let source = "a".repeat(32767).chars().collect::<Vec<_>>();
+        assert_eq!(literal_search(&source, "missing"), None);
+        assert_eq!(
+            literal_search(&"😀Привет".chars().collect::<Vec<_>>(), "ВЕТ"),
+            Some(4)
+        );
     }
 }
 
@@ -4777,14 +5290,19 @@ mod hundred_numeric_tests {
     #[test]
     fn numbervalue_ignores_spaces_between_percent_marks() {
         let book = Book::default();
-        let Value::Number(value) = evaluate(&book, book.active_id(), "=NUMBERVALUE(\"9% %\")") else { panic!("number"); };
+        let Value::Number(value) = evaluate(&book, book.active_id(), "=NUMBERVALUE(\"9% %\")")
+        else {
+            panic!("number");
+        };
         assert!((value - 0.0009).abs() < 1e-15);
     }
     #[test]
     fn numbervalue_applies_many_percent_marks_without_an_infinite_divisor() {
         let book = Book::default();
         let input = format!("=NUMBERVALUE(\"1e308{}\")", "%".repeat(200));
-        let Value::Number(value) = evaluate(&book, book.active_id(), &input) else { panic!("number"); };
+        let Value::Number(value) = evaluate(&book, book.active_id(), &input) else {
+            panic!("number");
+        };
         assert!((value / 1e-92 - 1.0).abs() < 1e-12);
     }
     #[test]
@@ -4792,14 +5310,20 @@ mod hundred_numeric_tests {
         let book = Book::default();
         let small = evaluate(&book, book.active_id(), "=NPER(0.1,-1,1,1)");
         let large = evaluate(&book, book.active_id(), "=NPER(0.1,-1e308,1e308,1e308)");
-        let (Value::Number(small), Value::Number(large)) = (small, large) else { panic!("numbers"); };
+        let (Value::Number(small), Value::Number(large)) = (small, large) else {
+            panic!("numbers");
+        };
         assert!((small - large).abs() < 1e-12);
     }
     #[test]
     fn random_between_opposite_large_bounds_stays_finite() {
         let book = Book::default();
         for _ in 0..16 {
-            let Value::Number(value) = evaluate(&book, book.active_id(), "=RANDBETWEEN(-1e308,1e308)") else { panic!("number"); };
+            let Value::Number(value) =
+                evaluate(&book, book.active_id(), "=RANDBETWEEN(-1e308,1e308)")
+            else {
+                panic!("number");
+            };
             assert!((-1e308..=1e308).contains(&value));
         }
     }
@@ -4821,11 +5345,23 @@ mod hundred_parser_reference_tests {
         book.set_input(id, 0, 0, "=1/0")?;
         let mut engine = Engine::new(&book);
         engine.materialized = 64 * 1024 * 1024;
-        assert_eq!(engine.eval(&parse("=ROWS(A1:B2)")?, 0, 0, 0)?.first(), Value::Number(2.0));
-        assert_eq!(engine.eval(&parse("=COLUMNS(A1:D2)")?, 0, 0, 0)?.first(), Value::Number(4.0));
+        assert_eq!(
+            engine.eval(&parse("=ROWS(A1:B2)")?, 0, 0, 0)?.first(),
+            Value::Number(2.0)
+        );
+        assert_eq!(
+            engine.eval(&parse("=COLUMNS(A1:D2)")?, 0, 0, 0)?.first(),
+            Value::Number(4.0)
+        );
         assert!(engine.cache.is_empty());
-        assert_eq!(evaluate(&book, id, "=ROWS('missing'!A1:B2)"), Value::Error("#REF!".into()));
-        assert_eq!(evaluate(&book, id, "=COLUMNS('missing'!A1:B2)"), Value::Error("#REF!".into()));
+        assert_eq!(
+            evaluate(&book, id, "=ROWS('missing'!A1:B2)"),
+            Value::Error("#REF!".into())
+        );
+        assert_eq!(
+            evaluate(&book, id, "=COLUMNS('missing'!A1:B2)"),
+            Value::Error("#REF!".into())
+        );
         Ok(())
     }
 }
@@ -4843,24 +5379,44 @@ fn wildcard_search(pattern: &str, text: &[char], mut budget: usize) -> CalcResul
         let source = &folded[start..];
         let (mut pi, mut ti, mut star, mut mark) = (0usize, 0usize, None, 0usize);
         loop {
-            if budget == 0 { return Err("#NUM!".into()); }
-            budget -= 1;
-            if pi == pattern.len() { return Ok(Some(original)); }
-            if pattern.get(pi) == Some(&'*') {
-                star = Some(pi); pi += 1; mark = ti; continue;
+            if budget == 0 {
+                return Err("#NUM!".into());
             }
-            if ti == source.len() { break; }
+            budget -= 1;
+            if pi == pattern.len() {
+                return Ok(Some(original));
+            }
+            if pattern.get(pi) == Some(&'*') {
+                star = Some(pi);
+                pi += 1;
+                mark = ti;
+                continue;
+            }
+            if ti == source.len() {
+                break;
+            }
             let escaped = pattern.get(pi) == Some(&'~')
-                && pattern.get(pi+1).is_some_and(|ch| matches!(ch, '*' | '?' | '~'));
-            if escaped && pattern.get(pi+1) == source.get(ti) {
-                pi += 2; ti += 1;
-            } else if !escaped && (pattern.get(pi) == Some(&'?') || pattern.get(pi) == source.get(ti)) {
-                pi += 1; ti += 1;
+                && pattern
+                    .get(pi + 1)
+                    .is_some_and(|ch| matches!(ch, '*' | '?' | '~'));
+            if escaped && pattern.get(pi + 1) == source.get(ti) {
+                pi += 2;
+                ti += 1;
+            } else if !escaped
+                && (pattern.get(pi) == Some(&'?') || pattern.get(pi) == source.get(ti))
+            {
+                pi += 1;
+                ti += 1;
             } else if let Some(index) = star {
                 mark += 1;
-                if mark > source.len() { break; }
-                ti = mark; pi = index + 1;
-            } else { break; }
+                if mark > source.len() {
+                    break;
+                }
+                ti = mark;
+                pi = index + 1;
+            } else {
+                break;
+            }
         }
     }
     Ok(None)
@@ -4872,19 +5428,40 @@ mod hundred_range_and_wildcard_tests {
     fn wildcard_search_reuses_one_folded_buffer_and_bounds_backtracking() {
         let book = Book::default();
         let query = format!("=SEARCH(\"?z\",\"{}\")", "a".repeat(32000));
-        assert_eq!(evaluate(&book, book.active_id(), &query), Value::Error("#VALUE!".into()));
-        assert_eq!(wildcard_search("*a*a*a*z", &"a".repeat(100).chars().collect::<Vec<_>>(), 10), Err("#NUM!".into()));
-        assert_eq!(wildcard_search("~?", &"a?b".chars().collect::<Vec<_>>(), 100), Ok(Some(1)));
+        assert_eq!(
+            evaluate(&book, book.active_id(), &query),
+            Value::Error("#VALUE!".into())
+        );
+        assert_eq!(
+            wildcard_search("*a*a*a*z", &"a".repeat(100).chars().collect::<Vec<_>>(), 10),
+            Err("#NUM!".into())
+        );
+        assert_eq!(
+            wildcard_search("~?", &"a?b".chars().collect::<Vec<_>>(), 100),
+            Ok(Some(1))
+        );
     }
     #[test]
-    fn computed_reference_consumers_keep_projection_and_subtotal_visibility() -> Result<(), String> {
+    fn computed_reference_consumers_keep_projection_and_subtotal_visibility() -> Result<(), String>
+    {
         let mut book = Book::default();
         let id = book.active_id();
-        book.set_cell(id, 0, 0, "1")?; book.set_cell(id, 1, 0, "1")?;
-        book.set_cell(id, 0, 1, "10")?; book.set_cell(id, 1, 1, "20")?;
-        assert_eq!(evaluate(&book, id, "=SUMIF(A1:A2,1,INDEX(B1:B2,1))"), Value::Number(30.0));
-        book.active_sheet_mut().ok_or("sheet")?.hidden_rows.insert(1);
-        assert_eq!(evaluate(&book, id, "=SUBTOTAL(109,INDEX(B1:B2,0))"), Value::Number(10.0));
+        book.set_cell(id, 0, 0, "1")?;
+        book.set_cell(id, 1, 0, "1")?;
+        book.set_cell(id, 0, 1, "10")?;
+        book.set_cell(id, 1, 1, "20")?;
+        assert_eq!(
+            evaluate(&book, id, "=SUMIF(A1:A2,1,INDEX(B1:B2,1))"),
+            Value::Number(30.0)
+        );
+        book.active_sheet_mut()
+            .ok_or("sheet")?
+            .hidden_rows
+            .insert(1);
+        assert_eq!(
+            evaluate(&book, id, "=SUBTOTAL(109,INDEX(B1:B2,0))"),
+            Value::Number(10.0)
+        );
         Ok(())
     }
 }
@@ -4894,60 +5471,77 @@ mod phase200_numeric_defects {
     use super::*;
     fn number(book: &Book, input: &str) -> Result<f64, String> {
         match evaluate(book, book.active_id(), input) {
-            Value::Number(value) => Ok(value), value => Err(format!("{input}: {value:?}")),
+            Value::Number(value) => Ok(value),
+            value => Err(format!("{input}: {value:?}")),
         }
     }
     #[test]
     fn count_functions_classify_computed_errors_as_values() -> Result<(), String> {
-        let mut book = Book::default(); let id = book.active_id();
+        let mut book = Book::default();
+        let id = book.active_id();
         book.set_cell(id, 0, 0, "=1/0")?;
-        for (input, expected) in [("=COUNT(1/0)", 0.0), ("=COUNTA(1/0)", 1.0),
-            ("=COUNT(A1)", 0.0), ("=COUNTA(A1)", 1.0), ("=COUNT(#N/A,2)", 1.0)] {
+        for (input, expected) in [
+            ("=COUNT(1/0)", 0.0),
+            ("=COUNTA(1/0)", 1.0),
+            ("=COUNT(A1)", 0.0),
+            ("=COUNTA(A1)", 1.0),
+            ("=COUNT(#N/A,2)", 1.0),
+        ] {
             assert_eq!(number(&book, input)?, expected, "{input}");
         }
-        assert_eq!(evaluate(&book,id,"=SUM(1/0)"),Value::Error("#DIV/0!".into()));
+        assert_eq!(
+            evaluate(&book, id, "=SUM(1/0)"),
+            Value::Error("#DIV/0!".into())
+        );
         Ok(())
     }
     #[test]
     fn unary_plus_preserves_text_and_boolean_types() {
-        let book = Book::default(); let id = book.active_id();
+        let book = Book::default();
+        let id = book.active_id();
         for (input, expected) in [
             ("=TYPE(+\"123\")", Value::Number(2.0)),
             ("=+\"plain\"", Value::Text("plain".into())),
             ("=TYPE(+TRUE())", Value::Number(4.0)),
             ("=+A1", Value::Number(0.0)),
             ("=+(1/0)", Value::Error("#DIV/0!".into())),
-        ] { assert_eq!(evaluate(&book,id,input),expected,"{input}"); }
+        ] {
+            assert_eq!(evaluate(&book, id, input), expected, "{input}");
+        }
     }
     #[test]
     fn straight_line_depreciation_divides_before_an_overflowing_difference() -> Result<(), String> {
         let book = Book::default();
-        assert_eq!(number(&book,"=SLN(1e308,-1e308,2)")?,1e308);
-        assert_eq!(number(&book,"=SLN(1e308,1e308,1e-300)")?,0.0);
+        assert_eq!(number(&book, "=SLN(1e308,-1e308,2)")?, 1e308);
+        assert_eq!(number(&book, "=SLN(1e308,1e308,1e-300)")?, 0.0);
         Ok(())
     }
     #[test]
     fn sum_of_years_depreciation_avoids_squaring_large_lives() -> Result<(), String> {
         let book = Book::default();
-        let value=number(&book,"=SYD(1,0,1e200,1)")?;
+        let value = number(&book, "=SYD(1,0,1e200,1)")?;
         assert!((value / 2e-200 - 1.0).abs() < 1e-12);
-        assert!((number(&book,"=SYD(1e308,-1e308,2,1)")? / (1e308_f64 * (4.0 / 3.0)) - 1.0).abs() < 1e-12);
-        assert_eq!(number(&book,"=SYD(1,0,1,1)")?,1.0);
+        assert!(
+            (number(&book, "=SYD(1e308,-1e308,2,1)")? / (1e308_f64 * (4.0 / 3.0)) - 1.0).abs()
+                < 1e-12
+        );
+        assert_eq!(number(&book, "=SYD(1,0,1,1)")?, 1.0);
         Ok(())
     }
     #[test]
     fn rate_is_invariant_under_large_cash_flow_scaling() -> Result<(), String> {
-        let book=Book::default();
-        let expected=number(&book,"=RATE(10,-20,100)")?;
-        assert!((number(&book,"=RATE(10,-2e307,1e308)")?-expected).abs()<1e-9);
+        let book = Book::default();
+        let expected = number(&book, "=RATE(10,-20,100)")?;
+        assert!((number(&book, "=RATE(10,-2e307,1e308)")? - expected).abs() < 1e-9);
         Ok(())
     }
     #[test]
     fn irr_brackets_large_unique_finite_rates() -> Result<(), String> {
-        let mut book=Book::default();let id=book.active_id();
-        book.set_range(id,0,0,&[vec!["-1".into()],vec!["1e200".into()]])?;
-        assert!((number(&book,"=IRR(A1:A2)")?/1e200-1.0).abs()<1e-12);
-        assert_eq!(conventional_irr(&[-1.0,3.0,-2.0]),None);
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.set_range(id, 0, 0, &[vec!["-1".into()], vec!["1e200".into()]])?;
+        assert!((number(&book, "=IRR(A1:A2)")? / 1e200 - 1.0).abs() < 1e-12);
+        assert_eq!(conventional_irr(&[-1.0, 3.0, -2.0]), None);
         Ok(())
     }
 }
@@ -4957,19 +5551,33 @@ mod phase200_formula_domains {
     use super::*;
     #[test]
     fn logarithm_rejects_zero_and_unit_bases_before_evaluation() {
-        let book=Book::default();let id=book.active_id();
-        for input in ["=LOG(100,0)","=LOG(1,0)","=LOG(100,1)","=LOG(100,-2)"] {
-            assert_eq!(evaluate(&book,id,input),Value::Error("#NUM!".into()),"{input}");
+        let book = Book::default();
+        let id = book.active_id();
+        for input in ["=LOG(100,0)", "=LOG(1,0)", "=LOG(100,1)", "=LOG(100,-2)"] {
+            assert_eq!(
+                evaluate(&book, id, input),
+                Value::Error("#NUM!".into()),
+                "{input}"
+            );
         }
-        let Value::Number(value)=evaluate(&book,id,"=LOG(100,0.1)") else {panic!("number");};
-        assert!((value+2.0).abs()<1e-12);
+        let Value::Number(value) = evaluate(&book, id, "=LOG(100,0.1)") else {
+            panic!("number");
+        };
+        assert!((value + 2.0).abs() < 1e-12);
     }
     #[test]
     fn interest_period_cannot_exceed_a_fractional_loan_term() {
-        let book=Book::default();let id=book.active_id();
-        for function in ["IPMT","PPMT"] {
-            assert_eq!(evaluate(&book,id,&format!("={function}(0.1,6,5.5,100)")),Value::Error("#NUM!".into()));
-            assert!(matches!(evaluate(&book,id,&format!("={function}(0.1,5,5.5,100)")),Value::Number(_)));
+        let book = Book::default();
+        let id = book.active_id();
+        for function in ["IPMT", "PPMT"] {
+            assert_eq!(
+                evaluate(&book, id, &format!("={function}(0.1,6,5.5,100)")),
+                Value::Error("#NUM!".into())
+            );
+            assert!(matches!(
+                evaluate(&book, id, &format!("={function}(0.1,5,5.5,100)")),
+                Value::Number(_)
+            ));
         }
     }
 }
@@ -4977,24 +5585,35 @@ mod phase200_formula_domains {
 #[cfg(test)]
 mod phase200_cashflow_defect {
     use super::*;
-    fn number(book:&Book,input:&str)->Result<f64,String> {
-        match evaluate(book,book.active_id(),input) {Value::Number(number)=>Ok(number),value=>Err(format!("{input}: {value:?}"))}
+    fn number(book: &Book, input: &str) -> Result<f64, String> {
+        match evaluate(book, book.active_id(), input) {
+            Value::Number(number) => Ok(number),
+            value => Err(format!("{input}: {value:?}")),
+        }
     }
     #[test]
-    fn annuity_cashflows_scale_before_overflow_and_cancel_exponential_growth() -> Result<(),String> {
-        let book=Book::default();
-        for (ordinary,large) in [
-            ("=PMT(0.1,10,1)","=PMT(0.1,10,1e308)"),
-            ("=PV(0.1,10,-1)","=PV(0.1,10,-1e307)"),
-            ("=FV(0.1,10,-1,1)","=FV(0.1,10,-1e307,1e307)"),
-            ("=PPMT(0.1,2,10,1)","=PPMT(0.1,2,10,1e308)"),
+    fn annuity_cashflows_scale_before_overflow_and_cancel_exponential_growth() -> Result<(), String>
+    {
+        let book = Book::default();
+        for (ordinary, large) in [
+            ("=PMT(0.1,10,1)", "=PMT(0.1,10,1e308)"),
+            ("=PV(0.1,10,-1)", "=PV(0.1,10,-1e307)"),
+            ("=FV(0.1,10,-1,1)", "=FV(0.1,10,-1e307,1e307)"),
+            ("=PPMT(0.1,2,10,1)", "=PPMT(0.1,2,10,1e308)"),
         ] {
-            let scale=if ordinary.starts_with("=PV")||ordinary.starts_with("=FV"){1e307}else{1e308};
-            let expected=number(&book,ordinary)?;
-            assert!((number(&book,large)?/scale-expected).abs()<1e-10,"{large}");
+            let scale = if ordinary.starts_with("=PV") || ordinary.starts_with("=FV") {
+                1e307
+            } else {
+                1e308
+            };
+            let expected = number(&book, ordinary)?;
+            assert!(
+                (number(&book, large)? / scale - expected).abs() < 1e-10,
+                "{large}"
+            );
         }
-        assert_eq!(number(&book,"=FV(1,2000,-1,1)")?,-1.0);
-        assert!((number(&book,"=PV(-0.5,1060,0,1e-308)")?/1.235570475125E11-1.0).abs()<0.01);
+        assert_eq!(number(&book, "=FV(1,2000,-1,1)")?, -1.0);
+        assert!((number(&book, "=PV(-0.5,1060,0,1e-308)")? / 1.235570475125E11 - 1.0).abs() < 0.01);
         Ok(())
     }
 }

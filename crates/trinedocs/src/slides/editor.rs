@@ -161,9 +161,12 @@ pub fn show(ui: &mut egui::Ui, deck: &mut Deck) -> bool {
         ui.ctx().data_mut(|d| d.insert_temp(memory_id, state));
         return false;
     }
-    if ui.is_enabled() && state.edit_text.is_some() && !egui::Popup::is_any_open(ui.ctx())
-        && ui.input(|input|input.key_pressed(egui::Key::Escape)) {
-        end_inline_edit(ui.ctx(),&mut state);
+    if ui.is_enabled()
+        && state.edit_text.is_some()
+        && !egui::Popup::is_any_open(ui.ctx())
+        && ui.input(|input| input.key_pressed(egui::Key::Escape))
+    {
+        end_inline_edit(ui.ctx(), &mut state);
     }
     let mut changed = false;
     let image_result = state
@@ -340,8 +343,11 @@ pub fn show(ui: &mut egui::Ui, deck: &mut Deck) -> bool {
         }
     }
     if let Some((id, index)) = dropped_slide {
-        match move_slide_before(deck,id,index) {
-            Ok(moved) => {changed|=moved;state.scroll_to_selection=true;},
+        match move_slide_before(deck, id, index) {
+            Ok(moved) => {
+                changed |= moved;
+                state.scroll_to_selection = true;
+            }
             Err(e) => state.error = e,
         }
     }
@@ -480,7 +486,7 @@ pub fn show(ui: &mut egui::Ui, deck: &mut Deck) -> bool {
                         {
                             element.text = text;
                         }
-                        select_inserted_objects(&mut state,vec![id]);
+                        select_inserted_objects(&mut state, vec![id]);
                         changed = true;
                     }
                     Err(error) => state.error = error,
@@ -532,9 +538,15 @@ pub fn show(ui: &mut egui::Ui, deck: &mut Deck) -> bool {
     ui.ctx().data_mut(|d| d.insert_temp(memory_id, state));
     changed
 }
-fn take_thumbnail_scroll(state:&mut State,slide_id:u64)->bool {
-    if slide_id!=state.slide_id || (!state.thumbnail_scroll_requested && state.thumbnail_seen_slide==slide_id) {return false;}
-    state.thumbnail_seen_slide=slide_id;state.thumbnail_scroll_requested=false;true
+fn take_thumbnail_scroll(state: &mut State, slide_id: u64) -> bool {
+    if slide_id != state.slide_id
+        || (!state.thumbnail_scroll_requested && state.thumbnail_seen_slide == slide_id)
+    {
+        return false;
+    }
+    state.thumbnail_seen_slide = slide_id;
+    state.thumbnail_scroll_requested = false;
+    true
 }
 fn thumbnail_panel(
     ui: &mut egui::Ui,
@@ -555,20 +567,33 @@ fn thumbnail_panel(
                     .color(crate::chrome::muted(ui)),
             );
             ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut state.slide_filter)
-                    .desired_width(112.0).hint_text("Найти слайд"));
-                if ui.small_button("×").on_hover_text("Очистить фильтр слайдов").clicked(){state.slide_filter.clear();}
+                ui.add(
+                    egui::TextEdit::singleline(&mut state.slide_filter)
+                        .desired_width(112.0)
+                        .hint_text("Найти слайд"),
+                );
+                if ui
+                    .small_button("×")
+                    .on_hover_text("Очистить фильтр слайдов")
+                    .clicked()
+                {
+                    state.slide_filter.clear();
+                }
             });
-            let filter=state.slide_filter.to_lowercase();
-            let mut shown=0usize;
+            let filter = state.slide_filter.to_lowercase();
+            let mut shown = 0usize;
             egui::ScrollArea::vertical()
                 .id_salt("slide_thumbnails")
                 .max_height((main_height - 70.0).max(70.0))
                 .show(ui, |ui| {
                     for (index, slide) in deck.slides.iter().enumerate() {
-                        if !filter.is_empty() && !slide.title.to_lowercase().contains(&filter)
-                            && !slide.section.to_lowercase().contains(&filter) {continue;}
-                        shown+=1;
+                        if !filter.is_empty()
+                            && !slide.title.to_lowercase().contains(&filter)
+                            && !slide.section.to_lowercase().contains(&filter)
+                        {
+                            continue;
+                        }
+                        shown += 1;
                         let selected = slide.id == state.slide_id;
                         if (index == 0
                             || deck
@@ -579,13 +604,29 @@ fn thumbnail_panel(
                         {
                             ui.strong(&slide.section);
                         }
-                        let preview=fit_slide_preview(deck.width,deck.height,Vec2::new(140.0,92.0));
-                        let response=ui.add_sized([150.0,127.0],egui::Button::new("")
-                            .selected(selected).sense(Sense::click_and_drag()));
-                        let rect=response.rect;
-                        let label=format!("Слайд {}: {}{}",index+1,slide.title,if slide.hidden {"; скрыт"}else{""});
-                        response.widget_info(||egui::WidgetInfo::labeled(egui::WidgetType::Button,ui.is_enabled(),&label));
-                        if selected && take_thumbnail_scroll(&mut *state,slide.id) {
+                        let preview =
+                            fit_slide_preview(deck.width, deck.height, Vec2::new(140.0, 92.0));
+                        let response = ui.add_sized(
+                            [150.0, 127.0],
+                            egui::Button::new("")
+                                .selected(selected)
+                                .sense(Sense::click_and_drag()),
+                        );
+                        let rect = response.rect;
+                        let label = format!(
+                            "Слайд {}: {}{}",
+                            index + 1,
+                            slide.title,
+                            if slide.hidden { "; скрыт" } else { "" }
+                        );
+                        response.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::Button,
+                                ui.is_enabled(),
+                                &label,
+                            )
+                        });
+                        if selected && take_thumbnail_scroll(&mut *state, slide.id) {
                             ui.scroll_to_rect(rect, Some(egui::Align::Center));
                         }
                         response.dnd_set_drag_payload(SlideDrag(slide.id));
@@ -616,9 +657,13 @@ fn thumbnail_panel(
                                 Stroke::new(2.0, crate::chrome::accent(ui)),
                             );
                         }
-                        let preview_area=Rect::from_min_size(rect.min+Vec2::splat(5.0),Vec2::new(140.0,92.0));
-                        ui.painter().rect_filled(preview_area,2.0,crate::chrome::workspace(ui));
-                        let canvas=Rect::from_center_size(preview_area.center(),preview);
+                        let preview_area = Rect::from_min_size(
+                            rect.min + Vec2::splat(5.0),
+                            Vec2::new(140.0, 92.0),
+                        );
+                        ui.painter()
+                            .rect_filled(preview_area, 2.0, crate::chrome::workspace(ui));
+                        let canvas = Rect::from_center_size(preview_area.center(), preview);
                         paint_slide(ui.ctx(), ui.painter(), canvas, deck, slide, None);
                         ui.painter().text(
                             rect.left_bottom() + Vec2::new(8.0, -7.0),
@@ -633,7 +678,12 @@ fn thumbnail_panel(
                             ui.visuals().text_color(),
                         );
                         if response.has_focus() {
-                            ui.painter().rect_stroke(rect,6.0,Stroke::new(2.0,crate::chrome::accent(ui)),egui::StrokeKind::Inside);
+                            ui.painter().rect_stroke(
+                                rect,
+                                6.0,
+                                Stroke::new(2.0, crate::chrome::accent(ui)),
+                                egui::StrokeKind::Inside,
+                            );
                         }
                         if response.clone().on_hover_text(label).clicked() {
                             state.slide_id = slide.id;
@@ -641,13 +691,20 @@ fn thumbnail_panel(
                             state.edit_text = None;
                         }
                     }
-                    if shown==0 {ui.weak("Слайды не найдены");}
-                    let (rect,response)=ui.allocate_exact_size(Vec2::new(150.0,14.0),Sense::hover());
-                    if response.dnd_hover_payload::<SlideDrag>().is_some() {
-                        ui.painter().hline(rect.x_range(),rect.center().y,Stroke::new(3.0,crate::chrome::accent(ui)));
+                    if shown == 0 {
+                        ui.weak("Слайды не найдены");
                     }
-                    if let Some(payload)=response.dnd_release_payload::<SlideDrag>() {
-                        *dropped_slide=Some((payload.0,deck.slides.len()));
+                    let (rect, response) =
+                        ui.allocate_exact_size(Vec2::new(150.0, 14.0), Sense::hover());
+                    if response.dnd_hover_payload::<SlideDrag>().is_some() {
+                        ui.painter().hline(
+                            rect.x_range(),
+                            rect.center().y,
+                            Stroke::new(3.0, crate::chrome::accent(ui)),
+                        );
+                    }
+                    if let Some(payload) = response.dnd_release_payload::<SlideDrag>() {
+                        *dropped_slide = Some((payload.0, deck.slides.len()));
                     }
                 });
             ui.horizontal(|ui| {
@@ -681,11 +738,25 @@ fn thumbnail_panel(
 
     changed
 }
-fn slide_property_text(ui:&mut egui::Ui,value:&mut String,slide_id:u64,field:&str,hint:&str)->bool {
-    let id=ui.id().with(("slide-property",slide_id,field));
-    crate::docs::editor::reconcile_text_edit(ui.ctx(),id,value);
-    let changed=ui.add(egui::TextEdit::singleline(&mut *value).id(id).desired_width(f32::INFINITY).hint_text(hint)).changed();
-    crate::docs::editor::remember_text_edit(ui.ctx(),id,value);changed
+fn slide_property_text(
+    ui: &mut egui::Ui,
+    value: &mut String,
+    slide_id: u64,
+    field: &str,
+    hint: &str,
+) -> bool {
+    let id = ui.id().with(("slide-property", slide_id, field));
+    crate::docs::editor::reconcile_text_edit(ui.ctx(), id, value);
+    let changed = ui
+        .add(
+            egui::TextEdit::singleline(&mut *value)
+                .id(id)
+                .desired_width(f32::INFINITY)
+                .hint_text(hint),
+        )
+        .changed();
+    crate::docs::editor::remember_text_edit(ui.ctx(), id, value);
+    changed
 }
 fn slide_panel(ui: &mut egui::Ui, deck: &mut Deck, state: &mut State, main_height: f32) -> bool {
     let mut changed = false;
@@ -702,7 +773,7 @@ fn slide_panel(ui: &mut egui::Ui, deck: &mut Deck, state: &mut State, main_heigh
                             .size(12.0)
                             .color(crate::chrome::muted(ui)),
                     );
-                    changed|=slide_property_text(ui,&mut slide.title,slide.id,"title","");
+                    changed |= slide_property_text(ui, &mut slide.title, slide.id, "title", "");
                     egui::CollapsingHeader::new("Параметры слайда")
                         .id_salt("slide-details")
                         .default_open(false)
@@ -715,7 +786,13 @@ fn slide_panel(ui: &mut egui::Ui, deck: &mut Deck, state: &mut State, main_heigh
                                     ui.color_edit_button_srgb(&mut slide.background).changed();
                             });
                             ui.label(egui::RichText::new("Раздел").color(crate::chrome::muted(ui)));
-                            changed|=slide_property_text(ui,&mut slide.section,slide.id,"section","Без раздела");
+                            changed |= slide_property_text(
+                                ui,
+                                &mut slide.section,
+                                slide.id,
+                                "section",
+                                "Без раздела",
+                            );
                         });
                     ui.separator();
                     egui::CollapsingHeader::new("Переход слайда")
@@ -734,7 +811,7 @@ fn slide_panel(ui: &mut egui::Ui, deck: &mut Deck, state: &mut State, main_heigh
                                             .changed();
                                     }
                                 });
-                            changed |= transition_timing_controls(ui,&mut slide.transition);
+                            changed |= transition_timing_controls(ui, &mut slide.transition);
                         });
                     ui.separator();
                     if let Some(id) = state.selected.first().copied() {
@@ -1109,9 +1186,10 @@ fn ribbon(ui: &mut egui::Ui, deck: &mut Deck, state: &mut State) -> bool {
                                     )
                                     .clicked()
                                 {
-                                    if let Some(slide)=deck.slide_mut(state.slide_id) {
-                                        match rotate_selected(slide,&state.selected,angle) {
-                                            Ok(rotated)=>changed|=rotated,Err(error)=>state.error=error,
+                                    if let Some(slide) = deck.slide_mut(state.slide_id) {
+                                        match rotate_selected(slide, &state.selected, angle) {
+                                            Ok(rotated) => changed |= rotated,
+                                            Err(error) => state.error = error,
                                         }
                                     }
                                     ui.close();
@@ -1342,9 +1420,14 @@ fn ribbon(ui: &mut egui::Ui, deck: &mut Deck, state: &mut State) -> bool {
     ui.add_space(4.0);
     changed
 }
-fn select_inserted_objects(state:&mut State,ids:Vec<u64>) {
-    state.selected=ids;state.edit_text=None;state.edit_cell=None;state.edit_focus=false;
-    state.drag_target=None;state.drag_original.clear();state.canvas_focus_requested=true;
+fn select_inserted_objects(state: &mut State, ids: Vec<u64>) {
+    state.selected = ids;
+    state.edit_text = None;
+    state.edit_cell = None;
+    state.edit_focus = false;
+    state.drag_target = None;
+    state.drag_original.clear();
+    state.canvas_focus_requested = true;
 }
 fn insert_button(
     ui: &mut egui::Ui,
@@ -1358,7 +1441,7 @@ fn insert_button(
     }
     match deck.add_element(state.slide_id, kind) {
         Ok(id) => {
-            select_inserted_objects(state,vec![id]);
+            select_inserted_objects(state, vec![id]);
             true
         }
         Err(error) => {
@@ -1438,7 +1521,7 @@ fn insert_image(deck: &mut Deck, state: &mut State, slide_id: u64, bytes: Vec<u8
                 element.y = ((height - element.h) / 2.0).max(0.0);
             }
             if state.slide_id == slide_id {
-                select_inserted_objects(state,vec![id]);
+                select_inserted_objects(state, vec![id]);
             }
             true
         }
@@ -1527,7 +1610,8 @@ fn paste_selection(deck: &mut Deck, state: &mut State) -> bool {
             slide.elements.push(element);
         }
     }
-    let selected=state.selected.clone();select_inserted_objects(state,selected);
+    let selected = state.selected.clone();
+    select_inserted_objects(state, selected);
     true
 }
 fn clipboard_text(elements: &[Element]) -> String {
@@ -1688,9 +1772,16 @@ fn properties(ui: &mut egui::Ui, e: &mut Element) -> bool {
                     | ElementKind::Arrow
                     | ElementKind::Image { .. }
             );
-            let mut rotation=(e.rotation+180.0).rem_euclid(360.0)-180.0;
-            if ui.add_enabled(rotation_supported,egui::Slider::new(&mut rotation,-180.0..=180.0).text("Поворот")).changed() {
-                e.rotation=rotation;changed=true;
+            let mut rotation = (e.rotation + 180.0).rem_euclid(360.0) - 180.0;
+            if ui
+                .add_enabled(
+                    rotation_supported,
+                    egui::Slider::new(&mut rotation, -180.0..=180.0).text("Поворот"),
+                )
+                .changed()
+            {
+                e.rotation = rotation;
+                changed = true;
             }
             if !rotation_supported {
                 ui.small("Поворот этого типа объекта на холсте пока не поддерживается");
@@ -1701,10 +1792,15 @@ fn properties(ui: &mut egui::Ui, e: &mut Element) -> bool {
         .default_open(false)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                if matches!(e.kind,ElementKind::Rect|ElementKind::Ellipse) {
-                    changed|=ui.checkbox(&mut e.fill_visible,"Заливка").changed();
-                    ui.add_enabled_ui(e.fill_visible,|ui|{changed|=ui.color_edit_button_srgb(&mut e.fill).changed();});
-                }else{ui.label("Заливка");changed|=ui.color_edit_button_srgb(&mut e.fill).changed();}
+                if matches!(e.kind, ElementKind::Rect | ElementKind::Ellipse) {
+                    changed |= ui.checkbox(&mut e.fill_visible, "Заливка").changed();
+                    ui.add_enabled_ui(e.fill_visible, |ui| {
+                        changed |= ui.color_edit_button_srgb(&mut e.fill).changed();
+                    });
+                } else {
+                    ui.label("Заливка");
+                    changed |= ui.color_edit_button_srgb(&mut e.fill).changed();
+                }
                 ui.label("Контур");
                 changed |= ui.color_edit_button_srgb(&mut e.stroke).changed();
             });
@@ -1831,7 +1927,7 @@ fn properties(ui: &mut egui::Ui, e: &mut Element) -> bool {
                 .max_height(210.0)
                 .show_rows(ui, 26.0, values.len().max(labels.len()), |ui, rows| {
                     for index in rows {
-                        let mut value=values.get(index).copied().unwrap_or(0.0);
+                        let mut value = values.get(index).copied().unwrap_or(0.0);
                         ui.push_id(index, |ui| {
                             ui.horizontal(|ui| {
                                 let mut label = labels
@@ -1857,8 +1953,13 @@ fn properties(ui: &mut egui::Ui, e: &mut Element) -> bool {
                                     }
                                 }
                                 crate::docs::editor::remember_text_edit(ui.ctx(), id, &label);
-                                if ui.add(egui::DragValue::new(&mut value).range(-1.0e20..=1.0e20)).changed() {
-                                    values.resize(values.len().max(index+1),0.0);values[index]=value;changed=true;
+                                if ui
+                                    .add(egui::DragValue::new(&mut value).range(-1.0e20..=1.0e20))
+                                    .changed()
+                                {
+                                    values.resize(values.len().max(index + 1), 0.0);
+                                    values[index] = value;
+                                    changed = true;
                                 }
                             });
                         });
@@ -1866,11 +1967,14 @@ fn properties(ui: &mut egui::Ui, e: &mut Element) -> bool {
                 });
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(values.len().max(labels.len()) < 10000, egui::Button::new("+ категория"))
+                    .add_enabled(
+                        values.len().max(labels.len()) < 10000,
+                        egui::Button::new("+ категория"),
+                    )
                     .clicked()
                 {
                     let index = values.len().max(labels.len());
-                    values.resize(index+1,0.0);
+                    values.resize(index + 1, 0.0);
                     if labels.len() <= index {
                         labels.resize_with(index + 1, String::new);
                         if let Some(label) = labels.get_mut(index) {
@@ -1880,12 +1984,17 @@ fn properties(ui: &mut egui::Ui, e: &mut Element) -> bool {
                     changed = true;
                 }
                 if ui
-                    .add_enabled(!values.is_empty()||!labels.is_empty(), egui::Button::new("− категория"))
+                    .add_enabled(
+                        !values.is_empty() || !labels.is_empty(),
+                        egui::Button::new("− категория"),
+                    )
                     .on_hover_text("Удалить последнюю категорию")
                     .clicked()
                 {
                     let removed = values.len().max(labels.len()) - 1;
-                    if removed<values.len() {values.pop();}
+                    if removed < values.len() {
+                        values.pop();
+                    }
                     if removed < labels.len() {
                         labels.remove(removed);
                     }
@@ -1941,15 +2050,32 @@ fn properties(ui: &mut egui::Ui, e: &mut Element) -> bool {
     changed
 }
 /// Controls of one animation step; returns (changed, remove requested).
-fn transition_timing_controls(ui:&mut egui::Ui,transition:&mut super::model::Transition)->bool {
-    let mut changed=ui.add(egui::DragValue::new(&mut transition.duration)
-        .range(0.001..=3600.0).prefix("Длительность ").suffix(" сек.")).changed();
-    let mut auto=transition.advance_after.is_some();
-    if ui.checkbox(&mut auto,"Автоматический переход").changed() {
-        transition.advance_after=if auto {Some(5.0)}else{None};changed=true;
+fn transition_timing_controls(
+    ui: &mut egui::Ui,
+    transition: &mut super::model::Transition,
+) -> bool {
+    let mut changed = ui
+        .add(
+            egui::DragValue::new(&mut transition.duration)
+                .range(0.001..=3600.0)
+                .prefix("Длительность ")
+                .suffix(" сек."),
+        )
+        .changed();
+    let mut auto = transition.advance_after.is_some();
+    if ui.checkbox(&mut auto, "Автоматический переход").changed() {
+        transition.advance_after = if auto { Some(5.0) } else { None };
+        changed = true;
     }
-    if let Some(seconds)=&mut transition.advance_after {
-        changed|=ui.add(egui::DragValue::new(seconds).range(0.001..=86400.0).prefix("После ").suffix(" сек.")).changed();
+    if let Some(seconds) = &mut transition.advance_after {
+        changed |= ui
+            .add(
+                egui::DragValue::new(seconds)
+                    .range(0.001..=86400.0)
+                    .prefix("После ")
+                    .suffix(" сек."),
+            )
+            .changed();
     }
     changed
 }
@@ -2109,14 +2235,26 @@ fn inline_editor(
         };
         let size = font_size.min(ch / scale * 0.7) * scale;
         crate::docs::editor::reconcile_text_edit(ui.ctx(), editor_id.with((r, c)), value);
-        let cell_editor_id=editor_id.with((r,c));
-        let enter_navigation=ui.memory(|memory|memory.has_focus(cell_editor_id))
-            && ui.input(|input|input.key_pressed(egui::Key::Enter)&&!input.modifiers.shift&&!input.modifiers.ctrl&&!input.modifiers.alt);
-        if enter_navigation {ui.input_mut(|input|{input.consume_key(egui::Modifiers::NONE,egui::Key::Enter);});}
+        let cell_editor_id = editor_id.with((r, c));
+        let enter_navigation = ui.memory(|memory| memory.has_focus(cell_editor_id))
+            && ui.input(|input| {
+                input.key_pressed(egui::Key::Enter)
+                    && !input.modifiers.shift
+                    && !input.modifiers.ctrl
+                    && !input.modifiers.alt
+            });
+        if enter_navigation {
+            ui.input_mut(|input| {
+                input.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+            });
+        }
         let response = ui.put(
             Rect::from_min_size(
                 cell.min + Vec2::splat(5.0 * scale),
-                Vec2::new((cw - 10.0 * scale).max(8.0), (ch-10.0*scale).max(size*1.3)),
+                Vec2::new(
+                    (cw - 10.0 * scale).max(8.0),
+                    (ch - 10.0 * scale).max(size * 1.3),
+                ),
             ),
             egui::TextEdit::multiline(value)
                 .id(editor_id.with((r, c)))
@@ -2139,7 +2277,7 @@ fn inline_editor(
         let moving = response.has_focus() && (up || down);
         if moving || enter_navigation || (response.lost_focus() && (tab || enter)) {
             let index = r * columns + c;
-            let enter=enter||enter_navigation;
+            let enter = enter || enter_navigation;
             let target = if tab && shift {
                 index.checked_sub(1)
             } else if tab {
@@ -2234,32 +2372,64 @@ fn snapped_drag_delta(original: &[(u64, f32, f32, f32, f32)], delta: Vec2, grid:
     };
     bounded_delta(original, delta)
 }
-fn object_hit_geometry(element:&Element,origin:Pos2,scale:f32,point:Pos2)->(Rect,bool) {
-    let object=Rect::from_min_size(origin+Vec2::new(element.x,element.y)*scale,Vec2::new(element.w,element.h)*scale);
-    if matches!(element.kind,ElementKind::Line|ElementKind::Arrow) {
-        let [x1,y1,x2,y2]=super::model::line_points(element);
-        let (a,b)=(origin+Vec2::new(x1,y1)*scale,origin+Vec2::new(x2,y2)*scale);
-        let padding=(element.stroke_width*scale*0.5).max(5.0);
-        let bounds=Rect::from_two_pos(a,b).expand(padding);
-        let segment=b-a;let squared=segment.length_sq();
-        let fraction=if squared>0.0 {((point-a).dot(segment)/squared).clamp(0.0,1.0)}else{0.0};
-        return (bounds,point.distance(a+segment*fraction)<=padding);
+fn object_hit_geometry(element: &Element, origin: Pos2, scale: f32, point: Pos2) -> (Rect, bool) {
+    let object = Rect::from_min_size(
+        origin + Vec2::new(element.x, element.y) * scale,
+        Vec2::new(element.w, element.h) * scale,
+    );
+    if matches!(element.kind, ElementKind::Line | ElementKind::Arrow) {
+        let [x1, y1, x2, y2] = super::model::line_points(element);
+        let (a, b) = (
+            origin + Vec2::new(x1, y1) * scale,
+            origin + Vec2::new(x2, y2) * scale,
+        );
+        let padding = (element.stroke_width * scale * 0.5).max(5.0);
+        let bounds = Rect::from_two_pos(a, b).expand(padding);
+        let segment = b - a;
+        let squared = segment.length_sq();
+        let fraction = if squared > 0.0 {
+            ((point - a).dot(segment) / squared).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        return (bounds, point.distance(a + segment * fraction) <= padding);
     }
-    let angle=if matches!(element.kind,ElementKind::Table{..}|ElementKind::Chart{..}){0.0}else{element.rotation.rem_euclid(360.0).to_radians()};
-    let turn=egui::emath::Rot2::from_angle(angle);
-    let corners=[object.left_top(),object.right_top(),object.right_bottom(),object.left_bottom()];
-    let mut bounds=Rect::NOTHING;
-    for corner in corners {bounds.extend_with(object.center()+turn*(corner-object.center()));}
-    let local=object.center()+egui::emath::Rot2::from_angle(-angle)*(point-object.center());
-    let hit=if matches!(element.kind,ElementKind::Ellipse) {
-        let radius=object.size()*0.5+Vec2::splat(2.0);
-        let delta=local-object.center();(delta.x/radius.x).powi(2)+(delta.y/radius.y).powi(2)<=1.0
-    }else{object.expand(2.0).contains(local)};
-    (bounds.expand(2.0),hit)
+    let angle = if matches!(
+        element.kind,
+        ElementKind::Table { .. } | ElementKind::Chart { .. }
+    ) {
+        0.0
+    } else {
+        element.rotation.rem_euclid(360.0).to_radians()
+    };
+    let turn = egui::emath::Rot2::from_angle(angle);
+    let corners = [
+        object.left_top(),
+        object.right_top(),
+        object.right_bottom(),
+        object.left_bottom(),
+    ];
+    let mut bounds = Rect::NOTHING;
+    for corner in corners {
+        bounds.extend_with(object.center() + turn * (corner - object.center()));
+    }
+    let local = object.center() + egui::emath::Rot2::from_angle(-angle) * (point - object.center());
+    let hit = if matches!(element.kind, ElementKind::Ellipse) {
+        let radius = object.size() * 0.5 + Vec2::splat(2.0);
+        let delta = local - object.center();
+        (delta.x / radius.x).powi(2) + (delta.y / radius.y).powi(2) <= 1.0
+    } else {
+        object.expand(2.0).contains(local)
+    };
+    (bounds.expand(2.0), hit)
 }
-fn end_inline_edit(ctx:&egui::Context,state:&mut State) {
-    state.edit_text=None;state.edit_cell=None;state.edit_focus=false;
-    if let Some(id)=ctx.memory(|memory|memory.focused()) {ctx.memory_mut(|memory|memory.surrender_focus(id));}
+fn end_inline_edit(ctx: &egui::Context, state: &mut State) {
+    state.edit_text = None;
+    state.edit_cell = None;
+    state.edit_focus = false;
+    if let Some(id) = ctx.memory(|memory| memory.focused()) {
+        ctx.memory_mut(|memory| memory.surrender_focus(id));
+    }
 }
 fn canvas(
     ui: &mut egui::Ui,
@@ -2274,7 +2444,9 @@ fn canvas(
         Sense::click_and_drag(),
     );
     state.canvas_rect = Some(rect);
-    if std::mem::take(&mut state.canvas_focus_requested) && ui.is_enabled() {response.request_focus();}
+    if std::mem::take(&mut state.canvas_focus_requested) && ui.is_enabled() {
+        response.request_focus();
+    }
     if state.scroll_to_selection {
         let target = state
             .selected
@@ -2329,38 +2501,81 @@ fn canvas(
         }
     }
     if response.clicked() || response.drag_started() {
-        if response.drag_started() {state.drag_target=None;}
+        if response.drag_started() {
+            state.drag_target = None;
+        }
         response.request_focus();
-        let pointer=if response.drag_started() {ui.input(|input|input.pointer.press_origin())}
-            else {response.interact_pointer_pos()};
-        let picked=pointer.and_then(|point|slide.elements.iter().rev().find(|element|
-            object_hit_geometry(element,rect.min,scale,point).1).map(|element|element.id));
-        if let Some(id)=picked {
-            let was_selected=state.selected.contains(&id);
-            let additive=ui.input(|input|input.modifiers.ctrl||input.modifiers.shift);
-            select_object(slide,state,id,additive,response.clicked());
-            if response.clicked() && state.edit_text.is_some_and(|editing|editing!=id) {state.edit_text=None;}
-            let reclick=response.clicked()&&was_selected&&!additive&&slide.element(id).is_some_and(|element|
-                matches!(element.kind,ElementKind::Text|ElementKind::Rect|ElementKind::Ellipse|ElementKind::Table{..}));
-            if (response.double_clicked()&&!additive)||reclick {
-                let cell=slide.element(id).and_then(|element| {
-                    let object=Rect::from_min_size(rect.min+Vec2::new(element.x,element.y)*scale,Vec2::new(element.w,element.h)*scale);
-                    pointer.and_then(|point|table_cell_at(element,object,point))
+        let pointer = if response.drag_started() {
+            ui.input(|input| input.pointer.press_origin())
+        } else {
+            response.interact_pointer_pos()
+        };
+        let picked = pointer.and_then(|point| {
+            slide
+                .elements
+                .iter()
+                .rev()
+                .find(|element| object_hit_geometry(element, rect.min, scale, point).1)
+                .map(|element| element.id)
+        });
+        if let Some(id) = picked {
+            let was_selected = state.selected.contains(&id);
+            let additive = ui.input(|input| input.modifiers.ctrl || input.modifiers.shift);
+            select_object(slide, state, id, additive, response.clicked());
+            if response.clicked() && state.edit_text.is_some_and(|editing| editing != id) {
+                state.edit_text = None;
+            }
+            let reclick = response.clicked()
+                && was_selected
+                && !additive
+                && slide.element(id).is_some_and(|element| {
+                    matches!(
+                        element.kind,
+                        ElementKind::Text
+                            | ElementKind::Rect
+                            | ElementKind::Ellipse
+                            | ElementKind::Table { .. }
+                    )
                 });
-                begin_edit(state,id,cell);
+            if (response.double_clicked() && !additive) || reclick {
+                let cell = slide.element(id).and_then(|element| {
+                    let object = Rect::from_min_size(
+                        rect.min + Vec2::new(element.x, element.y) * scale,
+                        Vec2::new(element.w, element.h) * scale,
+                    );
+                    pointer.and_then(|point| table_cell_at(element, object, point))
+                });
+                begin_edit(state, id, cell);
             }
             if response.drag_started() {
-                state.drag_target=Some(id);
-                state.drag_original=slide.elements.iter().filter(|element|state.selected.contains(&element.id))
-                    .map(|element|(element.id,element.x,element.y,element.w,element.h)).collect();
+                state.drag_target = Some(id);
+                state.drag_original = slide
+                    .elements
+                    .iter()
+                    .filter(|element| state.selected.contains(&element.id))
+                    .map(|element| (element.id, element.x, element.y, element.w, element.h))
+                    .collect();
             }
-        }else if response.clicked() {state.selected.clear();state.edit_text=None;}
+        } else if response.clicked() {
+            state.selected.clear();
+            state.edit_text = None;
+        }
     }
-    if response.drag_stopped() {state.drag_target=None;}
+    if response.drag_stopped() {
+        state.drag_target = None;
+    }
     if response.dragged() && state.drag_target.is_some() {
-        let delta=snapped_drag_delta(&state.drag_original,response.total_drag_delta().unwrap_or(Vec2::ZERO)/scale,state.grid);
-        for (id,x,y,_,_) in &state.drag_original {
-            if let Some(element)=slide.element_mut(*id) {element.x=x+delta.x;element.y=y+delta.y;changed=true;}
+        let delta = snapped_drag_delta(
+            &state.drag_original,
+            response.total_drag_delta().unwrap_or(Vec2::ZERO) / scale,
+            state.grid,
+        );
+        for (id, x, y, _, _) in &state.drag_original {
+            if let Some(element) = slide.element_mut(*id) {
+                element.x = x + delta.x;
+                element.y = y + delta.y;
+                changed = true;
+            }
         }
     }
     for id in state.selected.clone() {
@@ -2558,29 +2773,57 @@ fn resize_geometry(
         new_height,
     )
 }
-fn rotate_selected(slide:&mut Slide,ids:&[u64],angle:f32)->Result<bool,String> {
-    let selected:std::collections::HashSet<_>=ids.iter().copied().collect();
-    let mut units:std::collections::BTreeMap<(bool,u64),Vec<&Element>>=std::collections::BTreeMap::new();
-    for element in slide.elements.iter().filter(|element|selected.contains(&element.id)) {
-        units.entry(element.group.map(|group|(true,group)).unwrap_or((false,element.id))).or_default().push(element);
+fn rotate_selected(slide: &mut Slide, ids: &[u64], angle: f32) -> Result<bool, String> {
+    let selected: std::collections::HashSet<_> = ids.iter().copied().collect();
+    let mut units: std::collections::BTreeMap<(bool, u64), Vec<&Element>> =
+        std::collections::BTreeMap::new();
+    for element in slide
+        .elements
+        .iter()
+        .filter(|element| selected.contains(&element.id))
+    {
+        units
+            .entry(
+                element
+                    .group
+                    .map(|group| (true, group))
+                    .unwrap_or((false, element.id)),
+            )
+            .or_default()
+            .push(element);
     }
-    let turn=egui::emath::Rot2::from_angle(angle.rem_euclid(360.0).to_radians());
-    let mut updates=std::collections::HashMap::new();
+    let turn = egui::emath::Rot2::from_angle(angle.rem_euclid(360.0).to_radians());
+    let mut updates = std::collections::HashMap::new();
     for members in units.into_values() {
-        let mut bounds=Rect::NOTHING;
-        for element in &members {bounds=bounds.union(Rect::from_min_size(Pos2::new(element.x,element.y),Vec2::new(element.w,element.h)));}
+        let mut bounds = Rect::NOTHING;
+        for element in &members {
+            bounds = bounds.union(Rect::from_min_size(
+                Pos2::new(element.x, element.y),
+                Vec2::new(element.w, element.h),
+            ));
+        }
         for element in members {
-            let center=Pos2::new(element.x+element.w/2.0,element.y+element.h/2.0);
-            let next=bounds.center()+turn*(center-bounds.center())-Vec2::new(element.w/2.0,element.h/2.0);
-            if !next.x.is_finite()||!next.y.is_finite()||next.x.abs()>1_000_000.0||next.y.abs()>1_000_000.0 {
+            let center = Pos2::new(element.x + element.w / 2.0, element.y + element.h / 2.0);
+            let next = bounds.center() + turn * (center - bounds.center())
+                - Vec2::new(element.w / 2.0, element.h / 2.0);
+            if !next.x.is_finite()
+                || !next.y.is_finite()
+                || next.x.abs() > 1_000_000.0
+                || next.y.abs() > 1_000_000.0
+            {
                 return Err("Поворот группы выходит за допустимые координаты".into());
             }
-            updates.insert(element.id,(next,(element.rotation+angle).rem_euclid(360.0)));
+            updates.insert(
+                element.id,
+                (next, (element.rotation + angle).rem_euclid(360.0)),
+            );
         }
     }
     for element in &mut slide.elements {
-        if let Some((position,rotation))=updates.get(&element.id) {
-            element.x=position.x;element.y=position.y;element.rotation=*rotation;
+        if let Some((position, rotation)) = updates.get(&element.id) {
+            element.x = position.x;
+            element.y = position.y;
+            element.rotation = *rotation;
         }
     }
     Ok(!updates.is_empty())
@@ -2688,14 +2931,28 @@ fn align(slide: &mut Slide, ids: &[u64], axis: &str, width: f32, height: f32) {
 pub fn rgb(c: [u8; 3]) -> Color32 {
     Color32::from_rgb(c[0], c[1], c[2])
 }
-pub(crate) fn animation_signature(slide:&Slide)->u64 {
-    use std::hash::{Hash,Hasher};
-    let mut hash=std::collections::hash_map::DefaultHasher::new();
-    for element in slide.elements.iter().filter(|element|element.is_animated()) {
+pub(crate) fn animation_signature(slide: &Slide) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    for element in slide
+        .elements
+        .iter()
+        .filter(|element| element.is_animated())
+    {
         element.id.hash(&mut hash);
-        for (slot,animation) in element.animations() {
-            slot.hash(&mut hash);animation.effect.hash(&mut hash);animation.trigger.hash(&mut hash);animation.order.hash(&mut hash);
-            for value in [animation.delay,animation.duration,animation.dx,animation.dy] {value.to_bits().hash(&mut hash);}
+        for (slot, animation) in element.animations() {
+            slot.hash(&mut hash);
+            animation.effect.hash(&mut hash);
+            animation.trigger.hash(&mut hash);
+            animation.order.hash(&mut hash);
+            for value in [
+                animation.delay,
+                animation.duration,
+                animation.dx,
+                animation.dy,
+            ] {
+                value.to_bits().hash(&mut hash);
+            }
         }
     }
     hash.finish()
@@ -2756,14 +3013,34 @@ pub(crate) fn animation_end(slide: &Slide, click_times: &[f32]) -> f32 {
         .fold(0.0_f32, f32::max)
 }
 struct PaintElement<'a> {
-    source:&'a Element,x:f32,y:f32,w:f32,h:f32,rotation:f32,font_size:f32,stroke_width:f32,
+    source: &'a Element,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    rotation: f32,
+    font_size: f32,
+    stroke_width: f32,
 }
 impl<'a> PaintElement<'a> {
-    fn new(source:&'a Element)->Self {Self{source,x:source.x,y:source.y,w:source.w,h:source.h,rotation:source.rotation,font_size:source.font_size,stroke_width:source.stroke_width}}
+    fn new(source: &'a Element) -> Self {
+        Self {
+            source,
+            x: source.x,
+            y: source.y,
+            w: source.w,
+            h: source.h,
+            rotation: source.rotation,
+            font_size: source.font_size,
+            stroke_width: source.stroke_width,
+        }
+    }
 }
 impl std::ops::Deref for PaintElement<'_> {
-    type Target=Element;
-    fn deref(&self)->&Element {self.source}
+    type Target = Element;
+    fn deref(&self) -> &Element {
+        self.source
+    }
 }
 /// The element as it looks at `time` after its animation steps; `None` while it is hidden.
 fn animated_state<'a>(
@@ -2796,7 +3073,7 @@ fn animated_state<'a>(
                 if running {
                     opacity *= ease;
                     match animation.effect.as_str() {
-                        "fly_in" => shift += (1.0 - ease) * (slide_width-out.x),
+                        "fly_in" => shift += (1.0 - ease) * (slide_width - out.x),
                         "zoom" => scale *= 0.05 + 0.95 * ease,
                         _ => {}
                     }
@@ -2808,7 +3085,7 @@ fn animated_state<'a>(
                 } else {
                     opacity *= 1.0 - ease;
                     match animation.effect.as_str() {
-                        "fly_out" => shift += ease * (slide_width-out.x),
+                        "fly_out" => shift += ease * (slide_width - out.x),
                         "zoom_out" => scale *= 1.0 - 0.95 * ease,
                         _ => {}
                     }
@@ -2856,29 +3133,49 @@ pub fn paint_slide(
             && !steps.is_empty()
         {
             if let Some((animated, opacity)) = animated_state(element, steps, *time, deck.width) {
-                paint_projected(ctx,&painter,rect.min,scale,&animated,opacity);
+                paint_projected(ctx, &painter, rect.min, scale, &animated, opacity);
             }
             continue;
         }
         paint_element(ctx, &painter, rect.min, scale, element, 1.0);
     }
 }
-#[derive(Clone,Default)]
-struct SlideTextureCache {entries:Vec<(u64,egui::TextureHandle,usize)>}
+#[derive(Clone, Default)]
+struct SlideTextureCache {
+    entries: Vec<(u64, egui::TextureHandle, usize)>,
+}
 impl SlideTextureCache {
-    fn get(&mut self,key:u64)->Option<egui::TextureHandle> {
-        let index=self.entries.iter().position(|entry|entry.0==key)?;
-        let entry=self.entries.remove(index);let texture=entry.1.clone();self.entries.push(entry);Some(texture)
+    fn get(&mut self, key: u64) -> Option<egui::TextureHandle> {
+        let index = self.entries.iter().position(|entry| entry.0 == key)?;
+        let entry = self.entries.remove(index);
+        let texture = entry.1.clone();
+        self.entries.push(entry);
+        Some(texture)
     }
-    fn insert(&mut self,key:u64,texture:egui::TextureHandle,max_entries:usize,max_pixels:usize) {
-        self.entries.retain(|entry|entry.0!=key);
-        let size=texture.size();let pixels=size[0].saturating_mul(size[1]);
-        if max_entries==0||pixels>max_pixels {return;}
-        while !self.entries.is_empty() && (self.entries.len()>=max_entries
-            || self.entries.iter().fold(pixels,|total,entry|total.saturating_add(entry.2))>max_pixels) {
+    fn insert(
+        &mut self,
+        key: u64,
+        texture: egui::TextureHandle,
+        max_entries: usize,
+        max_pixels: usize,
+    ) {
+        self.entries.retain(|entry| entry.0 != key);
+        let size = texture.size();
+        let pixels = size[0].saturating_mul(size[1]);
+        if max_entries == 0 || pixels > max_pixels {
+            return;
+        }
+        while !self.entries.is_empty()
+            && (self.entries.len() >= max_entries
+                || self
+                    .entries
+                    .iter()
+                    .fold(pixels, |total, entry| total.saturating_add(entry.2))
+                    > max_pixels)
+        {
             self.entries.remove(0);
         }
-        self.entries.push((key,texture,pixels));
+        self.entries.push((key, texture, pixels));
     }
 }
 fn paint_element(
@@ -2889,9 +3186,16 @@ fn paint_element(
     e: &Element,
     opacity: f32,
 ) {
-    paint_projected(ctx,painter,origin,scale,&PaintElement::new(e),opacity);
+    paint_projected(ctx, painter, origin, scale, &PaintElement::new(e), opacity);
 }
-fn paint_projected(ctx:&egui::Context,painter:&egui::Painter,origin:Pos2,scale:f32,e:&PaintElement<'_>,opacity:f32) {
+fn paint_projected(
+    ctx: &egui::Context,
+    painter: &egui::Painter,
+    origin: Pos2,
+    scale: f32,
+    e: &PaintElement<'_>,
+    opacity: f32,
+) {
     if opacity <= 0.0 {
         return;
     }
@@ -2904,20 +3208,37 @@ fn paint_projected(ctx:&egui::Context,painter:&egui::Painter,origin:Pos2,scale:f
     let stroke = Stroke::new(e.stroke_width * scale, rgb(e.stroke));
     match &e.kind {
         ElementKind::Rect => {
-            let mut shape =
-                egui::epaint::RectShape::new(rect,0.0,if e.fill_visible {rgb(e.fill)}else{Color32::TRANSPARENT},stroke,StrokeKind::Inside);
+            let mut shape = egui::epaint::RectShape::new(
+                rect,
+                0.0,
+                if e.fill_visible {
+                    rgb(e.fill)
+                } else {
+                    Color32::TRANSPARENT
+                },
+                stroke,
+                StrokeKind::Inside,
+            );
             shape.angle = e.rotation.rem_euclid(360.0).to_radians();
             painter.add(shape);
         }
         ElementKind::Ellipse => {
-            let mut shape =
-                egui::epaint::EllipseShape::filled(rect.center(),rect.size()/2.0,if e.fill_visible {rgb(e.fill)}else{Color32::TRANSPARENT});
+            let mut shape = egui::epaint::EllipseShape::filled(
+                rect.center(),
+                rect.size() / 2.0,
+                if e.fill_visible {
+                    rgb(e.fill)
+                } else {
+                    Color32::TRANSPARENT
+                },
+            );
             shape.stroke = stroke;
             shape.angle = e.rotation.rem_euclid(360.0).to_radians();
             painter.add(shape);
         }
         ElementKind::Line | ElementKind::Arrow => {
-            let [x1, y1, x2, y2] = super::model::line_points_geometry(e.x,e.y,e.w,e.h,e.rotation);
+            let [x1, y1, x2, y2] =
+                super::model::line_points_geometry(e.x, e.y, e.w, e.h, e.rotation);
             let start = origin + Vec2::new(x1, y1) * scale;
             let end = origin + Vec2::new(x2, y2) * scale;
             if matches!(e.kind, ElementKind::Arrow) {
@@ -2930,24 +3251,34 @@ fn paint_projected(ctx:&egui::Context,painter:&egui::Painter,origin:Pos2,scale:f
             let hash = bytes.iter().fold(0xcbf29ce484222325_u64, |h, b| {
                 (h ^ u64::from(*b)).wrapping_mul(0x100000001b3)
             });
-            let key=egui::Id::new("slides-bounded-texture-cache");
-            let cache=ctx.data_mut(|data|data.get_temp_mut_or_insert_with(key,||
-                std::sync::Arc::new(std::sync::Mutex::new(SlideTextureCache::default()))).clone());
-            let texture = cache.lock().ok().and_then(|mut cache|cache.get(hash)).or_else(|| {
-                let image = crate::util::decode_image(bytes).ok()?.to_rgba8();
-                if image.width() > 8192 || image.height() > 8192 {
-                    return None;
-                }
-                let size = [image.width() as usize, image.height() as usize];
-                let color = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
-                let handle = ctx.load_texture(
-                    format!("slide_image_{}", e.id),
-                    color,
-                    egui::TextureOptions::LINEAR,
-                );
-                if let Ok(mut cache)=cache.lock() {cache.insert(hash,handle.clone(),4096,32_000_000);}
-                Some(handle)
+            let key = egui::Id::new("slides-bounded-texture-cache");
+            let cache = ctx.data_mut(|data| {
+                data.get_temp_mut_or_insert_with(key, || {
+                    std::sync::Arc::new(std::sync::Mutex::new(SlideTextureCache::default()))
+                })
+                .clone()
             });
+            let texture = cache
+                .lock()
+                .ok()
+                .and_then(|mut cache| cache.get(hash))
+                .or_else(|| {
+                    let image = crate::util::decode_image(bytes).ok()?.to_rgba8();
+                    if image.width() > 8192 || image.height() > 8192 {
+                        return None;
+                    }
+                    let size = [image.width() as usize, image.height() as usize];
+                    let color = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
+                    let handle = ctx.load_texture(
+                        format!("slide_image_{}", e.id),
+                        color,
+                        egui::TextureOptions::LINEAR,
+                    );
+                    if let Ok(mut cache) = cache.lock() {
+                        cache.insert(hash, handle.clone(), 4096, 32_000_000);
+                    }
+                    Some(handle)
+                });
             if let Some(texture) = texture {
                 let mut mesh = egui::Mesh::with_texture(texture.id());
                 mesh.add_rect_with_uv(
@@ -2956,7 +3287,8 @@ fn paint_projected(ctx:&egui::Context,painter:&egui::Painter,origin:Pos2,scale:f
                     Color32::WHITE,
                 );
                 if e.rotation != 0.0 {
-                    let turn = egui::emath::Rot2::from_angle(e.rotation.rem_euclid(360.0).to_radians());
+                    let turn =
+                        egui::emath::Rot2::from_angle(e.rotation.rem_euclid(360.0).to_radians());
                     let center = rect.center();
                     for vertex in &mut mesh.vertices {
                         vertex.pos = center + turn * (vertex.pos - center);
@@ -3030,12 +3362,19 @@ fn paint_projected(ctx:&egui::Context,painter:&egui::Painter,origin:Pos2,scale:f
         ElementKind::Chart { values, labels } => {
             let (min, max) = super::model::chart_bounds(values);
             let range = max - min;
-            let layout=super::model::chart_layout_geometry(e.y,e.h,e.font_size,!e.text.is_empty(),labels);
-            let painter=painter.with_clip_rect(rect);
-            let plot_height=layout.plot_h*scale;
+            let layout = super::model::chart_layout_geometry(
+                e.y,
+                e.h,
+                e.font_size,
+                !e.text.is_empty(),
+                labels,
+            );
+            let painter = painter.with_clip_rect(rect);
+            let plot_height = layout.plot_h * scale;
             let cw = rect.width() / values.len().max(labels.len()).max(1) as f32;
-            let baseline = origin.y + layout.plot_y*scale + plot_height * max / range;
-            let inset=(cw*0.15).min(4.0*scale);let bar_width=(cw-2.0*inset).max(0.0);
+            let baseline = origin.y + layout.plot_y * scale + plot_height * max / range;
+            let inset = (cw * 0.15).min(4.0 * scale);
+            let bar_width = (cw - 2.0 * inset).max(0.0);
             painter.line_segment(
                 [
                     Pos2::new(rect.left(), baseline),
@@ -3044,7 +3383,7 @@ fn paint_projected(ctx:&egui::Context,painter:&egui::Painter,origin:Pos2,scale:f
                 stroke,
             );
             for i in 0..values.len().max(labels.len()) {
-                let v=values.get(i).copied().unwrap_or(0.0);
+                let v = values.get(i).copied().unwrap_or(0.0);
                 let height = v.abs() / range * plot_height;
                 let bar = Rect::from_min_size(
                     Pos2::new(
@@ -3058,13 +3397,32 @@ fn paint_projected(ctx:&egui::Context,painter:&egui::Painter,origin:Pos2,scale:f
                     Vec2::new(bar_width, height),
                 );
                 painter.rect_filled(bar, 0.0, rgb(e.fill));
-                if layout.label_size>=1.0 {
-                    for (line_index,line) in super::model::chart_label(labels,i).split('\n').enumerate() {
-                        let text=super::model::fit_label_line(line,cw/scale,layout.label_size,&e.font,e.bold,e.italic);
+                if layout.label_size >= 1.0 {
+                    for (line_index, line) in
+                        super::model::chart_label(labels, i).split('\n').enumerate()
+                    {
+                        let text = super::model::fit_label_line(
+                            line,
+                            cw / scale,
+                            layout.label_size,
+                            &e.font,
+                            e.bold,
+                            e.italic,
+                        );
                         painter.text(
-                            Pos2::new(bar.center().x,origin.y+(layout.label_y+line_index as f32*layout.label_size*1.2)*scale),
-                            Align2::CENTER_TOP,text,
-                            FontId::new(layout.label_size*scale,crate::fonts::egui_family(painter.ctx(),&e.font,e.bold,e.italic)),
+                            Pos2::new(
+                                bar.center().x,
+                                origin.y
+                                    + (layout.label_y
+                                        + line_index as f32 * layout.label_size * 1.2)
+                                        * scale,
+                            ),
+                            Align2::CENTER_TOP,
+                            text,
+                            FontId::new(
+                                layout.label_size * scale,
+                                crate::fonts::egui_family(painter.ctx(), &e.font, e.bold, e.italic),
+                            ),
                             rgb(e.color),
                         );
                     }
@@ -3074,14 +3432,26 @@ fn paint_projected(ctx:&egui::Context,painter:&egui::Painter,origin:Pos2,scale:f
         ElementKind::Text => {}
     }
     if !e.text.is_empty() {
-        if let ElementKind::Chart{labels,..}=&e.kind {
-            let title_height=super::model::chart_layout_geometry(e.y,e.h,e.font_size,!e.text.is_empty(),labels).title_h*scale;
-            painter=painter.with_clip_rect(Rect::from_min_size(rect.min,Vec2::new(rect.width(),title_height)));
+        if let ElementKind::Chart { labels, .. } = &e.kind {
+            let title_height = super::model::chart_layout_geometry(
+                e.y,
+                e.h,
+                e.font_size,
+                !e.text.is_empty(),
+                labels,
+            )
+            .title_h
+                * scale;
+            painter = painter.with_clip_rect(Rect::from_min_size(
+                rect.min,
+                Vec2::new(rect.width(), title_height),
+            ));
         }
         let mut job = egui::text::LayoutJob::default();
         job.wrap.max_width = f32::INFINITY;
         job.append(
-            &super::model::text_lines_content(&e.text,e.w,e.font_size,&e.font,e.bold,e.italic).join("\n"),
+            &super::model::text_lines_content(&e.text, e.w, e.font_size, &e.font, e.bold, e.italic)
+                .join("\n"),
             0.0,
             egui::TextFormat {
                 font_id: FontId::new(
@@ -3856,34 +4226,59 @@ mod tests {
     }
 }
 
-fn move_slide_before(deck:&mut Deck,id:u64,before:usize)->Result<bool,String> {
-    let source=deck.slides.iter().position(|slide|slide.id==id).ok_or("Слайд не найден")?;
-    if before>deck.slides.len() {return Err("Неверная позиция слайда".into());}
-    let target=before-usize::from(source<before);
-    if source==target {return Ok(false);}
-    deck.move_slide(id,target)?;Ok(true)
+fn move_slide_before(deck: &mut Deck, id: u64, before: usize) -> Result<bool, String> {
+    let source = deck
+        .slides
+        .iter()
+        .position(|slide| slide.id == id)
+        .ok_or("Слайд не найден")?;
+    if before > deck.slides.len() {
+        return Err("Неверная позиция слайда".into());
+    }
+    let target = before - usize::from(source < before);
+    if source == target {
+        return Ok(false);
+    }
+    deck.move_slide(id, target)?;
+    Ok(true)
 }
-pub(super) fn fit_slide_preview(width:f32,height:f32,available:Vec2)->Vec2 {
-    let scale=(available.x/width).min(available.y/height);
-    Vec2::new(width*scale,height*scale)
+pub(super) fn fit_slide_preview(width: f32, height: f32, available: Vec2) -> Vec2 {
+    let scale = (available.x / width).min(available.y / height);
+    Vec2::new(width * scale, height * scale)
 }
 #[cfg(test)]
 mod next_thumbnail_tests {
     use super::*;
     #[test]
-    fn thumbnail_drop_inserts_before_the_indicated_card_and_supports_the_end()->Result<(),String> {
-        let mut deck=Deck::empty();let a=deck.add_slide("blank");let b=deck.add_slide("blank");let c=deck.add_slide("blank");
-        assert!(move_slide_before(&mut deck,a,2)?);
-        assert_eq!(deck.slides.iter().map(|slide|slide.id).collect::<Vec<_>>(),vec![b,a,c]);
-        assert!(move_slide_before(&mut deck,b,3)?);
-        assert_eq!(deck.slides.iter().map(|slide|slide.id).collect::<Vec<_>>(),vec![a,c,b]);Ok(())
+    fn thumbnail_drop_inserts_before_the_indicated_card_and_supports_the_end() -> Result<(), String>
+    {
+        let mut deck = Deck::empty();
+        let a = deck.add_slide("blank");
+        let b = deck.add_slide("blank");
+        let c = deck.add_slide("blank");
+        assert!(move_slide_before(&mut deck, a, 2)?);
+        assert_eq!(
+            deck.slides.iter().map(|slide| slide.id).collect::<Vec<_>>(),
+            vec![b, a, c]
+        );
+        assert!(move_slide_before(&mut deck, b, 3)?);
+        assert_eq!(
+            deck.slides.iter().map(|slide| slide.id).collect::<Vec<_>>(),
+            vec![a, c, b]
+        );
+        Ok(())
     }
     #[test]
     fn portrait_and_extreme_slide_previews_stay_inside_the_thumbnail_bounds() {
-        for (width,height) in [(960.0,540.0),(540.0,960.0),(1.0,10000.0),(10000.0,1.0)] {
-            let size=fit_slide_preview(width,height,Vec2::new(140.0,92.0));
-            assert!(size.x<=140.001 && size.y<=92.001);
-            assert!((size.x/size.y-width/height).abs()<(width/height)*1e-5);
+        for (width, height) in [
+            (960.0, 540.0),
+            (540.0, 960.0),
+            (1.0, 10000.0),
+            (10000.0, 1.0),
+        ] {
+            let size = fit_slide_preview(width, height, Vec2::new(140.0, 92.0));
+            assert!(size.x <= 140.001 && size.y <= 92.001);
+            assert!((size.x / size.y - width / height).abs() < (width / height) * 1e-5);
         }
     }
 }
@@ -3892,148 +4287,335 @@ mod next_thumbnail_tests {
 mod next_property_range_tests {
     use super::*;
     #[test]
-    fn viewing_imported_animation_values_does_not_clamp_them_to_short_ui_ranges()->Result<(),String> {
-        let ctx=egui::Context::default();crate::fonts::install(&ctx)?;
-        let mut animation=Animation{effect:"move".into(),duration:1200.0,delay:60000.0,order:4000,dx:90000.0,dy:-90000.0,..Default::default()};
-        let before=animation.clone();
-        let _=ctx.run_ui(egui::RawInput::default(),|ui|{animation_controls(ui,&mut animation,0);});
-        assert_eq!(animation,before);
-        let mut element=Element{kind:ElementKind::Rect,w:0.25,h:0.5,stroke_width:250.0,rotation:270.0,..Default::default()};
-        let before=element.clone();
-        let mut transition=super::super::model::Transition{effect:"fade".into(),duration:1200.0,advance_after:Some(60000.0)};
-        let before_transition=transition.clone();
-        let _=ctx.run_ui(egui::RawInput::default(),|ui| {
-            properties(ui,&mut element);transition_timing_controls(ui,&mut transition);
+    fn viewing_imported_animation_values_does_not_clamp_them_to_short_ui_ranges()
+    -> Result<(), String> {
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx)?;
+        let mut animation = Animation {
+            effect: "move".into(),
+            duration: 1200.0,
+            delay: 60000.0,
+            order: 4000,
+            dx: 90000.0,
+            dy: -90000.0,
+            ..Default::default()
+        };
+        let before = animation.clone();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            animation_controls(ui, &mut animation, 0);
         });
-        assert_eq!(element,before);assert_eq!(transition,before_transition);Ok(())
+        assert_eq!(animation, before);
+        let mut element = Element {
+            kind: ElementKind::Rect,
+            w: 0.25,
+            h: 0.5,
+            stroke_width: 250.0,
+            rotation: 270.0,
+            ..Default::default()
+        };
+        let before = element.clone();
+        let mut transition = super::super::model::Transition {
+            effect: "fade".into(),
+            duration: 1200.0,
+            advance_after: Some(60000.0),
+        };
+        let before_transition = transition.clone();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            properties(ui, &mut element);
+            transition_timing_controls(ui, &mut transition);
+        });
+        assert_eq!(element, before);
+        assert_eq!(transition, before_transition);
+        Ok(())
     }
 }
-
 
 #[cfg(test)]
 mod hundred_interaction_tests {
     use super::*;
     #[test]
     fn object_hit_regions_follow_rotation_and_line_geometry() {
-        let e=Element{kind:ElementKind::Rect,x:100.0,y:100.0,w:200.0,h:20.0,rotation:90.0,..Element::default()};
-        let (bounds,hit)=object_hit_geometry(&e,Pos2::ZERO,1.0,Pos2::new(200.0,20.0));
-        assert!(bounds.contains(Pos2::new(200.0,20.0)));assert!(hit);
-        assert!(!object_hit_geometry(&e,Pos2::ZERO,1.0,Pos2::new(110.0,110.0)).1);
-        let line=Element{kind:ElementKind::Line,x:100.0,y:100.0,w:200.0,h:0.001,..Element::default()};
-        assert!(object_hit_geometry(&line,Pos2::ZERO,1.0,Pos2::new(150.0,103.0)).1);
-        assert!(!object_hit_geometry(&line,Pos2::ZERO,1.0,Pos2::new(150.0,110.0)).1);
-        let ellipse=Element{kind:ElementKind::Ellipse,x:0.0,y:0.0,w:100.0,h:100.0,..Element::default()};
-        assert!(!object_hit_geometry(&ellipse,Pos2::ZERO,1.0,Pos2::ZERO).1);
+        let e = Element {
+            kind: ElementKind::Rect,
+            x: 100.0,
+            y: 100.0,
+            w: 200.0,
+            h: 20.0,
+            rotation: 90.0,
+            ..Element::default()
+        };
+        let (bounds, hit) = object_hit_geometry(&e, Pos2::ZERO, 1.0, Pos2::new(200.0, 20.0));
+        assert!(bounds.contains(Pos2::new(200.0, 20.0)));
+        assert!(hit);
+        assert!(!object_hit_geometry(&e, Pos2::ZERO, 1.0, Pos2::new(110.0, 110.0)).1);
+        let line = Element {
+            kind: ElementKind::Line,
+            x: 100.0,
+            y: 100.0,
+            w: 200.0,
+            h: 0.001,
+            ..Element::default()
+        };
+        assert!(object_hit_geometry(&line, Pos2::ZERO, 1.0, Pos2::new(150.0, 103.0)).1);
+        assert!(!object_hit_geometry(&line, Pos2::ZERO, 1.0, Pos2::new(150.0, 110.0)).1);
+        let ellipse = Element {
+            kind: ElementKind::Ellipse,
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 100.0,
+            ..Element::default()
+        };
+        assert!(!object_hit_geometry(&ellipse, Pos2::ZERO, 1.0, Pos2::ZERO).1);
     }
     #[test]
     fn escape_leaves_inline_editing_without_changing_the_deck() {
-        let ctx=egui::Context::default();let deck=Deck::default();let before=deck.clone();
-        let mut state=State{edit_text:Some(9),edit_cell:Some((1,2)),edit_focus:true,..State::default()};
-        let id=egui::Id::new("inline");ctx.memory_mut(|memory|memory.request_focus(id));
-        end_inline_edit(&ctx,&mut state);
-        assert!(state.edit_text.is_none());assert!(state.edit_cell.is_none());assert!(!state.edit_focus);
-        assert_ne!(ctx.memory(|memory|memory.focused()),Some(id));assert_eq!(deck,before);
+        let ctx = egui::Context::default();
+        let deck = Deck::default();
+        let before = deck.clone();
+        let mut state = State {
+            edit_text: Some(9),
+            edit_cell: Some((1, 2)),
+            edit_focus: true,
+            ..State::default()
+        };
+        let id = egui::Id::new("inline");
+        ctx.memory_mut(|memory| memory.request_focus(id));
+        end_inline_edit(&ctx, &mut state);
+        assert!(state.edit_text.is_none());
+        assert!(state.edit_cell.is_none());
+        assert!(!state.edit_focus);
+        assert_ne!(ctx.memory(|memory| memory.focused()), Some(id));
+        assert_eq!(deck, before);
     }
-    fn key(modifiers:egui::Modifiers)->egui::Event {
-        egui::Event::Key{key:egui::Key::Enter,physical_key:None,pressed:true,repeat:false,modifiers}
+    fn key(modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
     }
     #[test]
-    fn multiline_cell_editing_preserves_lines_and_enter_navigation()->Result<(),String> {
-        let ctx=egui::Context::default();crate::fonts::install(&ctx)?;
-        let mut e=Element{id:7,kind:ElementKind::Table{cells:vec![vec!["first\nsecond".into()],vec!["next".into()]]},..Element::default()};
-        let mut state=State::default();begin_edit(&mut state,7,Some((0,0)));
-        let draw=|events:Vec<egui::Event>,state:&mut State,e:&mut Element| {
-            let mut output=ctx.run_ui(egui::RawInput{events,..Default::default()},|ui|{inline_editor(ui,Pos2::ZERO,1.0,e,state);});
+    fn multiline_cell_editing_preserves_lines_and_enter_navigation() -> Result<(), String> {
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx)?;
+        let mut e = Element {
+            id: 7,
+            kind: ElementKind::Table {
+                cells: vec![vec!["first\nsecond".into()], vec!["next".into()]],
+            },
+            ..Element::default()
+        };
+        let mut state = State::default();
+        begin_edit(&mut state, 7, Some((0, 0)));
+        let draw = |events: Vec<egui::Event>, state: &mut State, e: &mut Element| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    inline_editor(ui, Pos2::ZERO, 1.0, e, state);
+                },
+            );
             output.textures_delta.clear();
         };
-        draw(vec![],&mut state,&mut e);
-        let shift=egui::Modifiers{shift:true,..egui::Modifiers::NONE};
-        draw(vec![egui::Event::ModifiersChanged(shift),key(shift)],&mut state,&mut e);
-        assert_eq!(state.edit_cell,Some((0,0)));
-        let ElementKind::Table{cells}=&e.kind else{return Err("table".into());};
-        assert!(cells[0][0].matches('\n').count()>=2);
-        draw(vec![egui::Event::ModifiersChanged(egui::Modifiers::NONE),key(egui::Modifiers::NONE)],&mut state,&mut e);
-        assert_eq!(state.edit_cell,Some((1,0)));assert!(state.edit_focus);Ok(())
+        draw(vec![], &mut state, &mut e);
+        let shift = egui::Modifiers {
+            shift: true,
+            ..egui::Modifiers::NONE
+        };
+        draw(
+            vec![egui::Event::ModifiersChanged(shift), key(shift)],
+            &mut state,
+            &mut e,
+        );
+        assert_eq!(state.edit_cell, Some((0, 0)));
+        let ElementKind::Table { cells } = &e.kind else {
+            return Err("table".into());
+        };
+        assert!(cells[0][0].matches('\n').count() >= 2);
+        draw(
+            vec![
+                egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+                key(egui::Modifiers::NONE),
+            ],
+            &mut state,
+            &mut e,
+        );
+        assert_eq!(state.edit_cell, Some((1, 0)));
+        assert!(state.edit_focus);
+        Ok(())
     }
 }
-
 
 #[cfg(test)]
 mod phase200_editor_tests {
     use super::*;
     #[test]
     fn small_object_resize_does_not_jump_to_four_points() {
-        for handle in [(0.0,0.0),(1.0,1.0),(0.5,1.0),(1.0,0.5)] {
-            assert_eq!(resize_geometry((10.0,20.0,0.25,0.5),handle,Vec2::ZERO,false),(10.0,20.0,0.25,0.5));
+        for handle in [(0.0, 0.0), (1.0, 1.0), (0.5, 1.0), (1.0, 0.5)] {
+            assert_eq!(
+                resize_geometry((10.0, 20.0, 0.25, 0.5), handle, Vec2::ZERO, false),
+                (10.0, 20.0, 0.25, 0.5)
+            );
         }
     }
     #[test]
     fn inserting_objects_ends_old_text_mode_and_returns_canvas_focus() {
-        let mut state=State{edit_text:Some(3),edit_cell:Some((2,4)),edit_focus:true,drag_target:Some(3),..State::default()};
-        select_inserted_objects(&mut state,vec![9]);
-        assert_eq!(state.selected,vec![9]);assert!(state.edit_text.is_none());assert!(state.edit_cell.is_none());
-        assert!(!state.edit_focus);assert!(state.canvas_focus_requested);assert!(state.drag_target.is_none());
+        let mut state = State {
+            edit_text: Some(3),
+            edit_cell: Some((2, 4)),
+            edit_focus: true,
+            drag_target: Some(3),
+            ..State::default()
+        };
+        select_inserted_objects(&mut state, vec![9]);
+        assert_eq!(state.selected, vec![9]);
+        assert!(state.edit_text.is_none());
+        assert!(state.edit_cell.is_none());
+        assert!(!state.edit_focus);
+        assert!(state.canvas_focus_requested);
+        assert!(state.drag_target.is_none());
     }
     #[test]
     fn thumbnail_selection_scroll_requests_survive_canvas_consumption() {
-        let mut state=State{slide_id:9,thumbnail_seen_slide:9,thumbnail_scroll_requested:true,scroll_to_selection:false,..State::default()};
-        assert!(!take_thumbnail_scroll(&mut state,2));assert!(state.thumbnail_scroll_requested);
-        assert!(take_thumbnail_scroll(&mut state,9));assert!(!state.thumbnail_scroll_requested);
-        assert!(!take_thumbnail_scroll(&mut state,9));
-        state.slide_id=10;assert!(take_thumbnail_scroll(&mut state,10));
+        let mut state = State {
+            slide_id: 9,
+            thumbnail_seen_slide: 9,
+            thumbnail_scroll_requested: true,
+            scroll_to_selection: false,
+            ..State::default()
+        };
+        assert!(!take_thumbnail_scroll(&mut state, 2));
+        assert!(state.thumbnail_scroll_requested);
+        assert!(take_thumbnail_scroll(&mut state, 9));
+        assert!(!state.thumbnail_scroll_requested);
+        assert!(!take_thumbnail_scroll(&mut state, 9));
+        state.slide_id = 10;
+        assert!(take_thumbnail_scroll(&mut state, 10));
     }
     #[test]
-    fn group_rotation_turns_member_positions_as_one_unit()->Result<(),String> {
-        let mut deck=Deck::empty();let slide=deck.add_slide("blank");
-        let a=deck.add_element(slide,ElementKind::Rect)?;let b=deck.add_element(slide,ElementKind::Rect)?;let group=deck.allocate_id();
-        for (id,x) in [(a,10.0),(b,50.0)] {let object=deck.slide_mut(slide).and_then(|s|s.element_mut(id)).ok_or("shape")?;
-            object.x=x;object.y=20.0;object.w=20.0;object.h=10.0;object.group=Some(group);}
-        assert!(rotate_selected(deck.slide_mut(slide).ok_or("slide")?,&[a,b],90.0)?);
-        let s=deck.slide(slide).ok_or("slide")?;let a=s.element(a).ok_or("a")?;let b=s.element(b).ok_or("b")?;
-        assert!((a.x-30.0).abs()<0.001 && a.y.abs()<0.001);
-        assert!((b.x-30.0).abs()<0.001 && (b.y-40.0).abs()<0.001);assert_eq!(a.rotation,90.0);deck.validate()?;Ok(())
+    fn group_rotation_turns_member_positions_as_one_unit() -> Result<(), String> {
+        let mut deck = Deck::empty();
+        let slide = deck.add_slide("blank");
+        let a = deck.add_element(slide, ElementKind::Rect)?;
+        let b = deck.add_element(slide, ElementKind::Rect)?;
+        let group = deck.allocate_id();
+        for (id, x) in [(a, 10.0), (b, 50.0)] {
+            let object = deck
+                .slide_mut(slide)
+                .and_then(|s| s.element_mut(id))
+                .ok_or("shape")?;
+            object.x = x;
+            object.y = 20.0;
+            object.w = 20.0;
+            object.h = 10.0;
+            object.group = Some(group);
+        }
+        assert!(rotate_selected(
+            deck.slide_mut(slide).ok_or("slide")?,
+            &[a, b],
+            90.0
+        )?);
+        let s = deck.slide(slide).ok_or("slide")?;
+        let a = s.element(a).ok_or("a")?;
+        let b = s.element(b).ok_or("b")?;
+        assert!((a.x - 30.0).abs() < 0.001 && a.y.abs() < 0.001);
+        assert!((b.x - 30.0).abs() < 0.001 && (b.y - 40.0).abs() < 0.001);
+        assert_eq!(a.rotation, 90.0);
+        deck.validate()?;
+        Ok(())
     }
     #[test]
     fn slide_texture_cache_evicts_old_images_with_shared_pixel_budget() {
-        let ctx=egui::Context::default();let mut cache=SlideTextureCache::default();
-        let image=||egui::ColorImage::from_rgba_unmultiplied([1,1],&[255,0,0,255]);
-        for key in 1..=2 {let texture=ctx.load_texture(format!("texture{key}"),image(),egui::TextureOptions::LINEAR);cache.insert(key,texture,10,2);}
+        let ctx = egui::Context::default();
+        let mut cache = SlideTextureCache::default();
+        let image = || egui::ColorImage::from_rgba_unmultiplied([1, 1], &[255, 0, 0, 255]);
+        for key in 1..=2 {
+            let texture = ctx.load_texture(
+                format!("texture{key}"),
+                image(),
+                egui::TextureOptions::LINEAR,
+            );
+            cache.insert(key, texture, 10, 2);
+        }
         assert!(cache.get(1).is_some());
-        let texture=ctx.load_texture("texture3",image(),egui::TextureOptions::LINEAR);cache.insert(3,texture,10,2);
-        assert!(cache.get(2).is_none());assert!(cache.get(1).is_some());assert!(cache.get(3).is_some());
-        assert_eq!(cache.entries.len(),2);
+        let texture = ctx.load_texture("texture3", image(), egui::TextureOptions::LINEAR);
+        cache.insert(3, texture, 10, 2);
+        assert!(cache.get(2).is_none());
+        assert!(cache.get(1).is_some());
+        assert!(cache.get(3).is_some());
+        assert_eq!(cache.entries.len(), 2);
     }
     #[test]
-    fn fly_effects_travel_to_the_slide_edge_from_off_canvas_objects()->Result<(),String> {
-        let mut element=Element{x:-1000.0,animation:Animation{effect:"fly_in".into(),duration:1.0,..Default::default()},..Default::default()};
-        let (frame,_)=animated_state(&element,&[(0,0.0)],0.0,960.0).ok_or("entrance")?;assert_eq!(frame.x,960.0);
-        element.animation.effect="fly_out".into();
-        let (frame,_)=animated_state(&element,&[(0,0.0)],0.5,960.0).ok_or("exit")?;
-        assert!((frame.x-715.0).abs()<0.001);Ok(())
+    fn fly_effects_travel_to_the_slide_edge_from_off_canvas_objects() -> Result<(), String> {
+        let mut element = Element {
+            x: -1000.0,
+            animation: Animation {
+                effect: "fly_in".into(),
+                duration: 1.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (frame, _) = animated_state(&element, &[(0, 0.0)], 0.0, 960.0).ok_or("entrance")?;
+        assert_eq!(frame.x, 960.0);
+        element.animation.effect = "fly_out".into();
+        let (frame, _) = animated_state(&element, &[(0, 0.0)], 0.5, 960.0).ok_or("exit")?;
+        assert!((frame.x - 715.0).abs() < 0.001);
+        Ok(())
     }
     #[test]
-    fn animation_geometry_borrows_large_payloads_instead_of_cloning_them()->Result<(),String> {
-        let element=Element{kind:ElementKind::Image{bytes:vec![9;1024*1024]},text:"caption".repeat(100),
-            animation:Animation{effect:"move".into(),duration:1.0,dx:100.0,..Default::default()},..Default::default()};
-        let (frame,_)=animated_state(&element,&[(0,0.0)],0.5,960.0).ok_or("frame")?;
-        assert!(std::ptr::eq(frame.source,&element));
-        assert_eq!(frame.text.as_ptr(),element.text.as_ptr());
-        assert!(matches!((&frame.kind,&element.kind),(ElementKind::Image{bytes:a},ElementKind::Image{bytes:b}) if a.as_ptr()==b.as_ptr()));
-        assert_eq!(frame.x,element.x+87.5);assert_eq!(element.x,60.0);Ok(())
+    fn animation_geometry_borrows_large_payloads_instead_of_cloning_them() -> Result<(), String> {
+        let element = Element {
+            kind: ElementKind::Image {
+                bytes: vec![9; 1024 * 1024],
+            },
+            text: "caption".repeat(100),
+            animation: Animation {
+                effect: "move".into(),
+                duration: 1.0,
+                dx: 100.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (frame, _) = animated_state(&element, &[(0, 0.0)], 0.5, 960.0).ok_or("frame")?;
+        assert!(std::ptr::eq(frame.source, &element));
+        assert_eq!(frame.text.as_ptr(), element.text.as_ptr());
+        assert!(
+            matches!((&frame.kind,&element.kind),(ElementKind::Image{bytes:a},ElementKind::Image{bytes:b}) if a.as_ptr()==b.as_ptr())
+        );
+        assert_eq!(frame.x, element.x + 87.5);
+        assert_eq!(element.x, 60.0);
+        Ok(())
     }
 
     #[test]
     fn slide_property_text_focus_does_not_transfer_to_another_slide() {
-        let ctx=egui::Context::default();let mut a="Slide A".to_string();let mut b="Slide B".to_string();let mut field_id=None;
-        let _=ctx.run_ui(egui::RawInput::default(),|ui|{
-            field_id=Some(ui.id().with(("slide-property",1_u64,"title")));
-            slide_property_text(ui,&mut a,1,"title","");
+        let ctx = egui::Context::default();
+        let mut a = "Slide A".to_string();
+        let mut b = "Slide B".to_string();
+        let mut field_id = None;
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            field_id = Some(ui.id().with(("slide-property", 1_u64, "title")));
+            slide_property_text(ui, &mut a, 1, "title", "");
         });
-        if let Some(id)=field_id {ctx.memory_mut(|memory|memory.request_focus(id));}
-        let _=ctx.run_ui(egui::RawInput{events:vec![egui::Event::Text("wrong slide".into())],..Default::default()},|ui|{
-            slide_property_text(ui,&mut b,2,"title","");
-        });
-        assert_eq!(b,"Slide B");
+        if let Some(id) = field_id {
+            ctx.memory_mut(|memory| memory.request_focus(id));
+        }
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::Text("wrong slide".into())],
+                ..Default::default()
+            },
+            |ui| {
+                slide_property_text(ui, &mut b, 2, "title", "");
+            },
+        );
+        assert_eq!(b, "Slide B");
     }
-
 }

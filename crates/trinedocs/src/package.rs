@@ -171,8 +171,11 @@ mod xml_character_tests {
 mod next_package_xml_tests {
     #[test]
     fn xml_scalar_validation_also_covers_uppercase_part_extensions() {
-        for name in ["word/DOCUMENT.XML","word/_rels/document.xml.RELS","a.Xml"] {
-            assert!(super::write_zip(vec![(name.into(),b"<t>\x01</t>".to_vec())]).is_err(),"{name}");
+        for name in ["word/DOCUMENT.XML", "word/_rels/document.xml.RELS", "a.Xml"] {
+            assert!(
+                super::write_zip(vec![(name.into(), b"<t>\x01</t>".to_vec())]).is_err(),
+                "{name}"
+            );
         }
     }
 }

@@ -398,10 +398,10 @@ impl Deck {
                 element.h = 120.0;
             }
         }
-        element.w=element.w.min(self.width).max(0.001);
-        element.h=element.h.min(self.height).max(0.001);
-        element.x=element.x.min(self.width-element.w).max(0.0);
-        element.y=element.y.min(self.height-element.h).max(0.0);
+        element.w = element.w.min(self.width).max(0.001);
+        element.h = element.h.min(self.height).max(0.001);
+        element.x = element.x.min(self.width - element.w).max(0.0);
+        element.y = element.y.min(self.height - element.h).max(0.0);
         if let Some(slide) = self.slide_mut(slide_id) {
             slide.elements.push(element);
         }
@@ -482,7 +482,8 @@ impl Deck {
         }
         let width = self.width;
         let height = self.height;
-        let mx=60.0*(width/960.0).min(1.0);let my=(height/540.0).min(1.0);
+        let mx = 60.0 * (width / 960.0).min(1.0);
+        let my = (height / 540.0).min(1.0);
         let Some(slide) = self.slide_mut(slide_id) else {
             return Err("Слайд не найден".into());
         };
@@ -500,21 +501,21 @@ impl Deck {
             if let Some(e) = slide.element_mut(id) {
                 if index == 0 {
                     e.x = mx;
-                    e.y = 50.0*my;
-                    e.w = (width - 2.0*mx).max(0.001);
-                    e.h = (80.0*my).max(0.001);
+                    e.y = 50.0 * my;
+                    e.w = (width - 2.0 * mx).max(0.001);
+                    e.h = (80.0 * my).max(0.001);
                     e.font_size = 40.0;
                     e.bold = true;
                 } else if layout == "two_content" {
                     e.x = mx + ((index - 1) % 2) as f32 * (width / 2.0);
-                    e.y = 160.0*my;
-                    e.w = (width / 2.0 - 1.5*mx).max(0.001);
-                    e.h = (height - 200.0*my).max(0.001);
+                    e.y = 160.0 * my;
+                    e.w = (width / 2.0 - 1.5 * mx).max(0.001);
+                    e.h = (height - 200.0 * my).max(0.001);
                 } else {
                     e.x = mx;
-                    e.y = 160.0*my;
-                    e.w = (width - 2.0*mx).max(0.001);
-                    e.h = (height - 200.0*my).max(0.001);
+                    e.y = 160.0 * my;
+                    e.w = (width - 2.0 * mx).max(0.001);
+                    e.h = (height - 200.0 * my).max(0.001);
                 }
             }
         }
@@ -688,7 +689,10 @@ impl Deck {
         let columns = cells.iter().map(Vec::len).max().unwrap_or(0).max(1);
         let count = if rows { cells.len() } else { columns };
         if insert {
-            let new_rows = cells.len().max(usize::from(!rows)).saturating_add(usize::from(rows));
+            let new_rows = cells
+                .len()
+                .max(usize::from(!rows))
+                .saturating_add(usize::from(rows));
             let new_columns = columns.saturating_add(usize::from(!rows));
             if index > count || count >= 1000 || new_rows.saturating_mul(new_columns) > 100000 {
                 return Err("invalid_range: index".into());
@@ -697,7 +701,9 @@ impl Deck {
             return Err("invalid_range: нельзя удалить эту строку или столбец".into());
         }
         if insert {
-            if !rows && cells.is_empty() {cells.push(vec![String::new();columns]);}
+            if !rows && cells.is_empty() {
+                cells.push(vec![String::new(); columns]);
+            }
             for line in cells.iter_mut() {
                 line.resize_with(columns, String::new);
             }
@@ -742,7 +748,9 @@ impl Deck {
         self.theme = theme;
     }
     pub fn validate(&self) -> Result<(), String> {
-        if self.theme.font.len()>64 {return Err("Гарнитура темы Slides превышает64 байта".into());}
+        if self.theme.font.len() > 64 {
+            return Err("Гарнитура темы Slides превышает64 байта".into());
+        }
         if !self.width.is_finite()
             || !self.height.is_finite()
             || !(1.0..=10000.0).contains(&self.width)
@@ -923,21 +931,45 @@ impl Deck {
         if visible.is_empty() || visible.len() > 200 {
             return Err("Повестка поддерживает от 1 до 200 видимых слайдов".into());
         }
-        Ok(visible.into_iter().enumerate().map(|(index, slide)| {
-            let title = slide.elements.iter()
-                .filter(|e| matches!(e.kind, ElementKind::Text) && !e.text.trim().is_empty())
-                .max_by(|a,b| a.font_size.total_cmp(&b.font_size).then_with(|| b.y.total_cmp(&a.y)))
-                .map(|e| e.text.as_str()).unwrap_or(&slide.title);
-            let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
-            let title = if title.chars().count() > 80 {
-                format!("{}…", title.chars().take(80).collect::<String>())
-            } else { title };
-            let section = slide.section.split_whitespace().collect::<Vec<_>>().join(" ");
-            let section: String = section.chars().take(40).collect();
-            format!("{}. {}{}", index+1,
-                if section.is_empty() { String::new() } else { format!("{section} — ") },
-                title)
-        }).collect())
+        Ok(visible
+            .into_iter()
+            .enumerate()
+            .map(|(index, slide)| {
+                let title = slide
+                    .elements
+                    .iter()
+                    .filter(|e| matches!(e.kind, ElementKind::Text) && !e.text.trim().is_empty())
+                    .max_by(|a, b| {
+                        a.font_size
+                            .total_cmp(&b.font_size)
+                            .then_with(|| b.y.total_cmp(&a.y))
+                    })
+                    .map(|e| e.text.as_str())
+                    .unwrap_or(&slide.title);
+                let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+                let title = if title.chars().count() > 80 {
+                    format!("{}…", title.chars().take(80).collect::<String>())
+                } else {
+                    title
+                };
+                let section = slide
+                    .section
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let section: String = section.chars().take(40).collect();
+                format!(
+                    "{}. {}{}",
+                    index + 1,
+                    if section.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{section} — ")
+                    },
+                    title
+                )
+            })
+            .collect())
     }
     pub fn insert_agenda(&mut self) -> Result<Vec<u64>, String> {
         if self.width < 480.0 || self.height < 320.0 {
@@ -945,14 +977,23 @@ impl Deck {
         }
         let entries = self.agenda_entries()?;
         let mut body = Element {
-            x: 60.0, y: 112.0, w: self.width-120.0, h: self.height-152.0,
-            font_size: 18.0, font: self.theme.font.clone(), color: self.theme.foreground,
+            x: 60.0,
+            y: 112.0,
+            w: self.width - 120.0,
+            h: self.height - 152.0,
+            font_size: 18.0,
+            font: self.theme.font.clone(),
+            color: self.theme.foreground,
             ..Element::default()
         };
         let mut pages = Vec::new();
         let mut chunk = String::new();
         for entry in entries {
-            let proposed = if chunk.is_empty() { entry.clone() } else { format!("{chunk}\n{entry}") };
+            let proposed = if chunk.is_empty() {
+                entry.clone()
+            } else {
+                format!("{chunk}\n{entry}")
+            };
             body.text = proposed.clone();
             if text_lines(&body).len() as f32 * body.font_size * 1.2 + 10.0 > body.h {
                 if chunk.is_empty() {
@@ -964,27 +1005,41 @@ impl Deck {
                 if text_lines(&body).len() as f32 * body.font_size * 1.2 + 10.0 > body.h {
                     return Err("Заголовок повестки не помещается: увеличьте размер слайда".into());
                 }
-            } else { chunk = proposed; }
+            } else {
+                chunk = proposed;
+            }
         }
-        if !chunk.is_empty() { pages.push(chunk); }
+        if !chunk.is_empty() {
+            pages.push(chunk);
+        }
         let mut candidate = self.clone();
         let mut ids = Vec::new();
         let total = pages.len();
         for (index, text) in pages.into_iter().enumerate() {
             let id = candidate.add_slide("blank");
             let title = candidate.add_element(id, ElementKind::Text)?;
-            let title_text = if total == 1 { "Повестка".into() } else { format!("Повестка · {}/{total}", index+1) };
+            let title_text = if total == 1 {
+                "Повестка".into()
+            } else {
+                format!("Повестка · {}/{total}", index + 1)
+            };
             let font = candidate.theme.font.clone();
             if let Some(element) = candidate.slide_mut(id).and_then(|s| s.element_mut(title)) {
-                element.x = 60.0; element.y = 40.0; element.w = body.w; element.h = 56.0;
-                element.text = title_text.clone(); element.font_size = 28.0;
-                element.bold = true; element.font = font;
+                element.x = 60.0;
+                element.y = 40.0;
+                element.w = body.w;
+                element.h = 56.0;
+                element.text = title_text.clone();
+                element.font_size = 28.0;
+                element.bold = true;
+                element.font = font;
             }
             let content = candidate.add_element(id, ElementKind::Text)?;
             if let Some(element) = candidate.slide_mut(id).and_then(|s| s.element_mut(content)) {
                 let own_id = element.id;
                 *element = body.clone();
-                element.id = own_id; element.text = text;
+                element.id = own_id;
+                element.text = text;
             }
             candidate.slide_mut(id).ok_or("Слайд не найден")?.title = title_text;
             candidate.move_slide(id, index)?;
@@ -1026,13 +1081,15 @@ impl Deck {
                 }
                 ElementKind::Line | ElementKind::Arrow => {}
                 ElementKind::Ellipse => {
-                    if element.fill_visible {items.push(Primitive::Ellipse {
-                        x: element.x,
-                        y: element.y,
-                        w: element.w,
-                        h: element.h,
-                        color: element.fill,
-                    });}
+                    if element.fill_visible {
+                        items.push(Primitive::Ellipse {
+                            x: element.x,
+                            y: element.y,
+                            w: element.w,
+                            h: element.h,
+                            color: element.fill,
+                        });
+                    }
                     if element.stroke_width > 0.0 {
                         for index in 0..48 {
                             let a = index as f32 * std::f32::consts::TAU / 48.0;
@@ -1080,10 +1137,22 @@ impl Deck {
                                 font: element.font.clone(),
                                 ..Element::default()
                             };
-                            for (index, line) in text_lines(&cell).into_iter()
-                                .take(visible_text_lines(ch,cell.font_size)).enumerate() {
-                                let line=fit_label_line(&line,(cw-10.0).max(0.0),cell.font_size,&element.font,element.bold,element.italic);
-                                if line.is_empty() {continue;}
+                            for (index, line) in text_lines(&cell)
+                                .into_iter()
+                                .take(visible_text_lines(ch, cell.font_size))
+                                .enumerate()
+                            {
+                                let line = fit_label_line(
+                                    &line,
+                                    (cw - 10.0).max(0.0),
+                                    cell.font_size,
+                                    &element.font,
+                                    element.bold,
+                                    element.italic,
+                                );
+                                if line.is_empty() {
+                                    continue;
+                                }
                                 items.push(Primitive::TextStyled {
                                     x: x + 5.0,
                                     y: y + 5.0 + index as f32 * cell.font_size * 1.2,
@@ -1125,11 +1194,12 @@ impl Deck {
                 ElementKind::Chart { values, labels } => {
                     let (min, max) = chart_bounds(values);
                     let range = max - min;
-                    let layout=chart_layout(element,labels);
+                    let layout = chart_layout(element, labels);
                     let plot_height = layout.plot_h;
                     let baseline = layout.plot_y + plot_height * max / range;
                     let cw = element.w / values.len().max(labels.len()).max(1) as f32;
-                    let inset=(cw*0.15).min(4.0);let bar_width=(cw-2.0*inset).max(0.0);
+                    let inset = (cw * 0.15).min(4.0);
+                    let bar_width = (cw - 2.0 * inset).max(0.0);
                     if element.stroke_width > 0.0 {
                         items.push(Primitive::Line {
                             x1: element.x,
@@ -1141,7 +1211,7 @@ impl Deck {
                         });
                     }
                     for index in 0..values.len().max(labels.len()) {
-                        let value=values.get(index).copied().unwrap_or(0.0);
+                        let value = values.get(index).copied().unwrap_or(0.0);
                         let height = value.abs() / range * plot_height;
                         items.push(Primitive::Rect {
                             x: element.x + index as f32 * cw + inset,
@@ -1154,18 +1224,37 @@ impl Deck {
                             h: height,
                             color: element.fill,
                         });
-                        let label = chart_label(labels,index);
-                        let center =
-                            element.x + index as f32 * cw + inset + bar_width / 2.0;
-                        for (line_index, line) in label.split('\n').enumerate().filter(|_|layout.label_size>=1.0) {
-                            let line=fit_label_line(line,cw,layout.label_size,&element.font,element.bold,element.italic);
+                        let label = chart_label(labels, index);
+                        let center = element.x + index as f32 * cw + inset + bar_width / 2.0;
+                        for (line_index, line) in label
+                            .split('\n')
+                            .enumerate()
+                            .filter(|_| layout.label_size >= 1.0)
+                        {
+                            let line = fit_label_line(
+                                line,
+                                cw,
+                                layout.label_size,
+                                &element.font,
+                                element.bold,
+                                element.italic,
+                            );
                             items.push(Primitive::TextStyled {
-                                x: center - text_width_with_font(&line,layout.label_size,&element.font,element.bold,element.italic) / 2.0,
+                                x: center
+                                    - text_width_with_font(
+                                        &line,
+                                        layout.label_size,
+                                        &element.font,
+                                        element.bold,
+                                        element.italic,
+                                    ) / 2.0,
                                 y: layout.label_y + line_index as f32 * layout.label_size * 1.2,
                                 text: line,
                                 size: layout.label_size,
                                 color: element.color,
-                                bold:element.bold,italic:element.italic,font:element.font.clone(),
+                                bold: element.bold,
+                                italic: element.italic,
+                                font: element.font.clone(),
                             });
                         }
                     }
@@ -1184,12 +1273,14 @@ impl Deck {
                     h: element.h,
                     color: element.fill,
                 }),
-                ElementKind::Rect=>{},
+                ElementKind::Rect => {}
             }
             if !element.text.is_empty() {
-                let title_limit=if let ElementKind::Chart{labels,..}=&element.kind {
-                    visible_text_lines(chart_layout(element,labels).title_h,element.font_size)
-                }else{usize::MAX};
+                let title_limit = if let ElementKind::Chart { labels, .. } = &element.kind {
+                    visible_text_lines(chart_layout(element, labels).title_h, element.font_size)
+                } else {
+                    usize::MAX
+                };
                 for (index, line) in text_lines(element).iter().take(title_limit).enumerate() {
                     items.push(Primitive::TextStyled {
                         x: element.x + 5.0,
@@ -1259,12 +1350,12 @@ impl Deck {
 /// End points `[x1, y1, x2, y2]` of a line or arrow: the frame diagonal from the top-left to
 /// the bottom-right corner, turned by the element rotation around the frame centre.
 pub fn line_points(e: &Element) -> [f32; 4] {
-    line_points_geometry(e.x,e.y,e.w,e.h,e.rotation)
+    line_points_geometry(e.x, e.y, e.w, e.h, e.rotation)
 }
-pub(crate) fn line_points_geometry(x:f32,y:f32,w:f32,h:f32,rotation:f32)->[f32;4] {
-    let (cx,cy)=(x+w/2.0,y+h/2.0);
-    let (sin,cos)=rotation.rem_euclid(360.0).to_radians().sin_cos();
-    let (hx,hy)=(w/2.0,h/2.0);
+pub(crate) fn line_points_geometry(x: f32, y: f32, w: f32, h: f32, rotation: f32) -> [f32; 4] {
+    let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+    let (sin, cos) = rotation.rem_euclid(360.0).to_radians().sin_cos();
+    let (hx, hy) = (w / 2.0, h / 2.0);
     let (rx, ry) = (hx * cos - hy * sin, hx * sin + hy * cos);
     [cx - rx, cy - ry, cx + rx, cy + ry]
 }
@@ -1272,7 +1363,7 @@ pub(crate) fn line_points_geometry(x:f32,y:f32,w:f32,h:f32,rotation:f32)->[f32;4
 fn layout_line_budget(text: &str, width: f32, size: f32) -> usize {
     let capacity = (((width - 10.0).max(1.0) / (size * 3.0).max(0.001)).floor() as usize).max(1);
     let mut lines = 0_usize;
-    let normalized=text.replace("\r\n","\n").replace('\r',"\n");
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
     for paragraph in normalized.split('\n') {
         let characters = paragraph
             .chars()
@@ -1320,50 +1411,123 @@ pub fn chart_bounds(values: &[f32]) -> (f32, f32) {
         .fold(0.0_f32, f32::max);
     if min == max { (0.0, 1.0) } else { (min, max) }
 }
-#[derive(Clone,Copy,Debug)]
-pub(crate) struct ChartLayout {pub plot_y:f32,pub plot_h:f32,pub label_y:f32,pub label_size:f32,pub title_h:f32}
-pub(crate) fn chart_layout(element:&Element,labels:&[String])->ChartLayout {
-    chart_layout_geometry(element.y,element.h,element.font_size,!element.text.is_empty(),labels)
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ChartLayout {
+    pub plot_y: f32,
+    pub plot_h: f32,
+    pub label_y: f32,
+    pub label_size: f32,
+    pub title_h: f32,
 }
-pub(crate) fn chart_layout_geometry(y:f32,h:f32,font_size:f32,has_title:bool,labels:&[String])->ChartLayout {
-    let lines=labels.iter().map(|text|text.replace("\r\n","\n").replace('\r',"\n").split('\n').count()).max().unwrap_or(1).max(1);
-    let title_h=if !has_title{0.0}else{(font_size*1.2+10.0).min(h*0.35)};
-    let label_h=(font_size*1.2*lines as f32+5.0).min(h*0.4);
-    let label_size=font_size.min((label_h-2.0).max(0.0)/(lines as f32*1.2));
-    let plot_h=(h-title_h-label_h).max(0.0);
-    ChartLayout{plot_y:y+title_h,plot_h,label_y:y+title_h+plot_h+2.0,label_size,title_h}
+pub(crate) fn chart_layout(element: &Element, labels: &[String]) -> ChartLayout {
+    chart_layout_geometry(
+        element.y,
+        element.h,
+        element.font_size,
+        !element.text.is_empty(),
+        labels,
+    )
 }
-pub(crate) fn visible_text_lines(height:f32,size:f32)->usize {
-    if size<=0.0||height<5.0+size {0}else{1+((height-5.0-size)/(size*1.2)).floor() as usize}
+pub(crate) fn chart_layout_geometry(
+    y: f32,
+    h: f32,
+    font_size: f32,
+    has_title: bool,
+    labels: &[String],
+) -> ChartLayout {
+    let lines = labels
+        .iter()
+        .map(|text| {
+            text.replace("\r\n", "\n")
+                .replace('\r', "\n")
+                .split('\n')
+                .count()
+        })
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let title_h = if !has_title {
+        0.0
+    } else {
+        (font_size * 1.2 + 10.0).min(h * 0.35)
+    };
+    let label_h = (font_size * 1.2 * lines as f32 + 5.0).min(h * 0.4);
+    let label_size = font_size.min((label_h - 2.0).max(0.0) / (lines as f32 * 1.2));
+    let plot_h = (h - title_h - label_h).max(0.0);
+    ChartLayout {
+        plot_y: y + title_h,
+        plot_h,
+        label_y: y + title_h + plot_h + 2.0,
+        label_size,
+        title_h,
+    }
 }
-pub(crate) fn fit_label_line(text:&str,width:f32,size:f32,font:&str,bold:bool,italic:bool)->String {
-    let advances=crate::fonts::advances(font,bold,italic);let mut used=0.0;let mut output=String::new();
+pub(crate) fn visible_text_lines(height: f32, size: f32) -> usize {
+    if size <= 0.0 || height < 5.0 + size {
+        0
+    } else {
+        1 + ((height - 5.0 - size) / (size * 1.2)).floor() as usize
+    }
+}
+pub(crate) fn fit_label_line(
+    text: &str,
+    width: f32,
+    size: f32,
+    font: &str,
+    bold: bool,
+    italic: bool,
+) -> String {
+    let advances = crate::fonts::advances(font, bold, italic);
+    let mut used = 0.0;
+    let mut output = String::new();
     for ch in text.chars() {
-        let next=advances.get(&ch).map_or(size*0.55,|value|value*size);
-        if used+next>width.max(0.0) {break;}used+=next;output.push(ch);
-    }output
+        let next = advances.get(&ch).map_or(size * 0.55, |value| value * size);
+        if used + next > width.max(0.0) {
+            break;
+        }
+        used += next;
+        output.push(ch);
+    }
+    output
 }
-pub(crate) fn chart_label(labels:&[String],index:usize)->String {
-    labels.get(index).cloned().unwrap_or_else(||(index+1).to_string())
-        .replace("\r\n","\n").replace('\r',"\n").replace('\t',"    ")
+pub(crate) fn chart_label(labels: &[String], index: usize) -> String {
+    labels
+        .get(index)
+        .cloned()
+        .unwrap_or_else(|| (index + 1).to_string())
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace('\t', "    ")
 }
-pub fn text_width_with_font(text:&str,size:f32,font:&str,bold:bool,italic:bool)->f32 {
-    let advances=crate::fonts::advances(font,bold,italic);
-    text.chars().map(|ch|advances.get(&ch).map_or(size*0.55,|width|width*size)).sum()
+pub fn text_width_with_font(text: &str, size: f32, font: &str, bold: bool, italic: bool) -> f32 {
+    let advances = crate::fonts::advances(font, bold, italic);
+    text.chars()
+        .map(|ch| advances.get(&ch).map_or(size * 0.55, |width| width * size))
+        .sum()
 }
 pub fn text_width(text: &str, size: f32, bold: bool, italic: bool) -> f32 {
-    text_width_with_font(text,size,crate::fonts::DEFAULT_FAMILY,bold,italic)
+    text_width_with_font(text, size, crate::fonts::DEFAULT_FAMILY, bold, italic)
 }
 pub fn text_lines(element: &Element) -> Vec<String> {
-    text_lines_content(&element.text,element.w,element.font_size,&element.font,element.bold,element.italic)
+    text_lines_content(
+        &element.text,
+        element.w,
+        element.font_size,
+        &element.font,
+        element.bold,
+        element.italic,
+    )
 }
-pub(crate) fn text_lines_content(text:&str,width:f32,size:f32,font:&str,bold:bool,italic:bool)->Vec<String> {
-    let advances = crate::fonts::advances(font,bold,italic);
-    let advance = |ch: char| {
-        advances
-            .get(&ch)
-            .map_or(size * 0.55, |w| w * size)
-    };
+pub(crate) fn text_lines_content(
+    text: &str,
+    width: f32,
+    size: f32,
+    font: &str,
+    bold: bool,
+    italic: bool,
+) -> Vec<String> {
+    let advances = crate::fonts::advances(font, bold, italic);
+    let advance = |ch: char| advances.get(&ch).map_or(size * 0.55, |w| w * size);
     let limit = (width - 10.0).max(1.0);
     let mut lines = Vec::new();
     let normalized = text
@@ -1438,8 +1602,20 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        let expected=chart_layout(deck.slide(slide).and_then(|s|s.element(chart)).ok_or("chart")?,&["positive".into(),"negative".into()]).plot_h/2.0;
-        assert!(bars.iter().filter(|h| (**h - expected).abs() < 0.001).count() >= 2);
+        let expected = chart_layout(
+            deck.slide(slide)
+                .and_then(|s| s.element(chart))
+                .ok_or("chart")?,
+            &["positive".into(), "negative".into()],
+        )
+        .plot_h
+            / 2.0;
+        assert!(
+            bars.iter()
+                .filter(|h| (**h - expected).abs() < 0.001)
+                .count()
+                >= 2
+        );
         deck.validate()
     }
 
@@ -1821,8 +1997,19 @@ mod agenda_tests {
         let ids = deck.insert_agenda()?;
         assert!(!ids.is_empty());
         assert_eq!(deck.slides[0].id, ids[0]);
-        assert_eq!(deck.slides[ids.len()..].iter().map(|s| s.id).collect::<Vec<_>>(), original_ids);
-        assert!(deck.slides[0].elements.iter().any(|e| e.text.contains("First")));
+        assert_eq!(
+            deck.slides[ids.len()..]
+                .iter()
+                .map(|s| s.id)
+                .collect::<Vec<_>>(),
+            original_ids
+        );
+        assert!(
+            deck.slides[0]
+                .elements
+                .iter()
+                .any(|e| e.text.contains("First"))
+        );
         deck.validate()?;
         let mut small = Deck::default();
         small.width = 100.0;
@@ -1833,108 +2020,233 @@ mod agenda_tests {
     }
 }
 
-
 #[cfg(test)]
 mod hundred_layout_tests {
     use super::*;
     #[test]
-    fn layout_change_preserves_additional_text_boxes()->Result<(),String> {
-        let mut deck=Deck::empty();let slide=deck.add_slide("content");
-        let extra=deck.add_element(slide,ElementKind::Text)?;
-        let element=deck.slide_mut(slide).and_then(|s|s.element_mut(extra)).ok_or("extra")?;
-        element.x=710.0;element.y=430.0;element.w=120.0;element.h=40.0;element.text="Independent annotation".into();
-        let original=element.clone();deck.set_layout(slide,"content")?;
-        assert_eq!(deck.slide(slide).and_then(|s|s.element(extra)),Some(&original));deck.validate()?;Ok(())
+    fn layout_change_preserves_additional_text_boxes() -> Result<(), String> {
+        let mut deck = Deck::empty();
+        let slide = deck.add_slide("content");
+        let extra = deck.add_element(slide, ElementKind::Text)?;
+        let element = deck
+            .slide_mut(slide)
+            .and_then(|s| s.element_mut(extra))
+            .ok_or("extra")?;
+        element.x = 710.0;
+        element.y = 430.0;
+        element.w = 120.0;
+        element.h = 40.0;
+        element.text = "Independent annotation".into();
+        let original = element.clone();
+        deck.set_layout(slide, "content")?;
+        assert_eq!(
+            deck.slide(slide).and_then(|s| s.element(extra)),
+            Some(&original)
+        );
+        deck.validate()?;
+        Ok(())
     }
 }
-
 
 #[cfg(test)]
 mod phase200_model_tests {
     use super::*;
     #[test]
-    fn empty_table_column_insert_creates_the_requested_grid()->Result<(),String> {
-        let mut deck=Deck::empty();let slide=deck.add_slide("blank");let id=deck.add_element(slide,ElementKind::Table{cells:vec![]})?;
-        deck.edit_table(slide,id,false,true,0)?;
-        let ElementKind::Table{cells}=&deck.slide(slide).and_then(|s|s.element(id)).ok_or("table")?.kind else{return Err("table".into());};
-        assert_eq!(cells,&vec![vec![String::new(),String::new()]]);deck.validate()?;Ok(())
+    fn empty_table_column_insert_creates_the_requested_grid() -> Result<(), String> {
+        let mut deck = Deck::empty();
+        let slide = deck.add_slide("blank");
+        let id = deck.add_element(slide, ElementKind::Table { cells: vec![] })?;
+        deck.edit_table(slide, id, false, true, 0)?;
+        let ElementKind::Table { cells } = &deck
+            .slide(slide)
+            .and_then(|s| s.element(id))
+            .ok_or("table")?
+            .kind
+        else {
+            return Err("table".into());
+        };
+        assert_eq!(cells, &vec![vec![String::new(), String::new()]]);
+        deck.validate()?;
+        Ok(())
     }
     #[test]
     fn theme_font_uses_the_same_limit_as_new_elements() {
-        let mut deck=Deck::empty();deck.theme.font="a".repeat(65);
-        assert!(deck.validate().is_err());deck.theme.font="a".repeat(64);assert!(deck.validate().is_ok());
+        let mut deck = Deck::empty();
+        deck.theme.font = "a".repeat(65);
+        assert!(deck.validate().is_err());
+        deck.theme.font = "a".repeat(64);
+        assert!(deck.validate().is_ok());
     }
     #[test]
     fn crlf_and_lf_have_identical_slide_line_budgets() {
-        let lf="a\n".repeat(2500);let crlf=lf.replace('\n',"\r\n");
-        assert_eq!(layout_line_budget(&lf,600.0,28.0),layout_line_budget(&crlf,600.0,28.0));
-        let a=Element{text:lf,..Element::default()};let b=Element{text:crlf,..Element::default()};
-        assert_eq!(text_lines(&a),text_lines(&b));
+        let lf = "a\n".repeat(2500);
+        let crlf = lf.replace('\n', "\r\n");
+        assert_eq!(
+            layout_line_budget(&lf, 600.0, 28.0),
+            layout_line_budget(&crlf, 600.0, 28.0)
+        );
+        let a = Element {
+            text: lf,
+            ..Element::default()
+        };
+        let b = Element {
+            text: crlf,
+            ..Element::default()
+        };
+        assert_eq!(text_lines(&a), text_lines(&b));
     }
     #[test]
-    fn small_slides_keep_inserted_objects_and_layouts_on_canvas()->Result<(),String> {
-        for (width,height) in [(1.0,1.0),(100.0,100.0),(200.0,800.0)] {
-            let mut deck=Deck{width,height,..Deck::empty()};
-            for layout in ["title","content","two_content"] {deck.add_slide(layout);}
-            let slide=deck.add_slide("blank");
-            for kind in [ElementKind::Text,ElementKind::Rect,ElementKind::Ellipse,ElementKind::Table{cells:vec![vec!["a".into()]]}] {
-                deck.add_element(slide,kind)?;
+    fn small_slides_keep_inserted_objects_and_layouts_on_canvas() -> Result<(), String> {
+        for (width, height) in [(1.0, 1.0), (100.0, 100.0), (200.0, 800.0)] {
+            let mut deck = Deck {
+                width,
+                height,
+                ..Deck::empty()
+            };
+            for layout in ["title", "content", "two_content"] {
+                deck.add_slide(layout);
             }
-            for object in deck.slides.iter().flat_map(|s|&s.elements) {
-                assert!(object.x>=0.0 && object.y>=0.0);
-                assert!(object.x+object.w<=width+0.0001 && object.y+object.h<=height+0.0001);
-            }deck.validate()?;
-        }Ok(())
+            let slide = deck.add_slide("blank");
+            for kind in [
+                ElementKind::Text,
+                ElementKind::Rect,
+                ElementKind::Ellipse,
+                ElementKind::Table {
+                    cells: vec![vec!["a".into()]],
+                },
+            ] {
+                deck.add_element(slide, kind)?;
+            }
+            for object in deck.slides.iter().flat_map(|s| &s.elements) {
+                assert!(object.x >= 0.0 && object.y >= 0.0);
+                assert!(
+                    object.x + object.w <= width + 0.0001 && object.y + object.h <= height + 0.0001
+                );
+            }
+            deck.validate()?;
+        }
+        Ok(())
     }
     #[test]
     fn chart_labels_share_newline_and_tab_normalization() {
-        let labels=vec!["A\tB\r\nC\rD".into(),String::new()];
-        assert_eq!(chart_label(&labels,0),"A    B\nC\nD");assert_eq!(chart_label(&labels,1),"");assert_eq!(chart_label(&labels,2),"3");
+        let labels = vec!["A\tB\r\nC\rD".into(), String::new()];
+        assert_eq!(chart_label(&labels, 0), "A    B\nC\nD");
+        assert_eq!(chart_label(&labels, 1), "");
+        assert_eq!(chart_label(&labels, 2), "3");
     }
     #[test]
-    fn chart_labels_keep_the_object_font_size_and_emphasis()->Result<(),String> {
-        let mut deck=Deck::empty();let slide=deck.add_slide("blank");
-        let id=deck.add_element(slide,ElementKind::Chart{values:vec![1.0],labels:vec!["Styled".into()]})?;
-        let object=deck.slide_mut(slide).and_then(|s|s.element_mut(id)).ok_or("chart")?;
-        object.font="Georgia".into();object.font_size=20.0;object.bold=true;object.italic=true;
-        let page=deck.page(deck.slide(slide).ok_or("slide")?);
-        assert!(page.items.iter().any(|item|matches!(item,crate::render::Primitive::TextStyled{text,size,font,bold,italic,..}
-            if text=="Styled" && *size==20.0 && font=="Georgia" && *bold && *italic)));Ok(())
+    fn chart_labels_keep_the_object_font_size_and_emphasis() -> Result<(), String> {
+        let mut deck = Deck::empty();
+        let slide = deck.add_slide("blank");
+        let id = deck.add_element(
+            slide,
+            ElementKind::Chart {
+                values: vec![1.0],
+                labels: vec!["Styled".into()],
+            },
+        )?;
+        let object = deck
+            .slide_mut(slide)
+            .and_then(|s| s.element_mut(id))
+            .ok_or("chart")?;
+        object.font = "Georgia".into();
+        object.font_size = 20.0;
+        object.bold = true;
+        object.italic = true;
+        let page = deck.page(deck.slide(slide).ok_or("slide")?);
+        assert!(page.items.iter().any(
+            |item| matches!(item,crate::render::Primitive::TextStyled{text,size,font,bold,italic,..}
+            if text=="Styled" && *size==20.0 && font=="Georgia" && *bold && *italic)
+        ));
+        Ok(())
     }
     #[test]
-    fn chart_layout_keeps_bars_labels_and_titles_inside_the_frame()->Result<(),String> {
-        let mut deck=Deck::empty();let slide=deck.add_slide("blank");
-        let id=deck.add_element(slide,ElementKind::Chart{values:vec![-2.0,3.0],labels:vec!["A".into(),"B".into()]})?;
-        for (width,height) in [(200.0,80.0),(0.1,0.25)] {
-            let object=deck.slide_mut(slide).and_then(|s|s.element_mut(id)).ok_or("chart")?;
-            object.w=width;object.h=height;object.text="Title".into();object.font_size=20.0;
-            let original=object.clone();let page=deck.page(deck.slide(slide).ok_or("slide")?);
+    fn chart_layout_keeps_bars_labels_and_titles_inside_the_frame() -> Result<(), String> {
+        let mut deck = Deck::empty();
+        let slide = deck.add_slide("blank");
+        let id = deck.add_element(
+            slide,
+            ElementKind::Chart {
+                values: vec![-2.0, 3.0],
+                labels: vec!["A".into(), "B".into()],
+            },
+        )?;
+        for (width, height) in [(200.0, 80.0), (0.1, 0.25)] {
+            let object = deck
+                .slide_mut(slide)
+                .and_then(|s| s.element_mut(id))
+                .ok_or("chart")?;
+            object.w = width;
+            object.h = height;
+            object.text = "Title".into();
+            object.font_size = 20.0;
+            let original = object.clone();
+            let page = deck.page(deck.slide(slide).ok_or("slide")?);
             for item in &page.items {
-                if let crate::render::Primitive::Rect{x,y,w,h,color}=item && *color==original.fill {
-                    assert!(*x>=original.x && *y>=original.y);
-                    assert!(*x+*w<=original.x+width+0.001 && *y+*h<=original.y+height+0.001);
+                if let crate::render::Primitive::Rect { x, y, w, h, color } = item
+                    && *color == original.fill
+                {
+                    assert!(*x >= original.x && *y >= original.y);
+                    assert!(
+                        *x + *w <= original.x + width + 0.001
+                            && *y + *h <= original.y + height + 0.001
+                    );
                 }
             }
-            let layout=chart_layout(&original,&["A".into(),"B".into()]);
-            assert!(layout.plot_h>=0.0 && layout.plot_y>=original.y);
-            assert!(layout.label_y<=original.y+height+2.001);
-        }Ok(())
+            let layout = chart_layout(&original, &["A".into(), "B".into()]);
+            assert!(layout.plot_h >= 0.0 && layout.plot_y >= original.y);
+            assert!(layout.label_y <= original.y + height + 2.001);
+        }
+        Ok(())
     }
     #[test]
-    fn slide_table_page_does_not_emit_text_below_its_cell()->Result<(),String> {
-        let mut deck=Deck::empty();let slide=deck.add_slide("blank");
-        let id=deck.add_element(slide,ElementKind::Table{cells:vec![vec!["A\nB\nC\nD".into()]]})?;
-        let object=deck.slide_mut(slide).and_then(|s|s.element_mut(id)).ok_or("table")?;
-        object.h=20.0;object.font_size=10.0;
-        let page=deck.page(deck.slide(slide).ok_or("slide")?);
-        let text=page.items.iter().filter_map(|item|if let crate::render::Primitive::TextStyled{text,..}=item {Some(text.as_str())}else{None}).collect::<Vec<_>>();
-        assert_eq!(text,vec!["A"]);Ok(())
+    fn slide_table_page_does_not_emit_text_below_its_cell() -> Result<(), String> {
+        let mut deck = Deck::empty();
+        let slide = deck.add_slide("blank");
+        let id = deck.add_element(
+            slide,
+            ElementKind::Table {
+                cells: vec![vec!["A\nB\nC\nD".into()]],
+            },
+        )?;
+        let object = deck
+            .slide_mut(slide)
+            .and_then(|s| s.element_mut(id))
+            .ok_or("table")?;
+        object.h = 20.0;
+        object.font_size = 10.0;
+        let page = deck.page(deck.slide(slide).ok_or("slide")?);
+        let text = page
+            .items
+            .iter()
+            .filter_map(|item| {
+                if let crate::render::Primitive::TextStyled { text, .. } = item {
+                    Some(text.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(text, vec!["A"]);
+        Ok(())
     }
     #[test]
     fn complete_rotation_turns_do_not_drift_line_endpoints() {
-        let a=Element{w:10000.0,h:10000.0,rotation:0.0,..Default::default()};
-        let b=Element{rotation:360000.0,..a.clone()};assert_eq!(line_points(&a),line_points(&b));
-        let c=Element{rotation:-360000.0,..a.clone()};assert_eq!(line_points(&a),line_points(&c));
+        let a = Element {
+            w: 10000.0,
+            h: 10000.0,
+            rotation: 0.0,
+            ..Default::default()
+        };
+        let b = Element {
+            rotation: 360000.0,
+            ..a.clone()
+        };
+        assert_eq!(line_points(&a), line_points(&b));
+        let c = Element {
+            rotation: -360000.0,
+            ..a.clone()
+        };
+        assert_eq!(line_points(&a), line_points(&c));
     }
-
 }

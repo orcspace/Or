@@ -1,5 +1,6 @@
 use super::model::{
-    Align, Book, CellFormat, ChartKind, ConditionalRule, MAX_RANGE_CELLS, Value, parse_address, parse_range,
+    Align, Book, CellFormat, ChartKind, ConditionalRule, MAX_RANGE_CELLS, Value, parse_address,
+    parse_range,
 };
 use calamine::{Data, Reader as _, open_workbook_auto_from_rs};
 use quick_xml::{
@@ -7,8 +8,8 @@ use quick_xml::{
     events::{BytesRef, BytesStart, BytesText, Event},
 };
 use rust_xlsxwriter::{
-    Chart, ChartType, Color, Format, FormatAlign, FormatBorder, FormatUnderline, Formula, Image,
-    Workbook, ConditionalFormatCell, ConditionalFormatCellRule,
+    Chart, ChartType, Color, ConditionalFormatCell, ConditionalFormatCellRule, Format, FormatAlign,
+    FormatBorder, FormatUnderline, Formula, Image, Workbook,
 };
 use std::{collections::BTreeMap, io::Cursor};
 
@@ -41,7 +42,7 @@ pub fn write(book: &Book, ext: &str) -> Result<Vec<u8>, String> {
     match ext.as_str() {
         "xlsx" => write_xlsx(book),
         "csv" | "tsv" => write_text_book(book, &ext, MAX_FILE),
-        "html" => write_html_book(book,1_000_000,MAX_FILE),
+        "html" => write_html_book(book, 1_000_000, MAX_FILE),
         "md" => write_text_book(book, &ext, MAX_FILE),
         _ => Err(format!("Не поддерживается сохранение {ext}")),
     }
@@ -65,7 +66,9 @@ fn markdown_text(text: &str) -> String {
     out
 }
 pub fn decode_text(bytes: &[u8]) -> Result<String, String> {
-    if let Some(decoded)=crate::util::decode_utf32_bom(bytes) {return decoded;}
+    if let Some(decoded) = crate::util::decode_utf32_bom(bytes) {
+        return decoded;
+    }
     if bytes.starts_with(&[0xff, 0xfe]) || bytes.starts_with(&[0xfe, 0xff]) {
         if !(bytes.len() - 2).is_multiple_of(2) {
             return Err("Нечётная длина UTF-16".into());
@@ -85,8 +88,10 @@ pub fn decode_text(bytes: &[u8]) -> Result<String, String> {
             .collect::<Vec<_>>();
         return String::from_utf16(&units).map_err(|e| e.to_string());
     }
-    if let Some(content)=bytes.strip_prefix(&[0xef,0xbb,0xbf]) {
-        return std::str::from_utf8(content).map(str::to_owned).map_err(|error|format!("Некорректный UTF-8 после BOM: {error}"));
+    if let Some(content) = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]) {
+        return std::str::from_utf8(content)
+            .map(str::to_owned)
+            .map_err(|error| format!("Некорректный UTF-8 после BOM: {error}"));
     }
     match std::str::from_utf8(bytes) {
         Ok(s) => Ok(s.into()),
@@ -406,11 +411,20 @@ fn ods_preflight(bytes: &[u8]) -> Result<(), String> {
     }
     Ok(())
 }
-fn xml_reference(reference: &BytesRef<'_>) -> Result<char,String> {
-    if let Some(character)=reference.resolve_char_ref().map_err(|error|error.to_string())? {return Ok(character);}
+fn xml_reference(reference: &BytesRef<'_>) -> Result<char, String> {
+    if let Some(character) = reference
+        .resolve_char_ref()
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(character);
+    }
     match reference.as_ref() {
-        "amp"=>Ok('&'),"lt"=>Ok('<'),"gt"=>Ok('>'),"quot"=>Ok('"'),"apos"=>Ok('\''),
-        _=>Err("XLSX: неизвестная XML entity".into()),
+        "amp" => Ok('&'),
+        "lt" => Ok('<'),
+        "gt" => Ok('>'),
+        "quot" => Ok('"'),
+        "apos" => Ok('\''),
+        _ => Err("XLSX: неизвестная XML entity".into()),
     }
 }
 fn xml_bounds(bytes: &[u8]) -> Result<Option<Vec<usize>>, String> {
@@ -488,7 +502,9 @@ fn xml_bounds(bytes: &[u8]) -> Result<Option<Vec<usize>>, String> {
             }
             Event::Text(t) if in_string => length = length.saturating_add(t.xml10_content().len()),
             Event::CData(t) if in_string => length = length.saturating_add(t.len()),
-            Event::GeneralRef(reference) if in_string => length = length.saturating_add(xml_reference(&reference)?.len_utf8()),
+            Event::GeneralRef(reference) if in_string => {
+                length = length.saturating_add(xml_reference(&reference)?.len_utf8())
+            }
             Event::End(e) => {
                 depth = depth.saturating_sub(1);
                 if e.local_name().as_ref() == "si" && root == "sst" {
@@ -628,7 +644,9 @@ fn worksheet_bounds(bytes: &[u8], strings: &[usize]) -> Result<(u64, usize), Str
             }
             Event::CData(t) => {
                 if in_value {
-                    if value.len().saturating_add(t.len())>32767 {return Err("XLSX: слишком длинное значение".into());}
+                    if value.len().saturating_add(t.len()) > 32767 {
+                        return Err("XLSX: слишком длинное значение".into());
+                    }
                     value.push_str(&t);
                 }
                 if in_text {
@@ -640,7 +658,7 @@ fn worksheet_bounds(bytes: &[u8], strings: &[usize]) -> Result<(u64, usize), Str
                 }
             }
             Event::GeneralRef(r) => {
-                let ch=xml_reference(&r)?;
+                let ch = xml_reference(&r)?;
                 if in_value {
                     value.push(ch);
                     if value.len() > 32767 {
@@ -662,7 +680,9 @@ fn worksheet_bounds(bytes: &[u8], strings: &[usize]) -> Result<(u64, usize), Str
                 }
                 "v" => {
                     in_value = false;
-                    if cell_type == "str" { text_bytes=text_bytes.saturating_add(value.len()); }
+                    if cell_type == "str" {
+                        text_bytes = text_bytes.saturating_add(value.len());
+                    }
                     if cell_type == "s" {
                         let index = value
                             .parse::<usize>()
@@ -871,15 +891,30 @@ fn rgb(a: &BTreeMap<String, String>) -> Option<[u8; 3]> {
     rgb_with_palette(a, &[])
 }
 fn rgb_with_palette(a: &BTreeMap<String, String>, palette: &[[u8; 3]]) -> Option<[u8; 3]> {
-    rgb_with_theme(a,palette,&[])
+    rgb_with_theme(a, palette, &[])
 }
-fn rgb_with_theme(a: &BTreeMap<String,String>, palette: &[[u8;3]], theme: &[[u8;3]]) -> Option<[u8;3]> {
-    let base = rgb_base(a,palette,theme)?;
-    let tint = a.get("tint").and_then(|value| value.parse::<f64>().ok()).unwrap_or(0.0);
-    Some(if tint.is_finite() && (-1.0..=1.0).contains(&tint) { tint_color(base,tint) } else { base })
+fn rgb_with_theme(
+    a: &BTreeMap<String, String>,
+    palette: &[[u8; 3]],
+    theme: &[[u8; 3]],
+) -> Option<[u8; 3]> {
+    let base = rgb_base(a, palette, theme)?;
+    let tint = a
+        .get("tint")
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    Some(if tint.is_finite() && (-1.0..=1.0).contains(&tint) {
+        tint_color(base, tint)
+    } else {
+        base
+    })
 }
-fn rgb_base(a: &BTreeMap<String,String>, palette: &[[u8;3]], theme: &[[u8;3]]) -> Option<[u8;3]> {
-    if let Some(index)=a.get("theme").and_then(|value| value.parse::<usize>().ok()) {
+fn rgb_base(
+    a: &BTreeMap<String, String>,
+    palette: &[[u8; 3]],
+    theme: &[[u8; 3]],
+) -> Option<[u8; 3]> {
+    if let Some(index) = a.get("theme").and_then(|value| value.parse::<usize>().ok()) {
         return theme.get(index).copied();
     }
     if let Some(index) = a.get("indexed").and_then(|v| v.parse::<usize>().ok()) {
@@ -974,13 +1009,17 @@ fn indexed_palette(bytes: &[u8]) -> Result<Vec<[u8; 3]>, String> {
 }
 #[cfg(test)]
 fn styles(bytes: &[u8]) -> Result<Vec<CellFormat>, String> {
-    styles_with_theme(bytes,&[])
+    styles_with_theme(bytes, &[])
 }
 #[cfg(test)]
-fn styles_with_theme(bytes: &[u8],theme:&[[u8;3]])->Result<Vec<CellFormat>,String> {
-    styles_with_theme_fonts(bytes,theme,&BTreeMap::new())
+fn styles_with_theme(bytes: &[u8], theme: &[[u8; 3]]) -> Result<Vec<CellFormat>, String> {
+    styles_with_theme_fonts(bytes, theme, &BTreeMap::new())
 }
-fn styles_with_theme_fonts(bytes: &[u8],theme:&[[u8;3]],faces:&BTreeMap<String,String>)->Result<Vec<CellFormat>,String> {
+fn styles_with_theme_fonts(
+    bytes: &[u8],
+    theme: &[[u8; 3]],
+    faces: &BTreeMap<String, String>,
+) -> Result<Vec<CellFormat>, String> {
     let palette = indexed_palette(bytes)?;
     let mut reader = Reader::from_str(std::str::from_utf8(bytes).map_err(|e| e.to_string())?);
     let mut section = String::new();
@@ -990,8 +1029,8 @@ fn styles_with_theme_fonts(bytes: &[u8],theme:&[[u8;3]],faces:&BTreeMap<String,S
     let mut current_border = false;
     let mut current_fill_active = false;
     let mut formats = Vec::new();
-    let mut base_formats:Vec<CellFormat> = Vec::new();
-    let mut font_scheme=String::new();
+    let mut base_formats: Vec<CellFormat> = Vec::new();
+    let mut font_scheme = String::new();
     let mut num_formats = BTreeMap::new();
     let mut current_font = CellFormat::default();
     let mut current_fill = None;
@@ -1047,7 +1086,7 @@ fn styles_with_theme_fonts(bytes: &[u8],theme:&[[u8;3]],faces:&BTreeMap<String,S
                 }
                 if section == "fonts" {
                     match tag.as_str() {
-                        "scheme"=>font_scheme=a.get("val").cloned().unwrap_or_default(),
+                        "scheme" => font_scheme = a.get("val").cloned().unwrap_or_default(),
                         "name" => {
                             if let Some(v) = a.get("val") {
                                 current_font.font = v.clone();
@@ -1066,7 +1105,7 @@ fn styles_with_theme_fonts(bytes: &[u8],theme:&[[u8;3]],faces:&BTreeMap<String,S
                         }
                         "strike" => current_font.strike = xml_bool(a.get("val"), true),
                         "color" => {
-                            if let Some(color) = rgb_with_theme(&a, &palette,theme) {
+                            if let Some(color) = rgb_with_theme(&a, &palette, theme) {
                                 current_font.color = color;
                             }
                         }
@@ -1074,7 +1113,7 @@ fn styles_with_theme_fonts(bytes: &[u8],theme:&[[u8;3]],faces:&BTreeMap<String,S
                     }
                 }
                 if section == "fills" && tag == "fgColor" && current_fill_active {
-                    current_fill = rgb_with_theme(&a, &palette,theme);
+                    current_fill = rgb_with_theme(&a, &palette, theme);
                 }
                 if tag == "numFmt"
                     && let (Some(id), Some(code)) = (
@@ -1084,53 +1123,94 @@ fn styles_with_theme_fonts(bytes: &[u8],theme:&[[u8;3]],faces:&BTreeMap<String,S
                 {
                     num_formats.insert(id, code.clone());
                 }
-                if matches!(section.as_str(),"cellXfs"|"cellStyleXfs") && tag=="xf" {
-                    let mut fmt=if section=="cellXfs" {
-                        a.get("xfId").and_then(|value|value.parse::<usize>().ok())
-                            .and_then(|index|base_formats.get(index)).cloned().unwrap_or_default()
-                    }else{CellFormat::default()};
-                    apply_style_alignment = section != "cellStyleXfs" || xml_bool(a.get("applyAlignment"), true);
+                if matches!(section.as_str(), "cellXfs" | "cellStyleXfs") && tag == "xf" {
+                    let mut fmt = if section == "cellXfs" {
+                        a.get("xfId")
+                            .and_then(|value| value.parse::<usize>().ok())
+                            .and_then(|index| base_formats.get(index))
+                            .cloned()
+                            .unwrap_or_default()
+                    } else {
+                        CellFormat::default()
+                    };
+                    apply_style_alignment =
+                        section != "cellStyleXfs" || xml_bool(a.get("applyAlignment"), true);
                     if (section != "cellStyleXfs" || xml_bool(a.get("applyFont"), true))
-                        && let Some(font)=a.get("fontId").and_then(|v|v.parse::<usize>().ok()).and_then(|i|fonts.get(i)) {
-                        fmt.font=font.font.clone();fmt.size=font.size;fmt.bold=font.bold;fmt.italic=font.italic;
-                        fmt.underline=font.underline;fmt.strike=font.strike;fmt.color=font.color;
+                        && let Some(font) = a
+                            .get("fontId")
+                            .and_then(|v| v.parse::<usize>().ok())
+                            .and_then(|i| fonts.get(i))
+                    {
+                        fmt.font = font.font.clone();
+                        fmt.size = font.size;
+                        fmt.bold = font.bold;
+                        fmt.italic = font.italic;
+                        fmt.underline = font.underline;
+                        fmt.strike = font.strike;
+                        fmt.color = font.color;
                     }
                     if (section != "cellStyleXfs" || xml_bool(a.get("applyNumberFormat"), true))
-                        && let Some(id)=a.get("numFmtId").and_then(|v|v.parse::<u32>().ok()) {
-                        fmt.number=num_formats.get(&id).cloned().unwrap_or_else(||builtin(id));
+                        && let Some(id) = a.get("numFmtId").and_then(|v| v.parse::<u32>().ok())
+                    {
+                        fmt.number = num_formats.get(&id).cloned().unwrap_or_else(|| builtin(id));
                     }
                     if (section != "cellStyleXfs" || xml_bool(a.get("applyFill"), true))
-                        && let Some(fill)=a.get("fillId").and_then(|v|v.parse::<usize>().ok()).and_then(|i|fills.get(i)) {fmt.fill=*fill;}
+                        && let Some(fill) = a
+                            .get("fillId")
+                            .and_then(|v| v.parse::<usize>().ok())
+                            .and_then(|i| fills.get(i))
+                    {
+                        fmt.fill = *fill;
+                    }
                     if (section != "cellStyleXfs" || xml_bool(a.get("applyBorder"), true))
-                        && let Some(border)=a.get("borderId").and_then(|v|v.parse::<usize>().ok()).and_then(|i|borders.get(i)) {fmt.border=*border;}
-                    if section=="cellXfs" {formats.push(fmt);}else{base_formats.push(fmt);}
-                }
-                if matches!(section.as_str(),"cellXfs"|"cellStyleXfs") && tag=="alignment" && apply_style_alignment {
-                    let target=if section=="cellXfs" {&mut formats}else{&mut base_formats};
-                    if let Some(fmt)=target.last_mut() {
-                    fmt.align = match a.get("horizontal").map(String::as_str) {
-                        Some("left") => Align::Left,
-                        Some("center") => Align::Center,
-                        Some("right") => Align::Right,
-                        _ => Align::General,
-                    };
-                    fmt.wrap = xml_bool(a.get("wrapText"), false);
-                    let rotation: i16 = a
-                        .get("textRotation")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0);
-                    fmt.rotation = if (91..=180).contains(&rotation) {
-                        90 - rotation
+                        && let Some(border) = a
+                            .get("borderId")
+                            .and_then(|v| v.parse::<usize>().ok())
+                            .and_then(|i| borders.get(i))
+                    {
+                        fmt.border = *border;
+                    }
+                    if section == "cellXfs" {
+                        formats.push(fmt);
                     } else {
-                        rotation
+                        base_formats.push(fmt);
+                    }
+                }
+                if matches!(section.as_str(), "cellXfs" | "cellStyleXfs")
+                    && tag == "alignment"
+                    && apply_style_alignment
+                {
+                    let target = if section == "cellXfs" {
+                        &mut formats
+                    } else {
+                        &mut base_formats
                     };
+                    if let Some(fmt) = target.last_mut() {
+                        fmt.align = match a.get("horizontal").map(String::as_str) {
+                            Some("left") => Align::Left,
+                            Some("center") => Align::Center,
+                            Some("right") => Align::Right,
+                            _ => Align::General,
+                        };
+                        fmt.wrap = xml_bool(a.get("wrapText"), false);
+                        let rotation: i16 = a
+                            .get("textRotation")
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(0);
+                        fmt.rotation = if (91..=180).contains(&rotation) {
+                            90 - rotation
+                        } else {
+                            rotation
+                        };
                     }
                 }
             }
             Event::End(e) => {
                 let tag = e.local_name().as_ref().to_string();
                 if tag == "font" {
-                    if let Some(face)=faces.get(&font_scheme) {current_font.font=face.clone();}
+                    if let Some(face) = faces.get(&font_scheme) {
+                        current_font.font = face.clone();
+                    }
                     fonts.push(current_font.clone());
                 }
                 if tag == "fill" {
@@ -1150,112 +1230,191 @@ fn styles_with_theme_fonts(bytes: &[u8],theme:&[[u8;3]],faces:&BTreeMap<String,S
     }
     Ok(formats)
 }
-fn differential_fills(bytes:&[u8],palette:&[[u8;3]],theme:&[[u8;3]]) -> Result<Vec<Option<[u8;3]>>,String> {
-    let mut reader=Reader::from_str(std::str::from_utf8(bytes).map_err(|error|error.to_string())?);
-    let mut fills=Vec::new();
-    let (mut inside,mut unsupported,mut foreground,mut background,mut solid)=(false,false,None,None,false);
+fn differential_fills(
+    bytes: &[u8],
+    palette: &[[u8; 3]],
+    theme: &[[u8; 3]],
+) -> Result<Vec<Option<[u8; 3]>>, String> {
+    let mut reader =
+        Reader::from_str(std::str::from_utf8(bytes).map_err(|error| error.to_string())?);
+    let mut fills = Vec::new();
+    let (mut inside, mut unsupported, mut foreground, mut background, mut solid) =
+        (false, false, None, None, false);
     loop {
-        let event=reader.read_event().map_err(|error|error.to_string())?;
-        let empty=matches!(event,Event::Empty(_));
+        let event = reader.read_event().map_err(|error| error.to_string())?;
+        let empty = matches!(event, Event::Empty(_));
         match event {
-            Event::Start(element)|Event::Empty(element) => {
-                let tag=local(&element);
-                if tag=="dxf" {
-                    inside=!empty;unsupported=false;foreground=None;background=None;solid=false;
-                    if empty {fills.push(None);}
+            Event::Start(element) | Event::Empty(element) => {
+                let tag = local(&element);
+                if tag == "dxf" {
+                    inside = !empty;
+                    unsupported = false;
+                    foreground = None;
+                    background = None;
+                    solid = false;
+                    if empty {
+                        fills.push(None);
+                    }
                 } else if inside {
-                    let attributes=attrs(&element,&reader)?;
+                    let attributes = attrs(&element, &reader)?;
                     match tag.as_str() {
-                        "font"|"border"|"numFmt"|"alignment"|"protection"|"gradientFill"=>unsupported=true,
-                        "patternFill"=>{
-                            solid=attributes.get("patternType").is_some_and(|value|value=="solid");
-                            unsupported|=attributes.get("patternType").is_some_and(|value|!matches!(value.as_str(),"none"|"solid"));
+                        "font" | "border" | "numFmt" | "alignment" | "protection"
+                        | "gradientFill" => unsupported = true,
+                        "patternFill" => {
+                            solid = attributes
+                                .get("patternType")
+                                .is_some_and(|value| value == "solid");
+                            unsupported |= attributes
+                                .get("patternType")
+                                .is_some_and(|value| !matches!(value.as_str(), "none" | "solid"));
                         }
-                        "fgColor"=>foreground=rgb_with_theme(&attributes,palette,theme),
-                        "bgColor"=>{
-                            if attributes.get("indexed").is_none_or(|value|value!="64") {
-                                background=rgb_with_theme(&attributes,palette,theme);
+                        "fgColor" => foreground = rgb_with_theme(&attributes, palette, theme),
+                        "bgColor" => {
+                            if attributes.get("indexed").is_none_or(|value| value != "64") {
+                                background = rgb_with_theme(&attributes, palette, theme);
                             }
                         }
-                        _=>(),
+                        _ => (),
                     }
                 }
             }
-            Event::End(element) if element.local_name().as_ref()=="dxf" => {
-                fills.push(if unsupported {None}else if solid {foreground.or(background)}else{background.or(foreground)});
-                inside=false;
+            Event::End(element) if element.local_name().as_ref() == "dxf" => {
+                fills.push(if unsupported {
+                    None
+                } else if solid {
+                    foreground.or(background)
+                } else {
+                    background.or(foreground)
+                });
+                inside = false;
             }
-            Event::DocType(_)=>return Err("DTD запрещён".into()),
-            Event::Eof=>break,
-            _=>(),
+            Event::DocType(_) => return Err("DTD запрещён".into()),
+            Event::Eof => break,
+            _ => (),
         }
-        if fills.len()>65536 {return Err("Слишком много дифференциальных форматов".into());}
+        if fills.len() > 65536 {
+            return Err("Слишком много дифференциальных форматов".into());
+        }
     }
     Ok(fills)
 }
-fn conditional_rules(bytes:&[u8],fills:&[Option<[u8;3]>]) -> Result<Vec<ConditionalRule>,String> {
-    let mut reader=Reader::from_str(std::str::from_utf8(bytes).map_err(|error|error.to_string())?);
-    let mut ranges=Vec::new();
-    let mut current:Option<BTreeMap<String,String>>=None;
-    let mut formulas=Vec::new();
-    let mut result=Vec::new();
+fn conditional_rules(
+    bytes: &[u8],
+    fills: &[Option<[u8; 3]>],
+) -> Result<Vec<ConditionalRule>, String> {
+    let mut reader =
+        Reader::from_str(std::str::from_utf8(bytes).map_err(|error| error.to_string())?);
+    let mut ranges = Vec::new();
+    let mut current: Option<BTreeMap<String, String>> = None;
+    let mut formulas = Vec::new();
+    let mut result = Vec::new();
     loop {
-        let event=reader.read_event().map_err(|error|error.to_string())?;
-        let empty=matches!(event,Event::Empty(_));
+        let event = reader.read_event().map_err(|error| error.to_string())?;
+        let empty = matches!(event, Event::Empty(_));
         match event {
-            Event::Start(element)|Event::Empty(element) => {
-                let tag=local(&element);
-                let attributes=attrs(&element,&reader)?;
+            Event::Start(element) | Event::Empty(element) => {
+                let tag = local(&element);
+                let attributes = attrs(&element, &reader)?;
                 match tag.as_str() {
-                    "conditionalFormatting"=>{
-                        ranges=attributes.get("sqref").ok_or("Не поддерживается conditionalFormatting без sqref")?
-                            .split_whitespace().map(parse_range).collect::<Result<Vec<_>,_>>()?;
-                        if ranges.is_empty()||ranges.len()>10000 {return Err("Недопустимые области conditionalFormatting".into());}
-                    }
-                    "cfRule"=>{
-                        if empty {return Err("Не поддерживается пустое правило conditionalFormatting".into());}
-                        current=Some(attributes);formulas.clear();
-                    }
-                    "formula" if current.is_some()=>{
-                        if empty {formulas.push(String::new());}
-                        else {
-                            let raw=reader.read_text(element.name()).map_err(|error|error.to_string())?;
-                            formulas.push(quick_xml::escape::unescape(&raw).map_err(|error|error.to_string())?.into_owned());
+                    "conditionalFormatting" => {
+                        ranges = attributes
+                            .get("sqref")
+                            .ok_or("Не поддерживается conditionalFormatting без sqref")?
+                            .split_whitespace()
+                            .map(parse_range)
+                            .collect::<Result<Vec<_>, _>>()?;
+                        if ranges.is_empty() || ranges.len() > 10000 {
+                            return Err("Недопустимые области conditionalFormatting".into());
                         }
                     }
-                    _=>(),
+                    "cfRule" => {
+                        if empty {
+                            return Err(
+                                "Не поддерживается пустое правило conditionalFormatting".into()
+                            );
+                        }
+                        current = Some(attributes);
+                        formulas.clear();
+                    }
+                    "formula" if current.is_some() => {
+                        if empty {
+                            formulas.push(String::new());
+                        } else {
+                            let raw = reader
+                                .read_text(element.name())
+                                .map_err(|error| error.to_string())?;
+                            formulas.push(
+                                quick_xml::escape::unescape(&raw)
+                                    .map_err(|error| error.to_string())?
+                                    .into_owned(),
+                            );
+                        }
+                    }
+                    _ => (),
                 }
             }
-            Event::End(element) if element.local_name().as_ref()=="cfRule" => {
-                let attributes=current.take().ok_or("Нет начала правила conditionalFormatting")?;
-                let operator=match attributes.get("operator").map(String::as_str) {
-                    Some("greaterThan")=>">",Some("lessThan")=>"<",Some("equal")=>"=",
-                    Some("greaterThanOrEqual")=>">=",Some("lessThanOrEqual")=>"<=",
-                    _=>return Err("Не поддерживается оператор conditionalFormatting".into()),
+            Event::End(element) if element.local_name().as_ref() == "cfRule" => {
+                let attributes = current
+                    .take()
+                    .ok_or("Нет начала правила conditionalFormatting")?;
+                let operator = match attributes.get("operator").map(String::as_str) {
+                    Some("greaterThan") => ">",
+                    Some("lessThan") => "<",
+                    Some("equal") => "=",
+                    Some("greaterThanOrEqual") => ">=",
+                    Some("lessThanOrEqual") => "<=",
+                    _ => return Err("Не поддерживается оператор conditionalFormatting".into()),
                 };
-                if attributes.get("type").is_none_or(|kind|kind!="cellIs")||formulas.len()!=1 {
-                    return Err("Поддерживаются только числовые cellIs правила условной заливки".into());
+                if attributes.get("type").is_none_or(|kind| kind != "cellIs") || formulas.len() != 1
+                {
+                    return Err(
+                        "Поддерживаются только числовые cellIs правила условной заливки".into(),
+                    );
                 }
-                let threshold=formulas[0].trim().trim_start_matches('=').parse::<f64>()
-                    .ok().filter(|value|value.is_finite()).ok_or("Не поддерживается формула порога conditionalFormatting")?;
-                let index=attributes.get("dxfId").and_then(|value|value.parse::<usize>().ok())
+                let threshold = formulas[0]
+                    .trim()
+                    .trim_start_matches('=')
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|value| value.is_finite())
+                    .ok_or("Не поддерживается формула порога conditionalFormatting")?;
+                let index = attributes
+                    .get("dxfId")
+                    .and_then(|value| value.parse::<usize>().ok())
                     .ok_or("Нет формата conditionalFormatting")?;
-                let fill=fills.get(index).copied().flatten().ok_or("Не поддерживается формат conditionalFormatting: нужна только сплошная заливка")?;
-                let priority=attributes.get("priority").and_then(|value|value.parse::<u32>().ok())
-                    .filter(|value|*value>0).ok_or("Нет приоритета conditionalFormatting")?;
+                let fill = fills.get(index).copied().flatten().ok_or(
+                    "Не поддерживается формат conditionalFormatting: нужна только сплошная заливка",
+                )?;
+                let priority = attributes
+                    .get("priority")
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .filter(|value| *value > 0)
+                    .ok_or("Нет приоритета conditionalFormatting")?;
                 for range in &ranges {
-                    result.push((priority,ConditionalRule{range:*range,operator:operator.into(),threshold,fill}));
-                    if result.len()>10000 {return Err("Слишком много правил conditionalFormatting".into());}
+                    result.push((
+                        priority,
+                        ConditionalRule {
+                            range: *range,
+                            operator: operator.into(),
+                            threshold,
+                            fill,
+                        },
+                    ));
+                    if result.len() > 10000 {
+                        return Err("Слишком много правил conditionalFormatting".into());
+                    }
                 }
             }
-            Event::End(element) if element.local_name().as_ref()=="conditionalFormatting"=>ranges.clear(),
-            Event::DocType(_)=>return Err("DTD запрещён".into()),
-            Event::Eof=>break,
-            _=>(),
+            Event::End(element) if element.local_name().as_ref() == "conditionalFormatting" => {
+                ranges.clear()
+            }
+            Event::DocType(_) => return Err("DTD запрещён".into()),
+            Event::Eof => break,
+            _ => (),
         }
     }
-    result.sort_by_key(|(priority,_)|*priority);
-    Ok(result.into_iter().map(|(_,rule)|rule).collect())
+    result.sort_by_key(|(priority, _)| *priority);
+    Ok(result.into_iter().map(|(_, rule)| rule).collect())
 }
 fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(), String> {
     let workbook_rels = relationships("xl/workbook.xml", parts);
@@ -1269,16 +1428,30 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
         .map(|bytes| indexed_palette(bytes))
         .transpose()?
         .unwrap_or_default();
-    let theme_path=workbook_rels.values().find(|(kind,_)| kind.ends_with("/theme")).map(|(_,path)| path.as_str());
-    let theme=theme_path.and_then(|path| parts.get(path)).map(|bytes| theme_colors(bytes)).transpose()?.unwrap_or_default();
-    let faces=theme_path.and_then(|path|parts.get(path)).map(|bytes|theme_font_faces(bytes)).transpose()?.unwrap_or_default();
-    let formats = parts
-        .get(style_path)
-        .map(|b| styles_with_theme_fonts(b,&theme,&faces))
+    let theme_path = workbook_rels
+        .values()
+        .find(|(kind, _)| kind.ends_with("/theme"))
+        .map(|(_, path)| path.as_str());
+    let theme = theme_path
+        .and_then(|path| parts.get(path))
+        .map(|bytes| theme_colors(bytes))
         .transpose()?
         .unwrap_or_default();
-    let differential = parts.get(style_path).map(|bytes| differential_fills(bytes,&palette,&theme))
-        .transpose()?.unwrap_or_default();
+    let faces = theme_path
+        .and_then(|path| parts.get(path))
+        .map(|bytes| theme_font_faces(bytes))
+        .transpose()?
+        .unwrap_or_default();
+    let formats = parts
+        .get(style_path)
+        .map(|b| styles_with_theme_fonts(b, &theme, &faces))
+        .transpose()?
+        .unwrap_or_default();
+    let differential = parts
+        .get(style_path)
+        .map(|bytes| differential_fills(bytes, &palette, &theme))
+        .transpose()?
+        .unwrap_or_default();
     let mut targets = BTreeMap::new();
     if let Some(bytes) = parts.get("xl/_rels/workbook.xml.rels") {
         each_tag(bytes, |tag, a| {
@@ -1315,7 +1488,7 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
             Ok(())
         })?;
     }
-    let mut selections=BTreeMap::new();
+    let mut selections = BTreeMap::new();
     for (name, path, hidden) in paths {
         let Some(id) = book.sheets.iter().find(|s| s.name == name).map(|s| s.id) else {
             continue;
@@ -1324,38 +1497,59 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
             s.hidden = hidden;
             // Standard XLSX fallback differs from a newly created native sheet.
             // Explicit sheetFormatPr values below take precedence.
-            s.default_col_width=64.0;
-            s.default_row_height=20.0;
+            s.default_col_width = 64.0;
+            s.default_row_height = 20.0;
         }
         let Some(bytes) = parts.get(&path) else {
             continue;
         };
-        let mut pane=String::from("topLeft");
-        let mut sheet_selections=Vec::new();
-        let mut row_styles=BTreeMap::new();
-        let mut col_styles=BTreeMap::new();
-        let (mut current_row,mut next_row,mut next_col)=(0u32,0u32,0u32);
+        let mut pane = String::from("topLeft");
+        let mut sheet_selections = Vec::new();
+        let mut row_styles = BTreeMap::new();
+        let mut col_styles = BTreeMap::new();
+        let (mut current_row, mut next_row, mut next_col) = (0u32, 0u32, 0u32);
         each_tag(bytes, |tag, a| {
-            if tag=="pane" {pane=a.get("activePane").cloned().unwrap_or_else(||"topLeft".into());}
-            if tag=="selection" && let Some(selection)=xlsx_selection(a) {
-                sheet_selections.push((a.get("pane").map(String::as_str).unwrap_or("topLeft").to_string(),selection));
+            if tag == "pane" {
+                pane = a
+                    .get("activePane")
+                    .cloned()
+                    .unwrap_or_else(|| "topLeft".into());
+            }
+            if tag == "selection"
+                && let Some(selection) = xlsx_selection(a)
+            {
+                sheet_selections.push((
+                    a.get("pane")
+                        .map(String::as_str)
+                        .unwrap_or("topLeft")
+                        .to_string(),
+                    selection,
+                ));
             }
             if tag == "row" {
-                current_row=match a.get("r") {
-                    Some(value) => value.parse::<u32>().ok().and_then(|v| v.checked_sub(1)).ok_or("Неверный номер строки")?,
+                current_row = match a.get("r") {
+                    Some(value) => value
+                        .parse::<u32>()
+                        .ok()
+                        .and_then(|v| v.checked_sub(1))
+                        .ok_or("Неверный номер строки")?,
                     None => next_row,
                 };
-                if current_row >= super::model::MAX_ROWS { return Err("Неверный номер строки".into()); }
-                next_row=current_row+1;
-                next_col=0;
+                if current_row >= super::model::MAX_ROWS {
+                    return Err("Неверный номер строки".into());
+                }
+                next_row = current_row + 1;
+                next_col = 0;
             }
             if tag == "c" {
-                let (r,c)=match a.get("r") {
+                let (r, c) = match a.get("r") {
                     Some(value) => parse_address(value).ok_or("Неверный адрес ячейки")?,
-                    None => (current_row,next_col),
+                    None => (current_row, next_col),
                 };
-                if c >= super::model::MAX_COLS { return Err("Неверный столбец ячейки".into()); }
-                next_col=c+1;
+                if c >= super::model::MAX_COLS {
+                    return Err("Неверный столбец ячейки".into());
+                }
+                next_col = c + 1;
                 let index = a
                     .get("s")
                     .and_then(|s| s.parse::<usize>().ok())
@@ -1374,19 +1568,29 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
             let s = book.sheet_by_id_mut(id).ok_or("Лист не найден")?;
             match tag {
                 "sheetFormatPr" => {
-                    if let Some(raw)=a.get("defaultColWidth") {
-                        let width=raw.parse::<f64>().ok().filter(|value|value.is_finite()&&*value>0.0)
+                    if let Some(raw) = a.get("defaultColWidth") {
+                        let width = raw
+                            .parse::<f64>()
+                            .ok()
+                            .filter(|value| value.is_finite() && *value > 0.0)
                             .ok_or("Недопустимая defaultColWidth")?;
-                        let pixels=((256.0*width+18.0)/256.0*7.0).trunc();
-                        if !(1.0..=1800.0).contains(&pixels) {return Err("defaultColWidth вне поддерживаемых пределов".into());}
-                        s.default_col_width=pixels as f32;
+                        let pixels = ((256.0 * width + 18.0) / 256.0 * 7.0).trunc();
+                        if !(1.0..=1800.0).contains(&pixels) {
+                            return Err("defaultColWidth вне поддерживаемых пределов".into());
+                        }
+                        s.default_col_width = pixels as f32;
                     }
-                    if let Some(raw)=a.get("defaultRowHeight") {
-                        let points=raw.parse::<f64>().ok().filter(|value|value.is_finite()&&*value>0.0)
+                    if let Some(raw) = a.get("defaultRowHeight") {
+                        let points = raw
+                            .parse::<f64>()
+                            .ok()
+                            .filter(|value| value.is_finite() && *value > 0.0)
                             .ok_or("Недопустимая defaultRowHeight")?;
-                        let pixels=points*4.0/3.0;
-                        if !(1.0..=600.0).contains(&pixels) {return Err("defaultRowHeight вне поддерживаемых пределов".into());}
-                        s.default_row_height=pixels as f32;
+                        let pixels = points * 4.0 / 3.0;
+                        if !(1.0..=600.0).contains(&pixels) {
+                            return Err("defaultRowHeight вне поддерживаемых пределов".into());
+                        }
+                        s.default_row_height = pixels as f32;
                     }
                 }
                 "col" => {
@@ -1404,8 +1608,10 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
                         return Err("Неверный диапазон столбцов".into());
                     }
                     for c in min..=max {
-                        if let Some(style)=a.get("style").and_then(|value| value.parse::<usize>().ok()) {
-                            col_styles.insert(c,style);
+                        if let Some(style) =
+                            a.get("style").and_then(|value| value.parse::<usize>().ok())
+                        {
+                            col_styles.insert(c, style);
                         }
                         if let Some(w) = a
                             .get("width")
@@ -1423,10 +1629,12 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
                     }
                 }
                 "row" => {
-                    let r=current_row;
-                    if xml_bool(a.get("customFormat"),a.contains_key("s"))
-                        && let Some(style)=a.get("s").and_then(|value| value.parse::<usize>().ok()) {
-                        row_styles.insert(r,style);
+                    let r = current_row;
+                    if xml_bool(a.get("customFormat"), a.contains_key("s"))
+                        && let Some(style) =
+                            a.get("s").and_then(|value| value.parse::<usize>().ok())
+                    {
+                        row_styles.insert(r, style);
                     }
                     if let Some(h) = a
                         .get("ht")
@@ -1456,17 +1664,23 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
                             .unwrap_or(0.0) as u32;
                     }
                 }
-                "tabColor" => s.tab_color = rgb_with_theme(a, &palette,&theme),
+                "tabColor" => s.tab_color = rgb_with_theme(a, &palette, &theme),
                 "autoFilter" => s.filter = a.get("ref").and_then(|v| parse_range(v).ok()),
                 _ => (),
             }
             Ok(())
         })?;
-        if let Some((_,selection))=sheet_selections.iter().find(|(name,_)|name==&pane).or_else(||sheet_selections.first()) {
-            selections.insert(id,selection.clone());
+        if let Some((_, selection)) = sheet_selections
+            .iter()
+            .find(|(name, _)| name == &pane)
+            .or_else(|| sheet_selections.first())
+        {
+            selections.insert(id, selection.clone());
         }
-        let rules=conditional_rules(bytes,&differential)?;
-        book.sheet_by_id_mut(id).ok_or("Лист не найден")?.conditional=rules;
+        let rules = conditional_rules(bytes, &differential)?;
+        book.sheet_by_id_mut(id)
+            .ok_or("Лист не найден")?
+            .conditional = rules;
         read_sheet_images(book, id, &path, parts)?;
     }
     if book.active_sheet().is_some_and(|sheet| sheet.hidden) {
@@ -1476,7 +1690,9 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
             .position(|sheet| !sheet.hidden)
             .ok_or("Книга не содержит видимых листов")?;
     }
-    if let Some(selection)=selections.remove(&book.active_id()) {book.selection=selection;}
+    if let Some(selection) = selections.remove(&book.active_id()) {
+        book.selection = selection;
+    }
     Ok(())
 }
 struct ChartLocation {
@@ -1484,37 +1700,62 @@ struct ChartLocation {
     path: String,
     anchor: PictureAnchor,
 }
-fn chart_locations(book: &Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<Vec<ChartLocation>, String> {
+fn chart_locations(
+    book: &Book,
+    parts: &BTreeMap<String, Vec<u8>>,
+) -> Result<Vec<ChartLocation>, String> {
     let mut locations = Vec::new();
     let workbook_rels = relationships("xl/workbook.xml", parts);
     let mut sheets = Vec::new();
     if let Some(workbook) = parts.get("xl/workbook.xml") {
         each_tag(workbook, |tag, attrs| {
-            if tag == "sheet" && let (Some(name), Some(id)) = (attrs.get("name"), attrs.get("r:id"))
+            if tag == "sheet"
+                && let (Some(name), Some(id)) = (attrs.get("name"), attrs.get("r:id"))
                 && let Some(sheet) = book.sheets.iter().find(|sheet| sheet.name == *name)
-                && let Some((_, path)) = workbook_rels.get(id) {
-                    sheets.push((sheet.id, path.clone()));
-                }
+                && let Some((_, path)) = workbook_rels.get(id)
+            {
+                sheets.push((sheet.id, path.clone()));
+            }
             Ok(())
         })?;
     }
     for (sheet, path) in sheets {
-        let Some(bytes) = parts.get(&path) else { continue; };
+        let Some(bytes) = parts.get(&path) else {
+            continue;
+        };
         let rels = relationships(&path, parts);
         let mut drawing_ids = Vec::new();
         each_tag(bytes, |tag, attrs| {
-            if tag == "drawing" && let Some(id) = attrs.get("r:id") { drawing_ids.push(id.clone()); }
+            if tag == "drawing"
+                && let Some(id) = attrs.get("r:id")
+            {
+                drawing_ids.push(id.clone());
+            }
             Ok(())
         })?;
         for id in drawing_ids {
-            let Some((_, drawing)) = rels.get(&id).filter(|(kind, _)| kind.ends_with("/drawing")) else { continue; };
+            let Some((_, drawing)) = rels.get(&id).filter(|(kind, _)| kind.ends_with("/drawing"))
+            else {
+                continue;
+            };
             let drawing_rels = relationships(drawing, parts);
-            let Some(bytes) = parts.get(drawing) else { continue; };
+            let Some(bytes) = parts.get(drawing) else {
+                continue;
+            };
             let text = std::str::from_utf8(bytes).map_err(|error| error.to_string())?;
             for anchor in drawing_pictures(text)? {
-                if let Some((_, path)) = drawing_rels.get(&anchor.chart).filter(|(kind, _)| kind.ends_with("/chart")) {
-                    locations.push(ChartLocation { sheet, path: path.clone(), anchor });
-                    if locations.len() > 10000 { return Err("Слишком много импортируемых диаграмм".into()); }
+                if let Some((_, path)) = drawing_rels
+                    .get(&anchor.chart)
+                    .filter(|(kind, _)| kind.ends_with("/chart"))
+                {
+                    locations.push(ChartLocation {
+                        sheet,
+                        path: path.clone(),
+                        anchor,
+                    });
+                    if locations.len() > 10000 {
+                        return Err("Слишком много импортируемых диаграмм".into());
+                    }
                 }
             }
         }
@@ -1523,17 +1764,19 @@ fn chart_locations(book: &Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<Vec
 }
 fn read_charts(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(), String> {
     for location in chart_locations(book, parts)? {
-        let bytes=parts.get(&location.path).ok_or("Не найдена XML-часть диаграммы")?;
+        let bytes = parts
+            .get(&location.path)
+            .ok_or("Не найдена XML-часть диаграммы")?;
         let mut reader = Reader::from_str(std::str::from_utf8(bytes).map_err(|e| e.to_string())?);
         let mut kind = ChartKind::Column;
         let mut refs = Vec::new();
         let mut header_refs = Vec::new();
         let mut category_refs = Vec::new();
         let mut value_refs = Vec::new();
-        let mut plot_types=0usize;
+        let mut plot_types = 0usize;
         let mut in_categories = false;
         let mut title = String::new();
-        let mut title_refs=Vec::new();
+        let mut title_refs = Vec::new();
         let mut in_title = false;
         let mut in_plot_area = false;
         let mut in_series_name = false;
@@ -1544,15 +1787,27 @@ fn read_charts(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(),
                 Event::Start(e) | Event::Empty(e) => {
                     let tag = local(&e);
                     if in_plot_area && tag.ends_with("Chart") {
-                        if !matches!(tag.as_str(),"barChart"|"lineChart"|"areaChart"|"pieChart"|"doughnutChart"|"scatterChart") {
-                            return Err(format!("Тип диаграммы {tag} пока не поддерживается; импорт остановлен без замены на столбчатую"));
+                        if !matches!(
+                            tag.as_str(),
+                            "barChart"
+                                | "lineChart"
+                                | "areaChart"
+                                | "pieChart"
+                                | "doughnutChart"
+                                | "scatterChart"
+                        ) {
+                            return Err(format!(
+                                "Тип диаграммы {tag} пока не поддерживается; импорт остановлен без замены на столбчатую"
+                            ));
                         }
-                        plot_types+=1;
-                        if plot_types>1 {return Err("Комбинированные диаграммы пока не поддерживаются".into());}
+                        plot_types += 1;
+                        if plot_types > 1 {
+                            return Err("Комбинированные диаграммы пока не поддерживаются".into());
+                        }
                     }
                     match tag.as_str() {
                         "plotArea" if !empty => in_plot_area = true,
-                        "cat"|"xVal" if !empty => in_categories = true,
+                        "cat" | "xVal" if !empty => in_categories = true,
                         "tx" if !in_title && !empty => in_series_name = true,
                         "title" if !in_plot_area && !empty => in_title = true,
                         "barChart" => kind = ChartKind::Column,
@@ -1575,12 +1830,24 @@ fn read_charts(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(),
                             let text = quick_xml::escape::unescape(&text)
                                 .map_err(|e| e.to_string())?
                                 .into_owned();
-                            let found=super::formula::dependencies(&format!("={text}"));
-                            if in_title {title_refs.extend(found);}
-                            else if in_series_name {header_refs.extend(found);}
-                            else if in_categories {category_refs.extend(found.clone());refs.extend(found);}
-                            else {value_refs.extend(found.clone());refs.extend(found);}
-                            if refs.len().saturating_add(header_refs.len()).saturating_add(title_refs.len())>100000 {
+                            let found = super::formula::dependencies(&format!("={text}"));
+                            if in_title {
+                                title_refs.extend(found);
+                            } else if in_series_name {
+                                header_refs.extend(found);
+                            } else if in_categories {
+                                category_refs.extend(found.clone());
+                                refs.extend(found);
+                            } else {
+                                value_refs.extend(found.clone());
+                                refs.extend(found);
+                            }
+                            if refs
+                                .len()
+                                .saturating_add(header_refs.len())
+                                .saturating_add(title_refs.len())
+                                > 100000
+                            {
                                 return Err("Слишком много ссылок в диаграмме".into());
                             }
                         }
@@ -1598,9 +1865,15 @@ fn read_charts(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(),
                     }
                 }
                 Event::End(e) => {
-                    if matches!(e.local_name().as_ref(),"cat"|"xVal") {in_categories=false;}
-                    if e.local_name().as_ref() == "plotArea" { in_plot_area = false; }
-                    if e.local_name().as_ref() == "tx" { in_series_name = false; }
+                    if matches!(e.local_name().as_ref(), "cat" | "xVal") {
+                        in_categories = false;
+                    }
+                    if e.local_name().as_ref() == "plotArea" {
+                        in_plot_area = false;
+                    }
+                    if e.local_name().as_ref() == "tx" {
+                        in_series_name = false;
+                    }
                     if e.local_name().as_ref() == "title" {
                         in_title = false;
                     }
@@ -1610,14 +1883,31 @@ fn read_charts(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(),
                 _ => (),
             }
         }
-        if title.is_empty() && let Some((Some(sheet),range))=title_refs.first()
-            && let Some(sheet)=book.sheets.iter().find(|value|value.name.to_lowercase() == sheet.to_lowercase()) {
-            title=sheet.display(range.r0,range.c0,book.locale_ru);
+        if title.is_empty()
+            && let Some((Some(sheet), range)) = title_refs.first()
+            && let Some(sheet) = book
+                .sheets
+                .iter()
+                .find(|value| value.name.to_lowercase() == sheet.to_lowercase())
+        {
+            title = sheet.display(range.r0, range.c0, book.locale_ru);
         }
-        let (source,first)=refs.first().ok_or("Диаграмма не содержит поддерживаемых ссылок на данные")?;
-        if value_refs.is_empty() {return Err("Диаграмма не содержит поддерживаемых рядов данных".into());}
-        let sheet=source.clone().unwrap_or_else(||book.sheet_by_id(location.sheet).map(|sheet|sheet.name.clone()).unwrap_or_default());
-        let id=book.sheets.iter().find(|value|value.name.to_lowercase()==sheet.to_lowercase()).map(|sheet|sheet.id)
+        let (source, first) = refs
+            .first()
+            .ok_or("Диаграмма не содержит поддерживаемых ссылок на данные")?;
+        if value_refs.is_empty() {
+            return Err("Диаграмма не содержит поддерживаемых рядов данных".into());
+        }
+        let sheet = source.clone().unwrap_or_else(|| {
+            book.sheet_by_id(location.sheet)
+                .map(|sheet| sheet.name.clone())
+                .unwrap_or_default()
+        });
+        let id = book
+            .sheets
+            .iter()
+            .find(|value| value.name.to_lowercase() == sheet.to_lowercase())
+            .map(|sheet| sheet.id)
             .ok_or("Не найден лист данных диаграммы")?;
         {
             let mut range = *first;
@@ -1627,32 +1917,57 @@ fn read_charts(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(),
                 range.r1 = range.r1.max(r.r1);
                 range.c1 = range.c1.max(r.c1);
             }
-            let data_columns:std::collections::BTreeSet<_>=refs.iter().map(|(_,range)|range.c0).collect();
-            if refs.iter().any(|(_,part)|part.c0!=part.c1||part.r0!=range.r0||part.r1!=range.r1)
-                || data_columns.len() as u32!=range.c1-range.c0+1
-                || category_refs.iter().any(|(_,part)|part.c0!=range.c0) {
+            let data_columns: std::collections::BTreeSet<_> =
+                refs.iter().map(|(_, range)| range.c0).collect();
+            if refs
+                .iter()
+                .any(|(_, part)| part.c0 != part.c1 || part.r0 != range.r0 || part.r1 != range.r1)
+                || data_columns.len() as u32 != range.c1 - range.c0 + 1
+                || category_refs.iter().any(|(_, part)| part.c0 != range.c0)
+            {
                 return Err("Несмежные или горизонтальные источники диаграммы пока не поддерживаются; импорт остановлен без включения посторонних ячеек".into());
             }
-            let has_headers=range.r0>0 && header_refs.iter().any(|(source,header)|
-                source.as_ref().is_none_or(|source|source.to_lowercase()==sheet.to_lowercase())
-                    && header.r0==header.r1 && header.r0+1==range.r0
-                    && header.c0==header.c1 && header.c0>=range.c0 && header.c0<=range.c1);
-            if has_headers {range.r0-=1;}
-            range.validate().map_err(|error|format!("Диапазон диаграммы: {error}"))?;
+            let has_headers = range.r0 > 0
+                && header_refs.iter().any(|(source, header)| {
+                    source
+                        .as_ref()
+                        .is_none_or(|source| source.to_lowercase() == sheet.to_lowercase())
+                        && header.r0 == header.r1
+                        && header.r0 + 1 == range.r0
+                        && header.c0 == header.c1
+                        && header.c0 >= range.c0
+                        && header.c0 <= range.c1
+                });
+            if has_headers {
+                range.r0 -= 1;
+            }
+            range
+                .validate()
+                .map_err(|error| format!("Диапазон диаграммы: {error}"))?;
             {
-                let owner = book.sheet_by_id(location.sheet).ok_or("Нет листа диаграммы")?;
-                if owner.id != id || refs.iter().any(|(source, _)| source.as_ref()
-                    .is_some_and(|source| source.to_lowercase() != owner.name.to_lowercase())) {
+                let owner = book
+                    .sheet_by_id(location.sheet)
+                    .ok_or("Нет листа диаграммы")?;
+                if owner.id != id
+                    || refs.iter().any(|(source, _)| {
+                        source.as_ref().is_some_and(|source| {
+                            source.to_lowercase() != owner.name.to_lowercase()
+                        })
+                    })
+                {
                     return Err("Диаграмма с данными другого листа пока не поддерживается; импорт остановлен без переноса её на чужой лист".into());
                 }
                 let (row, col, _, _, width, height) = picture_geometry(owner, &location.anchor);
                 let chart_id = book.add_chart(location.sheet, kind, range, &title)?;
-                if let Some(chart) = book.sheet_by_id_mut(location.sheet)
-                    .and_then(|sheet| sheet.charts.iter_mut().find(|chart| chart.id == chart_id)) {
-                    chart.row = row; chart.col = col;
-                    chart.has_headers=has_headers;
-                    chart.has_categories=!category_refs.is_empty()
-                        && !value_refs.iter().any(|(_,value)|value.c0==range.c0);
+                if let Some(chart) = book
+                    .sheet_by_id_mut(location.sheet)
+                    .and_then(|sheet| sheet.charts.iter_mut().find(|chart| chart.id == chart_id))
+                {
+                    chart.row = row;
+                    chart.col = col;
+                    chart.has_headers = has_headers;
+                    chart.has_categories = !category_refs.is_empty()
+                        && !value_refs.iter().any(|(_, value)| value.c0 == range.c0);
                     if width > 0.0 && height > 0.0 {
                         chart.width = width.clamp(1.0, 4000.0);
                         chart.height = height.clamp(1.0, 4000.0);
@@ -1717,38 +2032,54 @@ fn read_sheet_images(
     id: u64,
     sheet_path: &str,
     parts: &BTreeMap<String, Vec<u8>>,
-) -> Result<(),String> {
-    let worksheet=parts.get(sheet_path).ok_or("Нет части листа с рисунками")?;
-    let rels=relationships(sheet_path,parts);
-    let mut drawings=Vec::new();
-    each_tag(worksheet,|tag,attrs| {
-        if tag=="drawing" {
-            let reference=attrs.get("r:id").ok_or("Нет связи рисунков листа")?;
-            let (kind,target)=rels.get(reference).ok_or("Не найдена связь рисунков листа")?;
-            if !kind.ends_with("/drawing") {return Err("Связь рисунков имеет неверный тип".into());}
+) -> Result<(), String> {
+    let worksheet = parts.get(sheet_path).ok_or("Нет части листа с рисунками")?;
+    let rels = relationships(sheet_path, parts);
+    let mut drawings = Vec::new();
+    each_tag(worksheet, |tag, attrs| {
+        if tag == "drawing" {
+            let reference = attrs.get("r:id").ok_or("Нет связи рисунков листа")?;
+            let (kind, target) = rels
+                .get(reference)
+                .ok_or("Не найдена связь рисунков листа")?;
+            if !kind.ends_with("/drawing") {
+                return Err("Связь рисунков имеет неверный тип".into());
+            }
             drawings.push(target.clone());
         }
         Ok(())
     })?;
     for drawing in drawings {
-        let media=relationships(&drawing,parts);
-        let bytes=parts.get(&drawing).ok_or("Не найдена часть рисунков листа")?;
-        let text=std::str::from_utf8(bytes).map_err(|error|error.to_string())?;
+        let media = relationships(&drawing, parts);
+        let bytes = parts
+            .get(&drawing)
+            .ok_or("Не найдена часть рисунков листа")?;
+        let text = std::str::from_utf8(bytes).map_err(|error| error.to_string())?;
         for anchor in drawing_pictures(text)? {
-            if anchor.embed.is_empty() {continue;} // Chart anchors are handled separately.
-            let (kind,target)=media.get(&anchor.embed).ok_or("Не найдена связь изображения")?;
-            if !kind.ends_with("/image") {return Err("Связь изображения имеет неверный тип".into());}
-            let bytes=parts.get(target).ok_or("Не найдены байты изображения")?;
-            let sheet=book.sheet_by_id(id).ok_or("Лист не найден")?;
-            let (row,col,x_offset,y_offset,width,height)=picture_geometry(sheet,&anchor);
-            let image_id=book.add_image(id,row,col,bytes.clone())?;
-            let image=book.sheet_by_id_mut(id).and_then(|sheet|sheet.images.iter_mut().find(|image|image.id==image_id))
-                .ok_or("Импортированный рисунок не найден")?;
-            image.x_offset=x_offset;image.y_offset=y_offset;
-            if width>0.0 && height>0.0 {
-                image.width=width.clamp(1.0,8000.0);image.height=height.clamp(1.0,8000.0);
+            if anchor.embed.is_empty() {
+                continue;
+            } // Chart anchors are handled separately.
+            let (kind, target) = media
+                .get(&anchor.embed)
+                .ok_or("Не найдена связь изображения")?;
+            if !kind.ends_with("/image") {
+                return Err("Связь изображения имеет неверный тип".into());
             }
-            image.alt=anchor.alt;
+            let bytes = parts.get(target).ok_or("Не найдены байты изображения")?;
+            let sheet = book.sheet_by_id(id).ok_or("Лист не найден")?;
+            let (row, col, x_offset, y_offset, width, height) = picture_geometry(sheet, &anchor);
+            let image_id = book.add_image(id, row, col, bytes.clone())?;
+            let image = book
+                .sheet_by_id_mut(id)
+                .and_then(|sheet| sheet.images.iter_mut().find(|image| image.id == image_id))
+                .ok_or("Импортированный рисунок не найден")?;
+            image.x_offset = x_offset;
+            image.y_offset = y_offset;
+            if width > 0.0 && height > 0.0 {
+                image.width = width.clamp(1.0, 8000.0);
+                image.height = height.clamp(1.0, 8000.0);
+            }
+            image.alt = anchor.alt;
         }
     }
     Ok(())
@@ -1839,9 +2170,11 @@ fn drawing_pictures(text: &str) -> Result<Vec<PictureAnchor>, String> {
             },
             Event::DocType(_) => return Err("DTD запрещён".into()),
             Event::Eof => {
-                if current.is_some() {return Err("Незавершённая привязка рисунка".into());}
+                if current.is_some() {
+                    return Err("Незавершённая привязка рисунка".into());
+                }
                 break;
-            },
+            }
             _ => {}
         }
     }
@@ -1875,7 +2208,9 @@ fn picture_attrs(
             }
         }
         "chart" => {
-            if let Some(id) = values.get("r:id") { anchor.chart = id.clone(); }
+            if let Some(id) = values.get("r:id") {
+                anchor.chart = id.clone();
+            }
         }
         "blip" => {
             if let Some(embed) = values.get("r:embed") {
@@ -1928,8 +2263,12 @@ fn picture_geometry(
     sheet: &super::model::Sheet,
     anchor: &PictureAnchor,
 ) -> (u32, u32, f32, f32, f32, f32) {
-    let x = drawing_axis_position(anchor.from.col, sheet.default_col_width, &sheet.widths, &sheet.hidden_cols)
-        + anchor.from.col_off as f32 / 9525.0;
+    let x = drawing_axis_position(
+        anchor.from.col,
+        sheet.default_col_width,
+        &sheet.widths,
+        &sheet.hidden_cols,
+    ) + anchor.from.col_off as f32 / 9525.0;
     let y = drawing_axis_position(
         anchor.from.row,
         sheet.default_row_height,
@@ -1940,46 +2279,64 @@ fn picture_geometry(
         .absolute
         .map_or((x, y), |(x, y)| (x as f32 / 9525.0, y as f32 / 9525.0));
     let (x, y) = (x.max(0.0), y.max(0.0));
-    let (row, col, x_offset, y_offset) = if anchor.absolute.is_some()
-        || anchor.from.row_off < 0 || anchor.from.col_off < 0 {
-        let row = drawing_axis_index(
-            y,
-            super::model::MAX_ROWS,
-            sheet.default_row_height,
-            &sheet.row_heights,
-            &sheet.hidden_rows,
-        );
-        let col = drawing_axis_index(
-            x,
-            super::model::MAX_COLS,
-            sheet.default_col_width,
-            &sheet.widths,
-            &sheet.hidden_cols,
-        );
-        (
-            row,
-            col,
-            x - drawing_axis_position(col, sheet.default_col_width, &sheet.widths, &sheet.hidden_cols),
-            y - drawing_axis_position(row, sheet.default_row_height, &sheet.row_heights, &sheet.hidden_rows),
-        )
-    } else {
-        (
-            anchor.from.row,
-            anchor.from.col,
-            anchor.from.col_off as f32 / 9525.0,
-            anchor.from.row_off as f32 / 9525.0,
-        )
-    };
+    let (row, col, x_offset, y_offset) =
+        if anchor.absolute.is_some() || anchor.from.row_off < 0 || anchor.from.col_off < 0 {
+            let row = drawing_axis_index(
+                y,
+                super::model::MAX_ROWS,
+                sheet.default_row_height,
+                &sheet.row_heights,
+                &sheet.hidden_rows,
+            );
+            let col = drawing_axis_index(
+                x,
+                super::model::MAX_COLS,
+                sheet.default_col_width,
+                &sheet.widths,
+                &sheet.hidden_cols,
+            );
+            (
+                row,
+                col,
+                x - drawing_axis_position(
+                    col,
+                    sheet.default_col_width,
+                    &sheet.widths,
+                    &sheet.hidden_cols,
+                ),
+                y - drawing_axis_position(
+                    row,
+                    sheet.default_row_height,
+                    &sheet.row_heights,
+                    &sheet.hidden_rows,
+                ),
+            )
+        } else {
+            (
+                anchor.from.row,
+                anchor.from.col,
+                anchor.from.col_off as f32 / 9525.0,
+                anchor.from.row_off as f32 / 9525.0,
+            )
+        };
     let (width, height) = anchor
         .to
         .as_ref()
         .map(|end| {
             (
-                drawing_axis_position(end.col, sheet.default_col_width, &sheet.widths, &sheet.hidden_cols)
-                    + end.col_off as f32 / 9525.0
+                drawing_axis_position(
+                    end.col,
+                    sheet.default_col_width,
+                    &sheet.widths,
+                    &sheet.hidden_cols,
+                ) + end.col_off as f32 / 9525.0
                     - x,
-                drawing_axis_position(end.row, sheet.default_row_height, &sheet.row_heights, &sheet.hidden_rows)
-                    + end.row_off as f32 / 9525.0
+                drawing_axis_position(
+                    end.row,
+                    sheet.default_row_height,
+                    &sheet.row_heights,
+                    &sheet.hidden_rows,
+                ) + end.row_off as f32 / 9525.0
                     - y,
             )
         })
@@ -2034,12 +2391,30 @@ fn xlsx_format(fmt: &CellFormat) -> Format {
 fn rgb_number(v: [u8; 3]) -> u32 {
     u32::from(v[0]) * 65536 + u32::from(v[1]) * 256 + u32::from(v[2])
 }
-fn pin_drawing_columns(ws:&mut rust_xlsxwriter::Worksheet,sheet:&super::model::Sheet,col:u32,offset:f32,width:f32)->Result<(),String> {
-    let end=drawing_axis_index(drawing_axis_position(col,sheet.default_col_width,&sheet.widths,&sheet.hidden_cols)+offset+width,
-        super::model::MAX_COLS,sheet.default_col_width,&sheet.widths,&sheet.hidden_cols);
+fn pin_drawing_columns(
+    ws: &mut rust_xlsxwriter::Worksheet,
+    sheet: &super::model::Sheet,
+    col: u32,
+    offset: f32,
+    width: f32,
+) -> Result<(), String> {
+    let end = drawing_axis_index(
+        drawing_axis_position(
+            col,
+            sheet.default_col_width,
+            &sheet.widths,
+            &sheet.hidden_cols,
+        ) + offset
+            + width,
+        super::model::MAX_COLS,
+        sheet.default_col_width,
+        &sheet.widths,
+        &sheet.hidden_cols,
+    );
     for column in col..=end {
-        if !sheet.widths.contains_key(&column)&&!sheet.hidden_cols.contains(&column) {
-            ws.set_column_width_pixels(column as u16,sheet.default_col_width.round() as u32).map_err(|error|error.to_string())?;
+        if !sheet.widths.contains_key(&column) && !sheet.hidden_cols.contains(&column) {
+            ws.set_column_width_pixels(column as u16, sheet.default_col_width.round() as u32)
+                .map_err(|error| error.to_string())?;
         }
     }
     Ok(())
@@ -2059,11 +2434,15 @@ fn write_xlsx(book: &Book) -> Result<Vec<u8>, String> {
         ws.set_name(&sheet.name).map_err(|e| e.to_string())?;
         ws.set_active(index == book.active);
         ws.set_hidden(sheet.hidden);
-        ws.set_default_row_height(f64::from(sheet.default_row_height)*0.75);
+        ws.set_default_row_height(f64::from(sheet.default_row_height) * 0.75);
         if index == book.active {
-            ws.set_selection(book.selection.row, book.selection.col as u16,
-                book.selection.anchor_row, book.selection.anchor_col as u16)
-                .map_err(|error| error.to_string())?;
+            ws.set_selection(
+                book.selection.row,
+                book.selection.col as u16,
+                book.selection.anchor_row,
+                book.selection.anchor_col as u16,
+            )
+            .map_err(|error| error.to_string())?;
         }
         if let Some(color) = sheet.tab_color {
             ws.set_tab_color(Color::RGB(rgb_number(color)));
@@ -2149,22 +2528,30 @@ fn write_xlsx(book: &Book) -> Result<Vec<u8>, String> {
             }
         }
         for rule in &sheet.conditional {
-            let comparison=match rule.operator.as_str() {
-                ">"=>ConditionalFormatCellRule::GreaterThan(rule.threshold),
-                "<"=>ConditionalFormatCellRule::LessThan(rule.threshold),
-                "="=>ConditionalFormatCellRule::EqualTo(rule.threshold),
-                ">="=>ConditionalFormatCellRule::GreaterThanOrEqualTo(rule.threshold),
-                "<="=>ConditionalFormatCellRule::LessThanOrEqualTo(rule.threshold),
-                _=>return Err("Недопустимое условное форматирование".into()),
+            let comparison = match rule.operator.as_str() {
+                ">" => ConditionalFormatCellRule::GreaterThan(rule.threshold),
+                "<" => ConditionalFormatCellRule::LessThan(rule.threshold),
+                "=" => ConditionalFormatCellRule::EqualTo(rule.threshold),
+                ">=" => ConditionalFormatCellRule::GreaterThanOrEqualTo(rule.threshold),
+                "<=" => ConditionalFormatCellRule::LessThanOrEqualTo(rule.threshold),
+                _ => return Err("Недопустимое условное форматирование".into()),
             };
-            let format=ConditionalFormatCell::new().set_rule(comparison)
-                .set_format(Format::new().set_background_color(Color::RGB(rgb_number(rule.fill)))).set_stop_if_true(true);
-            let range=rule.range;
-            ws.add_conditional_format(range.r0,range.c0 as u16,range.r1,range.c1 as u16,&format)
-                .map_err(|error|error.to_string())?;
+            let format = ConditionalFormatCell::new()
+                .set_rule(comparison)
+                .set_format(Format::new().set_background_color(Color::RGB(rgb_number(rule.fill))))
+                .set_stop_if_true(true);
+            let range = rule.range;
+            ws.add_conditional_format(
+                range.r0,
+                range.c0 as u16,
+                range.r1,
+                range.c1 as u16,
+                &format,
+            )
+            .map_err(|error| error.to_string())?;
         }
         for model in &sheet.charts {
-            pin_drawing_columns(ws,sheet,model.col,0.0,model.width)?;
+            pin_drawing_columns(ws, sheet, model.col, 0.0, model.width)?;
             let mut chart = Chart::new(match model.kind {
                 ChartKind::Column => ChartType::Column,
                 ChartKind::Bar => ChartType::Bar,
@@ -2179,12 +2566,20 @@ fn write_xlsx(book: &Book) -> Result<Vec<u8>, String> {
                 .set_width(model.width.round().clamp(1.0, 4000.0) as u32)
                 .set_height(model.height.round().clamp(1.0, 4000.0) as u32);
             let r = model.range;
-            let data_start = if model.has_headers && r.r1 > r.r0 { r.r0 + 1 } else { r.r0 };
-            let start_col = if model.has_categories && r.c1 > r.c0 { r.c0 + 1 } else { r.c0 };
+            let data_start = if model.has_headers && r.r1 > r.r0 {
+                r.r0 + 1
+            } else {
+                r.r0
+            };
+            let start_col = if model.has_categories && r.c1 > r.c0 {
+                r.c0 + 1
+            } else {
+                r.c0
+            };
             for c in start_col..=r.c1 {
                 let series = chart.add_series();
                 series.set_values((sheet.name.as_str(), data_start, c as u16, r.r1, c as u16));
-                if (model.has_categories && r.c1 > r.c0) || model.kind==ChartKind::Scatter {
+                if (model.has_categories && r.c1 > r.c0) || model.kind == ChartKind::Scatter {
                     series.set_categories((
                         sheet.name.as_str(),
                         data_start,
@@ -2212,7 +2607,7 @@ fn write_xlsx(book: &Book) -> Result<Vec<u8>, String> {
             if !model.alt.is_empty() {
                 image = image.set_alt_text(&model.alt);
             }
-            pin_drawing_columns(ws,sheet,model.col,model.x_offset,model.width)?;
+            pin_drawing_columns(ws, sheet, model.col, model.x_offset, model.width)?;
             ws.insert_image_with_offset(
                 model.row,
                 model.col as u16,
@@ -2258,18 +2653,28 @@ fn typed_formula_strings(xml: &[u8], sheet: &super::model::Sheet) -> Result<Vec<
     loop {
         let event = reader.read_event().map_err(|error| error.to_string())?;
         match event {
-            Event::Empty(e) if e.local_name().as_ref()=="sheetFormatPr" => {
-                let values=attrs(&e,&reader)?;
-                let mut element=e.into_owned();element.clear_attributes();
-                for (key,value) in values.iter().filter(|(key,_)|!matches!(key.as_str(),"defaultColWidth"|"defaultRowHeight"|"customHeight")) {
-                    element.push_attribute((key.as_str(),value.as_str()));
+            Event::Empty(e) if e.local_name().as_ref() == "sheetFormatPr" => {
+                let values = attrs(&e, &reader)?;
+                let mut element = e.into_owned();
+                element.clear_attributes();
+                for (key, value) in values.iter().filter(|(key, _)| {
+                    !matches!(
+                        key.as_str(),
+                        "defaultColWidth" | "defaultRowHeight" | "customHeight"
+                    )
+                }) {
+                    element.push_attribute((key.as_str(), value.as_str()));
                 }
-                let width=((f64::from(sheet.default_col_width.round())+0.5)/7.0-18.0/256.0).to_string();
-                let height=(f64::from(sheet.default_row_height)*0.75).to_string();
-                element.push_attribute(("defaultColWidth",width.as_str()));
-                element.push_attribute(("defaultRowHeight",height.as_str()));
-                element.push_attribute(("customHeight","1"));
-                writer.write_event(Event::Empty(element)).map_err(|error|error.to_string())?;
+                let width = ((f64::from(sheet.default_col_width.round()) + 0.5) / 7.0
+                    - 18.0 / 256.0)
+                    .to_string();
+                let height = (f64::from(sheet.default_row_height) * 0.75).to_string();
+                element.push_attribute(("defaultColWidth", width.as_str()));
+                element.push_attribute(("defaultRowHeight", height.as_str()));
+                element.push_attribute(("customHeight", "1"));
+                writer
+                    .write_event(Event::Empty(element))
+                    .map_err(|error| error.to_string())?;
             }
             Event::Start(e) if e.local_name().as_ref() == "c" => {
                 let values = attrs(&e, &reader)?;
@@ -2352,10 +2757,12 @@ fn exact_row_height(
     Ok(element)
 }
 fn sheet_needs_patch(sheet: &super::model::Sheet) -> bool {
-    sheet.default_col_width != 64.0 || sheet.default_row_height != 20.0 || sheet
-        .row_heights
-        .values()
-        .any(|height| height.fract() != 0.0)
+    sheet.default_col_width != 64.0
+        || sheet.default_row_height != 20.0
+        || sheet
+            .row_heights
+            .values()
+            .any(|height| height.fract() != 0.0)
         || sheet
             .cells
             .values()
@@ -2821,51 +3228,94 @@ mod tests {
     }
 }
 
-fn tint_color(color: [u8;3], tint: f64) -> [u8;3] {
-    if tint == 0.0 { return color; }
-    let [r,g,b]=color.map(|v| f64::from(v)/255.0);
-    let max=r.max(g).max(b);
-    let min=r.min(g).min(b);
-    let delta=max-min;
-    let light=(max+min)/2.0;
-    let saturation=if delta == 0.0 { 0.0 } else { delta/(1.0-(2.0*light-1.0).abs()) };
-    let hue=if delta == 0.0 { 0.0 } else if max == r { ((g-b)/delta).rem_euclid(6.0) }
-        else if max == g { (b-r)/delta+2.0 } else { (r-g)/delta+4.0 };
-    let light=if tint < 0.0 { light*(1.0+tint) } else { light*(1.0-tint)+tint };
-    let chroma=(1.0-(2.0*light-1.0).abs())*saturation;
-    let x=chroma*(1.0-(hue.rem_euclid(2.0)-1.0).abs());
-    let offset=light-chroma/2.0;
-    let rgb=match hue as u32 {
-        0 => [chroma,x,0.0],1 => [x,chroma,0.0],2 => [0.0,chroma,x],
-        3 => [0.0,x,chroma],4 => [x,0.0,chroma],_ => [chroma,0.0,x],
+fn tint_color(color: [u8; 3], tint: f64) -> [u8; 3] {
+    if tint == 0.0 {
+        return color;
+    }
+    let [r, g, b] = color.map(|v| f64::from(v) / 255.0);
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let delta = max - min;
+    let light = (max + min) / 2.0;
+    let saturation = if delta == 0.0 {
+        0.0
+    } else {
+        delta / (1.0 - (2.0 * light - 1.0).abs())
     };
-    rgb.map(|v| ((v+offset)*255.0).round().clamp(0.0,255.0) as u8)
+    let hue = if delta == 0.0 {
+        0.0
+    } else if max == r {
+        ((g - b) / delta).rem_euclid(6.0)
+    } else if max == g {
+        (b - r) / delta + 2.0
+    } else {
+        (r - g) / delta + 4.0
+    };
+    let light = if tint < 0.0 {
+        light * (1.0 + tint)
+    } else {
+        light * (1.0 - tint) + tint
+    };
+    let chroma = (1.0 - (2.0 * light - 1.0).abs()) * saturation;
+    let x = chroma * (1.0 - (hue.rem_euclid(2.0) - 1.0).abs());
+    let offset = light - chroma / 2.0;
+    let rgb = match hue as u32 {
+        0 => [chroma, x, 0.0],
+        1 => [x, chroma, 0.0],
+        2 => [0.0, chroma, x],
+        3 => [0.0, x, chroma],
+        4 => [x, 0.0, chroma],
+        _ => [chroma, 0.0, x],
+    };
+    rgb.map(|v| ((v + offset) * 255.0).round().clamp(0.0, 255.0) as u8)
 }
-fn theme_colors(bytes: &[u8]) -> Result<Vec<[u8;3]>,String> {
-    let slots=["lt1","dk1","lt2","dk2","accent1","accent2","accent3","accent4","accent5","accent6","hlink","folHlink"];
-    let mut colors=vec![[255;3],[0;3],[238,236,225],[31,73,125],[79,129,189],[192,80,77],
-        [155,187,89],[128,100,162],[75,172,198],[247,150,70],[0,0,255],[128,0,128]];
-    let mut reader=Reader::from_str(std::str::from_utf8(bytes).map_err(|e| e.to_string())?);
-    let mut inside=false;
-    let mut slot=None;
+fn theme_colors(bytes: &[u8]) -> Result<Vec<[u8; 3]>, String> {
+    let slots = [
+        "lt1", "dk1", "lt2", "dk2", "accent1", "accent2", "accent3", "accent4", "accent5",
+        "accent6", "hlink", "folHlink",
+    ];
+    let mut colors = vec![
+        [255; 3],
+        [0; 3],
+        [238, 236, 225],
+        [31, 73, 125],
+        [79, 129, 189],
+        [192, 80, 77],
+        [155, 187, 89],
+        [128, 100, 162],
+        [75, 172, 198],
+        [247, 150, 70],
+        [0, 0, 255],
+        [128, 0, 128],
+    ];
+    let mut reader = Reader::from_str(std::str::from_utf8(bytes).map_err(|e| e.to_string())?);
+    let mut inside = false;
+    let mut slot = None;
     loop {
         match reader.read_event().map_err(|e| e.to_string())? {
-            Event::Start(e)|Event::Empty(e) => {
-                let tag=local(&e);
-                if tag == "clrScheme" { inside=true; }
-                else if inside {
-                    if let Some(index)=slots.iter().position(|name| *name==tag) { slot=Some(index); }
-                    else if matches!(tag.as_str(),"srgbClr"|"sysClr") {
-                        let a=attrs(&e,&reader)?;
-                        let value=a.get(if tag=="sysClr" { "lastClr" } else { "val" });
-                        if let (Some(index),Some(value))=(slot,value) {
-                            let attributes=BTreeMap::from([("rgb".into(),value.clone())]);
-                            if let Some(color)=rgb(&attributes) { colors[index]=color; }
+            Event::Start(e) | Event::Empty(e) => {
+                let tag = local(&e);
+                if tag == "clrScheme" {
+                    inside = true;
+                } else if inside {
+                    if let Some(index) = slots.iter().position(|name| *name == tag) {
+                        slot = Some(index);
+                    } else if matches!(tag.as_str(), "srgbClr" | "sysClr") {
+                        let a = attrs(&e, &reader)?;
+                        let value = a.get(if tag == "sysClr" { "lastClr" } else { "val" });
+                        if let (Some(index), Some(value)) = (slot, value) {
+                            let attributes = BTreeMap::from([("rgb".into(), value.clone())]);
+                            if let Some(color) = rgb(&attributes) {
+                                colors[index] = color;
+                            }
                         }
                     }
                 }
             }
-            Event::End(e) if e.local_name().as_ref()=="clrScheme" => { inside=false; slot=None; }
+            Event::End(e) if e.local_name().as_ref() == "clrScheme" => {
+                inside = false;
+                slot = None;
+            }
             Event::DocType(_) => return Err("DTD запрещён".into()),
             Event::Eof => break,
             _ => {}
@@ -2877,9 +3327,9 @@ fn theme_colors(bytes: &[u8]) -> Result<Vec<[u8;3]>,String> {
 #[cfg(test)]
 mod metadata_defect_tests {
     use super::*;
-    fn metadata(styles: &str,sheet: &str) -> Result<Book,String> {
-        let mut book=Book::default();
-        let name=crate::package::xml_escape(&book.sheets[0].name);
+    fn metadata(styles: &str, sheet: &str) -> Result<Book, String> {
+        let mut book = Book::default();
+        let name = crate::package::xml_escape(&book.sheets[0].name);
         let parts=BTreeMap::from([
             ("xl/workbook.xml".into(),format!("<workbook xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets><sheet name=\"{name}\" r:id=\"s1\"/></sheets></workbook>").into_bytes()),
             ("xl/_rels/workbook.xml.rels".into(),b"<Relationships><Relationship Id=\"s1\" Type=\"http://x/worksheet\" Target=\"worksheets/sheet1.xml\"/><Relationship Id=\"style\" Type=\"http://x/styles\" Target=\"styles.xml\"/><Relationship Id=\"theme\" Type=\"http://x/theme\" Target=\"theme/theme1.xml\"/></Relationships>".to_vec()),
@@ -2887,255 +3337,524 @@ mod metadata_defect_tests {
             ("xl/worksheets/sheet1.xml".into(),sheet.as_bytes().to_vec()),
             ("xl/theme/theme1.xml".into(),b"<theme><clrScheme><accent1><srgbClr val=\"FF0000\"/></accent1></clrScheme></theme>".to_vec()),
         ]);
-        read_metadata(&mut book,&parts)?;
+        read_metadata(&mut book, &parts)?;
         Ok(book)
     }
     fn formats() -> &'static str {
         r#"<styleSheet><fonts><font/><font><b/></font><font><i/></font></fonts><cellXfs><xf fontId="0"/><xf fontId="1"/><xf fontId="2"/></cellXfs></styleSheet>"#
     }
     #[test]
-    fn xlsx_theme_and_tint_colors() -> Result<(),String> {
-        let styles=r#"<styleSheet><fonts><font><color theme="4"/></font></fonts><fills><fill><patternFill patternType="solid"><fgColor theme="4" tint="0.5"/></patternFill></fill></fills><cellXfs><xf fontId="0" fillId="0"/></cellXfs></styleSheet>"#;
-        let book=metadata(styles,r#"<worksheet><sheetPr><tabColor theme="4"/></sheetPr><sheetData><row r="1"><c r="A1"/></row></sheetData></worksheet>"#)?;
-        let cell=book.sheets[0].cell(0,0).ok_or("cell")?;
-        assert_eq!(cell.fmt.color,[255,0,0]);
-        assert_eq!(cell.fmt.fill,Some([255,128,128]));
-        assert_eq!(book.sheets[0].tab_color,Some([255,0,0]));
-        assert_eq!(tint_color([0,0,0],0.5),[128,128,128]);
+    fn xlsx_theme_and_tint_colors() -> Result<(), String> {
+        let styles = r#"<styleSheet><fonts><font><color theme="4"/></font></fonts><fills><fill><patternFill patternType="solid"><fgColor theme="4" tint="0.5"/></patternFill></fill></fills><cellXfs><xf fontId="0" fillId="0"/></cellXfs></styleSheet>"#;
+        let book = metadata(
+            styles,
+            r#"<worksheet><sheetPr><tabColor theme="4"/></sheetPr><sheetData><row r="1"><c r="A1"/></row></sheetData></worksheet>"#,
+        )?;
+        let cell = book.sheets[0].cell(0, 0).ok_or("cell")?;
+        assert_eq!(cell.fmt.color, [255, 0, 0]);
+        assert_eq!(cell.fmt.fill, Some([255, 128, 128]));
+        assert_eq!(book.sheets[0].tab_color, Some([255, 0, 0]));
+        assert_eq!(tint_color([0, 0, 0], 0.5), [128, 128, 128]);
         Ok(())
     }
     #[test]
-    fn xlsx_row_and_column_format_inheritance() -> Result<(),String> {
-        let book=metadata(formats(),r#"<worksheet><cols><col min="1" max="2" style="1"/></cols><sheetData><row r="1"><c r="A1"/></row><row r="2" s="2" customFormat="1"><c r="A2"/><c r="B2" s="0"/></row></sheetData></worksheet>"#)?;
-        assert!(book.sheets[0].cell(0,0).ok_or("A1")?.fmt.bold);
-        assert!(book.sheets[0].cell(1,0).ok_or("A2")?.fmt.italic);
-        assert!(!book.sheets[0].cell(1,0).ok_or("A2")?.fmt.bold);
-        assert!(!book.sheets[0].cell(1,1).ok_or("B2")?.fmt.italic);
+    fn xlsx_row_and_column_format_inheritance() -> Result<(), String> {
+        let book = metadata(
+            formats(),
+            r#"<worksheet><cols><col min="1" max="2" style="1"/></cols><sheetData><row r="1"><c r="A1"/></row><row r="2" s="2" customFormat="1"><c r="A2"/><c r="B2" s="0"/></row></sheetData></worksheet>"#,
+        )?;
+        assert!(book.sheets[0].cell(0, 0).ok_or("A1")?.fmt.bold);
+        assert!(book.sheets[0].cell(1, 0).ok_or("A2")?.fmt.italic);
+        assert!(!book.sheets[0].cell(1, 0).ok_or("A2")?.fmt.bold);
+        assert!(!book.sheets[0].cell(1, 1).ok_or("B2")?.fmt.italic);
         Ok(())
     }
     #[test]
-    fn xlsx_implicit_metadata_coordinates() -> Result<(),String> {
-        let book=metadata(formats(),r#"<worksheet><sheetData><row ht="15" hidden="1"><c s="1"/></row><row ht="30"><c s="0"/><c s="1"/></row><row r="4"><c r="C4" s="1"/><c s="1"/></row></sheetData></worksheet>"#)?;
-        let sheet=&book.sheets[0];
-        assert_eq!(sheet.row_heights.get(&0),Some(&20.0));
-        assert_eq!(sheet.row_heights.get(&1),Some(&40.0));
-        assert_eq!(sheet.hidden_rows.iter().copied().collect::<Vec<_>>(),vec![0]);
-        assert!(sheet.cell(0,0).ok_or("A1")?.fmt.bold);
-        assert!(sheet.cell(1,1).ok_or("B2")?.fmt.bold);
-        assert!(sheet.cell(3,3).ok_or("D4")?.fmt.bold);
+    fn xlsx_implicit_metadata_coordinates() -> Result<(), String> {
+        let book = metadata(
+            formats(),
+            r#"<worksheet><sheetData><row ht="15" hidden="1"><c s="1"/></row><row ht="30"><c s="0"/><c s="1"/></row><row r="4"><c r="C4" s="1"/><c s="1"/></row></sheetData></worksheet>"#,
+        )?;
+        let sheet = &book.sheets[0];
+        assert_eq!(sheet.row_heights.get(&0), Some(&20.0));
+        assert_eq!(sheet.row_heights.get(&1), Some(&40.0));
+        assert_eq!(
+            sheet.hidden_rows.iter().copied().collect::<Vec<_>>(),
+            vec![0]
+        );
+        assert!(sheet.cell(0, 0).ok_or("A1")?.fmt.bold);
+        assert!(sheet.cell(1, 1).ok_or("B2")?.fmt.bold);
+        assert!(sheet.cell(3, 3).ok_or("D4")?.fmt.bold);
         Ok(())
     }
     #[test]
-    fn pipe_separator_and_empty_field_roundtrip() -> Result<(),String> {
-        assert_eq!(detect_separator("one|two"),'|');
-        assert_eq!(detect_separator("single"),',');
-        let rows=vec![vec!["a".into()],vec!["".into()]];
-        assert_eq!(parse_csv(&to_csv(&rows,','),',')?,rows);
-        assert_eq!(parse_csv(&to_csv(&[vec!["".into()]],','),',')?,vec![vec!["".to_string()]]);
+    fn pipe_separator_and_empty_field_roundtrip() -> Result<(), String> {
+        assert_eq!(detect_separator("one|two"), '|');
+        assert_eq!(detect_separator("single"), ',');
+        let rows = vec![vec!["a".into()], vec!["".into()]];
+        assert_eq!(parse_csv(&to_csv(&rows, ','), ',')?, rows);
+        assert_eq!(
+            parse_csv(&to_csv(&[vec!["".into()]], ','), ',')?,
+            vec![vec!["".to_string()]]
+        );
         Ok(())
     }
 }
 
-fn theme_font_faces(bytes:&[u8])->Result<BTreeMap<String,String>,String> {
-    let mut reader=Reader::from_str(std::str::from_utf8(bytes).map_err(|e|e.to_string())?);
-    let mut faces=BTreeMap::new();let mut kind=None;
+fn theme_font_faces(bytes: &[u8]) -> Result<BTreeMap<String, String>, String> {
+    let mut reader = Reader::from_str(std::str::from_utf8(bytes).map_err(|e| e.to_string())?);
+    let mut faces = BTreeMap::new();
+    let mut kind = None;
     loop {
-        match reader.read_event().map_err(|e|e.to_string())? {
-            Event::Start(e)|Event::Empty(e)=>{
-                match local(&e).as_str() {
-                    "majorFont"=>kind=Some("major"),
-                    "minorFont"=>kind=Some("minor"),
-                    "latin"=>if let Some(kind)=kind && let Some(face)=attrs(&e,&reader)?.get("typeface")
-                        .filter(|face|!face.is_empty() && face.len()<=256) {faces.insert(kind.into(),face.clone());},
-                    _=>(),
+        match reader.read_event().map_err(|e| e.to_string())? {
+            Event::Start(e) | Event::Empty(e) => match local(&e).as_str() {
+                "majorFont" => kind = Some("major"),
+                "minorFont" => kind = Some("minor"),
+                "latin" => {
+                    if let Some(kind) = kind
+                        && let Some(face) = attrs(&e, &reader)?
+                            .get("typeface")
+                            .filter(|face| !face.is_empty() && face.len() <= 256)
+                    {
+                        faces.insert(kind.into(), face.clone());
+                    }
+                }
+                _ => (),
+            },
+            Event::End(e) => {
+                if matches!(e.local_name().as_ref(), "majorFont" | "minorFont") {
+                    kind = None;
                 }
             }
-            Event::End(e)=>if matches!(e.local_name().as_ref(),"majorFont"|"minorFont"){kind=None;},
-            Event::DocType(_)=>return Err("DTD запрещён".into()),
-            Event::Eof=>break,_=>(),
+            Event::DocType(_) => return Err("DTD запрещён".into()),
+            Event::Eof => break,
+            _ => (),
         }
-    }Ok(faces)
+    }
+    Ok(faces)
 }
-fn xlsx_selection(attrs:&BTreeMap<String,String>)->Option<super::model::Selection> {
-    let (row,col)=parse_address(attrs.get("activeCell")?)?;
-    let mut result=super::model::Selection{row,col,anchor_row:row,anchor_col:col};
-    for token in attrs.get("sqref").map(String::as_str).unwrap_or("").split_whitespace() {
-        let (first,last)=token.split_once(':').unwrap_or((token,token));
-        let (r0,c0)=parse_address(first)?;let (r1,c1)=parse_address(last)?;
-        let range=super::model::Range::new(r0,c0,r1,c1);
-        if range.contains(row,col) && (row==range.r0 || row==range.r1) && (col==range.c0 || col==range.c1) {
-            result.anchor_row=if row==range.r0{range.r1}else{range.r0};
-            result.anchor_col=if col==range.c0{range.c1}else{range.c0};break;
+fn xlsx_selection(attrs: &BTreeMap<String, String>) -> Option<super::model::Selection> {
+    let (row, col) = parse_address(attrs.get("activeCell")?)?;
+    let mut result = super::model::Selection {
+        row,
+        col,
+        anchor_row: row,
+        anchor_col: col,
+    };
+    for token in attrs
+        .get("sqref")
+        .map(String::as_str)
+        .unwrap_or("")
+        .split_whitespace()
+    {
+        let (first, last) = token.split_once(':').unwrap_or((token, token));
+        let (r0, c0) = parse_address(first)?;
+        let (r1, c1) = parse_address(last)?;
+        let range = super::model::Range::new(r0, c0, r1, c1);
+        if range.contains(row, col)
+            && (row == range.r0 || row == range.r1)
+            && (col == range.c0 || col == range.c1)
+        {
+            result.anchor_row = if row == range.r0 { range.r1 } else { range.r0 };
+            result.anchor_col = if col == range.c0 { range.c1 } else { range.c0 };
+            break;
         }
-    }Some(result)
+    }
+    Some(result)
 }
 #[cfg(test)]
 mod additional_xlsx_defect_tests {
     use super::*;
     use crate::package::xml_escape as esc;
     #[test]
-    fn cell_xfs_inherit_missing_properties_from_the_referenced_style()->Result<(),String> {
+    fn cell_xfs_inherit_missing_properties_from_the_referenced_style() -> Result<(), String> {
         let bytes=br#"<styleSheet><fonts><font><name val="Georgia"/><b/><color rgb="FF123456"/></font></fonts><fills><fill><patternFill patternType="solid"><fgColor rgb="FFAABBCC"/></patternFill></fill></fills><cellStyleXfs><xf fontId="0" fillId="0" numFmtId="2"><alignment horizontal="right" wrapText="1"/></xf></cellStyleXfs><cellXfs><xf xfId="0"/></cellXfs></styleSheet>"#;
-        let formats=styles_with_theme(bytes,&[])?;let fmt=formats.first().ok_or("format")?;
-        assert_eq!(fmt.font,"Georgia");assert!(fmt.bold);assert_eq!(fmt.fill,Some([170,187,204]));
-        assert_eq!(fmt.number,"0.00");assert_eq!(fmt.align,Align::Right);assert!(fmt.wrap);Ok(())
+        let formats = styles_with_theme(bytes, &[])?;
+        let fmt = formats.first().ok_or("format")?;
+        assert_eq!(fmt.font, "Georgia");
+        assert!(fmt.bold);
+        assert_eq!(fmt.fill, Some([170, 187, 204]));
+        assert_eq!(fmt.number, "0.00");
+        assert_eq!(fmt.align, Align::Right);
+        assert!(fmt.wrap);
+        Ok(())
     }
     #[test]
-    fn spreadsheet_font_scheme_resolves_custom_theme_faces()->Result<(),String> {
+    fn spreadsheet_font_scheme_resolves_custom_theme_faces() -> Result<(), String> {
         let faces=theme_font_faces(br#"<theme><fontScheme><majorFont><latin typeface="Georgia"/></majorFont><minorFont><latin typeface="Verdana"/></minorFont></fontScheme></theme>"#)?;
         let formats=styles_with_theme_fonts(br#"<styleSheet><fonts><font><name val="Calibri"/><scheme val="minor"/></font><font><scheme val="major"/></font></fonts><cellXfs><xf fontId="0"/><xf fontId="1"/></cellXfs></styleSheet>"#,&[],&faces)?;
-        assert_eq!(formats[0].font,"Verdana");assert_eq!(formats[1].font,"Georgia");Ok(())
+        assert_eq!(formats[0].font, "Verdana");
+        assert_eq!(formats[1].font, "Georgia");
+        Ok(())
     }
     #[test]
-    fn worksheet_selection_uses_the_active_pane_and_preserves_the_anchor()->Result<(),String> {
-        let mut book=Book::default();let name=book.sheets[0].name.clone();
+    fn worksheet_selection_uses_the_active_pane_and_preserves_the_anchor() -> Result<(), String> {
+        let mut book = Book::default();
+        let name = book.sheets[0].name.clone();
         let parts=BTreeMap::from([
             ("xl/workbook.xml".into(),format!(r#"<workbook><sheets><sheet name="{}" r:id="s"/></sheets></workbook>"#,esc(&name)).into_bytes()),
             ("xl/_rels/workbook.xml.rels".into(),br#"<Relationships><Relationship Id="s" Target="worksheets/sheet1.xml"/></Relationships>"#.to_vec()),
             ("xl/worksheets/sheet1.xml".into(),br#"<worksheet><sheetViews><sheetView><pane state="frozen" activePane="bottomRight"/><selection pane="topLeft" activeCell="A1"/><selection pane="bottomRight" activeCell="E10" sqref="D8:E10"/></sheetView></sheetViews></worksheet>"#.to_vec()),
         ]);
-        read_metadata(&mut book,&parts)?;
-        assert_eq!((book.selection.row,book.selection.col,book.selection.anchor_row,book.selection.anchor_col),(9,4,7,3));Ok(())
+        read_metadata(&mut book, &parts)?;
+        assert_eq!(
+            (
+                book.selection.row,
+                book.selection.col,
+                book.selection.anchor_row,
+                book.selection.anchor_col
+            ),
+            (9, 4, 7, 3)
+        );
+        Ok(())
     }
     #[test]
-    fn linked_chart_titles_do_not_expand_the_plot_data_range()->Result<(),String> {
-        let mut book=Book::default();let id=book.active_id();let name=book.sheets[0].name.clone();
-        book.set_cell(id,9,25,"Revenue")?;book.set_cell(id,0,0,"1")?;book.set_cell(id,1,0,"2")?;
-        let chart = format!("<chartSpace><chart><title><strRef><f>'{}'!$Z$10</f></strRef></title><plotArea><barChart><ser><val><numRef><f>'{}'!$A$1:$A$2</f></numRef></val></ser></barChart></plotArea></chart></chartSpace>",esc(&name),esc(&name));
+    fn linked_chart_titles_do_not_expand_the_plot_data_range() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        let name = book.sheets[0].name.clone();
+        book.set_cell(id, 9, 25, "Revenue")?;
+        book.set_cell(id, 0, 0, "1")?;
+        book.set_cell(id, 1, 0, "2")?;
+        let chart = format!(
+            "<chartSpace><chart><title><strRef><f>'{}'!$Z$10</f></strRef></title><plotArea><barChart><ser><val><numRef><f>'{}'!$A$1:$A$2</f></numRef></val></ser></barChart></plotArea></chart></chartSpace>",
+            esc(&name),
+            esc(&name)
+        );
         let parts = chart_fixture_parts(&book, 0, "art/custom.xml", &chart);
-        read_charts(&mut book,&parts)?;
-        let chart=book.sheets[0].charts.first().ok_or("chart")?;
-        assert_eq!(chart.title,"Revenue");assert_eq!(chart.range,super::super::model::Range::new(0,0,1,0));Ok(())
+        read_charts(&mut book, &parts)?;
+        let chart = book.sheets[0].charts.first().ok_or("chart")?;
+        assert_eq!(chart.title, "Revenue");
+        assert_eq!(chart.range, super::super::model::Range::new(0, 0, 1, 0));
+        Ok(())
     }
 }
 
-fn html_push(output:&mut String,value:&str,limit:usize)->Result<(),String> {
-    if output.len().checked_add(value.len()).is_none_or(|length|length>limit) {return Err("HTML превышает лимит размера экспорта".into());}
-    output.push_str(value);Ok(())
+fn html_push(output: &mut String, value: &str, limit: usize) -> Result<(), String> {
+    if output
+        .len()
+        .checked_add(value.len())
+        .is_none_or(|length| length > limit)
+    {
+        return Err("HTML превышает лимит размера экспорта".into());
+    }
+    output.push_str(value);
+    Ok(())
 }
-fn html_font(value:&str)->String {
-    let mut escaped=String::from("'");
+fn html_font(value: &str) -> String {
+    let mut escaped = String::from("'");
     for ch in value.chars() {
-        match ch {'\\'=>escaped.push_str("\\\\"),'\''=>escaped.push_str("\\'"),
-            '\n'|'\r'=>escaped.push_str("\\A "),ch=>escaped.push(ch)}
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '\'' => escaped.push_str("\\'"),
+            '\n' | '\r' => escaped.push_str("\\A "),
+            ch => escaped.push(ch),
+        }
     }
-    escaped.push('\'');escaped
+    escaped.push('\'');
+    escaped
 }
-fn write_html_book(book:&Book,cell_limit:u64,byte_limit:usize)->Result<Vec<u8>,String> {
-    let mut dense=0u64;let mut extents=Vec::new();
-    for sheet in book.sheets.iter().filter(|sheet|!sheet.hidden) {
-        let (mut rows,mut cols)=sheet.extent();
-        for range in &sheet.merges {rows=rows.max(range.r1);cols=cols.max(range.c1);}
-        let cells=(u64::from(rows)+1)*(u64::from(cols)+1);
-        if cells>MAX_RANGE_CELLS as u64 {return Err("Слишком большой диапазон HTML".into());}
-        dense=dense.checked_add(cells).ok_or("Слишком большой HTML")?;
-        if dense>cell_limit {return Err("Суммарный диапазон HTML превышает безопасный лимит".into());}
-        extents.push((sheet,rows,cols));
-    }
-    let mut out=String::new();
-    html_push(&mut out,"<!doctype html><html lang=\"ru\"><head><meta charset=\"utf-8\"><style>table{border-collapse:collapse;table-layout:fixed}td{padding:4px}img{max-width:100%}</style></head><body>",byte_limit)?;
-    for (sheet,rows,cols) in extents {
-        let mut merged=BTreeMap::new();let mut covered=0u64;
+fn write_html_book(book: &Book, cell_limit: u64, byte_limit: usize) -> Result<Vec<u8>, String> {
+    let mut dense = 0u64;
+    let mut extents = Vec::new();
+    for sheet in book.sheets.iter().filter(|sheet| !sheet.hidden) {
+        let (mut rows, mut cols) = sheet.extent();
         for range in &sheet.merges {
-            covered=covered.saturating_add(u64::from(range.r1-range.r0+1)*u64::from(range.c1-range.c0+1));
-            if covered>cell_limit {return Err("Слишком большой индекс объединённых ячеек HTML".into());}
-            for row in range.r0..=range.r1 {for col in range.c0..=range.c1 {merged.entry((row,col)).or_insert(range);}}
+            rows = rows.max(range.r1);
+            cols = cols.max(range.c1);
         }
-        html_push(&mut out,&format!("<section><h2>{}</h2><table><colgroup>",crate::package::xml_escape(&sheet.name)),byte_limit)?;
-        for col in (0..=cols).filter(|col|!sheet.hidden_cols.contains(col)) {
-            html_push(&mut out,&format!("<col style=\"width:{}px\">",sheet.widths.get(&col).copied().unwrap_or(sheet.default_col_width)),byte_limit)?;
+        let cells = (u64::from(rows) + 1) * (u64::from(cols) + 1);
+        if cells > MAX_RANGE_CELLS as u64 {
+            return Err("Слишком большой диапазон HTML".into());
         }
-        html_push(&mut out,"</colgroup>",byte_limit)?;
-        for row in (0..=rows).filter(|row|!sheet.hidden_rows.contains(row)) {
-            html_push(&mut out,&format!("<tr style=\"height:{}px\">",sheet.row_heights.get(&row).copied().unwrap_or(sheet.default_row_height)),byte_limit)?;
-            for col in (0..=cols).filter(|col|!sheet.hidden_cols.contains(col)) {
-                let merge=merged.get(&(row,col)).copied();
-                let display_anchor = merge.and_then(|range| {
-                    Some(((range.r0..=range.r1).find(|row| !sheet.hidden_rows.contains(row))?,
-                        (range.c0..=range.c1).find(|col| !sheet.hidden_cols.contains(col))?))
-                });
-                if merge.is_some() && display_anchor != Some((row, col)) { continue; }
-                let (source_row, source_col) = merge.map_or((row, col), |range| (range.r0, range.c0));
-                let span=merge.map(|range|format!(" rowspan=\"{}\" colspan=\"{}\"",
-                    (range.r0..=range.r1).filter(|row|!sheet.hidden_rows.contains(row)).count(),
-                    (range.c0..=range.c1).filter(|col|!sheet.hidden_cols.contains(col)).count())).unwrap_or_default();
-                let mut format=sheet.cell(source_row,source_col).map(|cell|cell.fmt.clone()).unwrap_or_default();
-                if let Some(rgb)=sheet.cell(source_row,source_col).and_then(|cell|super::format::color(&cell.value,&format.number)) {format.color=rgb;}
-                let align=match format.align {Align::Left=>"left",Align::Center=>"center",Align::Right=>"right",
-                    Align::General=>if sheet.cell(source_row,source_col).is_some_and(|cell|matches!(cell.value,Value::Number(_))) {"right"}else{"left"}};
-                let decoration=format!("{}{}",if format.underline {"underline "}else{""},if format.strike {"line-through"}else{""});
-                let mut style=format!("color:#{:02X}{:02X}{:02X};font-family:{};font-size:{}pt;font-weight:{};font-style:{};text-decoration:{};text-align:{};white-space:{};border:{}",
-                    format.color[0],format.color[1],format.color[2],html_font(&format.font),format.size,
-                    if format.bold {"bold"}else{"normal"},if format.italic {"italic"}else{"normal"},decoration,align,
-                    if format.wrap {"pre-wrap"}else{"pre"},if format.border {"1px solid #666"}else{"none"});
-                if let Some(fill)=format.fill {style.push_str(&format!(";background:#{:02X}{:02X}{:02X}",fill[0],fill[1],fill[2]));}
-                html_push(&mut out,&format!("<td{span} style=\"{}\">{}</td>",
-                    crate::package::xml_escape(&style),crate::package::xml_escape(&sheet.display(source_row,source_col,book.locale_ru))),byte_limit)?;
+        dense = dense.checked_add(cells).ok_or("Слишком большой HTML")?;
+        if dense > cell_limit {
+            return Err("Суммарный диапазон HTML превышает безопасный лимит".into());
+        }
+        extents.push((sheet, rows, cols));
+    }
+    let mut out = String::new();
+    html_push(
+        &mut out,
+        "<!doctype html><html lang=\"ru\"><head><meta charset=\"utf-8\"><style>table{border-collapse:collapse;table-layout:fixed}td{padding:4px}img{max-width:100%}</style></head><body>",
+        byte_limit,
+    )?;
+    for (sheet, rows, cols) in extents {
+        let mut merged = BTreeMap::new();
+        let mut covered = 0u64;
+        for range in &sheet.merges {
+            covered = covered.saturating_add(
+                u64::from(range.r1 - range.r0 + 1) * u64::from(range.c1 - range.c0 + 1),
+            );
+            if covered > cell_limit {
+                return Err("Слишком большой индекс объединённых ячеек HTML".into());
             }
-            html_push(&mut out,"</tr>",byte_limit)?;
+            for row in range.r0..=range.r1 {
+                for col in range.c0..=range.c1 {
+                    merged.entry((row, col)).or_insert(range);
+                }
+            }
         }
-        html_push(&mut out,"</table>",byte_limit)?;
+        html_push(
+            &mut out,
+            &format!(
+                "<section><h2>{}</h2><table><colgroup>",
+                crate::package::xml_escape(&sheet.name)
+            ),
+            byte_limit,
+        )?;
+        for col in (0..=cols).filter(|col| !sheet.hidden_cols.contains(col)) {
+            html_push(
+                &mut out,
+                &format!(
+                    "<col style=\"width:{}px\">",
+                    sheet
+                        .widths
+                        .get(&col)
+                        .copied()
+                        .unwrap_or(sheet.default_col_width)
+                ),
+                byte_limit,
+            )?;
+        }
+        html_push(&mut out, "</colgroup>", byte_limit)?;
+        for row in (0..=rows).filter(|row| !sheet.hidden_rows.contains(row)) {
+            html_push(
+                &mut out,
+                &format!(
+                    "<tr style=\"height:{}px\">",
+                    sheet
+                        .row_heights
+                        .get(&row)
+                        .copied()
+                        .unwrap_or(sheet.default_row_height)
+                ),
+                byte_limit,
+            )?;
+            for col in (0..=cols).filter(|col| !sheet.hidden_cols.contains(col)) {
+                let merge = merged.get(&(row, col)).copied();
+                let display_anchor = merge.and_then(|range| {
+                    Some((
+                        (range.r0..=range.r1).find(|row| !sheet.hidden_rows.contains(row))?,
+                        (range.c0..=range.c1).find(|col| !sheet.hidden_cols.contains(col))?,
+                    ))
+                });
+                if merge.is_some() && display_anchor != Some((row, col)) {
+                    continue;
+                }
+                let (source_row, source_col) =
+                    merge.map_or((row, col), |range| (range.r0, range.c0));
+                let span = merge
+                    .map(|range| {
+                        format!(
+                            " rowspan=\"{}\" colspan=\"{}\"",
+                            (range.r0..=range.r1)
+                                .filter(|row| !sheet.hidden_rows.contains(row))
+                                .count(),
+                            (range.c0..=range.c1)
+                                .filter(|col| !sheet.hidden_cols.contains(col))
+                                .count()
+                        )
+                    })
+                    .unwrap_or_default();
+                let mut format = sheet
+                    .cell(source_row, source_col)
+                    .map(|cell| cell.fmt.clone())
+                    .unwrap_or_default();
+                if let Some(rgb) = sheet
+                    .cell(source_row, source_col)
+                    .and_then(|cell| super::format::color(&cell.value, &format.number))
+                {
+                    format.color = rgb;
+                }
+                let align = match format.align {
+                    Align::Left => "left",
+                    Align::Center => "center",
+                    Align::Right => "right",
+                    Align::General => {
+                        if sheet
+                            .cell(source_row, source_col)
+                            .is_some_and(|cell| matches!(cell.value, Value::Number(_)))
+                        {
+                            "right"
+                        } else {
+                            "left"
+                        }
+                    }
+                };
+                let decoration = format!(
+                    "{}{}",
+                    if format.underline { "underline " } else { "" },
+                    if format.strike { "line-through" } else { "" }
+                );
+                let mut style = format!(
+                    "color:#{:02X}{:02X}{:02X};font-family:{};font-size:{}pt;font-weight:{};font-style:{};text-decoration:{};text-align:{};white-space:{};border:{}",
+                    format.color[0],
+                    format.color[1],
+                    format.color[2],
+                    html_font(&format.font),
+                    format.size,
+                    if format.bold { "bold" } else { "normal" },
+                    if format.italic { "italic" } else { "normal" },
+                    decoration,
+                    align,
+                    if format.wrap { "pre-wrap" } else { "pre" },
+                    if format.border {
+                        "1px solid #666"
+                    } else {
+                        "none"
+                    }
+                );
+                if let Some(fill) = format.fill {
+                    style.push_str(&format!(
+                        ";background:#{:02X}{:02X}{:02X}",
+                        fill[0], fill[1], fill[2]
+                    ));
+                }
+                html_push(
+                    &mut out,
+                    &format!(
+                        "<td{span} style=\"{}\">{}</td>",
+                        crate::package::xml_escape(&style),
+                        crate::package::xml_escape(&sheet.display(
+                            source_row,
+                            source_col,
+                            book.locale_ru
+                        ))
+                    ),
+                    byte_limit,
+                )?;
+            }
+            html_push(&mut out, "</tr>", byte_limit)?;
+        }
+        html_push(&mut out, "</table>", byte_limit)?;
         for image in &sheet.images {
-            let encoded=image.bytes.len().div_ceil(3).saturating_mul(4);
-            if out.len().saturating_add(encoded).saturating_add(image.alt.len().saturating_mul(6)).saturating_add(512)>byte_limit {
+            let encoded = image.bytes.len().div_ceil(3).saturating_mul(4);
+            if out
+                .len()
+                .saturating_add(encoded)
+                .saturating_add(image.alt.len().saturating_mul(6))
+                .saturating_add(512)
+                > byte_limit
+            {
                 return Err("Изображения превышают лимит HTML".into());
             }
-            let mime=if matches!(image::guess_format(&image.bytes),Ok(image::ImageFormat::Jpeg)) {"image/jpeg"}else{"image/png"};
-            html_push(&mut out,&format!("<figure><img src=\"data:{mime};base64,{}\" alt=\"{}\" width=\"{}\" height=\"{}\"><figcaption>{} · {}</figcaption></figure>",
-                html_image_base64(&image.bytes),crate::package::xml_escape(&image.alt),image.width,image.height,
-                super::model::address(image.row,image.col),crate::package::xml_escape(&image.alt)),byte_limit)?;
+            let mime = if matches!(
+                image::guess_format(&image.bytes),
+                Ok(image::ImageFormat::Jpeg)
+            ) {
+                "image/jpeg"
+            } else {
+                "image/png"
+            };
+            html_push(
+                &mut out,
+                &format!(
+                    "<figure><img src=\"data:{mime};base64,{}\" alt=\"{}\" width=\"{}\" height=\"{}\"><figcaption>{} · {}</figcaption></figure>",
+                    html_image_base64(&image.bytes),
+                    crate::package::xml_escape(&image.alt),
+                    image.width,
+                    image.height,
+                    super::model::address(image.row, image.col),
+                    crate::package::xml_escape(&image.alt)
+                ),
+                byte_limit,
+            )?;
         }
-        html_push(&mut out,"</section>",byte_limit)?;
+        html_push(&mut out, "</section>", byte_limit)?;
     }
-    html_push(&mut out,"</body></html>",byte_limit)?;Ok(out.into_bytes())
+    html_push(&mut out, "</body></html>", byte_limit)?;
+    Ok(out.into_bytes())
 }
-fn html_image_base64(bytes:&[u8])->String {
-    const ALPHABET:&[u8;64]=b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result=String::with_capacity(bytes.len().div_ceil(3)*4);
+fn html_image_base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut result = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
-        let value=(u32::from(chunk[0])<<16)|(u32::from(*chunk.get(1).unwrap_or(&0))<<8)|u32::from(*chunk.get(2).unwrap_or(&0));
-        result.push(char::from(ALPHABET[((value>>18)&63) as usize]));result.push(char::from(ALPHABET[((value>>12)&63) as usize]));
-        result.push(if chunk.len()>1 {char::from(ALPHABET[((value>>6)&63) as usize])}else{'='});
-        result.push(if chunk.len()>2 {char::from(ALPHABET[(value&63) as usize])}else{'='});
-    }result
+        let value = (u32::from(chunk[0]) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        result.push(char::from(ALPHABET[((value >> 18) & 63) as usize]));
+        result.push(char::from(ALPHABET[((value >> 12) & 63) as usize]));
+        result.push(if chunk.len() > 1 {
+            char::from(ALPHABET[((value >> 6) & 63) as usize])
+        } else {
+            '='
+        });
+        result.push(if chunk.len() > 2 {
+            char::from(ALPHABET[(value & 63) as usize])
+        } else {
+            '='
+        });
+    }
+    result
 }
 #[cfg(test)]
 mod next_html_export_tests {
     use super::*;
-    fn text(book:&Book)->Result<String,String>{String::from_utf8(write(book,"html")?).map_err(|e|e.to_string())}
-    #[test]
-    fn html_export_preserves_merged_ranges_and_does_not_repeat_covered_cells()->Result<(),String> {
-        let mut book=Book::default();let id=book.active_id();book.set_cell(id,0,0,"merged")?;
-        book.sheets[0].merges.push(super::super::model::Range::new(0,0,1,1));
-        let output=text(&book)?;
-        assert!(output.contains("rowspan=\"2\" colspan=\"2\""));assert_eq!(output.matches("<td").count(),1);Ok(())
+    fn text(book: &Book) -> Result<String, String> {
+        String::from_utf8(write(book, "html")?).map_err(|e| e.to_string())
     }
     #[test]
-    fn html_export_keeps_shared_text_format_and_row_column_geometry()->Result<(),String> {
-        let mut book=Book::default();let id=book.active_id();book.set_cell(id,0,0,"text")?;
-        let cell=book.sheets[0].cell_mut(0,0).ok_or("cell")?;
-        cell.fmt.font="A';color:red;/*".into();cell.fmt.underline=true;cell.fmt.strike=true;
-        cell.fmt.align=Align::Right;cell.fmt.wrap=true;cell.fmt.border=true;
-        book.sheets[0].widths.insert(0,150.0);book.sheets[0].row_heights.insert(0,42.0);
-        let output=text(&book)?;
-        assert!(output.contains("width:150px"));assert!(output.contains("height:42px"));
-        assert!(output.contains("text-decoration:underline line-through"));assert!(output.contains("text-align:right"));
-        assert!(output.contains("white-space:pre-wrap"));assert!(output.contains("font-family:&apos;A\\&apos;"));Ok(())
+    fn html_export_preserves_merged_ranges_and_does_not_repeat_covered_cells() -> Result<(), String>
+    {
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.set_cell(id, 0, 0, "merged")?;
+        book.sheets[0]
+            .merges
+            .push(super::super::model::Range::new(0, 0, 1, 1));
+        let output = text(&book)?;
+        assert!(output.contains("rowspan=\"2\" colspan=\"2\""));
+        assert_eq!(output.matches("<td").count(), 1);
+        Ok(())
     }
     #[test]
-    fn html_export_includes_sheet_images_and_their_cell_anchor()->Result<(),String> {
-        let mut png=Cursor::new(Vec::new());image::DynamicImage::new_rgba8(2,2)
-            .write_to(&mut png,image::ImageFormat::Png).map_err(|e|e.to_string())?;
-        let mut book=Book::default();let id=book.active_id();book.add_image(id,1,2,png.into_inner())?;
-        let output=text(&book)?;assert!(output.contains("data:image/png;base64,"));
-        assert!(output.contains("C2 ·"));Ok(())
+    fn html_export_keeps_shared_text_format_and_row_column_geometry() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.set_cell(id, 0, 0, "text")?;
+        let cell = book.sheets[0].cell_mut(0, 0).ok_or("cell")?;
+        cell.fmt.font = "A';color:red;/*".into();
+        cell.fmt.underline = true;
+        cell.fmt.strike = true;
+        cell.fmt.align = Align::Right;
+        cell.fmt.wrap = true;
+        cell.fmt.border = true;
+        book.sheets[0].widths.insert(0, 150.0);
+        book.sheets[0].row_heights.insert(0, 42.0);
+        let output = text(&book)?;
+        assert!(output.contains("width:150px"));
+        assert!(output.contains("height:42px"));
+        assert!(output.contains("text-decoration:underline line-through"));
+        assert!(output.contains("text-align:right"));
+        assert!(output.contains("white-space:pre-wrap"));
+        assert!(output.contains("font-family:&apos;A\\&apos;"));
+        Ok(())
     }
     #[test]
-    fn html_export_limits_cover_the_whole_workbook_and_output_bytes()->Result<(),String> {
-        let mut book=Book::default();let id=book.active_id();book.set_cell(id,9,9,"x")?;
-        let second=book.add_sheet("Second")?;book.set_cell(second,9,9,"y")?;
-        assert!(write_html_book(&book,150,MAX_FILE).is_err());
-        assert!(write_html_book(&book,1000,500).is_err());Ok(())
+    fn html_export_includes_sheet_images_and_their_cell_anchor() -> Result<(), String> {
+        let mut png = Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(2, 2)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .map_err(|e| e.to_string())?;
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.add_image(id, 1, 2, png.into_inner())?;
+        let output = text(&book)?;
+        assert!(output.contains("data:image/png;base64,"));
+        assert!(output.contains("C2 ·"));
+        Ok(())
+    }
+    #[test]
+    fn html_export_limits_cover_the_whole_workbook_and_output_bytes() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.set_cell(id, 9, 9, "x")?;
+        let second = book.add_sheet("Second")?;
+        book.set_cell(second, 9, 9, "y")?;
+        assert!(write_html_book(&book, 150, MAX_FILE).is_err());
+        assert!(write_html_book(&book, 1000, 500).is_err());
+        Ok(())
     }
 }
 
@@ -3143,8 +3862,8 @@ mod next_html_export_tests {
 mod next_csv_bom_tests {
     #[test]
     fn a_declared_utf8_csv_never_falls_back_to_windows1251() {
-        assert!(super::decode_text(&[0xef,0xbb,0xbf,0xff]).is_err());
-        assert_eq!(super::decode_text("Привет".as_bytes()),Ok("Привет".into()));
+        assert!(super::decode_text(&[0xef, 0xbb, 0xbf, 0xff]).is_err());
+        assert_eq!(super::decode_text("Привет".as_bytes()), Ok("Привет".into()));
     }
 }
 
@@ -3152,36 +3871,71 @@ fn write_text_book(book: &Book, ext: &str, limit: usize) -> Result<Vec<u8>, Stri
     let sheet = book.active_sheet().ok_or("Нет активного листа")?;
     let (last_row, last_col) = sheet.extent();
     let cells = (u64::from(last_row) + 1) * (u64::from(last_col) + 1);
-    if cells > MAX_RANGE_CELLS as u64 { return Err("Экспортируемый диапазон превышает100000 ячеек".into()); }
+    if cells > MAX_RANGE_CELLS as u64 {
+        return Err("Экспортируемый диапазон превышает100000 ячеек".into());
+    }
     let mut output = String::new();
     let push = |output: &mut String, text: &str| -> Result<(), String> {
-        if output.len().checked_add(text.len()).is_none_or(|bytes| bytes > limit) {
+        if output
+            .len()
+            .checked_add(text.len())
+            .is_none_or(|bytes| bytes > limit)
+        {
             return Err("Текстовый экспорт превышает лимит размера файла".into());
         }
-        output.push_str(text); Ok(())
+        output.push_str(text);
+        Ok(())
     };
-    if ext == "md" { push(&mut output, &format!("# {}\n\n", markdown_text(&sheet.name)))?; }
-    else { push(&mut output, "\u{feff}")?; }
+    if ext == "md" {
+        push(
+            &mut output,
+            &format!("# {}\n\n", markdown_text(&sheet.name)),
+        )?;
+    } else {
+        push(&mut output, "\u{feff}")?;
+    }
     let separator = if ext == "tsv" { '\t' } else { ';' };
     for row in 0..=last_row {
-        if ext == "md" { push(&mut output, "| ")?; }
+        if ext == "md" {
+            push(&mut output, "| ")?;
+        }
         for col in 0..=last_col {
-            if col > 0 { push(&mut output, if ext == "md" { " | " } else if separator == '\t' { "\t" } else { ";" })?; }
+            if col > 0 {
+                push(
+                    &mut output,
+                    if ext == "md" {
+                        " | "
+                    } else if separator == '\t' {
+                        "\t"
+                    } else {
+                        ";"
+                    },
+                )?;
+            }
             let value = sheet.display(row, col, book.locale_ru);
-            let rendered = if ext == "md" { markdown_text(&value) }
-                else if value.contains([separator, '\n', '\r', '"']) || last_col == 0 && value.is_empty() {
-                    format!("\"{}\"", value.replace('"', "\"\""))
-                } else { value };
+            let rendered = if ext == "md" {
+                markdown_text(&value)
+            } else if value.contains([separator, '\n', '\r', '"'])
+                || last_col == 0 && value.is_empty()
+            {
+                format!("\"{}\"", value.replace('"', "\"\""))
+            } else {
+                value
+            };
             push(&mut output, &rendered)?;
         }
         if ext == "md" {
             push(&mut output, " |\n")?;
             if row == 0 {
                 push(&mut output, "|")?;
-                for _ in 0..=last_col { push(&mut output, " --- |")?; }
+                for _ in 0..=last_col {
+                    push(&mut output, " --- |")?;
+                }
                 push(&mut output, "\n")?;
             }
-        } else if row < last_row { push(&mut output, "\r\n")?; }
+        } else if row < last_row {
+            push(&mut output, "\r\n")?;
+        }
     }
     Ok(output.into_bytes())
 }
@@ -3191,7 +3945,12 @@ mod hundred_export_tests {
     #[test]
     fn xlsx_export_preserves_the_active_selection() -> Result<(), String> {
         let mut book = Book::default();
-        book.selection = super::super::model::Selection { row: 4, col: 3, anchor_row: 2, anchor_col: 1 };
+        book.selection = super::super::model::Selection {
+            row: 4,
+            col: 3,
+            anchor_row: 2,
+            anchor_col: 1,
+        };
         let decoded = read(&write(&book, "xlsx")?, "xlsx")?;
         assert_eq!(decoded.selection, book.selection);
         Ok(())
@@ -3220,12 +3979,16 @@ mod hundred_export_tests {
         Ok(())
     }
     #[test]
-    fn html_merged_content_remains_visible_when_its_anchor_column_is_hidden() -> Result<(), String> {
+    fn html_merged_content_remains_visible_when_its_anchor_column_is_hidden() -> Result<(), String>
+    {
         let mut book = Book::default();
         let id = book.active_id();
         book.set_cell(id, 0, 0, "Visible merged title")?;
         book.merge(id, super::super::model::Range::new(0, 0, 0, 1))?;
-        book.active_sheet_mut().ok_or("sheet")?.hidden_cols.insert(0);
+        book.active_sheet_mut()
+            .ok_or("sheet")?
+            .hidden_cols
+            .insert(0);
         let html = String::from_utf8(write(&book, "html")?).map_err(|error| error.to_string())?;
         assert!(html.contains("Visible merged title"));
         assert_eq!(html.matches("Visible merged title").count(), 1);
@@ -3235,7 +3998,12 @@ mod hundred_export_tests {
 }
 
 #[cfg(test)]
-fn chart_fixture_parts(book: &Book, owner: usize, chart_path: &str, chart: &str) -> BTreeMap<String, Vec<u8>> {
+fn chart_fixture_parts(
+    book: &Book,
+    owner: usize,
+    chart_path: &str,
+    chart: &str,
+) -> BTreeMap<String, Vec<u8>> {
     BTreeMap::from([
         ("xl/workbook.xml".into(), format!(r#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="{}" r:id="s"/></sheets></workbook>"#, crate::package::xml_escape(&book.sheets[owner].name)).into_bytes()),
         ("xl/_rels/workbook.xml.rels".into(), br#"<Relationships><Relationship Id="s" Type="worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#.to_vec()),
@@ -3253,11 +4021,16 @@ mod hundred_chart_picture_tests {
     fn linked_chart_parts_use_the_drawing_owner_and_geometry() -> Result<(), String> {
         let mut book = Book::default();
         let name = book.sheets[0].name.clone();
-        let chart = format!("<chartSpace><chart><plotArea><barChart><ser><val><numRef><f>'{name}'!A1:A2</f></numRef></val></ser></barChart></plotArea></chart></chartSpace>");
+        let chart = format!(
+            "<chartSpace><chart><plotArea><barChart><ser><val><numRef><f>'{name}'!A1:A2</f></numRef></val></ser></barChart></plotArea></chart></chartSpace>"
+        );
         let parts = chart_fixture_parts(&book, 0, "art/quarterly.xml", &chart);
         read_charts(&mut book, &parts)?;
         let saved = book.sheets[0].charts.first().ok_or("chart")?;
-        assert_eq!((saved.row, saved.col, saved.width, saved.height), (5, 4, 200.0, 100.0));
+        assert_eq!(
+            (saved.row, saved.col, saved.width, saved.height),
+            (5, 4, 200.0, 100.0)
+        );
         book.add_sheet("Other")?;
         let parts = chart_fixture_parts(&book, 1, "art/other.xml", &chart);
         assert!(read_charts(&mut book, &parts).is_err());
@@ -3267,8 +4040,13 @@ mod hundred_chart_picture_tests {
     fn axis_titles_do_not_become_the_chart_title() -> Result<(), String> {
         let mut book = Book::default();
         let name = book.sheets[0].name.clone();
-        let chart = format!("<chartSpace><chart><title><tx><rich><t>Sales</t></rich></tx></title><plotArea><barChart><ser><val><numRef><f>'{name}'!A1:A2</f></numRef></val></ser></barChart><catAx><title><tx><rich><t>Year</t></rich></tx></title></catAx></plotArea></chart></chartSpace>");
-        read_charts(&mut book, &chart_fixture_parts(&Book::default(), 0, "art/title.xml", &chart))?;
+        let chart = format!(
+            "<chartSpace><chart><title><tx><rich><t>Sales</t></rich></tx></title><plotArea><barChart><ser><val><numRef><f>'{name}'!A1:A2</f></numRef></val></ser></barChart><catAx><title><tx><rich><t>Year</t></rich></tx></title></catAx></plotArea></chart></chartSpace>"
+        );
+        read_charts(
+            &mut book,
+            &chart_fixture_parts(&Book::default(), 0, "art/title.xml", &chart),
+        )?;
         assert_eq!(book.sheets[0].charts.first().ok_or("chart")?.title, "Sales");
         Ok(())
     }
@@ -3292,7 +4070,9 @@ mod hundred_chart_unicode_tests {
         let id = book.active_id();
         let name = book.sheets[0].name.to_uppercase();
         book.set_cell(id, 9, 25, "Доход")?;
-        let chart = format!("<chartSpace><chart><title><strRef><f>'{name}'!Z10</f></strRef></title><plotArea><barChart><ser><val><numRef><f>'{name}'!A1:A2</f></numRef></val></ser></barChart></plotArea></chart></chartSpace>");
+        let chart = format!(
+            "<chartSpace><chart><title><strRef><f>'{name}'!Z10</f></strRef></title><plotArea><barChart><ser><val><numRef><f>'{name}'!A1:A2</f></numRef></val></ser></barChart></plotArea></chart></chartSpace>"
+        );
         let parts = chart_fixture_parts(&book, 0, "art/unicode.xml", &chart);
         read_charts(&mut book, &parts)?;
         assert_eq!(book.sheets[0].charts.len(), 1);
@@ -3305,36 +4085,46 @@ mod hundred_chart_unicode_tests {
 mod phase200_preflight_defects {
     use super::*;
     #[test]
-    fn xml_entity_budgets_use_decoded_utf8_lengths() -> Result<(),String> {
-        let xml=format!("<sst><si><t>{}</t></si></sst>","&amp;".repeat(10000));
-        assert_eq!(xml_bounds(xml.as_bytes())?,Some(vec![10000]));
-        let xml=format!("<worksheet><sheetData><row><c><f>\"{}\"</f></c></row></sheetData></worksheet>","&amp;".repeat(10000));
-        assert!(worksheet_bounds(xml.as_bytes(),&[]).is_ok());
+    fn xml_entity_budgets_use_decoded_utf8_lengths() -> Result<(), String> {
+        let xml = format!("<sst><si><t>{}</t></si></sst>", "&amp;".repeat(10000));
+        assert_eq!(xml_bounds(xml.as_bytes())?, Some(vec![10000]));
+        let xml = format!(
+            "<worksheet><sheetData><row><c><f>\"{}\"</f></c></row></sheetData></worksheet>",
+            "&amp;".repeat(10000)
+        );
+        assert!(worksheet_bounds(xml.as_bytes(), &[]).is_ok());
         let xml=br#"<worksheet><sheetData><row><c t="str"><v>A&amp;B&#x410;</v></c></row></sheetData></worksheet>"#;
-        assert_eq!(worksheet_bounds(xml,&[])?.1,5);
+        assert_eq!(worksheet_bounds(xml, &[])?.1, 5);
         Ok(())
     }
     #[test]
-    fn formula_string_caches_are_charged_before_calamine_import() -> Result<(),String> {
+    fn formula_string_caches_are_charged_before_calamine_import() -> Result<(), String> {
         let xml=br#"<worksheet><sheetData><row><c t="str"><f>1</f><v>cached text</v></c></row></sheetData></worksheet>"#;
-        assert_eq!(worksheet_bounds(xml,&[])?.1,258+"cached text".len());
+        assert_eq!(worksheet_bounds(xml, &[])?.1, 258 + "cached text".len());
         let xml=br#"<worksheet><sheetData><row><c t="str"><v><![CDATA[cached text]]></v></c></row></sheetData></worksheet>"#;
-        assert_eq!(worksheet_bounds(xml,&[])?.1,"cached text".len());
+        assert_eq!(worksheet_bounds(xml, &[])?.1, "cached text".len());
         Ok(())
     }
     #[test]
     fn inline_rich_text_checks_the_combined_cell_length() {
-        let xml=format!("<worksheet><sheetData><row><c t=\"inlineStr\"><is><r><t>{}</t></r><r><t>{}</t></r></is></c></row></sheetData></worksheet>","a".repeat(20000),"b".repeat(20000));
-        assert!(worksheet_bounds(xml.as_bytes(),&[]).is_err());
-        let xml=xml.replace(&"b".repeat(20000),&"b".repeat(10000));
-        assert!(worksheet_bounds(xml.as_bytes(),&[]).is_ok());
+        let xml = format!(
+            "<worksheet><sheetData><row><c t=\"inlineStr\"><is><r><t>{}</t></r><r><t>{}</t></r></is></c></row></sheetData></worksheet>",
+            "a".repeat(20000),
+            "b".repeat(20000)
+        );
+        assert!(worksheet_bounds(xml.as_bytes(), &[]).is_err());
+        let xml = xml.replace(&"b".repeat(20000), &"b".repeat(10000));
+        assert!(worksheet_bounds(xml.as_bytes(), &[]).is_ok());
     }
     #[test]
     fn uppercase_xml_parts_receive_the_same_resource_preflight() {
-        let bytes=br#"<worksheet><dimension ref="A1:XFD1048576"/></worksheet>"#.to_vec();
-        let parts=BTreeMap::from([("custom/Sheet.XML".into(),bytes)]);
+        let bytes = br#"<worksheet><dimension ref="A1:XFD1048576"/></worksheet>"#.to_vec();
+        let parts = BTreeMap::from([("custom/Sheet.XML".into(), bytes)]);
         assert!(preflight(&parts).is_err());
-        let parts=BTreeMap::from([("custom/Strings.XML".into(),br#"<sst uniqueCount="1000001"/>"#.to_vec())]);
+        let parts = BTreeMap::from([(
+            "custom/Strings.XML".into(),
+            br#"<sst uniqueCount="1000001"/>"#.to_vec(),
+        )]);
         assert!(preflight(&parts).is_err());
     }
 }
@@ -3342,7 +4132,7 @@ mod phase200_preflight_defects {
 #[cfg(test)]
 mod phase200_drawing_defects {
     use super::*;
-    fn parts(drawing:&str,referenced:bool)->BTreeMap<String,Vec<u8>> {
+    fn parts(drawing: &str, referenced: bool) -> BTreeMap<String, Vec<u8>> {
         BTreeMap::from([
             ("xl/worksheets/sheet1.xml".into(),if referenced {
                 br#"<worksheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><drawing r:id="d"/></worksheet>"#.to_vec()
@@ -3353,17 +4143,40 @@ mod phase200_drawing_defects {
             ("xl/media/p.png".into(),b"broken image".to_vec()),
         ])
     }
-    const DRAWING:&str=r#"<wsDr xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><oneCellAnchor><from><col>0</col><row>0</row></from><ext cx="9525" cy="9525"/><pic><blip r:embed="p"/></pic></oneCellAnchor></wsDr>"#;
+    const DRAWING: &str = r#"<wsDr xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><oneCellAnchor><from><col>0</col><row>0</row></from><ext cx="9525" cy="9525"/><pic><blip r:embed="p"/></pic></oneCellAnchor></wsDr>"#;
     #[test]
     fn referenced_invalid_pictures_fail_instead_of_disappearing() {
-        let mut book=Book::default();let id=book.active_id();
-        assert!(read_sheet_images(&mut book,id,"xl/worksheets/sheet1.xml",&parts(DRAWING,true)).is_err());
-        assert!(read_sheet_images(&mut book,id,"xl/worksheets/sheet1.xml",&parts("<wsDr><oneCellAnchor>",true)).is_err());
+        let mut book = Book::default();
+        let id = book.active_id();
+        assert!(
+            read_sheet_images(
+                &mut book,
+                id,
+                "xl/worksheets/sheet1.xml",
+                &parts(DRAWING, true)
+            )
+            .is_err()
+        );
+        assert!(
+            read_sheet_images(
+                &mut book,
+                id,
+                "xl/worksheets/sheet1.xml",
+                &parts("<wsDr><oneCellAnchor>", true)
+            )
+            .is_err()
+        );
     }
     #[test]
-    fn orphan_drawing_relationships_do_not_import_unreferenced_content() -> Result<(),String> {
-        let mut book=Book::default();let id=book.active_id();
-        read_sheet_images(&mut book,id,"xl/worksheets/sheet1.xml",&parts(DRAWING,false))?;
+    fn orphan_drawing_relationships_do_not_import_unreferenced_content() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        read_sheet_images(
+            &mut book,
+            id,
+            "xl/worksheets/sheet1.xml",
+            &parts(DRAWING, false),
+        )?;
         assert!(book.sheets[0].images.is_empty());
         Ok(())
     }
@@ -3373,19 +4186,22 @@ mod phase200_drawing_defects {
 mod phase200_conditional_defect {
     use super::*;
     #[test]
-    fn numeric_conditional_fills_round_trip_through_xlsx() -> Result<(),String> {
-        let mut book=Book::default();let id=book.active_id();
-        book.set_cell(id,0,0,"20")?;
-        for (index,operator) in [">","<","=",">=","<="].into_iter().enumerate() {
-            book.sheets[0].conditional.push(ConditionalRule{
-                range:super::super::model::Range::new(0,0,1,1),operator:operator.into(),
-                threshold:index as f64-2.0,fill:[index as u8,100,200],
+    fn numeric_conditional_fills_round_trip_through_xlsx() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.set_cell(id, 0, 0, "20")?;
+        for (index, operator) in [">", "<", "=", ">=", "<="].into_iter().enumerate() {
+            book.sheets[0].conditional.push(ConditionalRule {
+                range: super::super::model::Range::new(0, 0, 1, 1),
+                operator: operator.into(),
+                threshold: index as f64 - 2.0,
+                fill: [index as u8, 100, 200],
             });
         }
-        let imported=read(&write(&book,"xlsx")?,"xlsx")?;
-        assert_eq!(imported.sheets[0].conditional,book.sheets[0].conditional);
+        let imported = read(&write(&book, "xlsx")?, "xlsx")?;
+        assert_eq!(imported.sheets[0].conditional, book.sheets[0].conditional);
         let formats=differential_fills(br#"<styleSheet><dxfs><dxf/><dxf><fill><patternFill><bgColor rgb="FFABCDEF"/></patternFill></fill></dxf></dxfs></styleSheet>"#,&[],&[])?;
-        assert_eq!(formats,vec![None,Some([0xAB,0xCD,0xEF])]);
+        assert_eq!(formats, vec![None, Some([0xAB, 0xCD, 0xEF])]);
         assert!(conditional_rules(br#"<worksheet><conditionalFormatting sqref="A1"><cfRule type="expression" dxfId="1" priority="1"><formula>A1&gt;2</formula></cfRule></conditionalFormatting></worksheet>"#,&formats).is_err());
         Ok(())
     }
@@ -3395,22 +4211,29 @@ mod phase200_conditional_defect {
 mod phase200_default_geometry_defect {
     use super::*;
     #[test]
-    fn worksheet_default_geometry_survives_import_export_and_old_native_files() -> Result<(),String> {
-        let mut book=Book::default();let id=book.active_id();book.sheets[0].name="Sheet1".into();
+    fn worksheet_default_geometry_survives_import_export_and_old_native_files() -> Result<(), String>
+    {
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.sheets[0].name = "Sheet1".into();
         let parts=BTreeMap::from([
             ("xl/workbook.xml".into(),br#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" r:id="s"/></sheets></workbook>"#.to_vec()),
             ("xl/_rels/workbook.xml.rels".into(),br#"<Relationships><Relationship Id="s" Target="worksheets/sheet1.xml"/></Relationships>"#.to_vec()),
             ("xl/worksheets/sheet1.xml".into(),br#"<worksheet><sheetFormatPr defaultColWidth="20" defaultRowHeight="30"/></worksheet>"#.to_vec()),
         ]);
-        read_metadata(&mut book,&parts)?;
-        assert_eq!(book.sheets[0].default_col_width,140.0);
-        assert_eq!(book.sheets[0].default_row_height,40.0);
-        book.set_cell(id,0,0,"text")?;
-        let imported=read(&write(&book,"xlsx")?,"xlsx")?;
-        assert_eq!(imported.sheets[0].default_col_width,140.0);
-        assert_eq!(imported.sheets[0].default_row_height,40.0);
-        let old:super::super::model::Sheet=serde_json::from_str("{}").map_err(|error|error.to_string())?;
-        assert_eq!((old.default_col_width,old.default_row_height),(96.0,26.0));
+        read_metadata(&mut book, &parts)?;
+        assert_eq!(book.sheets[0].default_col_width, 140.0);
+        assert_eq!(book.sheets[0].default_row_height, 40.0);
+        book.set_cell(id, 0, 0, "text")?;
+        let imported = read(&write(&book, "xlsx")?, "xlsx")?;
+        assert_eq!(imported.sheets[0].default_col_width, 140.0);
+        assert_eq!(imported.sheets[0].default_row_height, 40.0);
+        let old: super::super::model::Sheet =
+            serde_json::from_str("{}").map_err(|error| error.to_string())?;
+        assert_eq!(
+            (old.default_col_width, old.default_row_height),
+            (96.0, 26.0)
+        );
         Ok(())
     }
 }
@@ -3419,20 +4242,35 @@ mod phase200_default_geometry_defect {
 mod phase200_chart_roles_defect {
     use super::*;
     #[test]
-    fn chart_round_trip_keeps_header_and_category_roles() -> Result<(),String> {
-        let mut book=Book::default();let id=book.active_id();
-        book.set_range(id,0,0,&[vec!["Name".into(),"Sales".into()],vec!["first".into(),"10".into()],vec!["last".into(),"20".into()]])?;
-        book.add_chart(id,ChartKind::Column,super::super::model::Range::new(0,0,2,1),"Sales")?;
-        let imported=read(&write(&book,"xlsx")?,"xlsx")?;
-        let chart=imported.sheets[0].charts.first().ok_or("chart")?;
-        assert_eq!(chart.range,book.sheets[0].charts[0].range);
-        assert!(chart.has_headers&&chart.has_categories);
-        book.sheets[0].charts[0].has_headers=false;
-        book.sheets[0].charts[0].has_categories=false;
-        let imported=read(&write(&book,"xlsx")?,"xlsx")?;
-        let chart=imported.sheets[0].charts.first().ok_or("chart")?;
-        assert!(!chart.has_headers&&!chart.has_categories);
-        assert_eq!(chart.range,book.sheets[0].charts[0].range);
+    fn chart_round_trip_keeps_header_and_category_roles() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.set_range(
+            id,
+            0,
+            0,
+            &[
+                vec!["Name".into(), "Sales".into()],
+                vec!["first".into(), "10".into()],
+                vec!["last".into(), "20".into()],
+            ],
+        )?;
+        book.add_chart(
+            id,
+            ChartKind::Column,
+            super::super::model::Range::new(0, 0, 2, 1),
+            "Sales",
+        )?;
+        let imported = read(&write(&book, "xlsx")?, "xlsx")?;
+        let chart = imported.sheets[0].charts.first().ok_or("chart")?;
+        assert_eq!(chart.range, book.sheets[0].charts[0].range);
+        assert!(chart.has_headers && chart.has_categories);
+        book.sheets[0].charts[0].has_headers = false;
+        book.sheets[0].charts[0].has_categories = false;
+        let imported = read(&write(&book, "xlsx")?, "xlsx")?;
+        let chart = imported.sheets[0].charts.first().ok_or("chart")?;
+        assert!(!chart.has_headers && !chart.has_categories);
+        assert_eq!(chart.range, book.sheets[0].charts[0].range);
         Ok(())
     }
 }
@@ -3440,48 +4278,111 @@ mod phase200_chart_roles_defect {
 #[cfg(test)]
 mod phase200_chart_integrity_defects {
     use super::*;
-    fn chart(series:&str,kind:&str)->String {
-        format!("<chartSpace><chart><plotArea><{kind}>{series}</{kind}></plotArea></chart></chartSpace>")
+    fn chart(series: &str, kind: &str) -> String {
+        format!(
+            "<chartSpace><chart><plotArea><{kind}>{series}</{kind}></plotArea></chart></chartSpace>"
+        )
     }
     #[test]
-    fn referenced_chart_parts_and_sources_cannot_silently_disappear() -> Result<(),String> {
-        let mut book=Book::default();
-        let xml=chart("<ser><val><numRef><f>A1:A2</f></numRef></val></ser>","barChart");
-        let mut parts=chart_fixture_parts(&book,0,"art/part.xml",&xml);
+    fn referenced_chart_parts_and_sources_cannot_silently_disappear() -> Result<(), String> {
+        let mut book = Book::default();
+        let xml = chart(
+            "<ser><val><numRef><f>A1:A2</f></numRef></val></ser>",
+            "barChart",
+        );
+        let mut parts = chart_fixture_parts(&book, 0, "art/part.xml", &xml);
         parts.remove("art/part.xml");
-        assert!(read_charts(&mut book,&parts).is_err());
-        let xml=chart("<ser><val><numLit><pt idx=\"0\"><v>1</v></pt></numLit></val></ser>","barChart");
-        assert!(read_charts(&mut book,&chart_fixture_parts(&Book::default(),0,"art/literal.xml",&xml)).is_err());
-        let xml=chart("<ser><val><numRef><f>A1:A2</f></numRef></val></ser>","barChart");
-        read_charts(&mut book,&chart_fixture_parts(&Book::default(),0,"art/local.xml",&xml))?;
-        assert_eq!(book.sheets[0].charts.len(),1);
+        assert!(read_charts(&mut book, &parts).is_err());
+        let xml = chart(
+            "<ser><val><numLit><pt idx=\"0\"><v>1</v></pt></numLit></val></ser>",
+            "barChart",
+        );
+        assert!(
+            read_charts(
+                &mut book,
+                &chart_fixture_parts(&Book::default(), 0, "art/literal.xml", &xml)
+            )
+            .is_err()
+        );
+        let xml = chart(
+            "<ser><val><numRef><f>A1:A2</f></numRef></val></ser>",
+            "barChart",
+        );
+        read_charts(
+            &mut book,
+            &chart_fixture_parts(&Book::default(), 0, "art/local.xml", &xml),
+        )?;
+        assert_eq!(book.sheets[0].charts.len(), 1);
         Ok(())
     }
     #[test]
     fn unsupported_chart_types_are_not_falsely_imported_as_columns() {
-        let mut book=Book::default();let name=book.sheets[0].name.clone();
-        let series=format!("<ser><val><numRef><f>'{name}'!A1:A2</f></numRef></val></ser>");
-        let xml=chart(&series,"radarChart");
-        assert!(read_charts(&mut book,&chart_fixture_parts(&Book::default(),0,"art/radar.xml",&xml)).is_err());
-        let xml=format!("<chartSpace><chart><plotArea><barChart>{series}</barChart><lineChart>{series}</lineChart></plotArea></chart></chartSpace>");
-        assert!(read_charts(&mut book,&chart_fixture_parts(&Book::default(),0,"art/mixed.xml",&xml)).is_err());
+        let mut book = Book::default();
+        let name = book.sheets[0].name.clone();
+        let series = format!("<ser><val><numRef><f>'{name}'!A1:A2</f></numRef></val></ser>");
+        let xml = chart(&series, "radarChart");
+        assert!(
+            read_charts(
+                &mut book,
+                &chart_fixture_parts(&Book::default(), 0, "art/radar.xml", &xml)
+            )
+            .is_err()
+        );
+        let xml = format!(
+            "<chartSpace><chart><plotArea><barChart>{series}</barChart><lineChart>{series}</lineChart></plotArea></chart></chartSpace>"
+        );
+        assert!(
+            read_charts(
+                &mut book,
+                &chart_fixture_parts(&Book::default(), 0, "art/mixed.xml", &xml)
+            )
+            .is_err()
+        );
         assert!(book.sheets[0].charts.is_empty());
     }
     #[test]
     fn disjoint_chart_sources_do_not_pull_intervening_unrelated_cells() {
-        let mut book=Book::default();let name=book.sheets[0].name.clone();
-        let series=format!("<ser><val><numRef><f>'{name}'!A1:A2</f></numRef></val></ser><ser><val><numRef><f>'{name}'!C1:C2</f></numRef></val></ser>");
-        assert!(read_charts(&mut book,&chart_fixture_parts(&Book::default(),0,"art/gap.xml",&chart(&series,"barChart"))).is_err());
+        let mut book = Book::default();
+        let name = book.sheets[0].name.clone();
+        let series = format!(
+            "<ser><val><numRef><f>'{name}'!A1:A2</f></numRef></val></ser><ser><val><numRef><f>'{name}'!C1:C2</f></numRef></val></ser>"
+        );
+        assert!(
+            read_charts(
+                &mut book,
+                &chart_fixture_parts(
+                    &Book::default(),
+                    0,
+                    "art/gap.xml",
+                    &chart(&series, "barChart")
+                )
+            )
+            .is_err()
+        );
         assert!(book.sheets[0].charts.is_empty());
     }
     #[test]
-    fn a_single_column_scatter_chart_exports_its_visible_x_values() -> Result<(),String> {
-        let mut book=Book::default();let id=book.active_id();
-        book.set_range(id,0,0,&[vec!["Value".into()],vec!["1".into()],vec!["2".into()]])?;
-        book.add_chart(id,ChartKind::Scatter,super::super::model::Range::new(0,0,2,0),"One")?;
-        let bytes=write(&book,"xlsx")?;
-        let imported=read(&bytes,"xlsx")?;
-        assert_eq!(imported.sheets[0].charts.first().ok_or("chart")?.kind,ChartKind::Scatter);
+    fn a_single_column_scatter_chart_exports_its_visible_x_values() -> Result<(), String> {
+        let mut book = Book::default();
+        let id = book.active_id();
+        book.set_range(
+            id,
+            0,
+            0,
+            &[vec!["Value".into()], vec!["1".into()], vec!["2".into()]],
+        )?;
+        book.add_chart(
+            id,
+            ChartKind::Scatter,
+            super::super::model::Range::new(0, 0, 2, 0),
+            "One",
+        )?;
+        let bytes = write(&book, "xlsx")?;
+        let imported = read(&bytes, "xlsx")?;
+        assert_eq!(
+            imported.sheets[0].charts.first().ok_or("chart")?.kind,
+            ChartKind::Scatter
+        );
         Ok(())
     }
 }

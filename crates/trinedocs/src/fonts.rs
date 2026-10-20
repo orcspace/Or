@@ -97,11 +97,14 @@ fn describe_face(file: &mut std::fs::File, offset: u64) -> Option<(String, bool,
     let selection = os2
         .and_then(|(at, len)| read_at(file, at, len.min(64)))
         .and_then(|data| be16(&data, 62));
-    let mac_style=head.and_then(|(at,len)|read_at(file,at,len.min(46)))
-        .and_then(|data|be16(&data,44)).unwrap_or_default();
-    let (bold,italic)=selection.map(|flags|(flags&0x20!=0,flags&1!=0))
-        .unwrap_or((mac_style&1!=0,mac_style&2!=0));
-    Some((family,bold,italic))
+    let mac_style = head
+        .and_then(|(at, len)| read_at(file, at, len.min(46)))
+        .and_then(|data| be16(&data, 44))
+        .unwrap_or_default();
+    let (bold, italic) = selection
+        .map(|flags| (flags & 0x20 != 0, flags & 1 != 0))
+        .unwrap_or((mac_style & 1 != 0, mac_style & 2 != 0));
+    Some((family, bold, italic))
 }
 fn scan() -> BTreeMap<String, Faces> {
     let mut families: BTreeMap<String, Faces> = BTreeMap::new();
@@ -178,15 +181,18 @@ pub fn warm_up() {
             catalog();
         });
 }
-fn find_family<'a>(catalog:&'a BTreeMap<String,Faces>,family:&str)->Option<&'a String> {
-    let wanted=family.trim();let folded=wanted.to_lowercase();
-    catalog.get_key_value(wanted).map(|(name,_)|name)
-        .or_else(||catalog.keys().find(|name|name.to_lowercase()==folded))
+fn find_family<'a>(catalog: &'a BTreeMap<String, Faces>, family: &str) -> Option<&'a String> {
+    let wanted = family.trim();
+    let folded = wanted.to_lowercase();
+    catalog
+        .get_key_value(wanted)
+        .map(|(name, _)| name)
+        .or_else(|| catalog.keys().find(|name| name.to_lowercase() == folded))
 }
 fn canonical(family: &str) -> Option<&'static String> {
-    find_family(catalog(),family)
+    find_family(catalog(), family)
 }
-pub fn canonical_name(family:&str)->Option<&'static str> {
+pub fn canonical_name(family: &str) -> Option<&'static str> {
     canonical(family).map(String::as_str)
 }
 /// Installed font families, alphabetically, as the font list in Office shows them.
@@ -510,36 +516,68 @@ mod two_hundred_font_regressions {
     use super::*;
     #[test]
     fn localized_family_names_resolve_across_case_and_whitespace() {
-        let catalog=BTreeMap::from([("Гарнитура".into(),Faces::default()),("Arial".into(),Faces::default())]);
-        assert_eq!(find_family(&catalog,"  ГАРНИТУРА ").map(String::as_str),Some("Гарнитура"));
-        assert_eq!(find_family(&catalog,"arial").map(String::as_str),Some("Arial"));
-        assert!(find_family(&catalog,"Missing").is_none());
+        let catalog = BTreeMap::from([
+            ("Гарнитура".into(), Faces::default()),
+            ("Arial".into(), Faces::default()),
+        ]);
+        assert_eq!(
+            find_family(&catalog, "  ГАРНИТУРА ").map(String::as_str),
+            Some("Гарнитура")
+        );
+        assert_eq!(
+            find_family(&catalog, "arial").map(String::as_str),
+            Some("Arial")
+        );
+        assert!(find_family(&catalog, "Missing").is_none());
     }
     #[test]
-    fn sfnt_without_os2_keeps_the_head_style_flags()->Result<(),String> {
-        let family:Vec<u8>="Fixture".encode_utf16().flat_map(u16::to_be_bytes).collect();
-        let mut name=vec![0u8;18];name[2..4].copy_from_slice(&1u16.to_be_bytes());
-        name[4..6].copy_from_slice(&18u16.to_be_bytes());name[6..8].copy_from_slice(&3u16.to_be_bytes());
-        name[8..10].copy_from_slice(&1u16.to_be_bytes());name[10..12].copy_from_slice(&0x409u16.to_be_bytes());
-        name[12..14].copy_from_slice(&1u16.to_be_bytes());name[14..16].copy_from_slice(&(family.len() as u16).to_be_bytes());
+    fn sfnt_without_os2_keeps_the_head_style_flags() -> Result<(), String> {
+        let family: Vec<u8> = "Fixture"
+            .encode_utf16()
+            .flat_map(u16::to_be_bytes)
+            .collect();
+        let mut name = vec![0u8; 18];
+        name[2..4].copy_from_slice(&1u16.to_be_bytes());
+        name[4..6].copy_from_slice(&18u16.to_be_bytes());
+        name[6..8].copy_from_slice(&3u16.to_be_bytes());
+        name[8..10].copy_from_slice(&1u16.to_be_bytes());
+        name[10..12].copy_from_slice(&0x409u16.to_be_bytes());
+        name[12..14].copy_from_slice(&1u16.to_be_bytes());
+        name[14..16].copy_from_slice(&(family.len() as u16).to_be_bytes());
         name.extend_from_slice(&family);
-        let name_offset=44usize;let head_offset=(name_offset+name.len()).div_ceil(4)*4;
-        let mut bytes=vec![0u8;head_offset+54];bytes[..4].copy_from_slice(&[0,1,0,0]);
+        let name_offset = 44usize;
+        let head_offset = (name_offset + name.len()).div_ceil(4) * 4;
+        let mut bytes = vec![0u8; head_offset + 54];
+        bytes[..4].copy_from_slice(&[0, 1, 0, 0]);
         bytes[4..6].copy_from_slice(&2u16.to_be_bytes());
-        for (index,tag,offset,length) in [(0,b"name",name_offset,name.len()),(1,b"head",head_offset,54)] {
-            let at=12+index*16;bytes[at..at+4].copy_from_slice(tag);
-            bytes[at+8..at+12].copy_from_slice(&(offset as u32).to_be_bytes());
-            bytes[at+12..at+16].copy_from_slice(&(length as u32).to_be_bytes());
+        for (index, tag, offset, length) in [
+            (0, b"name", name_offset, name.len()),
+            (1, b"head", head_offset, 54),
+        ] {
+            let at = 12 + index * 16;
+            bytes[at..at + 4].copy_from_slice(tag);
+            bytes[at + 8..at + 12].copy_from_slice(&(offset as u32).to_be_bytes());
+            bytes[at + 12..at + 16].copy_from_slice(&(length as u32).to_be_bytes());
         }
-        bytes[name_offset..name_offset+name.len()].copy_from_slice(&name);
-        let nonce=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|error|error.to_string())?.as_nanos();
-        let path=std::env::temp_dir().join(format!("trinedocs-head-style-{}-{nonce}.ttf",std::process::id()));
+        bytes[name_offset..name_offset + name.len()].copy_from_slice(&name);
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "trinedocs-head-style-{}-{nonce}.ttf",
+            std::process::id()
+        ));
         for flags in 0u16..=3 {
-            bytes[head_offset+44..head_offset+46].copy_from_slice(&flags.to_be_bytes());
-            std::fs::write(&path,&bytes).map_err(|error|error.to_string())?;
-            let mut file=std::fs::File::open(&path).map_err(|error|error.to_string())?;
-            assert_eq!(describe_face(&mut file,0),Some(("Fixture".into(),flags&1!=0,flags&2!=0)));
+            bytes[head_offset + 44..head_offset + 46].copy_from_slice(&flags.to_be_bytes());
+            std::fs::write(&path, &bytes).map_err(|error| error.to_string())?;
+            let mut file = std::fs::File::open(&path).map_err(|error| error.to_string())?;
+            assert_eq!(
+                describe_face(&mut file, 0),
+                Some(("Fixture".into(), flags & 1 != 0, flags & 2 != 0))
+            );
         }
-        std::fs::remove_file(path).map_err(|error|error.to_string())?;Ok(())
+        std::fs::remove_file(path).map_err(|error| error.to_string())?;
+        Ok(())
     }
 }

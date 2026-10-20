@@ -585,9 +585,12 @@ pub fn fit_for_slide(bytes: &[u8], aspect: Option<f32>) -> Result<(Vec<u8>, u32,
 
 /// Downscales to the slide edge limit and encodes PNG (transparent pictures) or JPEG within the size limit.
 fn encode_limited(picture: image::DynamicImage) -> Result<(Vec<u8>, u32, u32), String> {
-    encode_with_limit(picture,MAX_SLIDE_IMAGE)
+    encode_with_limit(picture, MAX_SLIDE_IMAGE)
 }
-fn encode_with_limit(picture:image::DynamicImage,limit:usize)->Result<(Vec<u8>,u32,u32),String> {
+fn encode_with_limit(
+    picture: image::DynamicImage,
+    limit: usize,
+) -> Result<(Vec<u8>, u32, u32), String> {
     let mut picture = if picture.width().max(picture.height()) > MAX_EDGE {
         picture.resize(MAX_EDGE, MAX_EDGE, image::imageops::FilterType::Triangle)
     } else {
@@ -604,24 +607,26 @@ fn encode_with_limit(picture:image::DynamicImage,limit:usize)->Result<(Vec<u8>,u
                 return Ok((png, picture.width(), picture.height()));
             }
         } else {
-        let rgb = flatten(&picture);
-        for quality in [88, 78, 68, 58, 48] {
-            let mut jpeg = Vec::new();
-            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, quality)
-                .encode(
-                    rgb.as_raw(),
-                    rgb.width(),
-                    rgb.height(),
-                    image::ExtendedColorType::Rgb8,
-                )
-                .map_err(|e| e.to_string())?;
-            if jpeg.len() <= limit {
-                return Ok((jpeg, rgb.width(), rgb.height()));
+            let rgb = flatten(&picture);
+            for quality in [88, 78, 68, 58, 48] {
+                let mut jpeg = Vec::new();
+                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, quality)
+                    .encode(
+                        rgb.as_raw(),
+                        rgb.width(),
+                        rgb.height(),
+                        image::ExtendedColorType::Rgb8,
+                    )
+                    .map_err(|e| e.to_string())?;
+                if jpeg.len() <= limit {
+                    return Ok((jpeg, rgb.width(), rgb.height()));
+                }
             }
         }
-        }
         let (w, h) = (picture.width(), picture.height());
-        if w==1 && h==1 {break;}
+        if w == 1 && h == 1 {
+            break;
+        }
         picture = picture.resize(
             (w * 3 / 4).max(1),
             (h * 3 / 4).max(1),
@@ -907,12 +912,28 @@ pub fn file_stem(title: &str) -> String {
     } else {
         stem
     };
-    let stem=stem.trim().trim_end_matches(['.',' ']);
-    let stem=if stem.is_empty() {"Документ".to_string()}else{stem.to_string()};
-    let upper=stem.split('.').next().unwrap_or_default().trim_end_matches(' ').to_ascii_uppercase();
-    let device=upper.strip_prefix("COM").or_else(||upper.strip_prefix("LPT"));
-    let reserved=matches!(upper.as_str(),"CON"|"PRN"|"AUX"|"NUL")
-        || device.is_some_and(|suffix|matches!(suffix,"1"|"2"|"3"|"4"|"5"|"6"|"7"|"8"|"9"|"¹"|"²"|"³"));
+    let stem = stem.trim().trim_end_matches(['.', ' ']);
+    let stem = if stem.is_empty() {
+        "Документ".to_string()
+    } else {
+        stem.to_string()
+    };
+    let upper = stem
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches(' ')
+        .to_ascii_uppercase();
+    let device = upper
+        .strip_prefix("COM")
+        .or_else(|| upper.strip_prefix("LPT"));
+    let reserved = matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || device.is_some_and(|suffix| {
+            matches!(
+                suffix,
+                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+            )
+        });
     if reserved { format!("_{stem}") } else { stem }
 }
 
@@ -1132,28 +1153,43 @@ mod tests {
 mod hundred_media_preservation_tests {
     use super::*;
     #[test]
-    fn reducing_a_transparent_picture_never_flattens_it_to_jpeg()->Result<(),String> {
-        let rgba=image::RgbaImage::from_fn(128,128,|x,y| {
-            let n=(x.wrapping_mul(1103515245)^y.wrapping_mul(2654435761)).to_le_bytes();
-            image::Rgba([n[0],n[1],n[2],128])
+    fn reducing_a_transparent_picture_never_flattens_it_to_jpeg() -> Result<(), String> {
+        let rgba = image::RgbaImage::from_fn(128, 128, |x, y| {
+            let n = (x.wrapping_mul(1103515245) ^ y.wrapping_mul(2654435761)).to_le_bytes();
+            image::Rgba([n[0], n[1], n[2], 128])
         });
-        let (bytes,w,h)=encode_with_limit(image::DynamicImage::ImageRgba8(rgba),1024)?;
-        assert_eq!(image::guess_format(&bytes).map_err(|e|e.to_string())?,image::ImageFormat::Png);
-        assert!(w<128 && h<128);
-        assert!(crate::util::decode_image(&bytes)?.to_rgba8().pixels().any(|pixel|pixel.0[3]<255));Ok(())
+        let (bytes, w, h) = encode_with_limit(image::DynamicImage::ImageRgba8(rgba), 1024)?;
+        assert_eq!(
+            image::guess_format(&bytes).map_err(|e| e.to_string())?,
+            image::ImageFormat::Png
+        );
+        assert!(w < 128 && h < 128);
+        assert!(
+            crate::util::decode_image(&bytes)?
+                .to_rgba8()
+                .pixels()
+                .any(|pixel| pixel.0[3] < 255)
+        );
+        Ok(())
     }
     #[test]
     fn export_stems_avoid_windows_devices_even_with_extensions() {
-        for title in ["CON.report.docx","NUL.tar.gz","COM¹.docx","LPT².data.xlsx","CON .docx"] {
-            assert!(file_stem(title).starts_with('_'),"{title}");
+        for title in [
+            "CON.report.docx",
+            "NUL.tar.gz",
+            "COM¹.docx",
+            "LPT².data.xlsx",
+            "CON .docx",
+        ] {
+            assert!(file_stem(title).starts_with('_'), "{title}");
         }
-        assert_eq!(file_stem("COM0.docx"),"COM0");
-        assert_eq!(file_stem("..docx"),"Документ");
+        assert_eq!(file_stem("COM0.docx"), "COM0");
+        assert_eq!(file_stem("..docx"), "Документ");
     }
     #[test]
     fn export_stems_remove_all_supported_source_file_extensions() {
-        for title in ["Quarter.xlsb","Quarter.ods","Quarter.lock","Quarter.png"] {
-            assert_eq!(file_stem(title),"Quarter");
+        for title in ["Quarter.xlsb", "Quarter.ods", "Quarter.lock", "Quarter.png"] {
+            assert_eq!(file_stem(title), "Quarter");
         }
     }
 }

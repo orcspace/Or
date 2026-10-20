@@ -182,7 +182,9 @@ pub fn parse_codex_models(bytes: &[u8]) -> Vec<CodexModel> {
             label,
             efforts,
         });
-        if models.len()==100 {break;}
+        if models.len() == 100 {
+            break;
+        }
     }
     models
 }
@@ -403,8 +405,11 @@ impl Chat {
         if finished && let Some(turn) = self.turn.take() {
             push_text(&mut self.messages, turn.draft);
         }
-        self.history_omitted=self.history_omitted.saturating_add(
-            prune_history(&mut self.messages,MAX_CHAT_HISTORY,MAX_CHAT_MESSAGES));
+        self.history_omitted = self.history_omitted.saturating_add(prune_history(
+            &mut self.messages,
+            MAX_CHAT_HISTORY,
+            MAX_CHAT_MESSAGES,
+        ));
     }
     pub fn stop(&mut self) {
         self.generation = self.generation.saturating_add(1);
@@ -428,17 +433,25 @@ impl Chat {
     }
     pub fn clear(&mut self) {
         self.stop();
-        self.messages.clear();self.history_omitted=0;
+        self.messages.clear();
+        self.history_omitted = 0;
         self.session = [None, None];
-        self.input.clear();self.last_sent=None;self.needs_login=false;
+        self.input.clear();
+        self.last_sent = None;
+        self.needs_login = false;
     }
     fn send(&mut self, ctx: &egui::Context, document: Option<&Context>, mcp_enabled: bool) {
-        if self.turn.is_some() || self.input.trim().is_empty() {return;}
-        if self.input.len()>MAX_CHAT_INPUT {
-            self.messages.push(Message{role:Role::Error,text:"Сообщение превышает1МиБ. Разделите его на несколько запросов.".into()});
+        if self.turn.is_some() || self.input.trim().is_empty() {
             return;
         }
-        let text=self.input.clone();
+        if self.input.len() > MAX_CHAT_INPUT {
+            self.messages.push(Message {
+                role: Role::Error,
+                text: "Сообщение превышает1МиБ. Разделите его на несколько запросов.".into(),
+            });
+            return;
+        }
+        let text = self.input.clone();
         self.input.clear();
         self.needs_login = false;
         self.last_sent = Some(text.clone());
@@ -542,12 +555,15 @@ impl Chat {
         std::mem::take(&mut self.prefs_changed)
     }
     /// Model and effort pickers of the current provider.
-    fn choose_provider(&mut self,provider:Provider) {
-        if self.turn.is_some() || self.provider==provider {return;}
-        self.provider=provider;
+    fn choose_provider(&mut self, provider: Provider) {
+        if self.turn.is_some() || self.provider == provider {
+            return;
+        }
+        self.provider = provider;
         // A resumed provider session cannot contain the other provider's turns.
         // Start it with the shared bounded transcript when switching back.
-        self.session[provider.index()]=None;self.needs_login=false;
+        self.session[provider.index()] = None;
+        self.needs_login = false;
     }
     fn model_row(&mut self, ui: &mut Ui) {
         let index = self.provider.index();
@@ -709,7 +725,10 @@ impl Chat {
                         self.login();
                         ui.close();
                     }
-                    if ui.add_enabled(self.probe.is_none(),egui::Button::new("Обновить статус")).clicked() {
+                    if ui
+                        .add_enabled(self.probe.is_none(), egui::Button::new("Обновить статус"))
+                        .clicked()
+                    {
                         self.refresh(ui.ctx());
                         ui.close();
                     }
@@ -1005,23 +1024,41 @@ impl Drop for Chat {
         }
     }
 }
-const MAX_CHAT_INPUT:usize=1024*1024;
-const MAX_CHAT_HISTORY:usize=32*1024*1024;
-const MAX_CHAT_MESSAGES:usize=2000;
-fn prune_history(messages:&mut Vec<Message>,byte_limit:usize,count_limit:usize)->usize {
-    if byte_limit==0 || count_limit==0 {let count=messages.len();messages.clear();return count;}
-    let mut bytes=messages.iter().fold(0usize,|total,message|total.saturating_add(message.text.len()));
-    let mut removed=0;
-    while messages.len().saturating_sub(removed)>1
-        && (messages.len()-removed>count_limit || bytes>byte_limit) {
-        bytes=bytes.saturating_sub(messages[removed].text.len());removed+=1;
+const MAX_CHAT_INPUT: usize = 1024 * 1024;
+const MAX_CHAT_HISTORY: usize = 32 * 1024 * 1024;
+const MAX_CHAT_MESSAGES: usize = 2000;
+fn prune_history(messages: &mut Vec<Message>, byte_limit: usize, count_limit: usize) -> usize {
+    if byte_limit == 0 || count_limit == 0 {
+        let count = messages.len();
+        messages.clear();
+        return count;
     }
-    if removed>0 {messages.drain(..removed);}
-    if let Some(message)=messages.last_mut() && message.text.len()>byte_limit {
-        let marker=if byte_limit>=6 {"[…]\n"}else{""};
-        let mut start=message.text.len().saturating_sub(byte_limit.saturating_sub(marker.len()));
-        while !message.text.is_char_boundary(start) {start+=1;}
-        message.text=format!("{marker}{}",&message.text[start..]);removed+=1;
+    let mut bytes = messages.iter().fold(0usize, |total, message| {
+        total.saturating_add(message.text.len())
+    });
+    let mut removed = 0;
+    while messages.len().saturating_sub(removed) > 1
+        && (messages.len() - removed > count_limit || bytes > byte_limit)
+    {
+        bytes = bytes.saturating_sub(messages[removed].text.len());
+        removed += 1;
+    }
+    if removed > 0 {
+        messages.drain(..removed);
+    }
+    if let Some(message) = messages.last_mut()
+        && message.text.len() > byte_limit
+    {
+        let marker = if byte_limit >= 6 { "[…]\n" } else { "" };
+        let mut start = message
+            .text
+            .len()
+            .saturating_sub(byte_limit.saturating_sub(marker.len()));
+        while !message.text.is_char_boundary(start) {
+            start += 1;
+        }
+        message.text = format!("{marker}{}", &message.text[start..]);
+        removed += 1;
     }
     removed
 }
@@ -1138,7 +1175,13 @@ fn prompt(document: Option<&Context>, selection: &str, history: &str, text: &str
 /// Assistant text with light Markdown: headings, lists, **bold**, `code` and code blocks.
 fn markdown(ui: &mut Ui, text: &str) {
     for block in chat_blocks(text) {
-        let line=match block {ChatBlock::Code(text)=>{code_block(ui,&text);continue;},ChatBlock::Text(line)=>line};
+        let line = match block {
+            ChatBlock::Code(text) => {
+                code_block(ui, &text);
+                continue;
+            }
+            ChatBlock::Text(line) => line,
+        };
         let trimmed = line.trim_start();
         let indent = (line.len() - trimmed.len()).min(12) as f32 * 4.0;
         if trimmed.is_empty() {
@@ -1180,26 +1223,43 @@ fn markdown(ui: &mut Ui, text: &str) {
     }
 }
 /** A bounded line parser for the subset displayed in chat. */
-enum ChatBlock<'a>{Text(&'a str),Code(String)}
-fn chat_fence(line:&str)->Option<(char,usize)> {
-    let rest=line.trim_start_matches(' ');
-    if line.len()-rest.len()>3{return None;}
-    let marker=rest.chars().next().filter(|ch|matches!(ch,'`'|'~'))?;
-    let length=rest.chars().take_while(|ch|*ch==marker).count();
-    (length>=3).then_some((marker,length))
+enum ChatBlock<'a> {
+    Text(&'a str),
+    Code(String),
 }
-fn chat_blocks(text:&str)->Vec<ChatBlock<'_>> {
-    let mut blocks=Vec::new();let mut fence=None;let mut lines=Vec::new();
-    for line in text.lines() {
-        if let Some((marker,length))=fence {
-            if chat_fence(line).is_some_and(|(other,count)|other==marker&&count>=length)
-                && line.trim().chars().all(|ch|ch==marker) {
-                blocks.push(ChatBlock::Code(lines.join("\n")));lines.clear();fence=None;
-            }else{lines.push(line);}
-        }else if let Some(open)=chat_fence(line) {fence=Some(open);}
-        else{blocks.push(ChatBlock::Text(line));}
+fn chat_fence(line: &str) -> Option<(char, usize)> {
+    let rest = line.trim_start_matches(' ');
+    if line.len() - rest.len() > 3 {
+        return None;
     }
-    if fence.is_some(){blocks.push(ChatBlock::Code(lines.join("\n")));}
+    let marker = rest.chars().next().filter(|ch| matches!(ch, '`' | '~'))?;
+    let length = rest.chars().take_while(|ch| *ch == marker).count();
+    (length >= 3).then_some((marker, length))
+}
+fn chat_blocks(text: &str) -> Vec<ChatBlock<'_>> {
+    let mut blocks = Vec::new();
+    let mut fence = None;
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        if let Some((marker, length)) = fence {
+            if chat_fence(line).is_some_and(|(other, count)| other == marker && count >= length)
+                && line.trim().chars().all(|ch| ch == marker)
+            {
+                blocks.push(ChatBlock::Code(lines.join("\n")));
+                lines.clear();
+                fence = None;
+            } else {
+                lines.push(line);
+            }
+        } else if let Some(open) = chat_fence(line) {
+            fence = Some(open);
+        } else {
+            blocks.push(ChatBlock::Text(line));
+        }
+    }
+    if fence.is_some() {
+        blocks.push(ChatBlock::Code(lines.join("\n")));
+    }
     blocks
 }
 /// Splits a list item into its marker («•  », «2.  ») and text.
@@ -1244,18 +1304,31 @@ fn inline(ui: &Ui, text: &str) -> egui::text::LayoutJob {
     let (mut bold, mut code) = (false, false);
     let mut rest = text;
     while !rest.is_empty() {
-        if !code && rest.starts_with('\\') && let Some(next)=rest.chars().nth(1).filter(char::is_ascii_punctuation) {
-            let length=1+next.len_utf8();
-            job.append(&rest[1..length],0.0,egui::TextFormat{
-                font_id:if bold {egui::FontId::new(body.size,egui::FontFamily::Name("bold".into()))}else{body.clone()},
-                color:if bold {strong}else{color},..Default::default()
-            });
-            rest=&rest[length..];continue;
+        if !code
+            && rest.starts_with('\\')
+            && let Some(next) = rest.chars().nth(1).filter(char::is_ascii_punctuation)
+        {
+            let length = 1 + next.len_utf8();
+            job.append(
+                &rest[1..length],
+                0.0,
+                egui::TextFormat {
+                    font_id: if bold {
+                        egui::FontId::new(body.size, egui::FontFamily::Name("bold".into()))
+                    } else {
+                        body.clone()
+                    },
+                    color: if bold { strong } else { color },
+                    ..Default::default()
+                },
+            );
+            rest = &rest[length..];
+            continue;
         }
         let next = if code {
             rest.find('`')
         } else {
-            [rest.find("**"), rest.find('`'),rest.find('\\')]
+            [rest.find("**"), rest.find('`'), rest.find('\\')]
                 .into_iter()
                 .flatten()
                 .min()
@@ -1267,9 +1340,13 @@ fn inline(ui: &Ui, text: &str) -> egui::text::LayoutJob {
                 piece,
                 0.0,
                 egui::TextFormat {
-                    font_id: if code { mono.clone() } else if bold {
-                        egui::FontId::new(body.size,egui::FontFamily::Name("bold".into()))
-                    } else { body.clone() },
+                    font_id: if code {
+                        mono.clone()
+                    } else if bold {
+                        egui::FontId::new(body.size, egui::FontFamily::Name("bold".into()))
+                    } else {
+                        body.clone()
+                    },
                     color: if bold { strong } else { color },
                     background: if code { code_bg } else { Color32::TRANSPARENT },
                     ..Default::default()
@@ -1278,22 +1355,56 @@ fn inline(ui: &Ui, text: &str) -> egui::text::LayoutJob {
         }
         if let Some(after) = marker.strip_prefix('`') {
             if !code && !after.contains('`') {
-                job.append("`",0.0,egui::TextFormat{font_id:body.clone(),color,..Default::default()});
-            }else {code=!code;}
-            rest=after;
+                job.append(
+                    "`",
+                    0.0,
+                    egui::TextFormat {
+                        font_id: body.clone(),
+                        color,
+                        ..Default::default()
+                    },
+                );
+            } else {
+                code = !code;
+            }
+            rest = after;
         } else if let Some(after) = marker.strip_prefix("**") {
             if !bold && !after.contains("**") {
-                job.append("**",0.0,egui::TextFormat{font_id:body.clone(),color,..Default::default()});
-            }else{bold=!bold;}
-            rest=after;
-        } else if let Some(after)=marker.strip_prefix('\\') {
-            let next=after.chars().next();let length=next.map_or(0,char::len_utf8);
-            let piece=if next.is_some_and(|ch|ch.is_ascii_punctuation()){&after[..length]}else{&marker[..1+length]};
-            job.append(piece,0.0,egui::TextFormat{
-                font_id:if bold {egui::FontId::new(body.size,egui::FontFamily::Name("bold".into()))}else{body.clone()},
-                color:if bold {strong}else{color},..Default::default()
-            });
-            rest=&marker[1+length..];
+                job.append(
+                    "**",
+                    0.0,
+                    egui::TextFormat {
+                        font_id: body.clone(),
+                        color,
+                        ..Default::default()
+                    },
+                );
+            } else {
+                bold = !bold;
+            }
+            rest = after;
+        } else if let Some(after) = marker.strip_prefix('\\') {
+            let next = after.chars().next();
+            let length = next.map_or(0, char::len_utf8);
+            let piece = if next.is_some_and(|ch| ch.is_ascii_punctuation()) {
+                &after[..length]
+            } else {
+                &marker[..1 + length]
+            };
+            job.append(
+                piece,
+                0.0,
+                egui::TextFormat {
+                    font_id: if bold {
+                        egui::FontId::new(body.size, egui::FontFamily::Name("bold".into()))
+                    } else {
+                        body.clone()
+                    },
+                    color: if bold { strong } else { color },
+                    ..Default::default()
+                },
+            );
+            rest = &marker[1 + length..];
         } else {
             rest = "";
         }
@@ -1326,7 +1437,7 @@ fn tool_label(name: &str) -> String {
             "Читает таблицу"
         }
         "sheets_find" => "Ищет в таблице",
-        "sheets_explain_formula"=>"Объясняет формулу",
+        "sheets_explain_formula" => "Объясняет формулу",
         name if name.starts_with("sheets_") => "Меняет таблицу",
         "slides_design_guide" => "Изучает правила дизайна",
         "slides_search_images" => "Ищет изображения",
@@ -1525,7 +1636,9 @@ fn codex_chat_mcp(
     }
     let status = wait_child(child_state).ok_or("Проверка MCP Codex остановлена")?;
     if !status.success() {
-        return Err("Не удалось проверить список MCP Codex. Обновите Codex CLI и повторите.".into());
+        return Err(
+            "Не удалось проверить список MCP Codex. Обновите Codex CLI и повторите.".into(),
+        );
     }
     codex_mcp_override(&bytes, shim, client)
 }
@@ -2434,7 +2547,10 @@ mod codex_isolation_review_tests {
             .parse::<toml_edit::DocumentMut>()
             .map_err(|e| e.to_string())?;
         for name in names {
-            assert_eq!(parsed["mcp_servers"][name]["enabled"].as_bool(), Some(false));
+            assert_eq!(
+                parsed["mcp_servers"][name]["enabled"].as_bool(),
+                Some(false)
+            );
         }
         let own = &parsed["mcp_servers"]["trinedocs"];
         assert_eq!(own["enabled"].as_bool(), Some(true));
@@ -2464,48 +2580,74 @@ mod codex_isolation_review_tests {
 mod hundred_chat_content_tests {
     use super::*;
     #[test]
-    fn chat_bold_spans_select_a_bold_font_face()->Result<(),String> {
-        let ctx=egui::Context::default();crate::fonts::install(&ctx)?;let mut result=None;
-        let _=ctx.run_ui(egui::RawInput::default(),|ui| {result=Some(inline(ui,"plain **bold**"));});
-        let job=result.unwrap_or_default();
-        assert!(job.sections.iter().any(|section|&job.text[section.byte_range.start.0..section.byte_range.end.0]=="bold"
-            && section.format.font_id.family==egui::FontFamily::Name("bold".into())));Ok(())
+    fn chat_bold_spans_select_a_bold_font_face() -> Result<(), String> {
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx)?;
+        let mut result = None;
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            result = Some(inline(ui, "plain **bold**"));
+        });
+        let job = result.unwrap_or_default();
+        assert!(job.sections.iter().any(|section| &job.text
+            [section.byte_range.start.0..section.byte_range.end.0]
+            == "bold"
+            && section.format.font_id.family == egui::FontFamily::Name("bold".into())));
+        Ok(())
     }
     #[test]
-    fn incomplete_and_escaped_chat_markers_remain_literal()->Result<(),String> {
-        let ctx=egui::Context::default();crate::fonts::install(&ctx)?;
-        for (source,expected) in [("an unmatched `code","an unmatched `code"),("literal **","literal **"),(r"\**literal\**","**literal**"),(r"prefix \*star\*","prefix *star*"),(r"path \folder",r"path \folder")] {
-            let mut output=String::new();
-            let _=ctx.run_ui(egui::RawInput::default(),|ui|{output=inline(ui,source).text;});
-            assert_eq!(output,expected);
-        }Ok(())
+    fn incomplete_and_escaped_chat_markers_remain_literal() -> Result<(), String> {
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx)?;
+        for (source, expected) in [
+            ("an unmatched `code", "an unmatched `code"),
+            ("literal **", "literal **"),
+            (r"\**literal\**", "**literal**"),
+            (r"prefix \*star\*", "prefix *star*"),
+            (r"path \folder", r"path \folder"),
+        ] {
+            let mut output = String::new();
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                output = inline(ui, source).text;
+            });
+            assert_eq!(output, expected);
+        }
+        Ok(())
     }
     #[test]
     fn chat_code_fences_match_their_opening_length_and_preserve_blank_lines() {
-        let blocks=chat_blocks("````rust\n\n```\ninside\n````\nafter");
+        let blocks = chat_blocks("````rust\n\n```\ninside\n````\nafter");
         assert!(matches!(&blocks[0],ChatBlock::Code(text) if text=="\n```\ninside"));
-        assert!(matches!(&blocks[1],ChatBlock::Text("after")));
+        assert!(matches!(&blocks[1], ChatBlock::Text("after")));
     }
     #[test]
     fn assistant_text_keeps_code_indentation_and_trailing_line_breaks() {
-        let mut messages=Vec::new();push_text(&mut messages,"    code\n".into());
-        assert_eq!(messages[0].text,"    code\n");
+        let mut messages = Vec::new();
+        push_text(&mut messages, "    code\n".into());
+        assert_eq!(messages[0].text, "    code\n");
     }
     #[test]
     fn new_chat_resets_retry_login_and_unsent_text() {
-        let mut chat=Chat::new();chat.input="private draft".into();chat.last_sent=Some("old prompt".into());chat.needs_login=true;
-        chat.clear();assert!(chat.input.is_empty());assert!(chat.last_sent.is_none());assert!(!chat.needs_login);
+        let mut chat = Chat::new();
+        chat.input = "private draft".into();
+        chat.last_sent = Some("old prompt".into());
+        chat.needs_login = true;
+        chat.clear();
+        assert!(chat.input.is_empty());
+        assert!(chat.last_sent.is_none());
+        assert!(!chat.needs_login);
     }
     #[test]
     fn formula_explanation_is_not_labelled_as_a_mutating_tool() {
-        assert_eq!(tool_label("sheets_explain_formula"),"Объясняет формулу");
+        assert_eq!(tool_label("sheets_explain_formula"), "Объясняет формулу");
         assert!(crate::mcp::tools::read_only("sheets_explain_formula"));
     }
     #[test]
     fn refreshing_status_keeps_the_existing_probe_receiver() {
-        let mut chat=Chat::new();let (_sender,receiver)=channel();
-        chat.probe=Some(receiver);
-        chat.refresh(&egui::Context::default());assert!(chat.probe.is_some());
+        let mut chat = Chat::new();
+        let (_sender, receiver) = channel();
+        chat.probe = Some(receiver);
+        chat.refresh(&egui::Context::default());
+        assert!(chat.probe.is_some());
     }
 }
 
@@ -2515,43 +2657,93 @@ mod two_hundred_chat_regressions {
     use serde_json::json;
     #[test]
     fn submitted_user_text_keeps_indentation_and_trailing_newlines() {
-        let mut chat=Chat::new();let text="    code()\n";chat.input=text.into();
-        chat.send(&egui::Context::default(),None,true);
-        assert_eq!(chat.messages.first().map(|message|message.text.as_str()),Some(text));
-        assert_eq!(chat.last_sent.as_deref(),Some(text));assert!(chat.input.is_empty());
+        let mut chat = Chat::new();
+        let text = "    code()\n";
+        chat.input = text.into();
+        chat.send(&egui::Context::default(), None, true);
+        assert_eq!(
+            chat.messages.first().map(|message| message.text.as_str()),
+            Some(text)
+        );
+        assert_eq!(chat.last_sent.as_deref(), Some(text));
+        assert!(chat.input.is_empty());
     }
     #[test]
     fn switching_provider_rebuilds_the_shared_conversation_context() {
-        let mut chat=Chat::new();chat.session[Provider::Claude.index()]=Some("old-claude".into());
-        chat.choose_provider(Provider::Codex);chat.messages.push(Message{role:Role::Assistant,text:"Codex's answer".into()});
+        let mut chat = Chat::new();
+        chat.session[Provider::Claude.index()] = Some("old-claude".into());
+        chat.choose_provider(Provider::Codex);
+        chat.messages.push(Message {
+            role: Role::Assistant,
+            text: "Codex's answer".into(),
+        });
         chat.choose_provider(Provider::Claude);
         assert!(chat.session[Provider::Claude.index()].is_none());
         assert!(transcript(&chat.messages).contains("Codex's answer"));
-        chat.session[Provider::Claude.index()]=Some("current".into());chat.choose_provider(Provider::Claude);
-        assert_eq!(chat.session[Provider::Claude.index()].as_deref(),Some("current"));
+        chat.session[Provider::Claude.index()] = Some("current".into());
+        chat.choose_provider(Provider::Claude);
+        assert_eq!(
+            chat.session[Provider::Claude.index()].as_deref(),
+            Some("current")
+        );
     }
     #[test]
     fn oversized_chat_input_is_rejected_before_consuming_the_draft() {
-        let mut chat=Chat::new();chat.input="x".repeat(MAX_CHAT_INPUT+1);chat.last_sent=Some("previous".into());
-        chat.send(&egui::Context::default(),None,true);
-        assert_eq!(chat.input.len(),MAX_CHAT_INPUT+1);assert_eq!(chat.last_sent.as_deref(),Some("previous"));
-        assert!(!chat.messages.iter().any(|message|message.role==Role::User));assert!(!chat.busy());
+        let mut chat = Chat::new();
+        chat.input = "x".repeat(MAX_CHAT_INPUT + 1);
+        chat.last_sent = Some("previous".into());
+        chat.send(&egui::Context::default(), None, true);
+        assert_eq!(chat.input.len(), MAX_CHAT_INPUT + 1);
+        assert_eq!(chat.last_sent.as_deref(), Some("previous"));
+        assert!(
+            !chat
+                .messages
+                .iter()
+                .any(|message| message.role == Role::User)
+        );
+        assert!(!chat.busy());
     }
     #[test]
     fn session_history_is_bounded_and_unicode_tail_is_not_split() {
-        let mut chat=Chat::new();
-        chat.messages=(0..MAX_CHAT_MESSAGES+3).map(|index|Message{role:Role::Tool,text:format!("tool-{index}")}).collect();
-        chat.poll();assert_eq!(chat.messages.len(),MAX_CHAT_MESSAGES);assert!(chat.history_omitted>=3);
-        let mut messages=vec![Message{role:Role::User,text:"old".into()},Message{role:Role::Assistant,text:"🙂".repeat(20)}];
-        assert!(prune_history(&mut messages,32,5)>0);assert_eq!(messages.len(),1);
-        assert!(messages[0].text.len()<=32);assert!(messages[0].text.ends_with("🙂"));assert!(messages[0].text.starts_with("[…]"));
-        chat.clear();assert_eq!(chat.history_omitted,0);
+        let mut chat = Chat::new();
+        chat.messages = (0..MAX_CHAT_MESSAGES + 3)
+            .map(|index| Message {
+                role: Role::Tool,
+                text: format!("tool-{index}"),
+            })
+            .collect();
+        chat.poll();
+        assert_eq!(chat.messages.len(), MAX_CHAT_MESSAGES);
+        assert!(chat.history_omitted >= 3);
+        let mut messages = vec![
+            Message {
+                role: Role::User,
+                text: "old".into(),
+            },
+            Message {
+                role: Role::Assistant,
+                text: "🙂".repeat(20),
+            },
+        ];
+        assert!(prune_history(&mut messages, 32, 5) > 0);
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].text.len() <= 32);
+        assert!(messages[0].text.ends_with("🙂"));
+        assert!(messages[0].text.starts_with("[…]"));
+        chat.clear();
+        assert_eq!(chat.history_omitted, 0);
     }
     #[test]
-    fn hidden_cache_entries_do_not_consume_the_visible_model_budget()->Result<(),String> {
-        let mut models:Vec<_>=(0..100).map(|index|json!({"slug":format!("old-{index}"),"visibility":"hide"})).collect();
+    fn hidden_cache_entries_do_not_consume_the_visible_model_budget() -> Result<(), String> {
+        let mut models: Vec<_> = (0..100)
+            .map(|index| json!({"slug":format!("old-{index}"),"visibility":"hide"}))
+            .collect();
         models.push(json!({"slug":"visible-new","visibility":"list","display_name":"Visible"}));
-        let parsed=parse_codex_models(&serde_json::to_vec(&json!({"models":models})).map_err(|error|error.to_string())?);
-        assert_eq!(parsed.len(),1);assert_eq!(parsed[0].slug,"visible-new");Ok(())
+        let parsed = parse_codex_models(
+            &serde_json::to_vec(&json!({"models":models})).map_err(|error| error.to_string())?,
+        );
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].slug, "visible-new");
+        Ok(())
     }
 }

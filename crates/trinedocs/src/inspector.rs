@@ -279,8 +279,18 @@ pub fn inspect(document: &Document) -> Report {
                 }
             }
             for (index, paragraph) in doc.paragraphs.iter().enumerate() {
-                if !matches!(paragraph.style.as_str(), "Normal" | "Title" | "Quote"
-                    | "Heading1" | "Heading2" | "Heading3" | "Heading4" | "Heading5" | "Heading6") {
+                if !matches!(
+                    paragraph.style.as_str(),
+                    "Normal"
+                        | "Title"
+                        | "Quote"
+                        | "Heading1"
+                        | "Heading2"
+                        | "Heading3"
+                        | "Heading4"
+                        | "Heading5"
+                        | "Heading6"
+                ) {
                     continue;
                 }
                 let mut baseline = crate::docs::model::Paragraph::default();
@@ -288,9 +298,15 @@ pub fn inspect(document: &Document) -> Report {
                 let expected = &baseline.runs[0].format;
                 let mut differences = std::collections::BTreeSet::new();
                 for run in paragraph.runs.iter().filter(|run| !run.text.is_empty()) {
-                    if run.format.size != expected.size { differences.insert("размер"); }
-                    if run.format.bold != expected.bold { differences.insert("жирность"); }
-                    if run.format.italic != expected.italic { differences.insert("курсив"); }
+                    if run.format.size != expected.size {
+                        differences.insert("размер");
+                    }
+                    if run.format.bold != expected.bold {
+                        differences.insert("жирность");
+                    }
+                    if run.format.italic != expected.italic {
+                        differences.insert("курсив");
+                    }
                 }
                 if !differences.is_empty() {
                     report.push(
@@ -377,11 +393,12 @@ pub fn inspect(document: &Document) -> Report {
                             target,
                         );
                     }
-                    let background = if matches!(&element.kind, ElementKind::Text) || !element.fill_visible {
-                        slide.background
-                    } else {
-                        element.fill
-                    };
+                    let background =
+                        if matches!(&element.kind, ElementKind::Text) || !element.fill_visible {
+                            slide.background
+                        } else {
+                            element.fill
+                        };
                     let required = if element.font_size >= 24.0
                         || element.bold && element.font_size >= 18.66
                     {
@@ -569,15 +586,31 @@ mod style_lens_tests {
 mod hundred_inspector_background_tests {
     use super::*;
     #[test]
-    fn transparent_shapes_use_the_slide_background_for_contrast()->Result<(),String> {
-        let mut deck=crate::slides::model::Deck::empty();let slide=deck.add_slide("blank");
-        let id=deck.add_element(slide,ElementKind::Rect)?;
-        let slide=deck.slide_mut(slide).ok_or("slide")?;slide.background=[255;3];
-        let element=slide.element_mut(id).ok_or("shape")?;
-        element.text="Readable".into();element.color=[0;3];element.fill=[0;3];element.fill_visible=false;
-        let report=inspect(&Document::Slides(deck.clone()));
-        assert!(!report.findings.iter().any(|finding|finding.message.contains("контраст")));
-        deck.slides[0].elements[0].fill_visible=true;
-        assert!(inspect(&Document::Slides(deck)).findings.iter().any(|finding|finding.message.contains("контраст")));Ok(())
+    fn transparent_shapes_use_the_slide_background_for_contrast() -> Result<(), String> {
+        let mut deck = crate::slides::model::Deck::empty();
+        let slide = deck.add_slide("blank");
+        let id = deck.add_element(slide, ElementKind::Rect)?;
+        let slide = deck.slide_mut(slide).ok_or("slide")?;
+        slide.background = [255; 3];
+        let element = slide.element_mut(id).ok_or("shape")?;
+        element.text = "Readable".into();
+        element.color = [0; 3];
+        element.fill = [0; 3];
+        element.fill_visible = false;
+        let report = inspect(&Document::Slides(deck.clone()));
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|finding| finding.message.contains("контраст"))
+        );
+        deck.slides[0].elements[0].fill_visible = true;
+        assert!(
+            inspect(&Document::Slides(deck))
+                .findings
+                .iter()
+                .any(|finding| finding.message.contains("контраст"))
+        );
+        Ok(())
     }
 }

@@ -196,7 +196,7 @@ impl Paragraph {
         self.runs = compact;
     }
     pub fn set_style(&mut self, style: &str) {
-        let leaving_code=self.style=="Code" && style!="Code";
+        let leaving_code = self.style == "Code" && style != "Code";
         self.style = style.into();
         let (size, bold) = match style {
             "Title" => (28.0, true),
@@ -212,8 +212,11 @@ impl Paragraph {
             run.format.size = size;
             run.format.bold = bold;
             run.format.italic = style == "Quote";
-            if style=="Code" {run.format.font="Consolas".into();}
-            else if leaving_code && run.format.font=="Consolas" {run.format.font=TextFormat::default().font;}
+            if style == "Code" {
+                run.format.font = "Consolas".into();
+            } else if leaving_code && run.format.font == "Consolas" {
+                run.format.font = TextFormat::default().font;
+            }
         }
         self.spacing_before = if heading_level(style).is_some() {
             12.0
@@ -567,11 +570,11 @@ pub fn cell_text(cell: &Cell) -> String {
 }
 /// Replaces the text of a cell, keeping formats and IDs of unchanged parts.
 pub fn edit_cell_text(cell: &mut Cell, text: &str, next_id: &mut u64) {
-    let _=try_edit_cell_text(cell,text,next_id);
+    let _ = try_edit_cell_text(cell, text, next_id);
 }
-pub fn try_edit_cell_text(cell: &mut Cell, text: &str, next_id: &mut u64)->Result<(),String> {
-    let normalized=text.replace("\r\n","\n").replace('\r',"\n");
-    let text=normalized.as_str();
+pub fn try_edit_cell_text(cell: &mut Cell, text: &str, next_id: &mut u64) -> Result<(), String> {
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let text = normalized.as_str();
     let mut nested = Doc {
         paragraphs: cell.paragraphs.clone(),
         next_id: *next_id,
@@ -613,8 +616,9 @@ pub fn try_edit_cell_text(cell: &mut Cell, text: &str, next_id: &mut u64)->Resul
         .skip(prefix)
         .take(new_chars.len().saturating_sub(prefix + suffix))
         .collect();
-    nested.replace_range(a,b,&inserted,None)?;
-    cell.paragraphs=nested.paragraphs;*next_id=nested.next_id;
+    nested.replace_range(a, b, &inserted, None)?;
+    cell.paragraphs = nested.paragraphs;
+    *next_id = nested.next_id;
     Ok(())
 }
 type FaceMetrics = (
@@ -666,7 +670,12 @@ pub fn char_width(ch: char, format: &TextFormat) -> f32 {
         }
     });
     let size = format.size.clamp(4.0, 144.0) * if format.script != 0 { 0.75 } else { 1.0 };
-    if matches!(ch,'\u{00ad}'|'\u{200b}'|'\u{200c}'|'\u{200d}'|'\u{2060}'|'\u{feff}') {return 0.0;}
+    if matches!(
+        ch,
+        '\u{00ad}' | '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{2060}' | '\u{feff}'
+    ) {
+        return 0.0;
+    }
     if ch == '\t' {
         return metrics.get(&' ').copied().unwrap_or(0.3) * size * 4.0;
     }
@@ -722,11 +731,20 @@ impl Doc {
         {
             return Err("Слишком длинные свойства документа".into());
         }
-        if self.losses.len()>1000 || self.losses.iter().any(|loss|loss.len()>8192)
-            || self.losses.iter().fold(0usize,|total,loss|total.saturating_add(loss.len()))>1024*1024 {
+        if self.losses.len() > 1000
+            || self.losses.iter().any(|loss| loss.len() > 8192)
+            || self
+                .losses
+                .iter()
+                .fold(0usize, |total, loss| total.saturating_add(loss.len()))
+                > 1024 * 1024
+        {
             return Err("Import notices Docs превышают безопасный лимит".into());
         }
-        if [&self.title,&self.author,&page.header,&page.footer].iter().any(|text|!xml_model_text(text,false)) {
+        if [&self.title, &self.author, &page.header, &page.footer]
+            .iter()
+            .any(|text| !xml_model_text(text, false))
+        {
             return Err("Свойства Docs содержат недопустимые control characters".into());
         }
         let mut ids = std::collections::HashSet::new();
@@ -802,7 +820,7 @@ impl Doc {
             {
                 return Err("Недопустимые размеры/заголовки таблицы Docs".into());
             }
-            if table.header_rows>table.rows.len() || table.row_heights.len()>table.rows.len() {
+            if table.header_rows > table.rows.len() || table.row_heights.len() > table.rows.len() {
                 return Err("Геометрия/заголовки таблицы выходят за её строки".into());
             }
             validate_table_merges(table)?;
@@ -852,7 +870,13 @@ impl Doc {
                             .fold(11.0_f32, f32::max);
                         let line_height =
                             f64::from(paragraph_line_height(p, &p.format_at(0), size));
-                        if line_height + f64::from(p.spacing_before + p.spacing_after + table.cell_margin[0] + table.cell_margin[2])
+                        if line_height
+                            + f64::from(
+                                p.spacing_before
+                                    + p.spacing_after
+                                    + table.cell_margin[0]
+                                    + table.cell_margin[2],
+                            )
                             > body_height
                         {
                             return Err("Строка таблицы выше доступной области страницы".into());
@@ -863,8 +887,17 @@ impl Doc {
                             .flat_map(|r| r.text.chars())
                             .filter(|c| matches!(*c, '\u{000b}' | '\u{000c}' | '\n'))
                             .count();
-                        let line_width=(width-f64::from(p.indent.max(0.0)+p.right_indent.max(0.0)+p.first_indent.max(0.0)+list_indent(p))).max(1.0);
-                        cell_lines += ((p.len() as f64 * f64::from(size) / line_width).ceil().max(1.0)
+                        let line_width = (width
+                            - f64::from(
+                                p.indent.max(0.0)
+                                    + p.right_indent.max(0.0)
+                                    + p.first_indent.max(0.0)
+                                    + list_indent(p),
+                            ))
+                        .max(1.0);
+                        cell_lines += ((p.len() as f64 * f64::from(size) / line_width)
+                            .ceil()
+                            .max(1.0)
                             + hard_breaks as f64)
                             * line_height
                             / 15.0
@@ -872,7 +905,8 @@ impl Doc {
                     }
                     row_lines = row_lines.max(cell_lines);
                 }
-                estimated_height += row_lines * 15.0 + f64::from(table.cell_margin[0]+table.cell_margin[2]);
+                estimated_height +=
+                    row_lines * 15.0 + f64::from(table.cell_margin[0] + table.cell_margin[2]);
             }
         }
         for image in &self.images {
@@ -888,7 +922,7 @@ impl Doc {
                 || image.width > 10000.0
                 || image.height > 10000.0
                 || image.alt.len() > 32767
-                || !xml_model_text(&image.alt,false)
+                || !xml_model_text(&image.alt, false)
                 || image.bytes.len() > 32 * 1024 * 1024
             {
                 return Err("Недопустимое изображение Docs".into());
@@ -1035,11 +1069,18 @@ impl Doc {
         out.join("\n")
     }
     pub fn word_count(&self) -> usize {
-        self.paragraphs.iter().map(|paragraph|paragraph.text().split_whitespace().count()).sum::<usize>()
-            + self.tables.iter().flat_map(|table|table.rows.iter().enumerate())
-                .flat_map(|(row,cells)|cells.iter().filter(move |cell|row==0 || !cell.merged))
-                .flat_map(|cell|&cell.paragraphs)
-                .map(|paragraph|paragraph.text().split_whitespace().count()).sum::<usize>()
+        self.paragraphs
+            .iter()
+            .map(|paragraph| paragraph.text().split_whitespace().count())
+            .sum::<usize>()
+            + self
+                .tables
+                .iter()
+                .flat_map(|table| table.rows.iter().enumerate())
+                .flat_map(|(row, cells)| cells.iter().filter(move |cell| row == 0 || !cell.merged))
+                .flat_map(|cell| &cell.paragraphs)
+                .map(|paragraph| paragraph.text().split_whitespace().count())
+                .sum::<usize>()
     }
     pub fn position(&self, paragraph_id: u64, offset: usize) -> Result<Position, String> {
         let paragraph = self
@@ -1126,20 +1167,48 @@ impl Doc {
         }
         let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
         let lines: Vec<&str> = normalized.split('\n').collect();
-        let remaining=self.paragraphs.len().saturating_sub(b.paragraph-a.paragraph+1);
-        if remaining.checked_add(lines.len()).is_none_or(|count|count>100000) {
+        let remaining = self
+            .paragraphs
+            .len()
+            .saturating_sub(b.paragraph - a.paragraph + 1);
+        if remaining
+            .checked_add(lines.len())
+            .is_none_or(|count| count > 100000)
+        {
             return Err("Правка превышает100000 абзацев Docs".into());
         }
-        let text_bytes=self.paragraphs.iter().chain(self.tables.iter()
-            .flat_map(|table|table.rows.iter().flatten()).flat_map(|cell|&cell.paragraphs))
-            .flat_map(|paragraph|&paragraph.runs).fold(0usize,|total,run|total.saturating_add(run.text.len()));
-        let removed=self.selected_text(a,b).len().saturating_sub(b.paragraph-a.paragraph);
-        let inserted=lines.iter().fold(0usize,|total,line|total.saturating_add(line.len()));
-        if text_bytes.saturating_sub(removed).checked_add(inserted).is_none_or(|total|total>16*1024*1024)
-            || self.next_id.max(2).checked_add(lines.len().saturating_sub(1) as u64).is_none_or(|next|next==u64::MAX) {
+        let text_bytes = self
+            .paragraphs
+            .iter()
+            .chain(
+                self.tables
+                    .iter()
+                    .flat_map(|table| table.rows.iter().flatten())
+                    .flat_map(|cell| &cell.paragraphs),
+            )
+            .flat_map(|paragraph| &paragraph.runs)
+            .fold(0usize, |total, run| total.saturating_add(run.text.len()));
+        let removed = self
+            .selected_text(a, b)
+            .len()
+            .saturating_sub(b.paragraph - a.paragraph);
+        let inserted = lines
+            .iter()
+            .fold(0usize, |total, line| total.saturating_add(line.len()));
+        if text_bytes
+            .saturating_sub(removed)
+            .checked_add(inserted)
+            .is_none_or(|total| total > 16 * 1024 * 1024)
+            || self
+                .next_id
+                .max(2)
+                .checked_add(lines.len().saturating_sub(1) as u64)
+                .is_none_or(|next| next == u64::MAX)
+        {
             return Err("Правка превышает безопасный лимит текста или ID Docs".into());
         }
-        let first=first.clone();let last=last.clone();
+        let first = first.clone();
+        let last = last.clone();
         let fmt = format.unwrap_or_else(|| {
             // Insertion follows the character before the caret; replacement follows
             // the first deleted character, including matches at a run boundary.
@@ -1147,15 +1216,20 @@ impl Doc {
         });
         let prefix = first.slice(0, a.offset);
         let suffix = last.slice(b.offset, last.len());
-        let mut template=if normalized.is_empty() && a.offset==0 && a.paragraph<b.paragraph {last.clone()}else{first.clone()};
-        template.id=first.id;template.runs.clear();
+        let mut template = if normalized.is_empty() && a.offset == 0 && a.paragraph < b.paragraph {
+            last.clone()
+        } else {
+            first.clone()
+        };
+        template.id = first.id;
+        template.runs.clear();
         let mut replacement = Vec::new();
         for (i, line) in lines.iter().enumerate() {
             let mut p = template.clone();
             if i > 0 {
                 p.id = self.alloc_id();
                 p.page_break_before = false;
-                p.list_start=None;
+                p.list_start = None;
             }
             p.runs = Vec::new();
             if i == 0 {
@@ -1342,78 +1416,181 @@ impl Doc {
         }
         matches
     }
-    pub fn replace_all(&mut self,needle:&str,replacement:&str,case_sensitive:bool)->usize {
-        self.try_replace_all(needle,replacement,case_sensitive).unwrap_or(0)
+    pub fn replace_all(&mut self, needle: &str, replacement: &str, case_sensitive: bool) -> usize {
+        self.try_replace_all(needle, replacement, case_sensitive)
+            .unwrap_or(0)
     }
     /// Preflight the entire operation and build each affected paragraph only once.
-    pub fn try_replace_all(&mut self,needle:&str,replacement:&str,case_sensitive:bool)->Result<usize,String> {
-        self.replace_all_with_limits(needle,replacement,case_sensitive,16*1024*1024,100_000)
+    pub fn try_replace_all(
+        &mut self,
+        needle: &str,
+        replacement: &str,
+        case_sensitive: bool,
+    ) -> Result<usize, String> {
+        self.replace_all_with_limits(
+            needle,
+            replacement,
+            case_sensitive,
+            16 * 1024 * 1024,
+            100_000,
+        )
     }
-    fn replace_all_with_limits(&mut self,needle:&str,replacement:&str,case_sensitive:bool,text_limit:usize,match_limit:usize)->Result<usize,String> {
-        let mut matches=self.find_bounded(needle,case_sensitive,match_limit.saturating_add(1));
-        if matches.len()>match_limit {return Err("Замена превышает 100 000 совпадений; уточните поиск".into());}
-        let mut previous=None;
-        matches.retain(|(start,end)| {
-            if previous.is_none_or(|previous|*start>=previous) {previous=Some(*end);true}else{false}
+    fn replace_all_with_limits(
+        &mut self,
+        needle: &str,
+        replacement: &str,
+        case_sensitive: bool,
+        text_limit: usize,
+        match_limit: usize,
+    ) -> Result<usize, String> {
+        let mut matches = self.find_bounded(needle, case_sensitive, match_limit.saturating_add(1));
+        if matches.len() > match_limit {
+            return Err("Замена превышает 100 000 совпадений; уточните поиск".into());
+        }
+        let mut previous = None;
+        matches.retain(|(start, end)| {
+            if previous.is_none_or(|previous| *start >= previous) {
+                previous = Some(*end);
+                true
+            } else {
+                false
+            }
         });
-        if matches.is_empty(){return Ok(0);}
-        let replacement=replacement.replace("\r\n","\n").replace('\r',"\n");
-        let count=matches.len();
-        let extra_lines=replacement.chars().filter(|ch|*ch=='\n').count().checked_mul(count)
-            .and_then(|lines|lines.checked_add(self.paragraphs.len()));
-        if extra_lines.is_none_or(|lines|lines>100000) {return Err("Замена превышает предел числа абзацев".into());}
-        let mut grouped=std::collections::BTreeMap::<usize,Vec<(usize,usize)>>::new();
-        for (start,end) in matches {grouped.entry(start.paragraph).or_default().push((start.offset,end.offset));}
-        let bytes=self.paragraphs.iter().chain(self.tables.iter().flat_map(|table|table.rows.iter().flatten())
-                .flat_map(|cell|cell.paragraphs.iter()))
-            .flat_map(|paragraph|paragraph.runs.iter()).map(|run|run.text.len()).sum::<usize>();
-        let mut removed=0usize;
-        for (index,ranges) in &grouped {
-            let mut range=0;
-            for (offset,ch) in self.paragraphs[*index].runs.iter().flat_map(|run|run.text.chars()).enumerate() {
-                while ranges.get(range).is_some_and(|(_,end)|offset>=*end) {range+=1;}
-                if ranges.get(range).is_some_and(|(start,end)|offset>=*start && offset<*end) {removed+=ch.len_utf8();}
+        if matches.is_empty() {
+            return Ok(0);
+        }
+        let replacement = replacement.replace("\r\n", "\n").replace('\r', "\n");
+        let count = matches.len();
+        let extra_lines = replacement
+            .chars()
+            .filter(|ch| *ch == '\n')
+            .count()
+            .checked_mul(count)
+            .and_then(|lines| lines.checked_add(self.paragraphs.len()));
+        if extra_lines.is_none_or(|lines| lines > 100000) {
+            return Err("Замена превышает предел числа абзацев".into());
+        }
+        let mut grouped = std::collections::BTreeMap::<usize, Vec<(usize, usize)>>::new();
+        for (start, end) in matches {
+            grouped
+                .entry(start.paragraph)
+                .or_default()
+                .push((start.offset, end.offset));
+        }
+        let bytes = self
+            .paragraphs
+            .iter()
+            .chain(
+                self.tables
+                    .iter()
+                    .flat_map(|table| table.rows.iter().flatten())
+                    .flat_map(|cell| cell.paragraphs.iter()),
+            )
+            .flat_map(|paragraph| paragraph.runs.iter())
+            .map(|run| run.text.len())
+            .sum::<usize>();
+        let mut removed = 0usize;
+        for (index, ranges) in &grouped {
+            let mut range = 0;
+            for (offset, ch) in self.paragraphs[*index]
+                .runs
+                .iter()
+                .flat_map(|run| run.text.chars())
+                .enumerate()
+            {
+                while ranges.get(range).is_some_and(|(_, end)| offset >= *end) {
+                    range += 1;
+                }
+                if ranges
+                    .get(range)
+                    .is_some_and(|(start, end)| offset >= *start && offset < *end)
+                {
+                    removed += ch.len_utf8();
+                }
             }
         }
-        let projected=replacement.len().checked_mul(count)
-            .and_then(|added|bytes.saturating_sub(removed).checked_add(added));
-        if projected.is_none_or(|bytes|bytes>text_limit) {return Err("Замена превышает лимит текста Docs".into());}
-        let mut candidate=self.clone();
-        let originals=std::mem::take(&mut candidate.paragraphs);
-        for (index,original) in originals.into_iter().enumerate() {
-            let Some(ranges)=grouped.get(&index) else {candidate.paragraphs.push(original);continue;};
-            let mut template=original.clone();template.runs.clear();
-            let mut current=template.clone();
-            let mut source=original.runs.iter().flat_map(|run|
-                run.text.chars().map(move|ch|(ch,&run.format))).peekable();
-            let mut offset=0;
-            for (start,end) in ranges {
-                while offset<*start {
-                    if let Some((ch,format))=source.next() {push_replacement_char(&mut current,ch,format);}
-                    offset+=1;
+        let projected = replacement
+            .len()
+            .checked_mul(count)
+            .and_then(|added| bytes.saturating_sub(removed).checked_add(added));
+        if projected.is_none_or(|bytes| bytes > text_limit) {
+            return Err("Замена превышает лимит текста Docs".into());
+        }
+        let mut candidate = self.clone();
+        let originals = std::mem::take(&mut candidate.paragraphs);
+        for (index, original) in originals.into_iter().enumerate() {
+            let Some(ranges) = grouped.get(&index) else {
+                candidate.paragraphs.push(original);
+                continue;
+            };
+            let mut template = original.clone();
+            template.runs.clear();
+            let mut current = template.clone();
+            let mut source = original
+                .runs
+                .iter()
+                .flat_map(|run| run.text.chars().map(move |ch| (ch, &run.format)))
+                .peekable();
+            let mut offset = 0;
+            for (start, end) in ranges {
+                while offset < *start {
+                    if let Some((ch, format)) = source.next() {
+                        push_replacement_char(&mut current, ch, format);
+                    }
+                    offset += 1;
                 }
-                let format=source.peek().map(|(_,format)|(**format).clone()).unwrap_or_default();
-                for _ in *start..*end {source.next();offset+=1;}
-                if current.runs.is_empty() {current.runs.push(Run{text:String::new(),format:format.clone()});}
+                let format = source
+                    .peek()
+                    .map(|(_, format)| (**format).clone())
+                    .unwrap_or_default();
+                for _ in *start..*end {
+                    source.next();
+                    offset += 1;
+                }
+                if current.runs.is_empty() {
+                    current.runs.push(Run {
+                        text: String::new(),
+                        format: format.clone(),
+                    });
+                }
                 for ch in replacement.chars() {
-                    if ch=='\n' {
-                        current.normalize();candidate.paragraphs.push(current);
-                        current=template.clone();current.id=candidate.alloc_id();current.page_break_before=false;
-                        current.runs.push(Run{text:String::new(),format:format.clone()});
-                    }else{push_replacement_char(&mut current,ch,&format);}
+                    if ch == '\n' {
+                        current.normalize();
+                        candidate.paragraphs.push(current);
+                        current = template.clone();
+                        current.id = candidate.alloc_id();
+                        current.page_break_before = false;
+                        current.runs.push(Run {
+                            text: String::new(),
+                            format: format.clone(),
+                        });
+                    } else {
+                        push_replacement_char(&mut current, ch, &format);
+                    }
                 }
             }
-            for (ch,format) in source {push_replacement_char(&mut current,ch,format);}
+            for (ch, format) in source {
+                push_replacement_char(&mut current, ch, format);
+            }
             current.normalize();
-            let last=current.id;
+            let last = current.id;
             candidate.paragraphs.push(current);
-            if last!=original.id {
-                for table in &mut candidate.tables {if table.after_paragraph_id==original.id {table.after_paragraph_id=last;}}
-                for image in &mut candidate.images {if image.after_paragraph_id==original.id {image.after_paragraph_id=last;}}
+            if last != original.id {
+                for table in &mut candidate.tables {
+                    if table.after_paragraph_id == original.id {
+                        table.after_paragraph_id = last;
+                    }
+                }
+                for image in &mut candidate.images {
+                    if image.after_paragraph_id == original.id {
+                        image.after_paragraph_id = last;
+                    }
+                }
             }
         }
         candidate.validate()?;
-        *self=candidate;Ok(count)
+        *self = candidate;
+        Ok(count)
     }
     pub fn add_table(
         &mut self,
@@ -1596,7 +1773,9 @@ impl Doc {
                         let mut heads = Vec::new();
                         let mut column = 0;
                         for cell in &deleted {
-                            if !cell.merged { heads.push((column, cell.span())); }
+                            if !cell.merged {
+                                heads.push((column, cell.span()));
+                            }
                             column += cell.span();
                         }
                         column = 0;
@@ -1713,17 +1892,20 @@ impl Doc {
                         } else if row.start > 0 && chars.get(row.start - 1) == Some(&'\u{000c}') {
                             Some((row.start - 1, row.end))
                         } else {
-                            (row.end>row.start).then_some((row.start,row.end))
+                            (row.end > row.start).then_some((row.start, row.end))
                         }
                     })
                     .collect::<Vec<_>>();
                 spans.sort_unstable();
-                let mut merged:Vec<(usize,usize)>=Vec::new();
-                for (from,to) in spans {
-                    if let Some(last)=merged.last_mut().filter(|last|from<=last.1) {last.1=last.1.max(to);}
-                    else {merged.push((from,to));}
+                let mut merged: Vec<(usize, usize)> = Vec::new();
+                for (from, to) in spans {
+                    if let Some(last) = merged.last_mut().filter(|last| from <= last.1) {
+                        last.1 = last.1.max(to);
+                    } else {
+                        merged.push((from, to));
+                    }
                 }
-                let spans=merged;
+                let spans = merged;
                 for (from, to) in spans.into_iter().rev() {
                     let format = p.format_at(from);
                     let mut runs = p.slice(0, from);
@@ -1819,8 +2001,14 @@ impl Doc {
             .map(|p| (p.id, p.style.clone(), p.text()))
             .collect()
     }
-    fn has_blocks_after(&self,id:u64)->bool {
-        self.tables.iter().any(|table|table.after_paragraph_id==id) || self.images.iter().any(|image|image.after_paragraph_id==id)
+    fn has_blocks_after(&self, id: u64) -> bool {
+        self.tables
+            .iter()
+            .any(|table| table.after_paragraph_id == id)
+            || self
+                .images
+                .iter()
+                .any(|image| image.after_paragraph_id == id)
     }
     pub fn pages(&self) -> Vec<Page> {
         self.layout().pages
@@ -1841,8 +2029,8 @@ impl Doc {
         for (pi, p) in doc.paragraphs.iter().enumerate() {
             let prev = pi.checked_sub(1).and_then(|i| doc.paragraphs.get(i));
             let next = doc.paragraphs.get(pi + 1);
-            let adjacent_prev=prev.filter(|previous|!doc.has_blocks_after(previous.id));
-            let adjacent_next=next.filter(|_|!doc.has_blocks_after(p.id));
+            let adjacent_prev = prev.filter(|previous| !doc.has_blocks_after(previous.id));
+            let adjacent_next = next.filter(|_| !doc.has_blocks_after(p.id));
             let (before, after) = paragraph_spacing(p, adjacent_prev, adjacent_next);
             if p.page_break_before && (y > setup.margin_top || pi > 0) {
                 next_page(&mut layout, setup, &mut y);
@@ -1878,10 +2066,13 @@ impl Doc {
                     breaks = vec![0];
                 }
                 // Keep with next: this paragraph and the first line of the next share a page.
-                if p.keep_next && breaks.is_empty()
-                    && let Some(need)=keep_group_height(&doc,pi,before+total+after,body)
-                    && y+need>bottom && need<=body {
-                    breaks=vec![0];
+                if p.keep_next
+                    && breaks.is_empty()
+                    && let Some(need) = keep_group_height(&doc, pi, before + total + after, body)
+                    && y + need > bottom
+                    && need <= body
+                {
+                    breaks = vec![0];
                 }
             }
             if breaks.first() == Some(&0) {
@@ -1955,9 +2146,7 @@ impl Doc {
             for image in doc.images.iter().filter(|im| im.after_paragraph_id == p.id) {
                 let max_w = setup.width - setup.margin_left - setup.margin_right;
                 let max_h = setup.height - setup.margin_top - setup.margin_bottom;
-                let scale = (max_w / image.width)
-                    .min(max_h / image.height)
-                    .min(1.0);
+                let scale = (max_w / image.width).min(max_h / image.height).min(1.0);
                 let width = image.width * scale;
                 let height = image.height * scale;
                 if y + height > setup.height - setup.margin_bottom {
@@ -1995,7 +2184,7 @@ fn validate_paragraph(
         || p.runs.len() > 100000
         || p.style.len() > 256
         || p.list_level > 8
-        || p.list_start.is_some_and(|value|value>999_999_999)
+        || p.list_start.is_some_and(|value| value > 999_999_999)
         || [
             p.indent,
             p.right_indent,
@@ -2017,10 +2206,18 @@ fn validate_paragraph(
     {
         return Err("Недопустимое оформление абзаца".into());
     }
-    if !xml_model_text(&p.style,false) {return Err("Недопустимый control character в style".into());}
+    if !xml_model_text(&p.style, false) {
+        return Err("Недопустимый control character в style".into());
+    }
     for run in &p.runs {
-        if !xml_model_text(&run.text,true) || run.format.font.chars().any(char::is_control)
-            || run.format.link.as_ref().is_some_and(|link|!xml_model_text(link,false)) {
+        if !xml_model_text(&run.text, true)
+            || run.format.font.chars().any(char::is_control)
+            || run
+                .format
+                .link
+                .as_ref()
+                .is_some_and(|link| !xml_model_text(link, false))
+        {
             return Err("Docs text/font/link содержит недопустимые control characters".into());
         }
         *runs += 1;
@@ -2100,7 +2297,13 @@ fn render_row(page: &mut Page, row: &Row) {
             .map(|segment| segment.format.clone())
             .unwrap_or_default();
         page.items.push(Primitive::TextStyled {
-            x: row.x - 4.0 - row.marker.chars().map(|ch|char_width(ch,&format)).sum::<f32>(),
+            x: row.x
+                - 4.0
+                - row
+                    .marker
+                    .chars()
+                    .map(|ch| char_width(ch, &format))
+                    .sum::<f32>(),
             y: row.y,
             text: row.marker.clone(),
             size: format.size,
@@ -2134,7 +2337,11 @@ fn render_row(page: &mut Page, row: &Row) {
             page.items.push(Primitive::TextStyled {
                 x: seg.x,
                 y: glyph_y,
-                text: seg.text.chars().filter(|ch|!matches!(*ch,'\u{00ad}'|'\u{200b}')).collect(),
+                text: seg
+                    .text
+                    .chars()
+                    .filter(|ch| !matches!(*ch, '\u{00ad}' | '\u{200b}'))
+                    .collect(),
                 size,
                 color: seg.format.color,
                 bold: seg.format.bold,
@@ -2187,11 +2394,28 @@ fn paragraph_spacing(
     let same = |other: Option<&Paragraph>| {
         p.contextual_spacing && other.is_some_and(|q| q.style == p.style)
     };
-    let before=if same(prev) {0.0}else{p.spacing_before.max(0.0)};
-    let previous_after=prev.map(|previous| {
-        if previous.contextual_spacing && previous.style==p.style {0.0}else{previous.spacing_after.max(0.0)}
-    }).unwrap_or(0.0);
-    ((before-previous_after).max(0.0),if same(next) {0.0}else{p.spacing_after.max(0.0)})
+    let before = if same(prev) {
+        0.0
+    } else {
+        p.spacing_before.max(0.0)
+    };
+    let previous_after = prev
+        .map(|previous| {
+            if previous.contextual_spacing && previous.style == p.style {
+                0.0
+            } else {
+                previous.spacing_after.max(0.0)
+            }
+        })
+        .unwrap_or(0.0);
+    (
+        (before - previous_after).max(0.0),
+        if same(next) {
+            0.0
+        } else {
+            p.spacing_after.max(0.0)
+        },
+    )
 }
 /// Advance of a character `pos` points right of the text area's left edge. A tab jumps to
 /// the hanging indent `hang` when that is ahead, otherwise to the next default tab stop.
@@ -2275,7 +2499,10 @@ fn wrap_lines(
             end = word_end;
             width = line_width(chars, start, end, line_origin, origin);
         }
-        let format=chars.get(start).map(|(_,format)|format.clone()).unwrap_or_else(||p.format_at(start));
+        let format = chars
+            .get(start)
+            .map(|(_, format)| format.clone())
+            .unwrap_or_else(|| p.format_at(start));
         let max_size = chars
             .get(start..end)
             .unwrap_or_default()
@@ -2322,10 +2549,17 @@ fn line_segments(
     origin: f32,
     hang: f32,
     justify: f32,
-    empty_format:&TextFormat,
+    empty_format: &TextFormat,
 ) -> Vec<Segment> {
     let line = chars.get(start..end).unwrap_or_default();
-    if line.is_empty() {return vec![Segment{text:String::new(),format:empty_format.clone(),x,width:0.0}];}
+    if line.is_empty() {
+        return vec![Segment {
+            text: String::new(),
+            format: empty_format.clone(),
+            x,
+            width: 0.0,
+        }];
+    }
     let content = line.len() - line.iter().rev().take_while(|(ch, _)| *ch == ' ').count();
     let mut segments: Vec<Segment> = Vec::new();
     let mut cursor = x;
@@ -2407,7 +2641,10 @@ pub(super) fn list_marker(p: &Paragraph, numbers: &mut [usize; 9]) -> String {
             "•".into()
         }
         List::Number => {
-            numbers[level] = p.list_start.map(|start|start as usize).unwrap_or_else(||numbers[level].saturating_add(1));
+            numbers[level] = p
+                .list_start
+                .map(|start| start as usize)
+                .unwrap_or_else(|| numbers[level].saturating_add(1));
             numbers[level + 1..].fill(0);
             format!("{}.", numbers[level])
         }
@@ -2587,81 +2824,174 @@ fn table_row(
             })
         })
         .collect();
-    let cell_lines: Vec<Vec<Row>> = cells.iter().enumerate().map(|(ci,cell)| {
-        if row_index>0 && cell.merged {Vec::new()}
-        else {table_lines(cell,cell_widths.get(ci).copied().unwrap_or(12.0),margin)}
-    }).collect();
-    let body_height=setup.height-setup.margin_top-setup.margin_bottom;
-    let min_height=table.row_heights.get(row_index).copied().filter(|height|height.is_finite())
-        .unwrap_or_default().clamp(0.0,body_height);
-    let full_height=(cell_lines.iter().map(|lines|lines.iter().map(|line|line.height).sum::<f32>())
-        .fold(8.0_f32,f32::max)+pad).max(min_height);
-    if full_height<=body_height && *y+full_height>setup.height-setup.margin_bottom {
-        table_page(layout,setup,table,geometry,y,repeat);
-    }
-    let mut offsets=vec![0usize;cells.len()];let mut first=true;let mut stalled=false;
-    while first || cell_lines.iter().zip(&offsets).any(|(lines,offset)|*offset<lines.len()) {
-        let available=setup.height-setup.margin_bottom-*y;
-        if first && min_height>available && *y>setup.margin_top+0.5 {
-            table_page(layout,setup,table,geometry,y,repeat && !stalled);stalled=true;continue;
-        }
-        let content_available=(available-pad).max(0.0);
-        let mut counts=Vec::with_capacity(cells.len());let mut used=Vec::with_capacity(cells.len());
-        for (lines,offset) in cell_lines.iter().zip(&offsets) {
-            let mut count=0;let mut height=0.0;
-            for line in lines.iter().skip(*offset) {
-                if height+line.height>content_available {break;}
-                height+=line.height;count+=1;
+    let cell_lines: Vec<Vec<Row>> = cells
+        .iter()
+        .enumerate()
+        .map(|(ci, cell)| {
+            if row_index > 0 && cell.merged {
+                Vec::new()
+            } else {
+                table_lines(cell, cell_widths.get(ci).copied().unwrap_or(12.0), margin)
             }
-            counts.push(count);used.push(height);
+        })
+        .collect();
+    let body_height = setup.height - setup.margin_top - setup.margin_bottom;
+    let min_height = table
+        .row_heights
+        .get(row_index)
+        .copied()
+        .filter(|height| height.is_finite())
+        .unwrap_or_default()
+        .clamp(0.0, body_height);
+    let full_height = (cell_lines
+        .iter()
+        .map(|lines| lines.iter().map(|line| line.height).sum::<f32>())
+        .fold(8.0_f32, f32::max)
+        + pad)
+        .max(min_height);
+    if full_height <= body_height && *y + full_height > setup.height - setup.margin_bottom {
+        table_page(layout, setup, table, geometry, y, repeat);
+    }
+    let mut offsets = vec![0usize; cells.len()];
+    let mut first = true;
+    let mut stalled = false;
+    while first
+        || cell_lines
+            .iter()
+            .zip(&offsets)
+            .any(|(lines, offset)| *offset < lines.len())
+    {
+        let available = setup.height - setup.margin_bottom - *y;
+        if first && min_height > available && *y > setup.margin_top + 0.5 {
+            table_page(layout, setup, table, geometry, y, repeat && !stalled);
+            stalled = true;
+            continue;
         }
-        let blocked=cell_lines.iter().zip(&offsets).zip(&counts)
-            .any(|((lines,offset),count)|*offset<lines.len() && *count==0);
-        if blocked && *y>setup.margin_top+0.5 {
-            table_page(layout,setup,table,geometry,y,repeat && !stalled);stalled=true;continue;
+        let content_available = (available - pad).max(0.0);
+        let mut counts = Vec::with_capacity(cells.len());
+        let mut used = Vec::with_capacity(cells.len());
+        for (lines, offset) in cell_lines.iter().zip(&offsets) {
+            let mut count = 0;
+            let mut height = 0.0;
+            for line in lines.iter().skip(*offset) {
+                if height + line.height > content_available {
+                    break;
+                }
+                height += line.height;
+                count += 1;
+            }
+            counts.push(count);
+            used.push(height);
+        }
+        let blocked = cell_lines
+            .iter()
+            .zip(&offsets)
+            .zip(&counts)
+            .any(|((lines, offset), count)| *offset < lines.len() && *count == 0);
+        if blocked && *y > setup.margin_top + 0.5 {
+            table_page(layout, setup, table, geometry, y, repeat && !stalled);
+            stalled = true;
+            continue;
         }
         // Public layout can receive an unvalidated model; always make bounded progress.
         if blocked {
-            for (ci,lines) in cell_lines.iter().enumerate() {
-                if counts[ci]==0 && offsets[ci]<lines.len() {counts[ci]=1;used[ci]=lines[offsets[ci]].height;}
+            for (ci, lines) in cell_lines.iter().enumerate() {
+                if counts[ci] == 0 && offsets[ci] < lines.len() {
+                    counts[ci] = 1;
+                    used[ci] = lines[offsets[ci]].height;
+                }
             }
         }
-        stalled=false;
-        let complete=cell_lines.iter().zip(&offsets).zip(&counts)
-            .all(|((lines,offset),count)|offset+count>=lines.len());
-        let mut row_height=used.iter().copied().fold(8.0_f32,f32::max)+pad;
-        if first && complete {row_height=row_height.max(min_height);}
-        let page_index=layout.pages.len().saturating_sub(1);
-        if let Some(page)=layout.pages.last_mut() {
-            for (ci,cell) in cells.iter().enumerate() {
-                let x=setup.margin_left+widths.iter().take(starts.get(ci).copied().unwrap_or_default()).sum::<f32>();
-                let width=cell_widths.get(ci).copied().unwrap_or(12.0);
-                layout.cells.push(CellBox{table:table.id,row:row_index,column:ci,page:page_index,x,y:*y,w:width,h:row_height});
-                let fill=if cell.merged && row_index>0 {merged_head_fill(table,row_index,ci)}else{cell.fill};
-                page.items.push(Primitive::Rect{x,y:*y,w:width,h:row_height,color:fill});
-                let edges=[
-                    (!cell.merged,(x,*y,x+width,*y)),
-                    (!continued.get(ci).copied().unwrap_or_default(),(x,*y+row_height,x+width,*y+row_height)),
-                    (true,(x,*y,x,*y+row_height)),(true,(x+width,*y,x+width,*y+row_height))
+        stalled = false;
+        let complete = cell_lines
+            .iter()
+            .zip(&offsets)
+            .zip(&counts)
+            .all(|((lines, offset), count)| offset + count >= lines.len());
+        let mut row_height = used.iter().copied().fold(8.0_f32, f32::max) + pad;
+        if first && complete {
+            row_height = row_height.max(min_height);
+        }
+        let page_index = layout.pages.len().saturating_sub(1);
+        if let Some(page) = layout.pages.last_mut() {
+            for (ci, cell) in cells.iter().enumerate() {
+                let x = setup.margin_left
+                    + widths
+                        .iter()
+                        .take(starts.get(ci).copied().unwrap_or_default())
+                        .sum::<f32>();
+                let width = cell_widths.get(ci).copied().unwrap_or(12.0);
+                layout.cells.push(CellBox {
+                    table: table.id,
+                    row: row_index,
+                    column: ci,
+                    page: page_index,
+                    x,
+                    y: *y,
+                    w: width,
+                    h: row_height,
+                });
+                let fill = if cell.merged && row_index > 0 {
+                    merged_head_fill(table, row_index, ci)
+                } else {
+                    cell.fill
+                };
+                page.items.push(Primitive::Rect {
+                    x,
+                    y: *y,
+                    w: width,
+                    h: row_height,
+                    color: fill,
+                });
+                let edges = [
+                    (!cell.merged, (x, *y, x + width, *y)),
+                    (
+                        !continued.get(ci).copied().unwrap_or_default(),
+                        (x, *y + row_height, x + width, *y + row_height),
+                    ),
+                    (true, (x, *y, x, *y + row_height)),
+                    (true, (x + width, *y, x + width, *y + row_height)),
                 ];
-                for (visible,(a,b,c,d)) in edges {
+                for (visible, (a, b, c, d)) in edges {
                     if visible && !table.borderless {
-                        page.items.push(Primitive::Line{x1:a,y1:b,x2:c,y2:d,width:0.7,color:table.border_color});
+                        page.items.push(Primitive::Line {
+                            x1: a,
+                            y1: b,
+                            x2: c,
+                            y2: d,
+                            width: 0.7,
+                            color: table.border_color,
+                        });
                     }
                 }
-                let free=(row_height-pad-used[ci]).max(0.0);
-                let mut slot_y=*y+margin[0]+match cell.v_align {VAlign::Top=>0.0,VAlign::Center=>free/2.0,VAlign::Bottom=>free};
+                let free = (row_height - pad - used[ci]).max(0.0);
+                let mut slot_y = *y
+                    + margin[0]
+                    + match cell.v_align {
+                        VAlign::Top => 0.0,
+                        VAlign::Center => free / 2.0,
+                        VAlign::Bottom => free,
+                    };
                 for row in cell_lines[ci].iter().skip(offsets[ci]).take(counts[ci]) {
-                    let mut positioned=row.clone();positioned.y=slot_y+row.y;positioned.x+=x;
-                    for segment in &mut positioned.segments {segment.x+=x;}
-                    render_row(page,&positioned);slot_y+=row.height;
+                    let mut positioned = row.clone();
+                    positioned.y = slot_y + row.y;
+                    positioned.x += x;
+                    for segment in &mut positioned.segments {
+                        segment.x += x;
+                    }
+                    render_row(page, &positioned);
+                    slot_y += row.height;
                 }
             }
         }
-        *y+=row_height;
-        for (offset,count) in offsets.iter_mut().zip(&counts) {*offset+=count;}
-        first=false;
-        if !complete {table_page(layout,setup,table,geometry,y,repeat);}
+        *y += row_height;
+        for (offset, count) in offsets.iter_mut().zip(&counts) {
+            *offset += count;
+        }
+        first = false;
+        if !complete {
+            table_page(layout, setup, table, geometry, y, repeat);
+        }
     }
 }
 
@@ -3365,46 +3695,75 @@ mod tests {
 mod merge_deletion_defect_tests {
     use super::*;
     #[test]
-    fn delete_middle_vertical_merge_head_promotes_its_continuation() -> Result<(),String> {
+    fn delete_middle_vertical_merge_head_promotes_its_continuation() -> Result<(), String> {
         let mut doc = Doc::from_text("table");
-        let id = doc.add_table(doc.paragraphs[0].id,3,1)?;
-        doc.tables[0].rows[2][0].merged=true;
+        let id = doc.add_table(doc.paragraphs[0].id, 3, 1)?;
+        doc.tables[0].rows[2][0].merged = true;
         doc.validate()?;
-        doc.edit_table(id,TableEdit::DeleteRow(1))?;
+        doc.edit_table(id, TableEdit::DeleteRow(1))?;
         assert!(!doc.tables[0].rows[1][0].merged);
         let mut chain = Doc::from_text("chain");
-        let id = chain.add_table(chain.paragraphs[0].id,3,1)?;
-        chain.tables[0].rows[1][0].merged=true;
-        chain.tables[0].rows[2][0].merged=true;
-        chain.edit_table(id,TableEdit::DeleteRow(1))?;
+        let id = chain.add_table(chain.paragraphs[0].id, 3, 1)?;
+        chain.tables[0].rows[1][0].merged = true;
+        chain.tables[0].rows[2][0].merged = true;
+        chain.edit_table(id, TableEdit::DeleteRow(1))?;
         assert!(chain.tables[0].rows[1][0].merged);
         Ok(())
     }
 }
 
-fn push_replacement_char(paragraph:&mut Paragraph,ch:char,format:&TextFormat) {
-    if let Some(run)=paragraph.runs.last_mut().filter(|run|run.format==*format) {run.text.push(ch);}
-    else{paragraph.runs.push(Run{text:ch.to_string(),format:format.clone()});}
+fn push_replacement_char(paragraph: &mut Paragraph, ch: char, format: &TextFormat) {
+    if let Some(run) = paragraph
+        .runs
+        .last_mut()
+        .filter(|run| run.format == *format)
+    {
+        run.text.push(ch);
+    } else {
+        paragraph.runs.push(Run {
+            text: ch.to_string(),
+            format: format.clone(),
+        });
+    }
 }
 #[cfg(test)]
 mod next_replace_all_defects {
     use super::*;
     #[test]
-    fn bulk_replacement_builds_dense_matches_and_preserves_rich_suffixes()->Result<(),String> {
-        let mut doc=Doc::from_text(&"a".repeat(20000));
-        doc.paragraphs[0].runs.push(Run{text:"tail".into(),format:TextFormat{bold:true,..Default::default()}});
-        assert_eq!(doc.try_replace_all("a","xy",true)?,20001);
-        assert_eq!(doc.paragraphs[0].text(),format!("{}txyil","xy".repeat(20000)));
-        assert!(doc.paragraphs[0].runs.last().is_some_and(|run|run.format.bold));
+    fn bulk_replacement_builds_dense_matches_and_preserves_rich_suffixes() -> Result<(), String> {
+        let mut doc = Doc::from_text(&"a".repeat(20000));
+        doc.paragraphs[0].runs.push(Run {
+            text: "tail".into(),
+            format: TextFormat {
+                bold: true,
+                ..Default::default()
+            },
+        });
+        assert_eq!(doc.try_replace_all("a", "xy", true)?, 20001);
+        assert_eq!(
+            doc.paragraphs[0].text(),
+            format!("{}txyil", "xy".repeat(20000))
+        );
+        assert!(
+            doc.paragraphs[0]
+                .runs
+                .last()
+                .is_some_and(|run| run.format.bold)
+        );
         Ok(())
     }
     #[test]
-    fn bulk_replacement_limits_refuse_the_whole_operation_before_mutation()->Result<(),String> {
-        let mut doc=Doc::from_text("a a");let before=doc.clone();
-        assert!(doc.replace_all_with_limits("a","long",true,4,100).is_err());
-        assert_eq!(doc,before);
-        assert!(doc.replace_all_with_limits("a","x",true,100,1).is_err());
-        assert_eq!(doc,before);Ok(())
+    fn bulk_replacement_limits_refuse_the_whole_operation_before_mutation() -> Result<(), String> {
+        let mut doc = Doc::from_text("a a");
+        let before = doc.clone();
+        assert!(
+            doc.replace_all_with_limits("a", "long", true, 4, 100)
+                .is_err()
+        );
+        assert_eq!(doc, before);
+        assert!(doc.replace_all_with_limits("a", "x", true, 100, 1).is_err());
+        assert_eq!(doc, before);
+        Ok(())
     }
 }
 
@@ -3412,304 +3771,726 @@ mod next_replace_all_defects {
 mod hundred_docs_model_regressions {
     use super::*;
     #[test]
-    fn subpoint_images_keep_their_model_dimensions_when_laid_out()->Result<(),String> {
-        let mut doc=Doc::from_text("anchor");let id=doc.alloc_id();
-        let mut png=std::io::Cursor::new(Vec::new());
-        image::DynamicImage::new_rgba8(1,1).write_to(&mut png,image::ImageFormat::Png).map_err(|error|error.to_string())?;
-        doc.images.push(AnchoredImage{id,after_paragraph_id:doc.paragraphs[0].id,bytes:png.into_inner(),width:0.25,height:2.0,alt:String::new()});
+    fn subpoint_images_keep_their_model_dimensions_when_laid_out() -> Result<(), String> {
+        let mut doc = Doc::from_text("anchor");
+        let id = doc.alloc_id();
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(1, 1)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .map_err(|error| error.to_string())?;
+        doc.images.push(AnchoredImage {
+            id,
+            after_paragraph_id: doc.paragraphs[0].id,
+            bytes: png.into_inner(),
+            width: 0.25,
+            height: 2.0,
+            alt: String::new(),
+        });
         doc.validate()?;
-        let layout=doc.layout();
-        assert!(layout.pages.iter().flat_map(|page|&page.items).any(|item|matches!(item,Primitive::Image{w,h,..} if *w==0.25 && *h==2.0)));Ok(())
+        let layout = doc.layout();
+        assert!(
+            layout
+                .pages
+                .iter()
+                .flat_map(|page| &page.items)
+                .any(|item| matches!(item,Primitive::Image{w,h,..} if *w==0.25 && *h==2.0))
+        );
+        Ok(())
     }
     #[test]
-    fn multiline_replace_preflights_limits_and_keeps_rich_suffix_without_repeated_source_clones()->Result<(),String> {
-        let mut doc=Doc::from_text(&"x".repeat(20000));
-        doc.paragraphs[0].runs.push(Run{text:"tail".into(),format:TextFormat{bold:true,..Default::default()}});
-        let pos=Position{paragraph:0,offset:0};
-        doc.replace_range(pos,pos,&"line\n".repeat(2000),None)?;
-        assert_eq!(doc.paragraphs.len(),2001);
-        assert!(doc.paragraphs.last().and_then(|paragraph|paragraph.runs.last()).is_some_and(|run|run.text=="tail" && run.format.bold));
-        doc.validate()?;let before=doc.clone();
-        assert!(doc.replace_range(pos,pos,&"\n".repeat(100000),None).is_err());
-        assert_eq!(doc,before);Ok(())
+    fn multiline_replace_preflights_limits_and_keeps_rich_suffix_without_repeated_source_clones()
+    -> Result<(), String> {
+        let mut doc = Doc::from_text(&"x".repeat(20000));
+        doc.paragraphs[0].runs.push(Run {
+            text: "tail".into(),
+            format: TextFormat {
+                bold: true,
+                ..Default::default()
+            },
+        });
+        let pos = Position {
+            paragraph: 0,
+            offset: 0,
+        };
+        doc.replace_range(pos, pos, &"line\n".repeat(2000), None)?;
+        assert_eq!(doc.paragraphs.len(), 2001);
+        assert!(
+            doc.paragraphs
+                .last()
+                .and_then(|paragraph| paragraph.runs.last())
+                .is_some_and(|run| run.text == "tail" && run.format.bold)
+        );
+        doc.validate()?;
+        let before = doc.clone();
+        assert!(
+            doc.replace_range(pos, pos, &"\n".repeat(100000), None)
+                .is_err()
+        );
+        assert_eq!(doc, before);
+        Ok(())
     }
     #[test]
-    fn word_count_excludes_invisible_vertical_merge_continuations()->Result<(),String> {
-        let mut doc=Doc::from_text("body");let anchor=doc.paragraphs[0].id;
-        doc.add_table(anchor,2,1)?;
-        let table=doc.tables[0].id;
-        doc.set_cell_text(table,0,0,"visible")?;doc.set_cell_text(table,1,0,"hidden extra words")?;
-        doc.tables[0].rows[1][0].merged=true;
-        assert_eq!(doc.word_count(),2);Ok(())
+    fn word_count_excludes_invisible_vertical_merge_continuations() -> Result<(), String> {
+        let mut doc = Doc::from_text("body");
+        let anchor = doc.paragraphs[0].id;
+        doc.add_table(anchor, 2, 1)?;
+        let table = doc.tables[0].id;
+        doc.set_cell_text(table, 0, 0, "visible")?;
+        doc.set_cell_text(table, 1, 0, "hidden extra words")?;
+        doc.tables[0].rows[1][0].merged = true;
+        assert_eq!(doc.word_count(), 2);
+        Ok(())
     }
 }
 
-fn validate_table_merges(table:&Table)->Result<(),String> {
-    let mut previous=std::collections::BTreeMap::new();
+fn validate_table_merges(table: &Table) -> Result<(), String> {
+    let mut previous = std::collections::BTreeMap::new();
     for row in &table.rows {
-        let mut current=std::collections::BTreeMap::new();let mut column=0;
+        let mut current = std::collections::BTreeMap::new();
+        let mut column = 0;
         for cell in row {
-            if cell.merged && previous.get(&column)!=Some(&cell.span()) {
-                return Err("Continuation объединённой ячейки не совпадает с предыдущей строкой".into());
+            if cell.merged && previous.get(&column) != Some(&cell.span()) {
+                return Err(
+                    "Continuation объединённой ячейки не совпадает с предыдущей строкой".into(),
+                );
             }
-            current.insert(column,cell.span());column+=cell.span();
+            current.insert(column, cell.span());
+            column += cell.span();
         }
-        previous=current;
+        previous = current;
     }
     Ok(())
 }
 
-fn merged_head_fill(table:&Table,row:usize,column:usize)->[u8;3] {
-    let Some(cell)=table.rows.get(row).and_then(|row|row.get(column)) else{return [255;3];};
-    let start=table.grid_starts(row).get(column).copied().unwrap_or_default();
-    let span=cell.span();
+fn merged_head_fill(table: &Table, row: usize, column: usize) -> [u8; 3] {
+    let Some(cell) = table.rows.get(row).and_then(|row| row.get(column)) else {
+        return [255; 3];
+    };
+    let start = table
+        .grid_starts(row)
+        .get(column)
+        .copied()
+        .unwrap_or_default();
+    let span = cell.span();
     for index in (0..=row).rev() {
-        if let Some(owner)=table.rows[index].iter().zip(table.grid_starts(index))
-            .find_map(|(cell,column)|(column==start && cell.span()==span).then_some(cell)) {
-            if !owner.merged {return owner.fill;}
-        }else{break;}
+        if let Some(owner) = table.rows[index]
+            .iter()
+            .zip(table.grid_starts(index))
+            .find_map(|(cell, column)| (column == start && cell.span() == span).then_some(cell))
+        {
+            if !owner.merged {
+                return owner.fill;
+            }
+        } else {
+            break;
+        }
     }
     cell.fill
 }
 
-fn paragraph_lines_for_layout(paragraph:&Paragraph,setup:&PageSetup)->Vec<Line> {
-    let indent=paragraph.indent+list_indent(paragraph);
-    let available=(setup.width-setup.margin_left-setup.margin_right-indent-paragraph.right_indent).max(12.0);
-    let chars=paragraph.runs.iter().flat_map(|run|run.text.chars().map(move |ch|(ch,run.format.clone()))).collect::<Vec<_>>();
-    wrap_lines(paragraph,&chars,available,indent,12.0)
+fn paragraph_lines_for_layout(paragraph: &Paragraph, setup: &PageSetup) -> Vec<Line> {
+    let indent = paragraph.indent + list_indent(paragraph);
+    let available =
+        (setup.width - setup.margin_left - setup.margin_right - indent - paragraph.right_indent)
+            .max(12.0);
+    let chars = paragraph
+        .runs
+        .iter()
+        .flat_map(|run| run.text.chars().map(move |ch| (ch, run.format.clone())))
+        .collect::<Vec<_>>();
+    wrap_lines(paragraph, &chars, available, indent, 12.0)
 }
-fn next_anchored_height(doc:&Doc,paragraph:u64,body:f32)->Option<f32> {
-    if let Some(table)=doc.tables.iter().find(|table|table.after_paragraph_id==paragraph)
-        && let Some(row)=table.rows.first() {
-        let usable=doc.page.width-doc.page.margin_left-doc.page.margin_right;
-        let columns=table.grid_columns().max(1);
-        let mut widths=(0..columns).map(|column|table.column_widths.get(column).copied().unwrap_or(usable/columns as f32).max(0.05)).collect::<Vec<_>>();
-        let total=widths.iter().sum::<f32>();let limit=usable+doc.page.margin_right.min(36.0);
-        if total>limit {for width in &mut widths {*width*=limit/total;}}
-        let starts=table.grid_starts(0);let pad=table.cell_margin[0]+table.cell_margin[2];
-        let heights=row.iter().zip(starts).map(|(cell,start)| {
-            let width=widths.iter().skip(start).take(cell.span()).sum::<f32>();
-            table_lines(cell,width,table.cell_margin).iter().map(|line|line.height).sum::<f32>()
-        }).collect::<Vec<_>>();
-        let full=(heights.into_iter().fold(8.0_f32,f32::max)+pad)
+fn next_anchored_height(doc: &Doc, paragraph: u64, body: f32) -> Option<f32> {
+    if let Some(table) = doc
+        .tables
+        .iter()
+        .find(|table| table.after_paragraph_id == paragraph)
+        && let Some(row) = table.rows.first()
+    {
+        let usable = doc.page.width - doc.page.margin_left - doc.page.margin_right;
+        let columns = table.grid_columns().max(1);
+        let mut widths = (0..columns)
+            .map(|column| {
+                table
+                    .column_widths
+                    .get(column)
+                    .copied()
+                    .unwrap_or(usable / columns as f32)
+                    .max(0.05)
+            })
+            .collect::<Vec<_>>();
+        let total = widths.iter().sum::<f32>();
+        let limit = usable + doc.page.margin_right.min(36.0);
+        if total > limit {
+            for width in &mut widths {
+                *width *= limit / total;
+            }
+        }
+        let starts = table.grid_starts(0);
+        let pad = table.cell_margin[0] + table.cell_margin[2];
+        let heights = row
+            .iter()
+            .zip(starts)
+            .map(|(cell, start)| {
+                let width = widths.iter().skip(start).take(cell.span()).sum::<f32>();
+                table_lines(cell, width, table.cell_margin)
+                    .iter()
+                    .map(|line| line.height)
+                    .sum::<f32>()
+            })
+            .collect::<Vec<_>>();
+        let full = (heights.into_iter().fold(8.0_f32, f32::max) + pad)
             .max(table.row_heights.first().copied().unwrap_or_default());
         return Some(full.min(body));
     }
-    doc.images.iter().find(|image|image.after_paragraph_id==paragraph).map(|image| {
-        let width=doc.page.width-doc.page.margin_left-doc.page.margin_right;
-        let scale=(width/image.width).min(body/image.height).min(1.0);
-        image.height*scale
-    })
+    doc.images
+        .iter()
+        .find(|image| image.after_paragraph_id == paragraph)
+        .map(|image| {
+            let width = doc.page.width - doc.page.margin_left - doc.page.margin_right;
+            let scale = (width / image.width).min(body / image.height).min(1.0);
+            image.height * scale
+        })
 }
-fn keep_group_height(doc:&Doc,start:usize,mut height:f32,body:f32)->Option<f32> {
-    let mut previous=start;
+fn keep_group_height(doc: &Doc, start: usize, mut height: f32, body: f32) -> Option<f32> {
+    let mut previous = start;
     loop {
-        let paragraph=doc.paragraphs.get(previous)?;
-        if let Some(block)=next_anchored_height(doc,paragraph.id,body) {return Some(height+block);}
-        let next=doc.paragraphs.get(previous+1)?;
-        if next.page_break_before {return None;}
-        let spacing=paragraph_spacing(next,Some(paragraph),doc.paragraphs.get(previous+2));
-        let lines=paragraph_lines_for_layout(next,&doc.page);
-        height+=spacing.0;
+        let paragraph = doc.paragraphs.get(previous)?;
+        if let Some(block) = next_anchored_height(doc, paragraph.id, body) {
+            return Some(height + block);
+        }
+        let next = doc.paragraphs.get(previous + 1)?;
+        if next.page_break_before {
+            return None;
+        }
+        let spacing = paragraph_spacing(next, Some(paragraph), doc.paragraphs.get(previous + 2));
+        let lines = paragraph_lines_for_layout(next, &doc.page);
+        height += spacing.0;
         if next.keep_next {
-            height+=lines.iter().map(|line|line.height).sum::<f32>()+spacing.1;
-            if height>body{return None;}
-            previous+=1;
-        }else{
-            return Some(height+lines.first().map(|line|line.height).unwrap_or(4.0));
+            height += lines.iter().map(|line| line.height).sum::<f32>() + spacing.1;
+            if height > body {
+                return None;
+            }
+            previous += 1;
+        } else {
+            return Some(height + lines.first().map(|line| line.height).unwrap_or(4.0));
         }
     }
 }
 
-fn xml_model_text(text:&str,breaks:bool)->bool {
-    text.chars().all(|ch| ch>=' ' || matches!(ch,'\t'|'\n'|'\r') || breaks && matches!(ch,'\u{000b}'|'\u{000c}'))
+fn xml_model_text(text: &str, breaks: bool) -> bool {
+    text.chars().all(|ch| {
+        ch >= ' '
+            || matches!(ch, '\t' | '\n' | '\r')
+            || breaks && matches!(ch, '\u{000b}' | '\u{000c}')
+    })
 }
 
 #[cfg(test)]
 mod two_hundred_docs_model_regressions {
     use super::*;
-    fn small_doc(text:&str)->Doc {
-        let mut doc=Doc::from_text(text);
-        doc.page=PageSetup{width:300.0,height:144.0,margin_top:22.0,margin_bottom:22.0,margin_left:20.0,margin_right:20.0,page_numbers:false,..Default::default()};
-        for paragraph in &mut doc.paragraphs {paragraph.spacing_before=0.0;paragraph.spacing_after=0.0;paragraph.line_points=20.0;paragraph.line_exact=true;paragraph.widow_control=false;}
+    fn small_doc(text: &str) -> Doc {
+        let mut doc = Doc::from_text(text);
+        doc.page = PageSetup {
+            width: 300.0,
+            height: 144.0,
+            margin_top: 22.0,
+            margin_bottom: 22.0,
+            margin_left: 20.0,
+            margin_right: 20.0,
+            page_numbers: false,
+            ..Default::default()
+        };
+        for paragraph in &mut doc.paragraphs {
+            paragraph.spacing_before = 0.0;
+            paragraph.spacing_after = 0.0;
+            paragraph.line_points = 20.0;
+            paragraph.line_exact = true;
+            paragraph.widow_control = false;
+        }
         doc
     }
-    fn drawn_text(layout:&Layout)->String {
-        layout.pages.iter().flat_map(|page|&page.items).filter_map(|item|match item {Primitive::TextStyled{text,..}=>Some(text.as_str()),_=>None}).collect()
+    fn drawn_text(layout: &Layout) -> String {
+        layout
+            .pages
+            .iter()
+            .flat_map(|page| &page.items)
+            .filter_map(|item| match item {
+                Primitive::TextStyled { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
     }
     #[test]
-    fn cell_text_crlf_is_normalized_before_computing_the_edit_delta()->Result<(),String> {
-        let nested=Doc::from_text("one\ntwo");let ids=nested.paragraphs.iter().map(|paragraph|paragraph.id).collect::<Vec<_>>();
-        let mut cell=Cell::new(90,nested.paragraphs,[255;3]);let mut next=100;
-        try_edit_cell_text(&mut cell,"one\r\ntwo",&mut next)?;
-        assert_eq!(cell_text(&cell),"one\ntwo");assert_eq!(cell.paragraphs.iter().map(|paragraph|paragraph.id).collect::<Vec<_>>(),ids);
-        try_edit_cell_text(&mut cell,"one\r\nchanged\rtwo",&mut next)?;
-        assert_eq!(cell_text(&cell),"one\nchanged\ntwo");Ok(())
+    fn cell_text_crlf_is_normalized_before_computing_the_edit_delta() -> Result<(), String> {
+        let nested = Doc::from_text("one\ntwo");
+        let ids = nested
+            .paragraphs
+            .iter()
+            .map(|paragraph| paragraph.id)
+            .collect::<Vec<_>>();
+        let mut cell = Cell::new(90, nested.paragraphs, [255; 3]);
+        let mut next = 100;
+        try_edit_cell_text(&mut cell, "one\r\ntwo", &mut next)?;
+        assert_eq!(cell_text(&cell), "one\ntwo");
+        assert_eq!(
+            cell.paragraphs
+                .iter()
+                .map(|paragraph| paragraph.id)
+                .collect::<Vec<_>>(),
+            ids
+        );
+        try_edit_cell_text(&mut cell, "one\r\nchanged\rtwo", &mut next)?;
+        assert_eq!(cell_text(&cell), "one\nchanged\ntwo");
+        Ok(())
     }
     #[test]
-    fn table_cells_flow_independently_instead_of_stretching_each_others_lines()->Result<(),String> {
-        let mut doc=Doc::from_text("anchor");doc.add_table(doc.paragraphs[0].id,1,2)?;
-        doc.tables[0].rows[0][0].paragraphs[0].runs[0].text="one\u{000b}two".into();
-        doc.tables[0].rows[0][1].paragraphs[0].runs[0]=Run{text:"large".into(),format:TextFormat{size:60.0,..Default::default()}};
-        let layout=doc.layout();
-        let ys=layout.pages.iter().flat_map(|page|&page.items).filter_map(|item|match item {Primitive::TextStyled{text,y,..} if text=="one" || text=="two"=>Some(*y),_=>None}).collect::<Vec<_>>();
-        assert_eq!(ys.len(),2);assert!(ys[1]>ys[0] && ys[1]-ys[0]<30.0,"{ys:?}");
-        assert_eq!(layout.cells.len(),2);Ok(())
+    fn table_cells_flow_independently_instead_of_stretching_each_others_lines() -> Result<(), String>
+    {
+        let mut doc = Doc::from_text("anchor");
+        doc.add_table(doc.paragraphs[0].id, 1, 2)?;
+        doc.tables[0].rows[0][0].paragraphs[0].runs[0].text = "one\u{000b}two".into();
+        doc.tables[0].rows[0][1].paragraphs[0].runs[0] = Run {
+            text: "large".into(),
+            format: TextFormat {
+                size: 60.0,
+                ..Default::default()
+            },
+        };
+        let layout = doc.layout();
+        let ys = layout
+            .pages
+            .iter()
+            .flat_map(|page| &page.items)
+            .filter_map(|item| match item {
+                Primitive::TextStyled { text, y, .. } if text == "one" || text == "two" => Some(*y),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(ys.len(), 2);
+        assert!(ys[1] > ys[0] && ys[1] - ys[0] < 30.0, "{ys:?}");
+        assert_eq!(layout.cells.len(), 2);
+        Ok(())
     }
     #[test]
-    fn table_validation_accounts_for_the_configured_vertical_padding()->Result<(),String> {
-        let mut doc=small_doc("anchor");doc.add_table(doc.paragraphs[0].id,1,1)?;
-        doc.tables[0].rows[0][0].paragraphs[0].runs[0].format.size=30.0;
-        doc.tables[0].cell_margin=[40.0,0.0,40.0,0.0];assert!(doc.validate().is_err());
-        doc.tables[0].cell_margin=[0.0;4];doc.tables[0].rows[0][0].paragraphs[0].runs[0].format.size=80.0;
-        doc.tables[0].rows[0][0].paragraphs[0].line_points=96.0;doc.tables[0].rows[0][0].paragraphs[0].line_exact=true;
-        doc.tables[0].rows[0][0].paragraphs[0].spacing_after=0.0;doc.validate()?;Ok(())
+    fn table_validation_accounts_for_the_configured_vertical_padding() -> Result<(), String> {
+        let mut doc = small_doc("anchor");
+        doc.add_table(doc.paragraphs[0].id, 1, 1)?;
+        doc.tables[0].rows[0][0].paragraphs[0].runs[0].format.size = 30.0;
+        doc.tables[0].cell_margin = [40.0, 0.0, 40.0, 0.0];
+        assert!(doc.validate().is_err());
+        doc.tables[0].cell_margin = [0.0; 4];
+        doc.tables[0].rows[0][0].paragraphs[0].runs[0].format.size = 80.0;
+        doc.tables[0].rows[0][0].paragraphs[0].line_points = 96.0;
+        doc.tables[0].rows[0][0].paragraphs[0].line_exact = true;
+        doc.tables[0].rows[0][0].paragraphs[0].spacing_after = 0.0;
+        doc.validate()?;
+        Ok(())
     }
     #[test]
     fn wrapped_line_height_uses_the_first_visible_run_instead_of_the_previous_one() {
-        let large=TextFormat{size:60.0,..Default::default()};let small=TextFormat{size:11.0,..Default::default()};
-        let paragraph=Paragraph{runs:vec![Run{text:"A".into(),format:large.clone()},Run{text:"b".into(),format:small.clone()}],..Default::default()};
-        let chars=vec![('A',large.clone()),('b',small)];
-        let lines=wrap_lines(&paragraph,&chars,char_width('A',&large)+0.1,0.0,1.0);
-        assert_eq!(lines.len(),2);assert!(lines[1].height<lines[0].height/2.0);
+        let large = TextFormat {
+            size: 60.0,
+            ..Default::default()
+        };
+        let small = TextFormat {
+            size: 11.0,
+            ..Default::default()
+        };
+        let paragraph = Paragraph {
+            runs: vec![
+                Run {
+                    text: "A".into(),
+                    format: large.clone(),
+                },
+                Run {
+                    text: "b".into(),
+                    format: small.clone(),
+                },
+            ],
+            ..Default::default()
+        };
+        let chars = vec![('A', large.clone()), ('b', small)];
+        let lines = wrap_lines(&paragraph, &chars, char_width('A', &large) + 0.1, 0.0, 1.0);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[1].height < lines[0].height / 2.0);
     }
     #[test]
-    fn vertical_merge_continuations_do_not_render_duplicate_text_or_replace_the_head_fill()->Result<(),String> {
-        let mut doc=Doc::from_text("anchor");doc.add_table(doc.paragraphs[0].id,2,1)?;
-        doc.tables[0].rows[0][0].fill=[1,2,3];doc.tables[0].rows[0][0].paragraphs[0].runs[0].text="visible".into();
-        doc.tables[0].rows[1][0].merged=true;doc.tables[0].rows[1][0].fill=[200,201,202];
-        doc.tables[0].rows[1][0].paragraphs[0].runs[0].text="hidden continuation".into();
-        let layout=doc.layout();assert!(!drawn_text(&layout).contains("hidden continuation"));
-        assert_eq!(merged_head_fill(&doc.tables[0],1,0),[1,2,3]);
-        let below=layout.cells.iter().find(|cell|cell.row==1).ok_or("continuation box")?;
-        assert!(layout.pages[below.page].items.iter().any(|item|matches!(item,Primitive::Rect{y,color,..} if *y==below.y && *color==[1,2,3])));Ok(())
+    fn vertical_merge_continuations_do_not_render_duplicate_text_or_replace_the_head_fill()
+    -> Result<(), String> {
+        let mut doc = Doc::from_text("anchor");
+        doc.add_table(doc.paragraphs[0].id, 2, 1)?;
+        doc.tables[0].rows[0][0].fill = [1, 2, 3];
+        doc.tables[0].rows[0][0].paragraphs[0].runs[0].text = "visible".into();
+        doc.tables[0].rows[1][0].merged = true;
+        doc.tables[0].rows[1][0].fill = [200, 201, 202];
+        doc.tables[0].rows[1][0].paragraphs[0].runs[0].text = "hidden continuation".into();
+        let layout = doc.layout();
+        assert!(!drawn_text(&layout).contains("hidden continuation"));
+        assert_eq!(merged_head_fill(&doc.tables[0], 1, 0), [1, 2, 3]);
+        let below = layout
+            .cells
+            .iter()
+            .find(|cell| cell.row == 1)
+            .ok_or("continuation box")?;
+        assert!(layout.pages[below.page].items.iter().any(
+            |item| matches!(item,Primitive::Rect{y,color,..} if *y==below.y && *color==[1,2,3])
+        ));
+        Ok(())
     }
     #[test]
-    fn table_validation_rejects_orphaned_or_misaligned_vertical_merges()->Result<(),String> {
-        let mut doc=Doc::from_text("anchor");doc.add_table(doc.paragraphs[0].id,2,2)?;
-        doc.tables[0].rows[0][0].merged=true;assert!(doc.validate().is_err());
-        doc.tables[0].rows[0][0].merged=false;doc.tables[0].rows[1][0].merged=true;doc.validate()?;
-        doc.tables[0].rows[1][0].span=2;doc.tables[0].rows[1].remove(1);assert!(doc.validate().is_err());Ok(())
+    fn table_validation_rejects_orphaned_or_misaligned_vertical_merges() -> Result<(), String> {
+        let mut doc = Doc::from_text("anchor");
+        doc.add_table(doc.paragraphs[0].id, 2, 2)?;
+        doc.tables[0].rows[0][0].merged = true;
+        assert!(doc.validate().is_err());
+        doc.tables[0].rows[0][0].merged = false;
+        doc.tables[0].rows[1][0].merged = true;
+        doc.validate()?;
+        doc.tables[0].rows[1][0].span = 2;
+        doc.tables[0].rows[1].remove(1);
+        assert!(doc.validate().is_err());
+        Ok(())
     }
     #[test]
     fn keep_next_chains_move_as_one_group_when_the_whole_chain_fits() {
-        let mut doc=small_doc("prefix\nfirst\nsecond\nbody");doc.paragraphs[0].line_points=60.0;
-        doc.paragraphs[1].keep_next=true;doc.paragraphs[2].keep_next=true;
-        let layout=doc.layout();let page=|paragraph|layout.rows.iter().find(|row|row.paragraph==paragraph).map(|row|row.page);
-        assert_eq!(page(0),Some(0));assert_eq!(page(1),Some(1));assert_eq!(page(1),page(2));assert_eq!(page(2),page(3));
+        let mut doc = small_doc("prefix\nfirst\nsecond\nbody");
+        doc.paragraphs[0].line_points = 60.0;
+        doc.paragraphs[1].keep_next = true;
+        doc.paragraphs[2].keep_next = true;
+        let layout = doc.layout();
+        let page = |paragraph| {
+            layout
+                .rows
+                .iter()
+                .find(|row| row.paragraph == paragraph)
+                .map(|row| row.page)
+        };
+        assert_eq!(page(0), Some(0));
+        assert_eq!(page(1), Some(1));
+        assert_eq!(page(1), page(2));
+        assert_eq!(page(2), page(3));
     }
     #[test]
-    fn keep_next_includes_the_next_anchored_table_or_image_block()->Result<(),String> {
-        let mut doc=small_doc("prefix\nheading");doc.paragraphs[0].line_points=60.0;doc.paragraphs[1].keep_next=true;
-        let anchor=doc.paragraphs[1].id;doc.add_table(anchor,1,1)?;doc.tables[0].row_heights=vec![60.0];
-        let layout=doc.layout();assert_eq!(layout.rows.iter().find(|row|row.paragraph==1).map(|row|row.page),Some(1));assert_eq!(layout.cells[0].page,1);
-        let mut png=std::io::Cursor::new(Vec::new());image::DynamicImage::new_rgba8(1,1).write_to(&mut png,image::ImageFormat::Png).map_err(|error|error.to_string())?;
-        doc.tables.clear();let id=doc.alloc_id();doc.images.push(AnchoredImage{id,after_paragraph_id:anchor,bytes:png.into_inner(),width:60.0,height:60.0,alt:String::new()});
-        let layout=doc.layout();assert_eq!(layout.rows.iter().find(|row|row.paragraph==1).map(|row|row.page),Some(1));
-        assert!(layout.pages[1].items.iter().any(|item|matches!(item,Primitive::Image{..})));Ok(())
+    fn keep_next_includes_the_next_anchored_table_or_image_block() -> Result<(), String> {
+        let mut doc = small_doc("prefix\nheading");
+        doc.paragraphs[0].line_points = 60.0;
+        doc.paragraphs[1].keep_next = true;
+        let anchor = doc.paragraphs[1].id;
+        doc.add_table(anchor, 1, 1)?;
+        doc.tables[0].row_heights = vec![60.0];
+        let layout = doc.layout();
+        assert_eq!(
+            layout
+                .rows
+                .iter()
+                .find(|row| row.paragraph == 1)
+                .map(|row| row.page),
+            Some(1)
+        );
+        assert_eq!(layout.cells[0].page, 1);
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(1, 1)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .map_err(|error| error.to_string())?;
+        doc.tables.clear();
+        let id = doc.alloc_id();
+        doc.images.push(AnchoredImage {
+            id,
+            after_paragraph_id: anchor,
+            bytes: png.into_inner(),
+            width: 60.0,
+            height: 60.0,
+            alt: String::new(),
+        });
+        let layout = doc.layout();
+        assert_eq!(
+            layout
+                .rows
+                .iter()
+                .find(|row| row.paragraph == 1)
+                .map(|row| row.page),
+            Some(1)
+        );
+        assert!(
+            layout.pages[1]
+                .items
+                .iter()
+                .any(|item| matches!(item, Primitive::Image { .. }))
+        );
+        Ok(())
     }
     #[test]
     fn empty_list_paragraph_markers_keep_the_paragraph_mark_format() {
-        let mut doc=Doc::from_text("");let paragraph=&mut doc.paragraphs[0];paragraph.list=List::Bullet;
-        paragraph.runs[0].format=TextFormat{font:"Georgia".into(),size:25.0,color:[11,22,33],..Default::default()};
-        let layout=doc.layout();
+        let mut doc = Doc::from_text("");
+        let paragraph = &mut doc.paragraphs[0];
+        paragraph.list = List::Bullet;
+        paragraph.runs[0].format = TextFormat {
+            font: "Georgia".into(),
+            size: 25.0,
+            color: [11, 22, 33],
+            ..Default::default()
+        };
+        let layout = doc.layout();
         assert!(layout.pages[0].items.iter().any(|item|matches!(item,Primitive::TextStyled{text,font,size,color,..} if text=="•" && font=="Georgia" && *size==25.0 && *color==[11,22,33])));
     }
     #[test]
     fn long_numbered_list_markers_end_before_the_body_text() {
-        let format=TextFormat::default();let row=Row{paragraph:0,start:0,end:1,x:100.0,y:10.0,height:15.0,page:0,
-            marker:"123456789.".into(),segments:vec![Segment{text:"x".into(),format:format.clone(),x:100.0,width:6.0}]};
-        let mut page=blank_page(&PageSetup::default(),1);render_row(&mut page,&row);
-        let x=page.items.iter().find_map(|item|match item {Primitive::TextStyled{text,x,..} if text==&row.marker=>Some(*x),_=>None}).unwrap_or(f32::INFINITY);
-        assert!((x+row.marker.chars().map(|ch|char_width(ch,&format)).sum::<f32>()-(row.x-4.0)).abs()<0.01);
+        let format = TextFormat::default();
+        let row = Row {
+            paragraph: 0,
+            start: 0,
+            end: 1,
+            x: 100.0,
+            y: 10.0,
+            height: 15.0,
+            page: 0,
+            marker: "123456789.".into(),
+            segments: vec![Segment {
+                text: "x".into(),
+                format: format.clone(),
+                x: 100.0,
+                width: 6.0,
+            }],
+        };
+        let mut page = blank_page(&PageSetup::default(), 1);
+        render_row(&mut page, &row);
+        let x = page
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Primitive::TextStyled { text, x, .. } if text == &row.marker => Some(*x),
+                _ => None,
+            })
+            .unwrap_or(f32::INFINITY);
+        assert!(
+            (x + row
+                .marker
+                .chars()
+                .map(|ch| char_width(ch, &format))
+                .sum::<f32>()
+                - (row.x - 4.0))
+                .abs()
+                < 0.01
+        );
     }
     #[test]
     fn justified_spaces_update_the_position_used_for_later_tab_stops() {
-        let format=TextFormat::default();let chars="a \tb".chars().map(|ch|(ch,format.clone())).collect::<Vec<_>>();
-        let segments=line_segments(&chars,0,chars.len(),0.0,0.0,0.0,10.0,&format);
-        let x=segments.iter().find(|segment|segment.text=="b").map(|segment|segment.x).unwrap_or(f32::INFINITY);
-        assert!((x-36.0).abs()<0.01,"{segments:?}");
+        let format = TextFormat::default();
+        let chars = "a \tb"
+            .chars()
+            .map(|ch| (ch, format.clone()))
+            .collect::<Vec<_>>();
+        let segments = line_segments(&chars, 0, chars.len(), 0.0, 0.0, 0.0, 10.0, &format);
+        let x = segments
+            .iter()
+            .find(|segment| segment.text == "b")
+            .map(|segment| segment.x)
+            .unwrap_or(f32::INFINITY);
+        assert!((x - 36.0).abs() < 0.01, "{segments:?}");
     }
     #[test]
     fn zero_width_format_characters_do_not_occupy_visible_line_width() {
-        let format=TextFormat::default();for ch in ['\u{00ad}','\u{200b}','\u{200c}','\u{200d}','\u{2060}','\u{feff}'] {assert_eq!(char_width(ch,&format),0.0);}
-        let doc=Doc::from_text("a\u{00ad}\u{200b}b");let layout=doc.layout();
-        assert_eq!(drawn_text(&layout),"ab");
-        let width=layout.rows[0].segments.iter().map(|segment|segment.width).sum::<f32>();
-        assert!((width-char_width('a',&format)-char_width('b',&format)).abs()<0.01);
+        let format = TextFormat::default();
+        for ch in [
+            '\u{00ad}', '\u{200b}', '\u{200c}', '\u{200d}', '\u{2060}', '\u{feff}',
+        ] {
+            assert_eq!(char_width(ch, &format), 0.0);
+        }
+        let doc = Doc::from_text("a\u{00ad}\u{200b}b");
+        let layout = doc.layout();
+        assert_eq!(drawn_text(&layout), "ab");
+        let width = layout.rows[0]
+            .segments
+            .iter()
+            .map(|segment| segment.width)
+            .sum::<f32>();
+        assert!((width - char_width('a', &format) - char_width('b', &format)).abs() < 0.01);
     }
     #[test]
-    fn table_metadata_cannot_extend_beyond_the_existing_rows()->Result<(),String> {
-        let mut doc=Doc::from_text("anchor");doc.add_table(doc.paragraphs[0].id,1,1)?;
-        doc.tables[0].header_rows=2;assert!(doc.validate().is_err());doc.tables[0].header_rows=1;
-        doc.tables[0].row_heights=vec![10.0,10.0];assert!(doc.validate().is_err());doc.tables[0].row_heights.truncate(1);doc.validate()?;Ok(())
+    fn table_metadata_cannot_extend_beyond_the_existing_rows() -> Result<(), String> {
+        let mut doc = Doc::from_text("anchor");
+        doc.add_table(doc.paragraphs[0].id, 1, 1)?;
+        doc.tables[0].header_rows = 2;
+        assert!(doc.validate().is_err());
+        doc.tables[0].header_rows = 1;
+        doc.tables[0].row_heights = vec![10.0, 10.0];
+        assert!(doc.validate().is_err());
+        doc.tables[0].row_heights.truncate(1);
+        doc.validate()?;
+        Ok(())
     }
     #[test]
     fn adjacent_paragraph_spacing_uses_the_maximum_gap_in_body_and_cells() {
-        let mut doc=small_doc("one\ntwo");doc.paragraphs[0].spacing_after=12.0;doc.paragraphs[1].spacing_before=4.0;
-        let layout=doc.layout();assert!((layout.rows[1].y-layout.rows[0].y-32.0).abs()<0.01);
-        let cell=Cell::new(99,doc.paragraphs.clone(),[255;3]);let rows=table_lines(&cell,200.0,[0.0;4]);
-        assert!((rows[0].height+rows[1].y-32.0).abs()<0.01);
-        doc.paragraphs[1].spacing_before=18.0;let layout=doc.layout();assert!((layout.rows[1].y-layout.rows[0].y-38.0).abs()<0.01);
+        let mut doc = small_doc("one\ntwo");
+        doc.paragraphs[0].spacing_after = 12.0;
+        doc.paragraphs[1].spacing_before = 4.0;
+        let layout = doc.layout();
+        assert!((layout.rows[1].y - layout.rows[0].y - 32.0).abs() < 0.01);
+        let cell = Cell::new(99, doc.paragraphs.clone(), [255; 3]);
+        let rows = table_lines(&cell, 200.0, [0.0; 4]);
+        assert!((rows[0].height + rows[1].y - 32.0).abs() < 0.01);
+        doc.paragraphs[1].spacing_before = 18.0;
+        let layout = doc.layout();
+        assert!((layout.rows[1].y - layout.rows[0].y - 38.0).abs() < 0.01);
     }
     #[test]
     fn document_import_notices_have_count_item_and_aggregate_budgets() {
-        let mut doc=Doc::from_text("text");doc.losses=vec!["notice".into();1001];assert!(doc.validate().is_err());
-        doc.losses=vec!["x".repeat(8193)];assert!(doc.validate().is_err());
-        doc.losses=vec!["x".repeat(1100);1000];assert!(doc.validate().is_err());doc.losses=vec!["notice".into();2];assert!(doc.validate().is_ok());
+        let mut doc = Doc::from_text("text");
+        doc.losses = vec!["notice".into(); 1001];
+        assert!(doc.validate().is_err());
+        doc.losses = vec!["x".repeat(8193)];
+        assert!(doc.validate().is_err());
+        doc.losses = vec!["x".repeat(1100); 1000];
+        assert!(doc.validate().is_err());
+        doc.losses = vec!["notice".into(); 2];
+        assert!(doc.validate().is_ok());
     }
     #[test]
     fn document_validation_rejects_xml_controls_but_keeps_supported_text_breaks() {
-        let mut doc=Doc::from_text("a\t\u{000b}b\u{000c}c");assert!(doc.validate().is_ok());
-        doc.title="bad\0title".into();assert!(doc.validate().is_err());doc.title.clear();
-        doc.paragraphs[0].runs[0].text="bad\u{0001}text".into();assert!(doc.validate().is_err());
-        doc.paragraphs[0].runs[0].text="valid".into();doc.paragraphs[0].runs[0].format.font="bad\u{000c}font".into();assert!(doc.validate().is_err());
+        let mut doc = Doc::from_text("a\t\u{000b}b\u{000c}c");
+        assert!(doc.validate().is_ok());
+        doc.title = "bad\0title".into();
+        assert!(doc.validate().is_err());
+        doc.title.clear();
+        doc.paragraphs[0].runs[0].text = "bad\u{0001}text".into();
+        assert!(doc.validate().is_err());
+        doc.paragraphs[0].runs[0].text = "valid".into();
+        doc.paragraphs[0].runs[0].format.font = "bad\u{000c}font".into();
+        assert!(doc.validate().is_err());
     }
     #[test]
-    fn deleting_an_empty_automatic_page_removes_its_whitespace_without_touching_other_text()->Result<(),String> {
-        let mut doc=small_doc(&format!("a\u{000b}{}\u{000b}z","\t".repeat(120)));
-        doc.page.width=144.0;let before=doc.layout();let pages=before.pages.len();
-        let blank=(1..pages.saturating_sub(1)).find(|page|before.rows.iter().any(|row|row.page==*page)
-            && before.rows.iter().filter(|row|row.page==*page).all(|row|row.segments.iter().all(|segment|segment.text.chars().all(char::is_whitespace)))).ok_or("blank automatic page")?;
-        assert!(doc.delete_empty_page(blank));assert!(doc.layout().pages.len()<pages);
-        assert_eq!(doc.plain_text().chars().filter(|ch|!ch.is_whitespace()).collect::<String>(),"az");Ok(())
+    fn deleting_an_empty_automatic_page_removes_its_whitespace_without_touching_other_text()
+    -> Result<(), String> {
+        let mut doc = small_doc(&format!("a\u{000b}{}\u{000b}z", "\t".repeat(120)));
+        doc.page.width = 144.0;
+        let before = doc.layout();
+        let pages = before.pages.len();
+        let blank = (1..pages.saturating_sub(1))
+            .find(|page| {
+                before.rows.iter().any(|row| row.page == *page)
+                    && before
+                        .rows
+                        .iter()
+                        .filter(|row| row.page == *page)
+                        .all(|row| {
+                            row.segments
+                                .iter()
+                                .all(|segment| segment.text.chars().all(char::is_whitespace))
+                        })
+            })
+            .ok_or("blank automatic page")?;
+        assert!(doc.delete_empty_page(blank));
+        assert!(doc.layout().pages.len() < pages);
+        assert_eq!(
+            doc.plain_text()
+                .chars()
+                .filter(|ch| !ch.is_whitespace())
+                .collect::<String>(),
+            "az"
+        );
+        Ok(())
     }
     #[test]
-    fn right_indent_wraps_and_roundtrips()->Result<(),String> {
-        let mut doc=Doc::from_text(&"word ".repeat(30));let wide=doc.layout().rows.len();doc.paragraphs[0].right_indent=300.0;
-        assert!(doc.layout().rows.len()>wide);
-        for ext in ["html","docx"] {let imported=super::super::io::read(&super::super::io::write(&doc,ext)?,ext)?;assert_eq!(imported.paragraphs[0].right_indent,300.0);}
-        let imported=super::super::io::read(br#"<p style="margin-right:36pt">text</p>"#,"html")?;assert_eq!(imported.paragraphs[0].right_indent,36.0);
-        let native=serde_json::to_value(Paragraph::default()).map_err(|error|error.to_string())?;assert!(native.get("right_indent").is_none());
-        let old:Paragraph=serde_json::from_value(serde_json::json!({"id":1})).map_err(|error|error.to_string())?;assert_eq!(old.right_indent,0.0);Ok(())
-    }
-    #[test]
-    fn explicit_list_starts_survive_supported_formats()->Result<(),String> {
-        let mut doc=Doc::from_text("first\nsecond");for paragraph in &mut doc.paragraphs {paragraph.list=List::Number;}doc.paragraphs[0].list_start=Some(42);
-        let layout=doc.layout();assert_eq!(layout.rows[0].marker,"42.");assert_eq!(layout.rows[1].marker,"43.");
-        for ext in ["md","html","docx"] {
-            let imported=super::super::io::read(&super::super::io::write(&doc,ext)?,ext)?;let layout=imported.layout();
-            assert_eq!(layout.rows[0].marker,"42.","{ext}");assert_eq!(layout.rows[1].marker,"43.","{ext}");
+    fn right_indent_wraps_and_roundtrips() -> Result<(), String> {
+        let mut doc = Doc::from_text(&"word ".repeat(30));
+        let wide = doc.layout().rows.len();
+        doc.paragraphs[0].right_indent = 300.0;
+        assert!(doc.layout().rows.len() > wide);
+        for ext in ["html", "docx"] {
+            let imported = super::super::io::read(&super::super::io::write(&doc, ext)?, ext)?;
+            assert_eq!(imported.paragraphs[0].right_indent, 300.0);
         }
-        let mut zero=Doc::from_text("zero\none");for paragraph in &mut zero.paragraphs {paragraph.list=List::Number;}zero.paragraphs[0].list_start=Some(0);
-        assert_eq!(zero.layout().rows[0].marker,"0.");assert_eq!(zero.layout().rows[1].marker,"1.");
-        let id=doc.paragraphs[0].id;doc.insert_text(id,5,"\nnew")?;assert_eq!(doc.paragraphs[1].list_start,None);
-        let html=super::super::io::read(br#"<ol start="7"><li>a</li><li value="12">b</li><li>c</li></ol>"#,"html")?;
-        assert_eq!(html.layout().rows.iter().map(|row|row.marker.as_str()).collect::<Vec<_>>(),vec!["7.","12.","13."]);
-        let mut ordinary=Doc::from_text(&(0..64).map(|index|format!("item {index}")).collect::<Vec<_>>().join("\n"));
-        for paragraph in &mut ordinary.paragraphs {paragraph.list=List::Number;}
-        let imported=super::super::io::read(&super::super::io::write(&ordinary,"docx")?,"docx")?;
-        let parts=crate::package::read_zip(&super::super::io::write(&imported,"docx")?)?;
-        let numbering=String::from_utf8_lossy(parts.get("word/numbering.xml").ok_or("numbering")?);
-        assert_eq!(numbering.matches("<w:num w:numId=").count(),2);
-        let output=String::from_utf8(super::super::io::write(&imported,"html")?).map_err(|error|error.to_string())?;
-        assert_eq!(output.matches("<ol ").count(),1);Ok(())
+        let imported = super::super::io::read(br#"<p style="margin-right:36pt">text</p>"#, "html")?;
+        assert_eq!(imported.paragraphs[0].right_indent, 36.0);
+        let native =
+            serde_json::to_value(Paragraph::default()).map_err(|error| error.to_string())?;
+        assert!(native.get("right_indent").is_none());
+        let old: Paragraph = serde_json::from_value(serde_json::json!({"id":1}))
+            .map_err(|error| error.to_string())?;
+        assert_eq!(old.right_indent, 0.0);
+        Ok(())
     }
     #[test]
-    fn deleting_a_whole_leading_paragraph_keeps_the_surviving_paragraph_properties()->Result<(),String> {
-        let mut doc=Doc::from_text("heading\nbody");let id=doc.paragraphs[0].id;doc.paragraphs[0].set_style("Heading1");
-        doc.paragraphs[1].align=Align::Right;doc.paragraphs[1].right_indent=18.0;
-        doc.replace_range(Position::default(),Position{paragraph:1,offset:0},"",None)?;
-        assert_eq!(doc.plain_text(),"body");assert_eq!(doc.paragraphs[0].style,"Normal");assert_eq!(doc.paragraphs[0].align,Align::Right);assert_eq!(doc.paragraphs[0].right_indent,18.0);assert_eq!(doc.paragraphs[0].id,id);Ok(())
+    fn explicit_list_starts_survive_supported_formats() -> Result<(), String> {
+        let mut doc = Doc::from_text("first\nsecond");
+        for paragraph in &mut doc.paragraphs {
+            paragraph.list = List::Number;
+        }
+        doc.paragraphs[0].list_start = Some(42);
+        let layout = doc.layout();
+        assert_eq!(layout.rows[0].marker, "42.");
+        assert_eq!(layout.rows[1].marker, "43.");
+        for ext in ["md", "html", "docx"] {
+            let imported = super::super::io::read(&super::super::io::write(&doc, ext)?, ext)?;
+            let layout = imported.layout();
+            assert_eq!(layout.rows[0].marker, "42.", "{ext}");
+            assert_eq!(layout.rows[1].marker, "43.", "{ext}");
+        }
+        let mut zero = Doc::from_text("zero\none");
+        for paragraph in &mut zero.paragraphs {
+            paragraph.list = List::Number;
+        }
+        zero.paragraphs[0].list_start = Some(0);
+        assert_eq!(zero.layout().rows[0].marker, "0.");
+        assert_eq!(zero.layout().rows[1].marker, "1.");
+        let id = doc.paragraphs[0].id;
+        doc.insert_text(id, 5, "\nnew")?;
+        assert_eq!(doc.paragraphs[1].list_start, None);
+        let html = super::super::io::read(
+            br#"<ol start="7"><li>a</li><li value="12">b</li><li>c</li></ol>"#,
+            "html",
+        )?;
+        assert_eq!(
+            html.layout()
+                .rows
+                .iter()
+                .map(|row| row.marker.as_str())
+                .collect::<Vec<_>>(),
+            vec!["7.", "12.", "13."]
+        );
+        let mut ordinary = Doc::from_text(
+            &(0..64)
+                .map(|index| format!("item {index}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        for paragraph in &mut ordinary.paragraphs {
+            paragraph.list = List::Number;
+        }
+        let imported =
+            super::super::io::read(&super::super::io::write(&ordinary, "docx")?, "docx")?;
+        let parts = crate::package::read_zip(&super::super::io::write(&imported, "docx")?)?;
+        let numbering =
+            String::from_utf8_lossy(parts.get("word/numbering.xml").ok_or("numbering")?);
+        assert_eq!(numbering.matches("<w:num w:numId=").count(), 2);
+        let output = String::from_utf8(super::super::io::write(&imported, "html")?)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(output.matches("<ol ").count(), 1);
+        Ok(())
+    }
+    #[test]
+    fn deleting_a_whole_leading_paragraph_keeps_the_surviving_paragraph_properties()
+    -> Result<(), String> {
+        let mut doc = Doc::from_text("heading\nbody");
+        let id = doc.paragraphs[0].id;
+        doc.paragraphs[0].set_style("Heading1");
+        doc.paragraphs[1].align = Align::Right;
+        doc.paragraphs[1].right_indent = 18.0;
+        doc.replace_range(
+            Position::default(),
+            Position {
+                paragraph: 1,
+                offset: 0,
+            },
+            "",
+            None,
+        )?;
+        assert_eq!(doc.plain_text(), "body");
+        assert_eq!(doc.paragraphs[0].style, "Normal");
+        assert_eq!(doc.paragraphs[0].align, Align::Right);
+        assert_eq!(doc.paragraphs[0].right_indent, 18.0);
+        assert_eq!(doc.paragraphs[0].id, id);
+        Ok(())
     }
 }

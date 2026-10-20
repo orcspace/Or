@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-const MAX_SETTINGS:usize=1024*1024;
+const MAX_SETTINGS: usize = 1024 * 1024;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -60,24 +60,26 @@ impl Settings {
         if !matches!(self.theme.as_str(), "light" | "dark" | "system") {
             self.theme = "system".into();
         }
-        let mut recent=std::collections::HashSet::new();
-        self.recent.retain(|path|recent.insert(path.clone()));
-        let mut pinned=std::collections::HashSet::new();
-        self.pinned.retain(|path|pinned.insert(path.clone()));
+        let mut recent = std::collections::HashSet::new();
+        self.recent.retain(|path| recent.insert(path.clone()));
+        let mut pinned = std::collections::HashSet::new();
+        self.pinned.retain(|path| pinned.insert(path.clone()));
         self.recent.truncate(50);
         self.pinned.truncate(50);
         self.chat_models = self.chat_models.map(|m| crate::chat::clean_model(&m));
         self.chat_efforts = self.chat_efforts.map(|e| crate::chat::clean_effort(&e));
         self
     }
-    fn encoded(&self)->Result<Vec<u8>,String> {
-        let bytes=serde_json::to_vec_pretty(self).map_err(|error|error.to_string())?;
-        if bytes.len()>MAX_SETTINGS {return Err("Настройки превышают1МиБ; сократите список длинных путей. Предыдущий файл сохранён.".into());}
+    fn encoded(&self) -> Result<Vec<u8>, String> {
+        let bytes = serde_json::to_vec_pretty(self).map_err(|error| error.to_string())?;
+        if bytes.len() > MAX_SETTINGS {
+            return Err("Настройки превышают1МиБ; сократите список длинных путей. Предыдущий файл сохранён.".into());
+        }
         Ok(bytes)
     }
     pub fn save(&self) -> Result<(), String> {
-        let bytes=self.encoded()?;
-        crate::util::atomic_write(&crate::util::app_dir().join("settings.json"),&bytes,true)
+        let bytes = self.encoded()?;
+        crate::util::atomic_write(&crate::util::app_dir().join("settings.json"), &bytes, true)
     }
     pub fn toggle_pin(&mut self, path: PathBuf) -> Result<(), String> {
         if self.pinned.contains(&path) {
@@ -170,13 +172,16 @@ mod recent_defect_tests {
     use super::*;
     #[test]
     fn duplicate_settings_paths_do_not_displace_unique_recent_files() {
-        let mut settings=Settings::default();
-        settings.recent=vec![PathBuf::from("C:/a.docx");50];
+        let mut settings = Settings::default();
+        settings.recent = vec![PathBuf::from("C:/a.docx"); 50];
         settings.recent.push("C:/b.docx".into());
-        settings.pinned=vec!["C:/a.docx".into(),"C:/a.docx".into()];
-        let settings=settings.normalized();
-        assert_eq!(settings.recent,vec![PathBuf::from("C:/a.docx"),PathBuf::from("C:/b.docx")]);
-        assert_eq!(settings.pinned.len(),1);
+        settings.pinned = vec!["C:/a.docx".into(), "C:/a.docx".into()];
+        let settings = settings.normalized();
+        assert_eq!(
+            settings.recent,
+            vec![PathBuf::from("C:/a.docx"), PathBuf::from("C:/b.docx")]
+        );
+        assert_eq!(settings.pinned.len(), 1);
     }
 }
 
@@ -184,12 +189,18 @@ mod recent_defect_tests {
 mod two_hundred_settings_regressions {
     use super::*;
     #[test]
-    fn saved_settings_cannot_exceed_their_own_reload_budget()->Result<(),String> {
-        let mut settings=Settings::default();
-        settings.recent=(0..50).map(|index|PathBuf::from(format!("C:/{index}/{}.docx","x/".repeat(12000)))).collect();
+    fn saved_settings_cannot_exceed_their_own_reload_budget() -> Result<(), String> {
+        let mut settings = Settings::default();
+        settings.recent = (0..50)
+            .map(|index| PathBuf::from(format!("C:/{index}/{}.docx", "x/".repeat(12000))))
+            .collect();
         assert!(settings.clone().normalized().encoded().is_err());
-        settings.recent.truncate(1);let bytes=settings.encoded()?;
-        assert!(bytes.len()<=MAX_SETTINGS);let decoded:Settings=serde_json::from_slice(&bytes).map_err(|error|error.to_string())?;
-        assert_eq!(decoded.normalized().recent,settings.recent);Ok(())
+        settings.recent.truncate(1);
+        let bytes = settings.encoded()?;
+        assert!(bytes.len() <= MAX_SETTINGS);
+        let decoded: Settings =
+            serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+        assert_eq!(decoded.normalized().recent, settings.recent);
+        Ok(())
     }
 }
