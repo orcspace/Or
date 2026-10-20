@@ -2474,7 +2474,7 @@ mod hundred_chat_content_tests {
     #[test]
     fn incomplete_and_escaped_chat_markers_remain_literal()->Result<(),String> {
         let ctx=egui::Context::default();crate::fonts::install(&ctx)?;
-        for (source,expected) in [("an unmatched `code","an unmatched `code"),("literal **","literal **"),(r"\**literal\**","**literal**"),(r"prefix \*star\*","prefix *star*"),(r"path \folder","path \folder")] {
+        for (source,expected) in [("an unmatched `code","an unmatched `code"),("literal **","literal **"),(r"\**literal\**","**literal**"),(r"prefix \*star\*","prefix *star*"),(r"path \folder",r"path \folder")] {
             let mut output=String::new();
             let _=ctx.run_ui(egui::RawInput::default(),|ui|{output=inline(ui,source).text;});
             assert_eq!(output,expected);

@@ -1,7 +1,8 @@
-name: Apply rustfmt to a branch
+name: Agent branch diagnostics
 
-# Agents may not run cargo on the owner's machine (AGENTS.md), so formatting is applied here.
-# The bot commit does not trigger other workflows; push again afterwards to run the checks.
+# Agents may not build or test on the owner's machine (AGENTS.md), so agent branches get one run
+# that applies rustfmt, then reports every lint and test failure instead of stopping at the first.
+# The bot formatting commit does not trigger workflows; push again to rerun the gated checks.
 on:
   push:
     branches: ['claude/**']
@@ -10,17 +11,25 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: agent-diagnostics-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  rustfmt:
+  diagnostics:
     runs-on: windows-2025
-    timeout-minutes: 10
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
       - name: Format
+        id: fmt
+        continue-on-error: true
         run: cargo fmt --all
       - name: Commit formatting
+        if: steps.fmt.outcome == 'success'
         shell: bash
         run: |
           if git diff --quiet; then echo "Already formatted"; exit 0; fi
@@ -28,3 +37,16 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -am "Apply rustfmt"
           git push origin "HEAD:${GITHUB_REF_NAME}"
+      - name: Clippy
+        id: clippy
+        continue-on-error: true
+        run: cargo clippy --locked --workspace --all-targets --message-format=short -- -D warnings
+      - name: Tests
+        id: tests
+        continue-on-error: true
+        run: cargo test --locked --workspace --no-fail-fast
+      - name: Summary
+        shell: bash
+        run: |
+          echo "fmt=${{ steps.fmt.outcome }} clippy=${{ steps.clippy.outcome }} tests=${{ steps.tests.outcome }}"
+          test "${{ steps.fmt.outcome }}${{ steps.clippy.outcome }}${{ steps.tests.outcome }}" = successsuccesssuccess
