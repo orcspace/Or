@@ -675,7 +675,7 @@ impl Reader<'_, '_> {
         self.doc.images.push(AnchoredImage {
             id,
             after_paragraph_id: anchor,
-            bytes: bytes.into(),
+            bytes,
             width,
             height,
             alt,
@@ -1554,7 +1554,7 @@ impl<'d> Writer<'d> {
             let source = format!(
                 "<draw:image xlink:href=\"{path}\" xlink:type=\"simple\" xlink:show=\"embed\" xlink:actuate=\"onLoad\"/>"
             );
-            self.pictures.push((path, media, image.bytes.as_slice()));
+            self.pictures.push((path, media, &image.bytes));
             source
         };
         let alt = if image.alt.is_empty() {
@@ -1885,7 +1885,7 @@ mod tests {
         doc.images.push(AnchoredImage {
             id,
             after_paragraph_id: anchor,
-            bytes: png()?.into(),
+            bytes: png()?,
             width: 200.0,
             height: 100.0,
             alt: "Схема".into(),
@@ -2053,7 +2053,7 @@ mod tests {
         let first = read(&write(&doc, "fodt")?, "fodt")?;
         let odt = read(&write(&doc, "odt")?, "odt")?;
         assert_eq!(first.plain_text(), odt.plain_text());
-        assert_eq!(first.images.first().map(|i| i.bytes.to_vec()), Some(png()?));
+        assert_eq!(first.images.first().map(|i| i.bytes.clone()), Some(png()?));
         assert_eq!(first.tables, odt.tables);
         Ok(())
     }

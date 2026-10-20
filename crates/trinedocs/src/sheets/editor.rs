@@ -2442,7 +2442,7 @@ fn paint_image(
     image: &super::model::SheetImage,
     rect: Rect,
 ) {
-    let key = egui::Id::new(("sheet_image", sheet, image.id, image.bytes.fingerprint()));
+    let key = egui::Id::new(("sheet_image", sheet, image.id, image.bytes.len()));
     let ctx = ui.ctx();
     let texture = ctx.data_mut(|d| d.get_temp::<egui::TextureHandle>(key));
     let texture = texture.or_else(|| {
@@ -3615,7 +3615,7 @@ mod tests {
             y_offset: 200.0,
             width: 8000.0,
             height: 8000.0,
-            bytes: vec![1].into(),
+            bytes: vec![1],
             alt: String::new(),
         });
         let (width, height) = grid_size(&sheet, 1000, 26);

@@ -51,7 +51,7 @@ pub enum Primitive {
         y: f32,
         w: f32,
         h: f32,
-        bytes: crate::blob::Blob,
+        bytes: Vec<u8>,
     },
 }
 pub fn normalized_text(text: &str) -> std::borrow::Cow<'_, str> {
@@ -141,7 +141,10 @@ pub fn paint(ui: &mut egui::Ui, page: &Page, origin: egui::Pos2, scale: f32) {
                 );
             }
             Primitive::Image { x, y, w, h, bytes } => {
-                let key = egui::Id::new(("asset", bytes.fingerprint()));
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                bytes.hash(&mut hasher);
+                let key = egui::Id::new(("asset", hasher.finish()));
                 let cached = ui
                     .ctx()
                     .data_mut(|d| d.get_temp::<egui::TextureHandle>(key));

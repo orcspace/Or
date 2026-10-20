@@ -102,10 +102,10 @@ pub fn encode(doc: &Document) -> Result<Vec<u8>, String> {
     let mut document = doc.clone();
     let mut assets = std::collections::BTreeMap::new();
     let mut parts = Vec::new();
-    let mut add = |id: u64, bytes: &mut crate::blob::Blob| {
+    let mut add = |id: u64, bytes: &mut Vec<u8>| {
         let path = format!("assets/{id}.bin");
         assets.insert(id, path.clone());
-        parts.push((path, std::mem::take(bytes).into_vec()));
+        parts.push((path, std::mem::take(bytes)));
     };
     match &mut document {
         Document::Docs(d) => {
@@ -146,7 +146,7 @@ pub fn decode(bytes: &[u8]) -> Result<Document, String> {
         return Err("Версия документа не поддерживается".into());
     }
     if env.version == 2 {
-        let mut restore = |id: u64, bytes: &mut crate::blob::Blob| -> Result<(), String> {
+        let mut restore = |id: u64, bytes: &mut Vec<u8>| -> Result<(), String> {
             let path = env
                 .assets
                 .remove(&id)
@@ -154,7 +154,7 @@ pub fn decode(bytes: &[u8]) -> Result<Document, String> {
             if path != format!("assets/{id}.bin") {
                 return Err("Неверный путь asset".into());
             }
-            *bytes = parts.remove(&path).ok_or("Нет части изображения")?.into();
+            *bytes = parts.remove(&path).ok_or("Нет части изображения")?;
             Ok(())
         };
         match &mut env.document {
@@ -385,7 +385,7 @@ mod asset_tests {
         d.images.push(crate::docs::model::AnchoredImage {
             id,
             after_paragraph_id: d.paragraphs[0].id,
-            bytes: bytes.into(),
+            bytes,
             width: 10.0,
             height: 10.0,
             alt: "test".into(),

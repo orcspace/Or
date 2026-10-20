@@ -368,7 +368,7 @@ impl Table {
 pub struct AnchoredImage {
     pub id: u64,
     pub after_paragraph_id: u64,
-    pub bytes: crate::blob::Blob,
+    pub bytes: Vec<u8>,
     pub width: f32,
     pub height: f32,
     pub alt: String,

@@ -199,7 +199,7 @@ pub struct SheetImage {
     pub y_offset: f32,
     pub width: f32,
     pub height: f32,
-    pub bytes: crate::blob::Blob,
+    pub bytes: Vec<u8>,
     #[serde(default)]
     pub alt: String,
 }
@@ -1307,7 +1307,7 @@ impl Book {
             y_offset: 0.0,
             width: (w * factor).max(1.0),
             height: (h * factor).max(1.0),
-            bytes: bytes.into(),
+            bytes,
             alt: String::new(),
         });
         Ok(id)

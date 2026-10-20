@@ -1428,7 +1428,7 @@ fn dispatch_inner(
             d.images.push(crate::docs::model::AnchoredImage {
                 id: eid,
                 after_paragraph_id: pid,
-                bytes: bytes.into(),
+                bytes,
                 width,
                 height,
                 alt: a
@@ -3016,7 +3016,7 @@ mod raw_model_contract_tests {
                 doc.images.push(crate::docs::model::AnchoredImage {
                     id,
                     after_paragraph_id: doc.paragraphs.first().ok_or("paragraph")?.id,
-                    bytes: tiny_png()?.into(),
+                    bytes: tiny_png()?,
                     width: 1.0,
                     height: 1.0,
                     alt: String::new(),
@@ -4120,7 +4120,7 @@ mod batch03_tests {
         slide.elements.push(crate::slides::model::Element {
             id: 7,
             kind: crate::slides::model::ElementKind::Image {
-                bytes: vec![255; 2_000_000].into(),
+                bytes: vec![255; 2_000_000],
             },
             text: "Caption".into(),
             ..Default::default()
