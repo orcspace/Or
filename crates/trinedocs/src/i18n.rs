@@ -257,7 +257,7 @@ mod tests {
     #[test]
     fn every_shell_string_has_a_translation() {
         let source = include_str!("app.rs");
-        let marker = "self.tr(\"";
+        let marker = "crate::i18n::tr(\"";
         let mut checked = 0;
         for (index, _) in source.match_indices(marker) {
             let rest = &source[index + marker.len()..];
