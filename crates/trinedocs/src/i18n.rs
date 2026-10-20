@@ -261,7 +261,7 @@ mod tests {
         let mut checked = 0;
         for (index, _) in source.match_indices(marker) {
             let rest = &source[index + marker.len()..];
-            let end = rest.find('"').expect("unterminated shell string");
+            let end = rest.find('"').unwrap_or(rest.len());
             let key = &rest[..end];
             assert!(
                 super::STRINGS.iter().any(|(en, _)| *en == key),
