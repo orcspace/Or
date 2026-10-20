@@ -22,6 +22,9 @@ struct State {
     slide_filter: String,
     show_properties: bool,
     canvas_rect: Option<Rect>,
+    canvas_focus_requested: bool,
+    thumbnail_seen_slide: u64,
+    thumbnail_scroll_requested: bool,
     show_notes: bool,
     agenda_open: bool,
     selected: Vec<u64>,
@@ -201,6 +204,7 @@ pub fn show(ui: &mut egui::Ui, deck: &mut Deck) -> bool {
             .request_repaint_after(std::time::Duration::from_millis(50));
     }
     changed |= ribbon(ui, deck, &mut state);
+    state.thumbnail_scroll_requested |= state.scroll_to_selection;
     let (deck_width, deck_height) = (deck.width, deck.height);
     if !state.error.is_empty() {
         ui.horizontal(|ui| {
@@ -476,7 +480,7 @@ pub fn show(ui: &mut egui::Ui, deck: &mut Deck) -> bool {
                         {
                             element.text = text;
                         }
-                        state.selected = vec![id];
+                        select_inserted_objects(&mut state,vec![id]);
                         changed = true;
                     }
                     Err(error) => state.error = error,
@@ -528,6 +532,10 @@ pub fn show(ui: &mut egui::Ui, deck: &mut Deck) -> bool {
     ui.ctx().data_mut(|d| d.insert_temp(memory_id, state));
     changed
 }
+fn take_thumbnail_scroll(state:&mut State,slide_id:u64)->bool {
+    if slide_id!=state.slide_id || (!state.thumbnail_scroll_requested && state.thumbnail_seen_slide==slide_id) {return false;}
+    state.thumbnail_seen_slide=slide_id;state.thumbnail_scroll_requested=false;true
+}
 fn thumbnail_panel(
     ui: &mut egui::Ui,
     deck: &mut Deck,
@@ -577,7 +585,7 @@ fn thumbnail_panel(
                         let rect=response.rect;
                         let label=format!("Слайд {}: {}{}",index+1,slide.title,if slide.hidden {"; скрыт"}else{""});
                         response.widget_info(||egui::WidgetInfo::labeled(egui::WidgetType::Button,ui.is_enabled(),&label));
-                        if selected && state.scroll_to_selection {
+                        if selected && take_thumbnail_scroll(&mut *state,slide.id) {
                             ui.scroll_to_rect(rect, Some(egui::Align::Center));
                         }
                         response.dnd_set_drag_payload(SlideDrag(slide.id));
@@ -673,6 +681,12 @@ fn thumbnail_panel(
 
     changed
 }
+fn slide_property_text(ui:&mut egui::Ui,value:&mut String,slide_id:u64,field:&str,hint:&str)->bool {
+    let id=ui.id().with(("slide-property",slide_id,field));
+    crate::docs::editor::reconcile_text_edit(ui.ctx(),id,value);
+    let changed=ui.add(egui::TextEdit::singleline(&mut *value).id(id).desired_width(f32::INFINITY).hint_text(hint)).changed();
+    crate::docs::editor::remember_text_edit(ui.ctx(),id,value);changed
+}
 fn slide_panel(ui: &mut egui::Ui, deck: &mut Deck, state: &mut State, main_height: f32) -> bool {
     let mut changed = false;
     let right_width = 260.0;
@@ -688,12 +702,7 @@ fn slide_panel(ui: &mut egui::Ui, deck: &mut Deck, state: &mut State, main_heigh
                             .size(12.0)
                             .color(crate::chrome::muted(ui)),
                     );
-                    changed |= ui
-                        .add(
-                            egui::TextEdit::singleline(&mut slide.title)
-                                .desired_width(f32::INFINITY),
-                        )
-                        .changed();
+                    changed|=slide_property_text(ui,&mut slide.title,slide.id,"title","");
                     egui::CollapsingHeader::new("Параметры слайда")
                         .id_salt("slide-details")
                         .default_open(false)
@@ -706,13 +715,7 @@ fn slide_panel(ui: &mut egui::Ui, deck: &mut Deck, state: &mut State, main_heigh
                                     ui.color_edit_button_srgb(&mut slide.background).changed();
                             });
                             ui.label(egui::RichText::new("Раздел").color(crate::chrome::muted(ui)));
-                            changed |= ui
-                                .add(
-                                    egui::TextEdit::singleline(&mut slide.section)
-                                        .desired_width(f32::INFINITY)
-                                        .hint_text("Без раздела"),
-                                )
-                                .changed();
+                            changed|=slide_property_text(ui,&mut slide.section,slide.id,"section","Без раздела");
                         });
                     ui.separator();
                     egui::CollapsingHeader::new("Переход слайда")
@@ -1106,9 +1109,11 @@ fn ribbon(ui: &mut egui::Ui, deck: &mut Deck, state: &mut State) -> bool {
                                     )
                                     .clicked()
                                 {
-                                    changed |= edit_selected(deck, state, |e| {
-                                        e.rotation = (e.rotation + angle).rem_euclid(360.0);
-                                    });
+                                    if let Some(slide)=deck.slide_mut(state.slide_id) {
+                                        match rotate_selected(slide,&state.selected,angle) {
+                                            Ok(rotated)=>changed|=rotated,Err(error)=>state.error=error,
+                                        }
+                                    }
                                     ui.close();
                                 }
                             }
@@ -1337,6 +1342,10 @@ fn ribbon(ui: &mut egui::Ui, deck: &mut Deck, state: &mut State) -> bool {
     ui.add_space(4.0);
     changed
 }
+fn select_inserted_objects(state:&mut State,ids:Vec<u64>) {
+    state.selected=ids;state.edit_text=None;state.edit_cell=None;state.edit_focus=false;
+    state.drag_target=None;state.drag_original.clear();state.canvas_focus_requested=true;
+}
 fn insert_button(
     ui: &mut egui::Ui,
     deck: &mut Deck,
@@ -1349,7 +1358,7 @@ fn insert_button(
     }
     match deck.add_element(state.slide_id, kind) {
         Ok(id) => {
-            state.selected = vec![id];
+            select_inserted_objects(state,vec![id]);
             true
         }
         Err(error) => {
@@ -1421,14 +1430,15 @@ fn insert_image(deck: &mut Deck, state: &mut State, slide_id: u64, bytes: Vec<u8
                 .slide_mut(slide_id)
                 .and_then(|slide| slide.element_mut(id))
             {
-                let factor = (480.0 / w.max(1) as f32).min(280.0 / h.max(1) as f32);
-                element.w = w as f32 * factor;
-                element.h = h as f32 * factor;
+                let factor = (480.0_f32.min(width) / w.max(1) as f32)
+                    .min(280.0_f32.min(height) / h.max(1) as f32);
+                element.w = (w as f32 * factor).max(0.001);
+                element.h = (h as f32 * factor).max(0.001);
                 element.x = ((width - element.w) / 2.0).max(0.0);
                 element.y = ((height - element.h) / 2.0).max(0.0);
             }
             if state.slide_id == slide_id {
-                state.selected = vec![id];
+                select_inserted_objects(state,vec![id]);
             }
             true
         }
@@ -1517,6 +1527,7 @@ fn paste_selection(deck: &mut Deck, state: &mut State) -> bool {
             slide.elements.push(element);
         }
     }
+    let selected=state.selected.clone();select_inserted_objects(state,selected);
     true
 }
 fn clipboard_text(elements: &[Element]) -> String {
@@ -1818,11 +1829,9 @@ fn properties(ui: &mut egui::Ui, e: &mut Element) -> bool {
             egui::ScrollArea::vertical()
                 .id_salt(("slide_chart_values", e.id))
                 .max_height(210.0)
-                .show_rows(ui, 26.0, values.len(), |ui, rows| {
+                .show_rows(ui, 26.0, values.len().max(labels.len()), |ui, rows| {
                     for index in rows {
-                        let Some(value) = values.get_mut(index) else {
-                            continue;
-                        };
+                        let mut value=values.get(index).copied().unwrap_or(0.0);
                         ui.push_id(index, |ui| {
                             ui.horizontal(|ui| {
                                 let mut label = labels
@@ -1848,20 +1857,20 @@ fn properties(ui: &mut egui::Ui, e: &mut Element) -> bool {
                                     }
                                 }
                                 crate::docs::editor::remember_text_edit(ui.ctx(), id, &label);
-                                changed |= ui
-                                    .add(egui::DragValue::new(value).range(-1.0e20..=1.0e20))
-                                    .changed();
+                                if ui.add(egui::DragValue::new(&mut value).range(-1.0e20..=1.0e20)).changed() {
+                                    values.resize(values.len().max(index+1),0.0);values[index]=value;changed=true;
+                                }
                             });
                         });
                     }
                 });
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(values.len() < 10000, egui::Button::new("+ категория"))
+                    .add_enabled(values.len().max(labels.len()) < 10000, egui::Button::new("+ категория"))
                     .clicked()
                 {
-                    let index = values.len();
-                    values.push(0.0);
+                    let index = values.len().max(labels.len());
+                    values.resize(index+1,0.0);
                     if labels.len() <= index {
                         labels.resize_with(index + 1, String::new);
                         if let Some(label) = labels.get_mut(index) {
@@ -1871,12 +1880,12 @@ fn properties(ui: &mut egui::Ui, e: &mut Element) -> bool {
                     changed = true;
                 }
                 if ui
-                    .add_enabled(!values.is_empty(), egui::Button::new("− категория"))
+                    .add_enabled(!values.is_empty()||!labels.is_empty(), egui::Button::new("− категория"))
                     .on_hover_text("Удалить последнюю категорию")
                     .clicked()
                 {
-                    let removed = values.len() - 1;
-                    values.pop();
+                    let removed = values.len().max(labels.len()) - 1;
+                    if removed<values.len() {values.pop();}
                     if removed < labels.len() {
                         labels.remove(removed);
                     }
@@ -2236,7 +2245,7 @@ fn object_hit_geometry(element:&Element,origin:Pos2,scale:f32,point:Pos2)->(Rect
         let fraction=if squared>0.0 {((point-a).dot(segment)/squared).clamp(0.0,1.0)}else{0.0};
         return (bounds,point.distance(a+segment*fraction)<=padding);
     }
-    let angle=if matches!(element.kind,ElementKind::Table{..}|ElementKind::Chart{..}){0.0}else{element.rotation.to_radians()};
+    let angle=if matches!(element.kind,ElementKind::Table{..}|ElementKind::Chart{..}){0.0}else{element.rotation.rem_euclid(360.0).to_radians()};
     let turn=egui::emath::Rot2::from_angle(angle);
     let corners=[object.left_top(),object.right_top(),object.right_bottom(),object.left_bottom()];
     let mut bounds=Rect::NOTHING;
@@ -2265,6 +2274,7 @@ fn canvas(
         Sense::click_and_drag(),
     );
     state.canvas_rect = Some(rect);
+    if std::mem::take(&mut state.canvas_focus_requested) && ui.is_enabled() {response.request_focus();}
     if state.scroll_to_selection {
         let target = state
             .selected
@@ -2501,12 +2511,12 @@ fn resize_geometry(
     let horizontal = hx != 0.5;
     let vertical = hy != 0.5;
     let mut new_width = if horizontal {
-        (width + if hx == 0.0 { -delta.x } else { delta.x }).clamp(4.0, 10000.0)
+        (width + if hx == 0.0 { -delta.x } else { delta.x }).clamp(0.001, 10000.0)
     } else {
         width
     };
     let mut new_height = if vertical {
-        (height + if hy == 0.0 { -delta.y } else { delta.y }).clamp(4.0, 10000.0)
+        (height + if hy == 0.0 { -delta.y } else { delta.y }).clamp(0.001, 10000.0)
     } else {
         height
     };
@@ -2547,6 +2557,33 @@ fn resize_geometry(
         new_width,
         new_height,
     )
+}
+fn rotate_selected(slide:&mut Slide,ids:&[u64],angle:f32)->Result<bool,String> {
+    let selected:std::collections::HashSet<_>=ids.iter().copied().collect();
+    let mut units:std::collections::BTreeMap<(bool,u64),Vec<&Element>>=std::collections::BTreeMap::new();
+    for element in slide.elements.iter().filter(|element|selected.contains(&element.id)) {
+        units.entry(element.group.map(|group|(true,group)).unwrap_or((false,element.id))).or_default().push(element);
+    }
+    let turn=egui::emath::Rot2::from_angle(angle.rem_euclid(360.0).to_radians());
+    let mut updates=std::collections::HashMap::new();
+    for members in units.into_values() {
+        let mut bounds=Rect::NOTHING;
+        for element in &members {bounds=bounds.union(Rect::from_min_size(Pos2::new(element.x,element.y),Vec2::new(element.w,element.h)));}
+        for element in members {
+            let center=Pos2::new(element.x+element.w/2.0,element.y+element.h/2.0);
+            let next=bounds.center()+turn*(center-bounds.center())-Vec2::new(element.w/2.0,element.h/2.0);
+            if !next.x.is_finite()||!next.y.is_finite()||next.x.abs()>1_000_000.0||next.y.abs()>1_000_000.0 {
+                return Err("Поворот группы выходит за допустимые координаты".into());
+            }
+            updates.insert(element.id,(next,(element.rotation+angle).rem_euclid(360.0)));
+        }
+    }
+    for element in &mut slide.elements {
+        if let Some((position,rotation))=updates.get(&element.id) {
+            element.x=position.x;element.y=position.y;element.rotation=*rotation;
+        }
+    }
+    Ok(!updates.is_empty())
 }
 fn align(slide: &mut Slide, ids: &[u64], axis: &str, width: f32, height: f32) {
     let mut groups: std::collections::BTreeMap<(bool, u64), Vec<u64>> =
@@ -2651,6 +2688,18 @@ fn align(slide: &mut Slide, ids: &[u64], axis: &str, width: f32, height: f32) {
 pub fn rgb(c: [u8; 3]) -> Color32 {
     Color32::from_rgb(c[0], c[1], c[2])
 }
+pub(crate) fn animation_signature(slide:&Slide)->u64 {
+    use std::hash::{Hash,Hasher};
+    let mut hash=std::collections::hash_map::DefaultHasher::new();
+    for element in slide.elements.iter().filter(|element|element.is_animated()) {
+        element.id.hash(&mut hash);
+        for (slot,animation) in element.animations() {
+            slot.hash(&mut hash);animation.effect.hash(&mut hash);animation.trigger.hash(&mut hash);animation.order.hash(&mut hash);
+            for value in [animation.delay,animation.duration,animation.dx,animation.dy] {value.to_bits().hash(&mut hash);}
+        }
+    }
+    hash.finish()
+}
 fn animation_start(
     animation: &Animation,
     click_times: &[f32],
@@ -2706,20 +2755,30 @@ pub(crate) fn animation_end(slide: &Slide, click_times: &[f32]) -> f32 {
         })
         .fold(0.0_f32, f32::max)
 }
+struct PaintElement<'a> {
+    source:&'a Element,x:f32,y:f32,w:f32,h:f32,rotation:f32,font_size:f32,stroke_width:f32,
+}
+impl<'a> PaintElement<'a> {
+    fn new(source:&'a Element)->Self {Self{source,x:source.x,y:source.y,w:source.w,h:source.h,rotation:source.rotation,font_size:source.font_size,stroke_width:source.stroke_width}}
+}
+impl std::ops::Deref for PaintElement<'_> {
+    type Target=Element;
+    fn deref(&self)->&Element {self.source}
+}
 /// The element as it looks at `time` after its animation steps; `None` while it is hidden.
-fn animated_state(
-    element: &Element,
+fn animated_state<'a>(
+    element: &'a Element,
     steps: &[(usize, f32)],
     time: f32,
     slide_width: f32,
-) -> Option<(Element, f32)> {
+) -> Option<(PaintElement<'a>, f32)> {
     let mut visible = !steps
         .first()
         .and_then(|(slot, _)| element.animation_slot(*slot))
         .is_some_and(Animation::is_entrance);
     let mut ordered: Vec<(usize, f32)> = steps.to_vec();
     ordered.sort_by(|a, b| a.1.total_cmp(&b.1));
-    let mut out = element.clone();
+    let mut out = PaintElement::new(element);
     let (mut opacity, mut scale, mut shift) = (1.0_f32, 1.0_f32, 0.0_f32);
     for (slot, start) in ordered {
         let Some(animation) = element.animation_slot(slot) else {
@@ -2737,7 +2796,7 @@ fn animated_state(
                 if running {
                     opacity *= ease;
                     match animation.effect.as_str() {
-                        "fly_in" => shift += (1.0 - ease) * slide_width,
+                        "fly_in" => shift += (1.0 - ease) * (slide_width-out.x),
                         "zoom" => scale *= 0.05 + 0.95 * ease,
                         _ => {}
                     }
@@ -2749,7 +2808,7 @@ fn animated_state(
                 } else {
                     opacity *= 1.0 - ease;
                     match animation.effect.as_str() {
-                        "fly_out" => shift += ease * slide_width,
+                        "fly_out" => shift += ease * (slide_width-out.x),
                         "zoom_out" => scale *= 1.0 - 0.95 * ease,
                         _ => {}
                     }
@@ -2797,11 +2856,29 @@ pub fn paint_slide(
             && !steps.is_empty()
         {
             if let Some((animated, opacity)) = animated_state(element, steps, *time, deck.width) {
-                paint_element(ctx, &painter, rect.min, scale, &animated, opacity);
+                paint_projected(ctx,&painter,rect.min,scale,&animated,opacity);
             }
             continue;
         }
         paint_element(ctx, &painter, rect.min, scale, element, 1.0);
+    }
+}
+#[derive(Clone,Default)]
+struct SlideTextureCache {entries:Vec<(u64,egui::TextureHandle,usize)>}
+impl SlideTextureCache {
+    fn get(&mut self,key:u64)->Option<egui::TextureHandle> {
+        let index=self.entries.iter().position(|entry|entry.0==key)?;
+        let entry=self.entries.remove(index);let texture=entry.1.clone();self.entries.push(entry);Some(texture)
+    }
+    fn insert(&mut self,key:u64,texture:egui::TextureHandle,max_entries:usize,max_pixels:usize) {
+        self.entries.retain(|entry|entry.0!=key);
+        let size=texture.size();let pixels=size[0].saturating_mul(size[1]);
+        if max_entries==0||pixels>max_pixels {return;}
+        while !self.entries.is_empty() && (self.entries.len()>=max_entries
+            || self.entries.iter().fold(pixels,|total,entry|total.saturating_add(entry.2))>max_pixels) {
+            self.entries.remove(0);
+        }
+        self.entries.push((key,texture,pixels));
     }
 }
 fn paint_element(
@@ -2812,6 +2889,9 @@ fn paint_element(
     e: &Element,
     opacity: f32,
 ) {
+    paint_projected(ctx,painter,origin,scale,&PaintElement::new(e),opacity);
+}
+fn paint_projected(ctx:&egui::Context,painter:&egui::Painter,origin:Pos2,scale:f32,e:&PaintElement<'_>,opacity:f32) {
     if opacity <= 0.0 {
         return;
     }
@@ -2826,18 +2906,18 @@ fn paint_element(
         ElementKind::Rect => {
             let mut shape =
                 egui::epaint::RectShape::new(rect,0.0,if e.fill_visible {rgb(e.fill)}else{Color32::TRANSPARENT},stroke,StrokeKind::Inside);
-            shape.angle = e.rotation.to_radians();
+            shape.angle = e.rotation.rem_euclid(360.0).to_radians();
             painter.add(shape);
         }
         ElementKind::Ellipse => {
             let mut shape =
                 egui::epaint::EllipseShape::filled(rect.center(),rect.size()/2.0,if e.fill_visible {rgb(e.fill)}else{Color32::TRANSPARENT});
             shape.stroke = stroke;
-            shape.angle = e.rotation.to_radians();
+            shape.angle = e.rotation.rem_euclid(360.0).to_radians();
             painter.add(shape);
         }
         ElementKind::Line | ElementKind::Arrow => {
-            let [x1, y1, x2, y2] = super::model::line_points(e);
+            let [x1, y1, x2, y2] = super::model::line_points_geometry(e.x,e.y,e.w,e.h,e.rotation);
             let start = origin + Vec2::new(x1, y1) * scale;
             let end = origin + Vec2::new(x2, y2) * scale;
             if matches!(e.kind, ElementKind::Arrow) {
@@ -2850,9 +2930,10 @@ fn paint_element(
             let hash = bytes.iter().fold(0xcbf29ce484222325_u64, |h, b| {
                 (h ^ u64::from(*b)).wrapping_mul(0x100000001b3)
             });
-            let key = egui::Id::new(("slide_image", hash));
-            let texture = ctx.data_mut(|d| d.get_temp::<egui::TextureHandle>(key));
-            let texture = texture.or_else(|| {
+            let key=egui::Id::new("slides-bounded-texture-cache");
+            let cache=ctx.data_mut(|data|data.get_temp_mut_or_insert_with(key,||
+                std::sync::Arc::new(std::sync::Mutex::new(SlideTextureCache::default()))).clone());
+            let texture = cache.lock().ok().and_then(|mut cache|cache.get(hash)).or_else(|| {
                 let image = crate::util::decode_image(bytes).ok()?.to_rgba8();
                 if image.width() > 8192 || image.height() > 8192 {
                     return None;
@@ -2864,7 +2945,7 @@ fn paint_element(
                     color,
                     egui::TextureOptions::LINEAR,
                 );
-                ctx.data_mut(|d| d.insert_temp(key, handle.clone()));
+                if let Ok(mut cache)=cache.lock() {cache.insert(hash,handle.clone(),4096,32_000_000);}
                 Some(handle)
             });
             if let Some(texture) = texture {
@@ -2875,7 +2956,7 @@ fn paint_element(
                     Color32::WHITE,
                 );
                 if e.rotation != 0.0 {
-                    let turn = egui::emath::Rot2::from_angle(e.rotation.to_radians());
+                    let turn = egui::emath::Rot2::from_angle(e.rotation.rem_euclid(360.0).to_radians());
                     let center = rect.center();
                     for vertex in &mut mesh.vertices {
                         vertex.pos = center + turn * (vertex.pos - center);
@@ -2949,9 +3030,12 @@ fn paint_element(
         ElementKind::Chart { values, labels } => {
             let (min, max) = super::model::chart_bounds(values);
             let range = max - min;
-            let plot_height = (rect.height() - 30.0 * scale).max(1.0);
-            let cw = rect.width() / values.len().max(1) as f32;
-            let baseline = rect.top() + plot_height * max / range;
+            let layout=super::model::chart_layout_geometry(e.y,e.h,e.font_size,!e.text.is_empty(),labels);
+            let painter=painter.with_clip_rect(rect);
+            let plot_height=layout.plot_h*scale;
+            let cw = rect.width() / values.len().max(labels.len()).max(1) as f32;
+            let baseline = origin.y + layout.plot_y*scale + plot_height * max / range;
+            let inset=(cw*0.15).min(4.0*scale);let bar_width=(cw-2.0*inset).max(0.0);
             painter.line_segment(
                 [
                     Pos2::new(rect.left(), baseline),
@@ -2959,39 +3043,45 @@ fn paint_element(
                 ],
                 stroke,
             );
-            for (i, v) in values.iter().enumerate() {
+            for i in 0..values.len().max(labels.len()) {
+                let v=values.get(i).copied().unwrap_or(0.0);
                 let height = v.abs() / range * plot_height;
                 let bar = Rect::from_min_size(
                     Pos2::new(
-                        rect.left() + i as f32 * cw + 4.0 * scale,
-                        if *v >= 0.0 {
+                        rect.left() + i as f32 * cw + inset,
+                        if v >= 0.0 {
                             baseline - height
                         } else {
                             baseline
                         },
                     ),
-                    Vec2::new((cw - 8.0 * scale).max(1.0), height),
+                    Vec2::new(bar_width, height),
                 );
                 painter.rect_filled(bar, 0.0, rgb(e.fill));
-                painter.text(
-                    Pos2::new(bar.center().x, rect.bottom() - 24.0 * scale),
-                    Align2::CENTER_TOP,
-                    labels
-                        .get(i)
-                        .cloned()
-                        .unwrap_or_else(|| (i + 1).to_string()),
-                    FontId::proportional(14.0 * scale),
-                    rgb(e.color),
-                );
+                if layout.label_size>=1.0 {
+                    for (line_index,line) in super::model::chart_label(labels,i).split('\n').enumerate() {
+                        let text=super::model::fit_label_line(line,cw/scale,layout.label_size,&e.font,e.bold,e.italic);
+                        painter.text(
+                            Pos2::new(bar.center().x,origin.y+(layout.label_y+line_index as f32*layout.label_size*1.2)*scale),
+                            Align2::CENTER_TOP,text,
+                            FontId::new(layout.label_size*scale,crate::fonts::egui_family(painter.ctx(),&e.font,e.bold,e.italic)),
+                            rgb(e.color),
+                        );
+                    }
+                }
             }
         }
         ElementKind::Text => {}
     }
     if !e.text.is_empty() {
+        if let ElementKind::Chart{labels,..}=&e.kind {
+            let title_height=super::model::chart_layout_geometry(e.y,e.h,e.font_size,!e.text.is_empty(),labels).title_h*scale;
+            painter=painter.with_clip_rect(Rect::from_min_size(rect.min,Vec2::new(rect.width(),title_height)));
+        }
         let mut job = egui::text::LayoutJob::default();
         job.wrap.max_width = f32::INFINITY;
         job.append(
-            &super::model::text_lines(e).join("\n"),
+            &super::model::text_lines_content(&e.text,e.w,e.font_size,&e.font,e.bold,e.italic).join("\n"),
             0.0,
             egui::TextFormat {
                 font_id: FontId::new(
@@ -3004,7 +3094,7 @@ fn paint_element(
             },
         );
         let galley = painter.layout_job(job);
-        let angle = e.rotation.to_radians();
+        let angle = e.rotation.rem_euclid(360.0).to_radians();
         let pos = rect.center()
             + egui::emath::Rot2::from_angle(angle)
                 * (rect.min + Vec2::splat(5.0 * scale) - rect.center());
@@ -3865,4 +3955,87 @@ mod hundred_interaction_tests {
         draw(vec![egui::Event::ModifiersChanged(egui::Modifiers::NONE),key(egui::Modifiers::NONE)],&mut state,&mut e);
         assert_eq!(state.edit_cell,Some((1,0)));assert!(state.edit_focus);Ok(())
     }
+}
+
+
+#[cfg(test)]
+mod phase200_editor_tests {
+    use super::*;
+    #[test]
+    fn small_object_resize_does_not_jump_to_four_points() {
+        for handle in [(0.0,0.0),(1.0,1.0),(0.5,1.0),(1.0,0.5)] {
+            assert_eq!(resize_geometry((10.0,20.0,0.25,0.5),handle,Vec2::ZERO,false),(10.0,20.0,0.25,0.5));
+        }
+    }
+    #[test]
+    fn inserting_objects_ends_old_text_mode_and_returns_canvas_focus() {
+        let mut state=State{edit_text:Some(3),edit_cell:Some((2,4)),edit_focus:true,drag_target:Some(3),..State::default()};
+        select_inserted_objects(&mut state,vec![9]);
+        assert_eq!(state.selected,vec![9]);assert!(state.edit_text.is_none());assert!(state.edit_cell.is_none());
+        assert!(!state.edit_focus);assert!(state.canvas_focus_requested);assert!(state.drag_target.is_none());
+    }
+    #[test]
+    fn thumbnail_selection_scroll_requests_survive_canvas_consumption() {
+        let mut state=State{slide_id:9,thumbnail_seen_slide:9,thumbnail_scroll_requested:true,scroll_to_selection:false,..State::default()};
+        assert!(!take_thumbnail_scroll(&mut state,2));assert!(state.thumbnail_scroll_requested);
+        assert!(take_thumbnail_scroll(&mut state,9));assert!(!state.thumbnail_scroll_requested);
+        assert!(!take_thumbnail_scroll(&mut state,9));
+        state.slide_id=10;assert!(take_thumbnail_scroll(&mut state,10));
+    }
+    #[test]
+    fn group_rotation_turns_member_positions_as_one_unit()->Result<(),String> {
+        let mut deck=Deck::empty();let slide=deck.add_slide("blank");
+        let a=deck.add_element(slide,ElementKind::Rect)?;let b=deck.add_element(slide,ElementKind::Rect)?;let group=deck.allocate_id();
+        for (id,x) in [(a,10.0),(b,50.0)] {let object=deck.slide_mut(slide).and_then(|s|s.element_mut(id)).ok_or("shape")?;
+            object.x=x;object.y=20.0;object.w=20.0;object.h=10.0;object.group=Some(group);}
+        assert!(rotate_selected(deck.slide_mut(slide).ok_or("slide")?,&[a,b],90.0)?);
+        let s=deck.slide(slide).ok_or("slide")?;let a=s.element(a).ok_or("a")?;let b=s.element(b).ok_or("b")?;
+        assert!((a.x-30.0).abs()<0.001 && a.y.abs()<0.001);
+        assert!((b.x-30.0).abs()<0.001 && (b.y-40.0).abs()<0.001);assert_eq!(a.rotation,90.0);deck.validate()?;Ok(())
+    }
+    #[test]
+    fn slide_texture_cache_evicts_old_images_with_shared_pixel_budget() {
+        let ctx=egui::Context::default();let mut cache=SlideTextureCache::default();
+        let image=||egui::ColorImage::from_rgba_unmultiplied([1,1],&[255,0,0,255]);
+        for key in 1..=2 {let texture=ctx.load_texture(format!("texture{key}"),image(),egui::TextureOptions::LINEAR);cache.insert(key,texture,10,2);}
+        assert!(cache.get(1).is_some());
+        let texture=ctx.load_texture("texture3",image(),egui::TextureOptions::LINEAR);cache.insert(3,texture,10,2);
+        assert!(cache.get(2).is_none());assert!(cache.get(1).is_some());assert!(cache.get(3).is_some());
+        assert_eq!(cache.entries.len(),2);
+    }
+    #[test]
+    fn fly_effects_travel_to_the_slide_edge_from_off_canvas_objects()->Result<(),String> {
+        let mut element=Element{x:-1000.0,animation:Animation{effect:"fly_in".into(),duration:1.0,..Default::default()},..Default::default()};
+        let (frame,_)=animated_state(&element,&[(0,0.0)],0.0,960.0).ok_or("entrance")?;assert_eq!(frame.x,960.0);
+        element.animation.effect="fly_out".into();
+        let (frame,_)=animated_state(&element,&[(0,0.0)],0.5,960.0).ok_or("exit")?;
+        assert!((frame.x-715.0).abs()<0.001);Ok(())
+    }
+    #[test]
+    fn animation_geometry_borrows_large_payloads_instead_of_cloning_them()->Result<(),String> {
+        let element=Element{kind:ElementKind::Image{bytes:vec![9;1024*1024]},text:"caption".repeat(100),
+            animation:Animation{effect:"move".into(),duration:1.0,dx:100.0,..Default::default()},..Default::default()};
+        let (frame,_)=animated_state(&element,&[(0,0.0)],0.5,960.0).ok_or("frame")?;
+        assert!(std::ptr::eq(frame.source,&element));
+        assert_eq!(frame.text.as_ptr(),element.text.as_ptr());
+        assert!(matches!((&frame.kind,&element.kind),(ElementKind::Image{bytes:a},ElementKind::Image{bytes:b}) if a.as_ptr()==b.as_ptr()));
+        assert_eq!(frame.x,element.x+87.5);assert_eq!(element.x,60.0);Ok(())
+    }
+
+    #[test]
+    fn slide_property_text_focus_does_not_transfer_to_another_slide() {
+        let ctx=egui::Context::default();let mut a="Slide A".to_string();let mut b="Slide B".to_string();let mut field_id=None;
+        let _=ctx.run(egui::RawInput::default(),|ctx|{
+            egui::CentralPanel::default().show(ctx,|ui|{
+                field_id=Some(ui.id().with(("slide-property",1_u64,"title")));
+                slide_property_text(ui,&mut a,1,"title","");
+            });
+        });
+        if let Some(id)=field_id {ctx.memory_mut(|memory|memory.request_focus(id));}
+        let _=ctx.run(egui::RawInput{events:vec![egui::Event::Text("wrong slide".into())],..Default::default()},|ctx|{
+            egui::CentralPanel::default().show(ctx,|ui|{slide_property_text(ui,&mut b,2,"title","");});
+        });
+        assert_eq!(b,"Slide B");
+    }
+
 }

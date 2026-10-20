@@ -33,7 +33,7 @@ pub fn write(deck: &Deck, ext: &str) -> Result<Vec<u8>, String> {
     match ext.trim_start_matches('.').to_ascii_lowercase().as_str() {
         "pptx" => write_pptx(deck),
         "trineslide" => crate::native::encode(&crate::native::Document::Slides(deck.clone())),
-        "json" => serde_json::to_vec_pretty(deck).map_err(|e| e.to_string()),
+        "json" => deck_json(deck,true,crate::package::MAX_FILE),
         "md" => linear_export(deck,"md",crate::package::MAX_FILE),
         "txt" => Ok(deck
             .slides
@@ -56,6 +56,22 @@ pub fn write(deck: &Deck, ext: &str) -> Result<Vec<u8>, String> {
         "html" => linear_export(deck,"html",crate::package::MAX_FILE),
         _ => Err(format!("Экспорт .{ext} ещё не поддерживается")),
     }
+}
+struct LimitedJson {bytes:Vec<u8>,limit:usize}
+impl std::io::Write for LimitedJson {
+    fn write(&mut self,bytes:&[u8])->std::io::Result<usize> {
+        if self.bytes.len().checked_add(bytes.len()).is_none_or(|length|length>self.limit) {
+            return Err(std::io::Error::other("JSON Slides превышает безопасный размер"));
+        }
+        self.bytes.extend_from_slice(bytes);Ok(bytes.len())
+    }
+    fn flush(&mut self)->std::io::Result<()> {Ok(())}
+}
+fn deck_json(deck:&Deck,pretty:bool,limit:usize)->Result<Vec<u8>,String> {
+    let mut output=LimitedJson{bytes:Vec::new(),limit};
+    if pretty {serde_json::to_writer_pretty(&mut output,deck)}else{serde_json::to_writer(&mut output,deck)}
+        .map_err(|error|error.to_string())?;
+    Ok(output.bytes)
 }
 pub(crate) fn element_text(element: &Element) -> String {
     let content = match &element.kind {
@@ -418,7 +434,7 @@ impl Look {
                     .child("srgbClr")
                     .map(|n| n.attr("val"))
                     .or_else(|| entry.child("sysClr").map(|n| n.attr("lastClr")));
-                if let Some(rgb) = value.and_then(parse_hex) {
+                if let Some(rgb) = value.and_then(parse_hex).or_else(||entry.child("scrgbClr").and_then(sc_rgb)) {
                     look.colors.insert(entry.name.clone(), rgb);
                 }
             }
@@ -477,15 +493,28 @@ fn parse_hex(value: &str) -> Option<[u8; 3]> {
     let number = u32::from_str_radix(value, 16).ok()?;
     Some([(number >> 16) as u8, (number >> 8) as u8, number as u8])
 }
+fn drawing_percentage(text:&str)->Option<f64> {
+    let (number,scale)=if let Some(number)=text.strip_suffix('%'){(number,100.0)}else{(text,100000.0)};
+    number.parse::<f64>().ok().filter(|number|number.is_finite()).map(|number|number/scale)
+}
+fn sc_rgb(node:&Node)->Option<[u8;3]> {
+    let channel=|name|drawing_percentage(node.attr(name)).map(|value|{
+        let value=value.clamp(0.0,1.0);
+        let encoded=if value<=0.0031308 {value*12.92}else{1.055*value.powf(1.0/2.4)-0.055};
+        (encoded*255.0).round().clamp(0.0,255.0) as u8
+    });
+    Some([channel("r")?,channel("g")?,channel("b")?])
+}
 fn color(node: Option<&Node>, look: &Look, fallback: [u8; 3]) -> [u8; 3] {
     let Some(node) = node else { return fallback; };
     let source = node.descend("srgbClr").or_else(|| node.descend("schemeClr"))
-        .or_else(|| node.descend("sysClr"));
+        .or_else(|| node.descend("sysClr")).or_else(||node.descend("scrgbClr"));
     let Some(source) = source else { return fallback; };
     let mut rgb = match source.name.as_str() {
         "srgbClr" => parse_hex(source.attr("val")),
         "schemeClr" => look.colors.get(source.attr("val")).copied(),
         "sysClr" => parse_hex(source.attr("lastClr")),
+        "scrgbClr" => sc_rgb(source),
         _ => None,
     }.unwrap_or(fallback);
     for transform in &source.children {
@@ -595,10 +624,11 @@ fn flatten<'a>(
             let value = |child: &str, key: &str| x.child(child).map_or(0.0, |n| n.number(key, 0.0));
             let (cx, cy) = (value("ext", "cx"), value("ext", "cy"));
             let (chx, chy) = (value("chExt", "cx"), value("chExt", "cy"));
-            let sx = if chx > 0.0 { cx / chx } else { 1.0 };
-            let sy = if chy > 0.0 { cy / chy } else { 1.0 };
-            let dx = value("off", "x") - value("chOff", "x") * sx;
-            let dy = value("off", "y") - value("chOff", "y") * sy;
+            let flip_x=matches!(x.attr("flipH"),"1"|"true");let flip_y=matches!(x.attr("flipV"),"1"|"true");
+            let sx = if chx > 0.0 { cx / chx } else { 1.0 } * if flip_x{-1.0}else{1.0};
+            let sy = if chy > 0.0 { cy / chy } else { 1.0 } * if flip_y{-1.0}else{1.0};
+            let dx = value("off", "x") + if flip_x{cx}else{0.0} - value("chOff", "x") * sx;
+            let dy = value("off", "y") + if flip_y{cy}else{0.0} - value("chOff", "y") * sy;
             inner = [
                 map[0] * sx,
                 map[1] * sy,
@@ -610,7 +640,33 @@ fn flatten<'a>(
         flatten(shape, inner, depth + 1, out, rotated_groups);
     }
 }
+fn multilevel_points(cache:&Node)->Result<Vec<String>,String> {
+    let mut count=cache.child("ptCount").map(|node|node.attr("val").parse::<usize>()).transpose().map_err(|_|"Некорректное число категорий")?.unwrap_or(0);
+    if count>10000 {return Err("Слишком много категорий".into());}
+    let mut levels=Vec::new();
+    for level in cache.children.iter().filter(|node|node.name=="lvl") {
+        if levels.len()>=32 {return Err("Слишком много уровней категорий".into());}
+        let mut labels=BTreeMap::new();
+        for point in level.children.iter().filter(|node|node.name=="pt") {
+            let index=point.attr("idx").parse::<usize>().map_err(|_|"Некорректный индекс категории")?;
+            if index>=10000 {return Err("Слишком большой индекс категории".into());}
+            count=count.max(index+1);labels.insert(index,point.child("v").map(|node|node.text.as_str()).unwrap_or(""));
+        }
+        levels.push(labels);
+    }
+    let mut output=Vec::with_capacity(count);let mut total=0_usize;
+    for index in 0..count {
+        let labels=levels.iter().enumerate().rev().filter_map(|(level,labels)|{
+            if level==0 {labels.get(&index).copied()}else{labels.range(..=index).next_back().map(|(_,label)|*label)}
+        }).collect::<Vec<_>>();
+        let size=labels.iter().fold(labels.len().saturating_sub(1),|size,label|size.saturating_add(label.len()));
+        total=total.saturating_add(size);if total>8*1024*1024 {return Err("Текст категорий превышает8МБ".into());}
+        output.push(labels.join("\n"));
+    }
+    Ok(output)
+}
 fn cached_points(node: &Node) -> Result<Vec<String>, String> {
+    if let Some(cache)=node.descend("multiLvlStrCache"){return multilevel_points(cache);}
     let cache = ["numCache", "strCache", "numLit", "strLit"]
         .iter()
         .find_map(|name| node.descend(name))
@@ -676,13 +732,21 @@ fn selected_run_properties(body: &Node) -> (Vec<&Node>, bool) {
     if !has_text && let Some(props)=paragraph.and_then(|p|p.child("endParaRPr")) {layers.push(props);}
     (layers,has_text)
 }
+fn style_theme_font<'a>(style:Option<&Node>,look:&'a Look)->Option<&'a str> {
+    let font=match style?.child("fontRef")?.attr("idx") {"major"=>&look.major,"minor"=>&look.minor,_=>return None};
+    (!font.is_empty()).then_some(font.as_str())
+}
+fn shape_fill_visible(props:Option<&Node>,style:Option<&Node>)->bool {
+    if let Some(fill)=props.and_then(|props|props.children.iter().find(|node|matches!(node.name.as_str(),"solidFill"|"gradFill"|"pattFill"|"noFill"))) {return fill.name!="noFill";}
+    !style.and_then(|node|node.child("fillRef")).is_some_and(|node|matches!(node.attr("idx"),"0"|"1000"))
+}
 fn apply_text_look(
     body:&Node,element:&mut Element,look:&Look,style:Option<&Node>,default_size:f32,title:bool,
 ) {
     let (layers,_)=selected_run_properties(body);
     element.font_size=default_size;
-    let theme_face=if title {&look.major}else{&look.minor};
-    if !theme_face.is_empty() {element.font.clone_from(theme_face);}
+    let theme_face=style_theme_font(style,look).unwrap_or_else(||if title {&look.major}else{&look.minor});
+    if !theme_face.is_empty() {element.font=theme_face.to_owned();}
     element.color=color(style.and_then(|n|n.child("fontRef")),look,element.color);
     for props in layers {apply_run_properties(props,element,look);}
 }
@@ -692,7 +756,7 @@ fn apply_inherited_text_look(
 ) {
     apply_text_look(body,element,look,style,default_size,title);
     let own_layers=selected_run_properties(body).0;
-    let own_font=own_layers.iter().any(|props|props.child("latin").and_then(|n|look.font(n.attr("typeface"))).is_some());
+    let own_font=style_theme_font(style,look).is_some()||own_layers.iter().any(|props|props.child("latin").and_then(|n|look.font(n.attr("typeface"))).is_some());
     let own_color=own_layers.iter().any(|props|props.child("solidFill").is_some())
         ||style.and_then(|n|n.child("fontRef")).is_some();
     let level=paragraph_level(first_text_paragraph(body));
@@ -731,9 +795,10 @@ fn flipped_image(bytes:&[u8],flip:(bool,bool))->Result<Vec<u8>,String> {
 fn scale_group_appearance(element:&mut Element,map:[f32;4]) {
     // A uniform group scale applies to line widths and text sizes too. Nonuniform text
     // deformation cannot be represented by the current single font-size field.
-    if map[0]>0.0 && (map[0]-map[1]).abs()<=map[0].abs()*0.00001 {
-        element.font_size=(element.font_size*map[0]).clamp(1.0,300.0);
-        element.stroke_width=(element.stroke_width*map[0]).clamp(0.0,300.0);
+    let (sx,sy)=(map[0].abs(),map[1].abs());
+    if sx>0.0 && (sx-sy).abs()<=sx*0.00001 {
+        element.font_size=(element.font_size*sx).clamp(1.0,300.0);
+        element.stroke_width=(element.stroke_width*sx).clamp(0.0,300.0);
     }
 }
 fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
@@ -829,7 +894,19 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
                 .transpose()?;
             looks.insert(master.clone(), Look::read(theme.as_ref()));
         }
-        let raw_look = looks.get(&master).unwrap_or(&no_look);
+        let mut current_look=looks.get(&master).unwrap_or(&no_look).clone();
+        // Layout overrides precede a slide override; omitted scheme components inherit.
+        for owner in chain.iter().take(1).map(String::as_str).chain(std::iter::once(target.as_str())) {
+            if let Some(path)=rels_of_kind(owner,Some("themeOverride"))?.values().next() {
+                if !parsed.contains_key(path) && let Some(bytes)=parts.get(path) {parsed.insert(path.clone(),parse(bytes)?);}
+                if let Some(theme)=parsed.get(path) {
+                    let replacement=Look::read(Some(theme));
+                    if theme.child("clrScheme").is_some() {current_look.colors.extend(replacement.colors);}
+                    if theme.child("fontScheme").is_some() {current_look.major=replacement.major;current_look.minor=replacement.minor;}
+                }
+            }
+        }
+        let raw_look=&current_look;
         let sources: Vec<&Node> = chain.iter().filter_map(|p| parsed.get(p)).collect();
         if let Some(layout) = sources.first() {
             slide.layout = match layout.attr("type") {
@@ -911,8 +988,8 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
                         element.y = (map[1] * offset.number("y", 0.0) + map[3]) / 12700.0;
                     }
                     if let Some(size) = own.and_then(|n|n.child("ext")).or_else(||inherited.and_then(|n|n.child("ext"))) {
-                        element.w = (map[0] * size.number("cx", 1270000.0) / 12700.0).max(0.001);
-                        element.h = (map[1] * size.number("cy", 1270000.0) / 12700.0).max(0.001);
+                        element.w = (map[0].abs() * size.number("cx", 1270000.0) / 12700.0).max(0.001);
+                        element.h = (map[1].abs() * size.number("cy", 1270000.0) / 12700.0).max(0.001);
                     }
                     element.rotation = transform.number("rot", 0.0) / 60000.0;
                     flip = (
@@ -920,6 +997,9 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
                         matches!(transform.attr("flipV"), "1" | "true"),
                     );
                 }
+                if map[0]<0.0 {element.x-=element.w;flip.0=!flip.0;}
+                if map[1]<0.0 {element.y-=element.h;flip.1=!flip.1;}
+                if (map[0]<0.0)!=(map[1]<0.0) {element.rotation=-element.rotation;}
                 let props = shape.child("spPr");
                 let style = shape.child("style");
                 if matches!(shape.name.as_str(), "sp" | "cxnSp") {
@@ -945,13 +1025,6 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
                     element.stroke = color(line.or(line_ref), look, element.stroke);
                     element.stroke_width = match line {
                         Some(line) if line.child("noFill").is_some() => 0.0,
-                        Some(line)
-                            if line.child("solidFill").is_none()
-                                && line.child("gradFill").is_none()
-                                && line_ref.is_none() =>
-                        {
-                            0.0
-                        }
                         Some(line) => line.number("w", 12700.0) / 12700.0,
                         None if line_ref.is_some() => 1.0,
                         None => 0.0,
@@ -1051,7 +1124,7 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
                             .map(cached_points)
                             .transpose()?
                             .unwrap_or_default();
-                        element.text = chart.descend("title").map(Node::text_content).unwrap_or_default();
+                        element.text = chart_title(&chart)?;
                         element.fill = color(chart.descend("ser").and_then(|series|series.child("spPr")), look, element.fill);
                         element.kind = ElementKind::Chart { values, labels };
                     } else {
@@ -1129,7 +1202,7 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
                         element.kind=ElementKind::Text;
                     }
                     if matches!(element.kind,ElementKind::Rect|ElementKind::Ellipse) {
-                        element.fill_visible=props.and_then(|node|node.child("noFill")).is_none();
+                        element.fill_visible=shape_fill_visible(props,style);
                     }
                 }
                 if let Some(body) = shape.child("txBody") {
@@ -1227,7 +1300,7 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
                 notes.all("sp", &mut shapes);
                 slide.notes = shapes
                     .iter()
-                    .filter(|s| placeholder(s).is_some_and(|(t, _)| t == "body"))
+                    .filter(|s| placeholder(s).is_none_or(|(kind,_)|kind=="body"))
                     .filter_map(|s| s.child("txBody"))
                     .map(|body| body.paragraph_text())
                     .collect::<Vec<_>>()
@@ -1256,29 +1329,74 @@ fn read_pptx(bytes: &[u8]) -> Result<Deck, String> {
 }
 /// Start delay of a time node in ms (`indefinite` and missing = 0).
 fn node_delay(node: &Node) -> f32 {
-    node.child("stCondLst")
-        .and_then(|n| n.child("cond"))
-        .map_or(0.0, |n| n.number("delay", 0.0).max(0.0))
+    node.child("stCondLst").map(|conditions|conditions.children.iter().filter(|node|node.name=="cond")
+        .filter_map(|condition|condition.attr("delay").parse::<f32>().ok().filter(|delay|delay.is_finite()&&*delay>=0.0))
+        .min_by(f32::total_cmp).unwrap_or(0.0)).unwrap_or(0.0)
 }
 /// Effect nodes under a time node with their start in ms from the start of the click group.
-fn timed_effects<'a>(node: &'a Node, offset: f32, out: &mut Vec<(f32, &'a Node)>) {
-    let Some(children) = node.child("childTnLst") else {
-        return;
-    };
-    for child in &children.children {
-        let Some(ctn) = child.child("cTn") else {
-            continue;
-        };
-        let start = offset + node_delay(ctn);
-        if ctn.attr("presetClass").is_empty() {
-            timed_effects(ctn, start, out);
-        } else {
-            out.push((start, ctn));
+fn timed_effects<'a>(node:&'a Node,offset:f32,out:&mut Vec<(f32,&'a Node)>) {
+    collect_timed_effects(node,offset,false,out);
+}
+fn collect_timed_effects<'a>(node:&'a Node,offset:f32,sequential:bool,out:&mut Vec<(f32,&'a Node)>)->f32 {
+    let mut end=offset;
+    if let Some(children)=node.child("childTnLst") {
+        for child in &children.children {
+            let Some(ctn)=child.child("cTn") else{continue;};
+            let start=if sequential{end}else{offset}+node_delay(ctn);
+            let child_end=if ctn.attr("presetClass").is_empty() {
+                collect_timed_effects(ctn,start,child.name=="seq",out)
+            }else{out.push((start,ctn));start+effect_duration_ms(ctn)};
+            end=end.max(child_end);
         }
     }
+    let own=node.number("dur",0.0);
+    if own>0.0 {offset+own}else{end}
 }
 /// TrineDocs effect for a PowerPoint preset; `None` = no equivalent. The flag marks presets
 /// replaced by the closest TrineDocs effect.
+struct MotionCursor<'a>{text:&'a str,index:usize}
+impl MotionCursor<'_> {
+    fn skip(&mut self){while self.text.as_bytes().get(self.index).is_some_and(|b|b.is_ascii_whitespace()||*b==b','){self.index+=1;}}
+    fn number(&mut self)->Option<f64>{
+        self.skip();let start=self.index;let bytes=self.text.as_bytes();
+        if matches!(bytes.get(self.index),Some(b'+')|Some(b'-')) {self.index+=1;}
+        let mut digits=0;
+        while bytes.get(self.index).is_some_and(u8::is_ascii_digit){self.index+=1;digits+=1;}
+        if bytes.get(self.index)==Some(&b'.') {self.index+=1;while bytes.get(self.index).is_some_and(u8::is_ascii_digit){self.index+=1;digits+=1;}}
+        if digits==0 {return None;}
+        if matches!(bytes.get(self.index),Some(b'e')|Some(b'E')) {
+            let mut end=self.index+1;
+            if matches!(bytes.get(end),Some(b'+')|Some(b'-')) {end+=1;}
+            if bytes.get(end).is_some_and(u8::is_ascii_digit) {
+                self.index=end+1;while bytes.get(self.index).is_some_and(u8::is_ascii_digit){self.index+=1;}
+            }
+        }
+        self.text[start..self.index].parse::<f64>().ok().filter(|number|number.is_finite())
+    }
+}
+fn motion_path_endpoint(path:&str)->Option<(f32,f32,bool)> {
+    let mut cursor=MotionCursor{text:path,index:0};let mut command=b'M';
+    let (mut x,mut y,mut start_x,mut start_y)=(0.0_f64,0.0_f64,0.0_f64,0.0_f64);
+    let mut moves=0;let mut segments=0;let mut approximate=false;
+    loop {
+        cursor.skip();let Some(&byte)=path.as_bytes().get(cursor.index) else{break;};
+        if byte.is_ascii_alphabetic() {command=byte;cursor.index+=1;}
+        if matches!(command,b'E'|b'e'){cursor.skip();if cursor.index!=path.len(){return None;}break;}
+        if matches!(command,b'Z'|b'z') {x=start_x;y=start_y;approximate=true;command=b'L';continue;}
+        let count=match command {b'M'|b'm'|b'L'|b'l'=>2,b'C'|b'c'=>6,_=>return None};
+        let mut numbers=[0.0_f64;6];for value in numbers.iter_mut().take(count){*value=cursor.number()?;}
+        let (next_x,next_y)=(numbers[count-2],numbers[count-1]);
+        if command.is_ascii_lowercase(){x+=next_x;y+=next_y;}else{x=next_x;y=next_y;}
+        if !x.is_finite()||!y.is_finite(){return None;}
+        if matches!(command,b'M'|b'm'){
+            moves+=1;if moves>1 {approximate=true;}start_x=x;start_y=y;
+            approximate|=x!=0.0||y!=0.0;
+            command=if command==b'M'{b'L'}else{b'l'};
+        }else{segments+=1;approximate|=count==6||segments>1;}
+    }
+    if moves==0 {return None;}
+    Some((x.clamp(-100000.0,100000.0) as f32,y.clamp(-100000.0,100000.0) as f32,approximate))
+}
 fn preset_effect(effect: &Node, size: (f32, f32)) -> Option<(&'static str, f32, f32, bool)> {
     let id = effect.attr("presetID");
     Some(match effect.attr("presetClass") {
@@ -1301,22 +1419,8 @@ fn preset_effect(effect: &Node, size: (f32, f32)) -> Option<(&'static str, f32, 
         },
         "path" => {
             let path = effect.descend("animMotion")?.attr("path");
-            let numbers: Vec<f32> = path
-                .split(|c: char| c.is_whitespace() || c == ',')
-                .filter_map(|t| t.parse::<f32>().ok())
-                .filter(|v| v.is_finite())
-                .collect();
-            let [.., x, y] = numbers.as_slice() else {
-                return None;
-            };
-            // Only straight paths are exact; curves keep their end point.
-            let straight = !path.contains('C') && numbers.len() <= 4;
-            (
-                "move",
-                (x * size.0).clamp(-100000.0, 100000.0),
-                (y * size.1).clamp(-100000.0, 100000.0),
-                !straight,
-            )
+            let (x,y,approximate)=motion_path_endpoint(path)?;
+            ("move",(x*size.0).clamp(-100000.0,100000.0),(y*size.1).clamp(-100000.0,100000.0),approximate)
         }
         _ => return None,
     })
@@ -1324,6 +1428,18 @@ fn preset_effect(effect: &Node, size: (f32, f32)) -> Option<(&'static str, f32, 
 /// Object animations of a slide's `p:timing` main sequence mapped onto its elements. Start
 /// times are rebuilt from the group/sub-group/effect delays, so with/after-previous chains keep
 /// their timing. Returns the number of effects that were approximated or skipped.
+fn effect_duration_ms(effect:&Node)->f32 {
+    let own=effect.number("dur",0.0);
+    if own>0.0 {return own*if matches!(effect.attr("autoRev"),"1"|"true"){2.0}else{1.0};}
+    let mut behaviours=Vec::new();
+    if let Some(children)=effect.child("childTnLst") {children.all("cTn",&mut behaviours);}
+    behaviours.into_iter().map(|node|{
+        let mut duration=node.number("dur",0.0);
+        if matches!(node.attr("autoRev"),"1"|"true") {duration*=2.0;}
+        node_delay(node)+duration
+    }).filter(|duration|*duration>0.0).fold(1.0_f32,f32::max)
+        * if matches!(effect.attr("autoRev"),"1"|"true"){2.0}else{1.0}
+}
 fn read_timing(
     timing: &Node,
     shape_ids: &BTreeMap<String, usize>,
@@ -1355,9 +1471,11 @@ fn read_timing(
                 .child("stCondLst")
                 .is_some_and(|n| n.children.iter().any(|c| c.attr("evt") == "onBegin"));
         let mut effects = Vec::new();
-        timed_effects(group, 0.0, &mut effects);
+        timed_effects(group, node_delay(group), &mut effects);
         // Times are in seconds from the click (or slide start) that began this group.
-        for (position, (start_ms, effect)) in effects.into_iter().enumerate() {
+        effects.sort_by(|a,b|a.0.total_cmp(&b.0));
+        let mut accepted=0_usize;
+        for (start_ms, effect) in effects {
             used += 1;
             let start = start_ms / 1000.0;
             let index = effect
@@ -1377,32 +1495,10 @@ fn read_timing(
                 continue;
             }
             inexact += usize::from(approximate);
-            let mut behaviours = Vec::new();
-            if let Some(children) = effect.child("childTnLst") {
-                children.all("cTn", &mut behaviours);
-            }
-            let longest = behaviours
-                .iter()
-                .map(|n| {
-                    let duration = n.number("dur", 0.0);
-                    // Auto-reversed behaviours (pulse) run twice.
-                    if n.attr("autoRev") == "1" {
-                        duration * 2.0
-                    } else {
-                        duration
-                    }
-                })
-                .filter(|ms| *ms > 1.0)
-                .fold(0.0_f32, f32::max);
-            // "Appear" and other instant effects.
-            let duration = if longest > 0.0 {
-                (longest / 1000.0).clamp(0.01, 3600.0)
-            } else {
-                0.01
-            };
-            let (trigger, delay) = if position == 0 && !auto {
+            let duration=(effect_duration_ms(effect)/1000.0).clamp(0.001,3600.0);
+            let (trigger, delay) = if accepted == 0 && !auto {
                 ("on_click", start)
-            } else if position == 0 {
+            } else if accepted == 0 {
                 ("with_previous", start)
             } else if effect.attr("nodeType") == "afterEffect" && start + 0.0005 >= previous_end {
                 ("after_previous", start - previous_end)
@@ -1416,7 +1512,7 @@ fn read_timing(
             let delay = delay.clamp(0.0, 86400.0);
             let start = match trigger {
                 "after_previous" => previous_end + delay,
-                _ if position == 0 => delay,
+                _ if accepted == 0 => delay,
                 _ => previous_start + delay,
             };
             previous_start = start;
@@ -1431,6 +1527,7 @@ fn read_timing(
                 dx,
                 dy,
             };
+            accepted+=1;
             if element.is_animated() {
                 element.more_animations.push(animation);
             } else {
@@ -1502,7 +1599,7 @@ fn text_body(e: &Element) -> String {
         ""
     };
     format!(
-        "<p:txBody><a:bodyPr wrap=\"square\">{fit}</a:bodyPr><a:lstStyle/>{paragraphs}</p:txBody>"
+        "<p:txBody><a:bodyPr wrap=\"square\" lIns=\"63500\" tIns=\"63500\" rIns=\"63500\" bIns=\"63500\">{fit}</a:bodyPr><a:lstStyle/>{paragraphs}</p:txBody>"
     )
 }
 fn shape_xml(e: &Element, id: usize) -> String {
@@ -1556,11 +1653,12 @@ fn table_xml(e: &Element, id: usize, cells: &[Vec<String>]) -> Result<String,Str
     let grid = (0..cols)
         .map(|_| format!("<a:gridCol w=\"{}\"/>", emu(e.w / cols as f32)))
         .collect::<String>();
+    let cell_font=e.font_size.min(e.h/cells.len().max(1) as f32*0.7).clamp(1.0,300.0);
     let paragraphs = |text: &str| {
         text.replace("\r\n", "\n").replace('\r', "\n").split('\n')
             .map(|line| format!(
                 "<a:p><a:r><a:rPr lang=\"ru-RU\" sz=\"{}\" b=\"{}\" i=\"{}\"><a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill><a:latin typeface=\"{}\"/></a:rPr><a:t xml:space=\"preserve\">{}</a:t></a:r></a:p>",
-                (e.font_size * 100.0) as u32, u8::from(e.bold), u8::from(e.italic), hex(e.color), xml_escape(&e.font), xml_escape(line)
+                (cell_font * 100.0).round() as u32, u8::from(e.bold), u8::from(e.italic), hex(e.color), xml_escape(&e.font), xml_escape(line)
             )).collect::<String>()
     };
     let line = if e.stroke_width <= 0.0 {
@@ -1582,7 +1680,7 @@ fn table_xml(e: &Element, id: usize, cells: &[Vec<String>]) -> Result<String,Str
             let values = (0..cols)
                 .map(|col| {
                     format!(
-                        "<a:tc><a:txBody><a:bodyPr/><a:lstStyle/>{}</a:txBody><a:tcPr>{borders}<a:solidFill><a:srgbClr val=\"{fill}\"/></a:solidFill></a:tcPr></a:tc>",
+                        "<a:tc><a:txBody><a:bodyPr lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"/><a:lstStyle/>{}</a:txBody><a:tcPr marL=\"63500\" marT=\"63500\" marR=\"63500\" marB=\"63500\">{borders}<a:solidFill><a:srgbClr val=\"{fill}\"/></a:solidFill></a:tcPr></a:tc>",
                         paragraphs(row.get(col).map(String::as_str).unwrap_or(""))
                     )
                 })
@@ -1598,11 +1696,18 @@ fn table_xml(e: &Element, id: usize, cells: &[Vec<String>]) -> Result<String,Str
         xfrm(e, "p")
     ))
 }
+fn chart_title(chart:&Node)->Result<String,String> {
+    let Some(title)=chart.descend("chart").and_then(|chart|chart.child("title")) else{return Ok(String::new());};
+    let Some(text)=title.child("tx") else{return Ok(String::new());};
+    if let Some(rich)=text.child("rich") {return Ok(rich.paragraph_text());}
+    if let Some(reference)=text.child("strRef").or_else(||text.child("strLit")) {
+        return Ok(cached_points(reference)?.into_iter().next().unwrap_or_default());
+    }
+    Ok(text.child("v").map(|node|node.text.clone()).unwrap_or_default())
+}
 fn chart_xml(values: &[f32], labels: &[String], fill: [u8; 3],title:&str) -> String {
-    let cats = values
-        .iter()
-        .enumerate()
-        .map(|(i, _)| {
+    let point_count=values.len().max(labels.len());
+    let cats = (0..point_count).map(|i| {
             format!(
                 "<c:pt idx=\"{i}\"><c:v>{}</c:v></c:pt>",
                 xml_escape(
@@ -1614,10 +1719,8 @@ fn chart_xml(values: &[f32], labels: &[String], fill: [u8; 3],title:&str) -> Str
             )
         })
         .collect::<String>();
-    let vals = values
-        .iter()
-        .enumerate()
-        .map(|(i, v)| format!("<c:pt idx=\"{i}\"><c:v>{v}</c:v></c:pt>"))
+    let vals = (0..point_count)
+        .map(|i| {let value=values.get(i).copied().unwrap_or(0.0);format!("<c:pt idx=\"{i}\"><c:v>{value}</c:v></c:pt>")})
         .collect::<String>();
     let title=if title.is_empty() {String::new()}else {
         format!("<c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>{}</a:t></a:r></a:p></c:rich></c:tx><c:overlay val=\"0\"/></c:title>",xml_escape(title))
@@ -1625,8 +1728,8 @@ fn chart_xml(values: &[f32], labels: &[String], fill: [u8; 3],title:&str) -> Str
     format!(
         "{XML}<c:chartSpace xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\" xmlns:a=\"{A}\"><c:chart>{title}<c:plotArea><c:layout/><c:barChart><c:barDir val=\"col\"/><c:grouping val=\"clustered\"/><c:ser><c:idx val=\"0\"/><c:order val=\"0\"/><c:spPr><a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill></c:spPr><c:cat><c:strLit><c:ptCount val=\"{}\"/>{cats}</c:strLit></c:cat><c:val><c:numLit><c:formatCode>General</c:formatCode><c:ptCount val=\"{}\"/>{vals}</c:numLit></c:val></c:ser><c:axId val=\"1\"/><c:axId val=\"2\"/></c:barChart><c:catAx><c:axId val=\"1\"/><c:scaling><c:orientation val=\"minMax\"/></c:scaling><c:axPos val=\"b\"/><c:crossAx val=\"2\"/><c:crosses val=\"autoZero\"/><c:auto val=\"1\"/><c:lblAlgn val=\"ctr\"/><c:lblOffset val=\"100\"/></c:catAx><c:valAx><c:axId val=\"2\"/><c:scaling><c:orientation val=\"minMax\"/></c:scaling><c:axPos val=\"l\"/><c:numFmt formatCode=\"General\" sourceLinked=\"1\"/><c:crossAx val=\"1\"/><c:crosses val=\"autoZero\"/><c:crossBetween val=\"between\"/></c:valAx></c:plotArea><c:plotVisOnly val=\"1\"/></c:chart></c:chartSpace>",
         hex(fill),
-        values.len(),
-        values.len()
+        point_count,
+        point_count
     )
 }
 fn theme_xml(deck: &Deck) -> String {
@@ -1736,16 +1839,12 @@ fn effect_xml(
                 + &visibility(id(), hide_at, "hidden"),
         ),
         "pulse" => {
-            let half = (duration / 2).max(1);
-            let scale = id();
-            (
-                "emph",
-                26,
-                0,
-                format!(
-                    "<p:animScale><p:cBhvr><p:cTn id=\"{scale}\" dur=\"{half}\" autoRev=\"1\" fill=\"hold\"/>{target}</p:cBhvr><p:by x=\"115000\" y=\"115000\"/></p:animScale>"
-                ),
-            )
+            let mut behaviours=String::new();
+            for dimension in ["w","h"] {
+                let step=id();
+                behaviours.push_str(&format!("<p:anim calcmode=\"lin\" valueType=\"num\"><p:cBhvr additive=\"base\"><p:cTn id=\"{step}\" dur=\"{duration}\" fill=\"hold\"/>{target}<p:attrNameLst><p:attrName>ppt_{dimension}</p:attrName></p:attrNameLst></p:cBhvr><p:tavLst><p:tav tm=\"0\"><p:val><p:strVal val=\"#ppt_{dimension}\"/></p:val></p:tav><p:tav tm=\"50000\"><p:val><p:strVal val=\"#ppt_{dimension}*1.15\"/></p:val></p:tav><p:tav tm=\"100000\"><p:val><p:strVal val=\"#ppt_{dimension}\"/></p:val></p:tav></p:tavLst></p:anim>"));
+            }
+            ("emph",26,0,behaviours)
         }
         "spin" => {
             let rotate = id();
@@ -1767,7 +1866,7 @@ fn effect_xml(
                 0,
                 0,
                 format!(
-                    "<p:animMotion origin=\"layout\" path=\"M 0 0 L {x:.5} {y:.5} E\" pathEditMode=\"relative\" ptsTypes=\"\"><p:cBhvr><p:cTn id=\"{motion}\" dur=\"{duration}\" fill=\"hold\"/>{target}<p:attrNameLst><p:attrName>ppt_x</p:attrName><p:attrName>ppt_y</p:attrName></p:attrNameLst></p:cBhvr></p:animMotion>"
+                    "<p:animMotion origin=\"layout\" path=\"M 0 0 L {x} {y} E\" pathEditMode=\"relative\" ptsTypes=\"\"><p:cBhvr><p:cTn id=\"{motion}\" dur=\"{duration}\" fill=\"hold\"/>{target}<p:attrNameLst><p:attrName>ppt_x</p:attrName><p:attrName>ppt_y</p:attrName></p:attrNameLst></p:cBhvr></p:animMotion>"
                 ),
             )
         }
@@ -2086,7 +2185,7 @@ fn write_pptx(deck: &Deck) -> Result<Vec<u8>, String> {
         ("ppt/slideLayouts/slideLayout1.xml".into(),layout.into_bytes()),("ppt/slideLayouts/_rels/slideLayout1.xml.rels".into(),rels(&rel("rIdMaster","slideMaster","../slideMasters/slideMaster1.xml")).into_bytes()),
         ("ppt/theme/theme1.xml".into(),theme_xml(deck).into_bytes()),("ppt/notesMasters/notesMaster1.xml".into(),wrap("notesMaster","",&format!("<p:cSld><p:spTree>{GROUP}</p:spTree></p:cSld>{color_map}<p:notesStyle/>")).into_bytes()),("ppt/notesMasters/_rels/notesMaster1.xml.rels".into(),rels(&rel("rIdTheme","theme","../theme/theme1.xml")).into_bytes()),
         ("docProps/core.xml".into(),format!("{XML}<cp:coreProperties xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><dc:creator>TrineDocs</dc:creator><dc:title>{}</dc:title></cp:coreProperties>",xml_escape(deck.slides.first().map(|s| s.title.as_str()).unwrap_or("Презентация"))).into_bytes()),
-        ("customXml/trinedocs-deck.json".into(),serde_json::to_vec(deck).map_err(|e| e.to_string())?),
+        ("customXml/trinedocs-deck.json".into(),deck_json(deck,false,crate::package::MAX_FILE)?),
     ]);
     let manifest: BTreeMap<String, u64> = parts
         .iter()
@@ -2233,7 +2332,7 @@ mod tests {
         for class in ["entr", "emph", "path", "exit"] {
             assert!(xml.contains(&format!("presetClass=\"{class}\"")), "{class}");
         }
-        assert!(xml.contains("<p:animRot by=\"21600000\">") && xml.contains("<p:animScale>"));
+        assert!(xml.contains("<p:animRot by=\"21600000\">") && xml.contains("#ppt_w*1.15"));
         assert!(xml.find("<p:spTgt spid=\"4\"/>") < xml.find("<p:spTgt spid=\"2\"/>"));
         parse(xml.as_bytes())?;
         let again = without_native(&deck)?;
@@ -3059,4 +3158,270 @@ mod hundred_slide_io_tests {
         let imported=import_parts(shape_parts(shape)?)?;let e=&imported.slides[0].elements[0];
         assert_eq!((e.font_size,e.stroke_width),(24.0,3.0));Ok(())
     }
+}
+
+
+#[cfg(test)]
+mod phase200_io_tests {
+    use super::*;
+    fn external(deck:&Deck)->Result<Deck,String> {
+        let parts=read_zip(&write(deck,"pptx")?)?.into_iter().filter(|(path,_)|!path.starts_with("customXml/")).collect();
+        read(&write_zip(parts)?,"pptx")
+    }
+    #[test]
+    fn chart_categories_without_values_survive_pptx_and_display()->Result<(),String> {
+        let mut deck=Deck::empty();let slide=deck.add_slide("blank");
+        deck.add_element(slide,ElementKind::Chart{values:vec![1.0],labels:vec!["A".into(),"B".into(),"C".into()]})?;
+        let imported=external(&deck)?;
+        let ElementKind::Chart{values,labels}=&imported.slides[0].elements[0].kind else{return Err("chart".into());};
+        assert_eq!(values,&vec![1.0,0.0,0.0]);assert_eq!(labels,&vec!["A".to_string(),"B".into(),"C".into()]);
+        let page=deck.page(&deck.slides[0]);
+        assert!(page.items.iter().any(|item|matches!(item,crate::render::Primitive::TextStyled{text,..} if text=="C")));Ok(())
+    }
+    #[test]
+    fn linked_chart_titles_import_the_cached_scalar_text()->Result<(),String> {
+        let chart=parse(br#"<chart><title><tx><strRef><f>Sheet1!$A$1</f><strCache><ptCount val="1"/><pt idx="0"><v>Revenue &amp; costs</v></pt></strCache></strRef></tx></title></chart>"#)?;
+        assert_eq!(chart_title(&chart)?,"Revenue & costs");
+        let rich=parse(br#"<chart><title><tx><rich><p><r><t>A</t></r></p><p><r><t>B</t></r></p></rich></tx></title></chart>"#)?;
+        assert_eq!(chart_title(&rich)?,"A\nB");Ok(())
+    }
+    fn timing_effect(target:&str,delay:u32,duration:u32)->String {
+        format!("<par><cTn presetClass=\"entr\" presetID=\"10\" nodeType=\"withEffect\"><stCondLst><cond delay=\"{delay}\"/></stCondLst><childTnLst><animEffect><cBhvr><cTn dur=\"{duration}\"/><tgtEl><spTgt spid=\"{target}\"/></tgtEl></cBhvr></animEffect></childTnLst></cTn></par>")
+    }
+    fn timing_group(effects:&str)->Result<Node,String> {
+        parse(format!("<timing><cTn nodeType=\"mainSeq\"><childTnLst><par><cTn><stCondLst><cond delay=\"indefinite\"/></stCondLst><childTnLst>{effects}</childTnLst></cTn></par></childTnLst></cTn></timing>").as_bytes())
+    }
+    fn timing_slide()->Slide {Slide{elements:vec![Element{id:2,..Element::default()},Element{id:3,..Element::default()}],..Slide::default()}}
+    #[test]
+    fn first_usable_timing_effect_keeps_the_click_trigger()->Result<(),String> {
+        let timing=timing_group(&(timing_effect("missing",0,1000)+&timing_effect("2",500,1000)))?;
+        let mut slide=timing_slide();let ids=BTreeMap::from([("2".into(),0),("3".into(),1)]);
+        assert_eq!(read_timing(&timing,&ids,&mut slide,(960.0,540.0)),1);
+        assert_eq!(slide.elements[0].animation.trigger,"on_click");assert_eq!(slide.elements[0].animation.delay,0.5);Ok(())
+    }
+    #[test]
+    fn parallel_timing_nodes_keep_offsets_independent_of_xml_order()->Result<(),String> {
+        let timing=timing_group(&(timing_effect("2",5000,1000)+&timing_effect("3",0,1000)))?;
+        let mut slide=timing_slide();let ids=BTreeMap::from([("2".into(),0),("3".into(),1)]);
+        assert_eq!(read_timing(&timing,&ids,&mut slide,(960.0,540.0)),0);
+        assert_eq!(slide.elements[1].animation.trigger,"on_click");assert_eq!(slide.elements[1].animation.delay,0.0);
+        assert_eq!(slide.elements[0].animation.trigger,"with_previous");assert_eq!(slide.elements[0].animation.delay,5.0);
+        assert_eq!(slide.animation_sequence(),vec![1,0]);Ok(())
+    }
+    #[test]
+    fn timing_conditions_choose_the_earliest_numeric_delay()->Result<(),String> {
+        let node=parse(br#"<cTn><stCondLst><cond delay="indefinite"/><cond delay="2500"/><cond delay="5000"/><cond delay="-1"/></stCondLst></cTn>"#)?;
+        assert_eq!(node_delay(&node),2500.0);Ok(())
+    }
+    #[test]
+    fn motion_paths_accept_attached_commands_and_exponents()->Result<(),String> {
+        let (x,y,approximate)=motion_path_endpoint("M0,0 L1e-3,-2E-3 E").ok_or("path")?;
+        assert!((x-0.001).abs()<0.0000001 && (y+0.002).abs()<0.0000001);assert!(!approximate);
+        assert!(motion_path_endpoint("M0 0 Lnan 1 E").is_none());Ok(())
+    }
+    #[test]
+    fn relative_motion_paths_accumulate_their_coordinates()->Result<(),String> {
+        let (x,y,approximate)=motion_path_endpoint("M0 0 l .2 .3 l .1 .2 E").ok_or("path")?;
+        assert!((x-0.3).abs()<0.00001 && (y-0.5).abs()<0.00001);assert!(approximate);
+        let (x,y,approximate)=motion_path_endpoint("M0 0 L1 1 Z E").ok_or("closed")?;
+        assert_eq!((x,y),(0.0,0.0));assert!(approximate);Ok(())
+    }
+    #[test]
+    fn timing_duration_resolves_parent_clock_and_child_start_delays()->Result<(),String> {
+        let explicit=parse(br#"<cTn dur="2500"><childTnLst><anim><cBhvr><cTn dur="indefinite"/></cBhvr></anim></childTnLst></cTn>"#)?;
+        assert_eq!(effect_duration_ms(&explicit),2500.0);
+        let delayed=parse(br#"<cTn><childTnLst><anim><cBhvr><cTn dur="1000"><stCondLst><cond delay="500"/></stCondLst></cTn></cBhvr></anim></childTnLst></cTn>"#)?;
+        assert_eq!(effect_duration_ms(&delayed),1500.0);Ok(())
+    }
+    #[test]
+    fn pptx_animation_import_preserves_supported_millisecond_durations()->Result<(),String> {
+        for effect in ["fade","fade_out","move","pulse"] {for duration in [0.001,0.003,0.009] {
+            let mut deck=Deck::empty();let slide=deck.add_slide("blank");let id=deck.add_element(slide,ElementKind::Rect)?;
+            deck.slide_mut(slide).and_then(|s|s.element_mut(id)).ok_or("shape")?.animation=Animation{effect:effect.into(),duration,..Animation::default()};
+            let imported=external(&deck)?;assert!((imported.slides[0].elements[0].animation.duration-duration).abs()<0.000001,"{effect} {duration}");
+        }}Ok(())
+    }
+    #[test]
+    fn timing_autoreverse_accepts_both_xml_true_lexical_forms()->Result<(),String> {
+        for value in ["true","1"] {
+            let node=parse(format!("<cTn><childTnLst><animScale><cBhvr><cTn dur=\"50\" autoRev=\"{value}\"/></cBhvr></animScale></childTnLst></cTn>").as_bytes())?;
+            assert_eq!(effect_duration_ms(&node),100.0);
+        }Ok(())
+    }
+    #[test]
+    fn pptx_motion_export_keeps_small_nonzero_offsets()->Result<(),String> {
+        let mut deck=Deck{width:10000.0,height:500.0,..Deck::empty()};let slide=deck.add_slide("blank");
+        let id=deck.add_element(slide,ElementKind::Rect)?;
+        deck.slide_mut(slide).and_then(|s|s.element_mut(id)).ok_or("shape")?.animation=Animation{effect:"move".into(),dx:0.001,dy:-0.002,..Animation::default()};
+        let imported=external(&deck)?;let animation=&imported.slides[0].elements[0].animation;
+        assert!((animation.dx-0.001).abs()<0.00000001 && (animation.dy+0.002).abs()<0.00000001);Ok(())
+    }
+    #[test]
+    fn pptx_pulse_preserves_odd_millisecond_durations()->Result<(),String> {
+        let mut id=1;let animation=Animation{effect:"pulse".into(),duration:0.003,..Animation::default()};
+        let node=parse(effect_xml(&mut id,&animation,2,"withEffect",0,(960.0,540.0)).as_bytes())?;
+        let effect=node.child("cTn").ok_or("effect")?;assert_eq!(effect_duration_ms(effect),3.0);
+        let values=effect.descend("tavLst").ok_or("keyframes")?;
+        assert_eq!(values.children.iter().map(|node|node.attr("tm")).collect::<Vec<_>>(),vec!["0","50000","100000"]);
+        assert_eq!(values.children[0].descend("strVal").map(|n|n.attr("val")),values.children[2].descend("strVal").map(|n|n.attr("val")));Ok(())
+    }
+
+    #[test]
+    fn click_group_delay_is_added_before_its_effect_delay()->Result<(),String> {
+        let timing=timing_group(&timing_effect("2",250,1000))?;
+        let mut timing=timing;
+        let main=timing.children.first_mut().ok_or("main")?;
+        let group=main.children.iter_mut().find(|n|n.name=="childTnLst").and_then(|n|n.children.first_mut()).and_then(|n|n.children.first_mut()).ok_or("group")?;
+        let condition=group.children.iter_mut().find(|n|n.name=="stCondLst").and_then(|n|n.children.first_mut()).ok_or("condition")?;
+        condition.attrs.insert("delay".into(),"750".into());
+        let mut slide=timing_slide();let ids=BTreeMap::from([("2".into(),0)]);
+        assert_eq!(read_timing(&timing,&ids,&mut slide,(960.0,540.0)),0);
+        assert_eq!(slide.elements[0].animation.delay,1.0);Ok(())
+    }
+
+    #[test]
+    fn explicit_font_reference_selects_major_or_minor_before_run_overrides()->Result<(),String> {
+        let look=Look{major:"Georgia".into(),minor:"Arial".into(),..Look::default()};
+        let body=parse(br#"<txBody><p><r><t>A</t></r></p></txBody>"#)?;let shape=parse(b"<sp/>")?;
+        for (idx,title,expected) in [("major",false,"Georgia"),("minor",true,"Arial")] {
+            let style=parse(format!("<style><fontRef idx=\"{idx}\"/></style>").as_bytes())?;
+            let mut element=Element::default();
+            apply_inherited_text_look(&shape,&body,&[],&mut element,&look,Some(&style),18.0,title);assert_eq!(element.font,expected);
+        }
+        let style=parse(br#"<style><fontRef idx="major"/></style>"#)?;
+        let body=parse(br#"<txBody><p><r><rPr><latin typeface="Verdana"/></rPr><t>A</t></r></p></txBody>"#)?;
+        let mut element=Element::default();apply_inherited_text_look(&shape,&body,&[],&mut element,&look,Some(&style),18.0,false);
+        assert_eq!(element.font,"Verdana");Ok(())
+    }
+    #[test]
+    fn fill_reference_zero_and_one_thousand_mean_no_fill()->Result<(),String> {
+        for idx in ["0","1000"] {
+            let style=parse(format!("<style><fillRef idx=\"{idx}\"><srgbClr val=\"FF0000\"/></fillRef></style>").as_bytes())?;
+            assert!(!shape_fill_visible(None,Some(&style)));
+            let explicit=parse(br#"<spPr><solidFill><srgbClr val="00FF00"/></solidFill></spPr>"#)?;
+            assert!(shape_fill_visible(Some(&explicit),Some(&style)));
+        }
+        let style=parse(br#"<style><fillRef idx="1"/></style>"#)?;assert!(shape_fill_visible(None,Some(&style)));Ok(())
+    }
+    #[test]
+    fn pptx_text_and_table_exports_use_the_native_five_point_inset()->Result<(),String> {
+        let element=Element{text:"A".into(),..Element::default()};
+        let text=parse(text_body(&element).as_bytes())?;let body=text.child("bodyPr").ok_or("body")?;
+        for key in ["lIns","tIns","rIns","bIns"] {assert_eq!(body.attr(key),"63500");}
+        let table=parse(table_xml(&element,2,&[vec!["A".into()]])?.as_bytes())?;
+        let cell=table.descend("tcPr").ok_or("cell")?;
+        for key in ["marL","marT","marR","marB"] {assert_eq!(cell.attr(key),"63500");}Ok(())
+    }
+    #[test]
+    fn pptx_table_font_matches_the_native_effective_row_font()->Result<(),String> {
+        let element=Element{h:200.0,font_size:28.0,..Element::default()};
+        let cells=vec![vec!["A".into()];20];let table=parse(table_xml(&element,2,&cells)?.as_bytes())?;
+        assert_eq!(table.descend("rPr").ok_or("font")?.attr("sz"),"700");Ok(())
+    }
+    #[test]
+    fn json_serialization_stops_at_the_output_limit()->Result<(),String> {
+        let deck=Deck::default();
+        for pretty in [true,false] {
+            let expected=if pretty {serde_json::to_vec_pretty(&deck)}else{serde_json::to_vec(&deck)}.map_err(|error|error.to_string())?;
+            assert_eq!(deck_json(&deck,pretty,expected.len())?,expected);
+            assert!(deck_json(&deck,pretty,expected.len()-1).is_err());
+        }
+        let mut output=LimitedJson{bytes:Vec::new(),limit:3};
+        assert!(std::io::Write::write_all(&mut output,b"123").is_ok());
+        assert!(std::io::Write::write_all(&mut output,b"4").is_err());assert_eq!(output.bytes,b"123");Ok(())
+    }
+
+    #[test]
+    fn linear_rgb_colours_import_as_gamma_encoded_srgb_in_fills_and_themes()->Result<(),String> {
+        let fill=parse(br#"<solidFill><scrgbClr r="50000" g="50000" b="50000"/></solidFill>"#)?;
+        assert_eq!(color(Some(&fill),&Look::default(),[1,2,3]),[188,188,188]);
+        let theme=parse(br#"<theme><themeElements><clrScheme><accent1><scrgbClr r="100%" g="0%" b="50%"/></accent1></clrScheme></themeElements></theme>"#)?;
+        assert_eq!(Look::read(Some(&theme)).colors.get("accent1"),Some(&[255,0,188]));
+        let malformed=parse(br#"<scrgbClr r="NaN" g="0" b="0"/>"#)?;assert_eq!(color(Some(&malformed),&Look::default(),[1,2,3]),[1,2,3]);Ok(())
+    }
+    #[test]
+    fn axis_titles_are_not_mistaken_for_the_chart_title()->Result<(),String> {
+        let chart=parse(br#"<chartSpace><chart><plotArea><valAx><title><tx><rich><p><r><t>Revenue axis</t></r></p></rich></tx></title></valAx></plotArea></chart></chartSpace>"#)?;
+        assert_eq!(chart_title(&chart)?,"");
+        let chart=parse(br#"<chartSpace><chart><title><tx><rich><p><r><t>Actual title</t></r></p></rich></tx></title><plotArea><valAx><title><tx><rich><p><r><t>Axis</t></r></p></rich></tx></title></valAx></plotArea></chart></chartSpace>"#)?;
+        assert_eq!(chart_title(&chart)?,"Actual title");Ok(())
+    }
+
+    #[test]
+    fn layout_and_slide_theme_overrides_merge_before_text_style_resolution()->Result<(),String> {
+        let mut deck=Deck::default();deck.theme.font="Arial".into();
+        let mut parts=read_zip(&write(&deck,"pptx")?)?;
+        parts.retain(|path,_|!path.starts_with("customXml/"));
+        let slide_path="ppt/slides/slide1.xml";
+        let xml=String::from_utf8(parts.get(slide_path).ok_or("slide")?.clone()).map_err(|error|error.to_string())?;
+        parts.insert(slide_path.into(),xml.replace("<a:latin typeface=\"Arial\"/>","").into_bytes());
+        let overrides=[
+            ("ppt/slideLayouts/_rels/slideLayout1.xml.rels","../theme/override-layout.xml","ppt/theme/override-layout.xml",
+                format!("<a:themeOverride xmlns:a=\"{A}\"><a:fontScheme name=\"Layout\"><a:majorFont><a:latin typeface=\"Georgia\"/></a:majorFont><a:minorFont><a:latin typeface=\"Verdana\"/></a:minorFont></a:fontScheme></a:themeOverride>")),
+            ("ppt/slides/_rels/slide1.xml.rels","../theme/override-slide.xml","ppt/theme/override-slide.xml",
+                format!("<a:themeOverride xmlns:a=\"{A}\"><a:fontScheme name=\"Slide\"><a:majorFont><a:latin typeface=\"Georgia\"/></a:majorFont><a:minorFont><a:latin typeface=\"Tahoma\"/></a:minorFont></a:fontScheme></a:themeOverride>"))
+        ];
+        for (rels_path,target,path,theme) in overrides {
+            let relations=String::from_utf8(parts.get(rels_path).ok_or("rels")?.clone()).map_err(|error|error.to_string())?;
+            parts.insert(rels_path.into(),relations.replace("</Relationships>",&format!("{}</Relationships>",rel("rThemeOverride","themeOverride",target))).into_bytes());
+            parts.insert(path.into(),theme.into_bytes());
+            let types=String::from_utf8(parts.get("[Content_Types].xml").ok_or("types")?.clone()).map_err(|error|error.to_string())?;
+            parts.insert("[Content_Types].xml".into(),types.replace("</Types>",&format!("<Override PartName=\"/{path}\" ContentType=\"application/vnd.openxmlformats-officedocument.themeOverride+xml\"/></Types>")).into_bytes());
+        }
+        let imported=read(&write_zip(parts.into_iter().collect())?,"pptx")?;
+        assert!(imported.slides[0].elements.iter().all(|element|element.font=="Tahoma"));
+        assert_eq!(imported.theme.font,"Tahoma");assert_eq!(imported.theme.accent,deck.theme.accent);Ok(())
+    }
+
+    #[test]
+    fn group_flips_reflect_child_frames_and_compose_through_nested_groups()->Result<(),String> {
+        let mut deck=Deck::empty();deck.add_slide("blank");
+        let shape=Element{x:10.0,y:20.0,w:20.0,h:10.0,rotation:30.0,kind:ElementKind::Rect,..Default::default()};
+        let group=|content:&str|format!("<p:grpSp><p:nvGrpSpPr><p:cNvPr id=\"8\" name=\"Group\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm flipH=\"true\"><a:off x=\"0\" y=\"0\"/><a:ext cx=\"1270000\" cy=\"1270000\"/><a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"1270000\" cy=\"1270000\"/></a:xfrm></p:grpSpPr>{content}</p:grpSp>");
+        for (content,expected_x,rotation) in [(group(&shape_xml(&shape,2)),70.0,330.0),(group(&group(&shape_xml(&shape,2))),10.0,30.0)] {
+            let mut parts=read_zip(&write(&deck,"pptx")?)?;parts.retain(|path,_|!path.starts_with("customXml/"));
+            parts.insert("ppt/slides/slide1.xml".into(),wrap("sld","",&format!("<p:cSld><p:spTree>{GROUP}{content}</p:spTree></p:cSld>")).into_bytes());
+            let imported=read(&write_zip(parts.into_iter().collect())?,"pptx")?;
+            let element=&imported.slides[0].elements[0];
+            assert_eq!((element.x,element.y,element.w,element.h),(expected_x,20.0,20.0,10.0));assert_eq!(element.rotation,rotation);
+        }Ok(())
+    }
+
+    #[test]
+    fn ordinary_speaker_note_text_boxes_survive_import_without_footer_fields()->Result<(),String> {
+        let deck=Deck::default();let mut parts=read_zip(&write(&deck,"pptx")?)?;parts.retain(|path,_|!path.starts_with("customXml/"));
+        let note=|text:&str,id:usize,kind:Option<&str>|{
+            let xml=shape_xml(&Element{text:text.into(),..Default::default()},id);
+            kind.map(|kind|xml.replace("<p:nvPr/>",&format!("<p:nvPr><p:ph type=\"{kind}\"/></p:nvPr>"))).unwrap_or(xml)
+        };
+        let shapes=note("Main notes",2,Some("body"))+&note("Extra note",3,None)+&note("Footer",4,Some("ftr"));
+        parts.insert("ppt/notesSlides/notesSlide1.xml".into(),wrap("notes","",&format!("<p:cSld><p:spTree>{GROUP}{shapes}</p:spTree></p:cSld>")).into_bytes());
+        let imported=read(&write_zip(parts.into_iter().collect())?,"pptx")?;
+        assert_eq!(imported.slides[0].notes,"Main notes\nExtra note");Ok(())
+    }
+
+    #[test]
+    fn multilevel_category_cache_preserves_parent_and_leaf_labels_with_bounds()->Result<(),String> {
+        let node=parse(br#"<cat><multiLvlStrRef><multiLvlStrCache><ptCount val="4"/><lvl><pt idx="0"><v>Q1</v></pt><pt idx="1"><v>Q2</v></pt><pt idx="2"><v>Q1</v></pt><pt idx="3"><v>Q2</v></pt></lvl><lvl><pt idx="0"><v>2024</v></pt><pt idx="2"><v>2025</v></pt></lvl></multiLvlStrCache></multiLvlStrRef></cat>"#)?;
+        assert_eq!(cached_points(&node)?,vec!["2024\nQ1","2024\nQ2","2025\nQ1","2025\nQ2"]);
+        let large=parse(br#"<multiLvlStrCache><ptCount val="10001"/></multiLvlStrCache>"#)?;assert!(cached_points(&large).is_err());
+        let levels=parse(format!("<multiLvlStrCache>{}</multiLvlStrCache>","<lvl/>".repeat(33)).as_bytes())?;assert!(cached_points(&levels).is_err());Ok(())
+    }
+    #[test]
+    fn nested_sequential_timing_waits_for_the_preceding_child()->Result<(),String> {
+        let effects=timing_effect("2",0,1000)+&timing_effect("3",250,500);
+        let timing=timing_group(&format!("<seq><cTn><childTnLst>{effects}</childTnLst></cTn></seq>"))?;
+        let mut slide=timing_slide();let ids=BTreeMap::from([("2".into(),0),("3".into(),1)]);
+        assert_eq!(read_timing(&timing,&ids,&mut slide,(960.0,540.0)),0);
+        assert_eq!(slide.elements[0].animation.delay,0.0);assert_eq!(slide.elements[1].animation.delay,1.25);
+        assert_eq!(slide.elements[1].animation.trigger,"with_previous");Ok(())
+    }
+    #[test]
+    fn outlines_with_width_but_no_fill_child_remain_visible()->Result<(),String> {
+        let mut deck=Deck::empty();deck.add_slide("blank");let mut parts=read_zip(&write(&deck,"pptx")?)?;parts.retain(|path,_|!path.starts_with("customXml/"));
+        let shape=format!("<p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"Width only\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"1270000\" cy=\"1270000\"/></a:xfrm><a:prstGeom prst=\"rect\"/><a:ln w=\"25400\"/></p:spPr></p:sp>");
+        parts.insert("ppt/slides/slide1.xml".into(),wrap("sld","",&format!("<p:cSld><p:spTree>{GROUP}{shape}</p:spTree></p:cSld>")).into_bytes());
+        let imported=read(&write_zip(parts.into_iter().collect())?,"pptx")?;assert_eq!(imported.slides[0].elements[0].stroke_width,2.0);Ok(())
+    }
+
 }
