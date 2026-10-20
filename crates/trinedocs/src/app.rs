@@ -348,6 +348,9 @@ impl App {
             egui::text_edit::TextEditState::default().store(ctx, id);
         }
         ctx.memory_mut(|m| m.request_focus(id));
+        // Every invocation starts with an empty search, otherwise a stale query
+        // hides the commands the user is looking for.
+        self.palette_query.clear();
         self.palette = true;
         self.palette_focus = true;
         self.palette_selected = 0;
@@ -4742,6 +4745,33 @@ mod shell_input_tests {
         assert!(text(&app).contains("prefix"));
         assert!(!text(&app).contains("needle"));
         assert_eq!(app.palette_query, "needle");
+        Ok(())
+    }
+    #[test]
+    fn opening_the_palette_starts_with_an_empty_query() -> Result<(), String> {
+        let mut app = fixture()?;
+        focus_page(&mut app)?;
+        app.palette_query = "старый запрос".into();
+        let cmd = egui::Modifiers {
+            ctrl: true,
+            command: true,
+            ..Default::default()
+        };
+        frame(
+            &mut app,
+            vec![
+                egui::Event::ModifiersChanged(cmd),
+                egui::Event::Key {
+                    key: egui::Key::K,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: cmd,
+                },
+            ],
+        );
+        assert!(app.palette);
+        assert!(app.palette_query.is_empty());
         Ok(())
     }
     #[test]
