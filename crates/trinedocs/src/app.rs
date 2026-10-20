@@ -5046,12 +5046,11 @@ mod shell_input_tests {
         assert!(!crate::mcp::workspace::batchable("inspect_document"));
         Ok(())
     }
-    fn hundred_shortcut_frame(
-        app: &mut App,
-        key: egui::Key,
-        modifiers: egui::Modifiers,
-        repeat: bool,
-    ) {
+    /// Sends one key press to the shell.
+    ///
+    /// egui derives the repeat flag itself: a key that was already held down in the
+    /// previous frame arrives as a key repeat, so a repeat needs a second frame.
+    fn hundred_shortcut_frame(app: &mut App, key: egui::Key, modifiers: egui::Modifiers) {
         let ctx = app.editor_ctx.clone();
         ctx.run_ui(
             egui::RawInput {
@@ -5059,7 +5058,7 @@ mod shell_input_tests {
                     key,
                     physical_key: None,
                     pressed: true,
-                    repeat,
+                    repeat: false,
                     modifiers,
                 }],
                 ..Default::default()
@@ -5076,7 +5075,6 @@ mod shell_input_tests {
             &mut app,
             egui::Key::S,
             egui::Modifiers::CTRL | egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
-            false,
         );
         assert_eq!(app.deferred, vec![(10, "saveas")]);
         Ok(())
@@ -5094,7 +5092,6 @@ mod shell_input_tests {
             &mut app,
             egui::Key::Tab,
             egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
-            false,
         );
         assert_eq!(app.deferred, vec![(12, "activate")]);
         Ok(())
@@ -5106,7 +5103,6 @@ mod shell_input_tests {
             &mut app,
             egui::Key::Z,
             egui::Modifiers::CTRL | egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
-            false,
         );
         assert_eq!(app.deferred, vec![(10, "redo")]);
         Ok(())
@@ -5119,7 +5115,6 @@ mod shell_input_tests {
                 &mut app,
                 key,
                 egui::Modifiers::CTRL | egui::Modifiers::COMMAND | egui::Modifiers::ALT,
-                false,
             );
             assert!(app.deferred.is_empty());
             assert!(!app.palette);
@@ -5130,13 +5125,18 @@ mod shell_input_tests {
     #[test]
     fn repeating_the_palette_shortcut_does_not_toggle_the_palette() -> Result<(), String> {
         let mut app = fixture()?;
-        hundred_shortcut_frame(
-            &mut app,
-            egui::Key::K,
-            egui::Modifiers::CTRL | egui::Modifiers::COMMAND,
-            true,
-        );
+        let command = egui::Modifiers::CTRL | egui::Modifiers::COMMAND;
+        // The first press queues the palette for the next frame.
+        hundred_shortcut_frame(&mut app, egui::Key::K, command);
         assert!(!app.palette);
+        assert!(app.palette_tail.is_some());
+        let ctx = app.editor_ctx.clone();
+        app.palette_tail = None;
+        app.open_palette(&ctx);
+        assert!(app.palette);
+        // Holding the key down sends repeats; they must not toggle the palette.
+        hundred_shortcut_frame(&mut app, egui::Key::K, command);
+        assert!(app.palette);
         assert!(app.palette_tail.is_none());
         Ok(())
     }
