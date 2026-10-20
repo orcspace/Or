@@ -3173,7 +3173,7 @@ impl SlideTextureCache {
                     .fold(pixels, |total, entry| total.saturating_add(entry.2))
                     > max_pixels)
         {
-            self.entries.remove(0);
+            drop(self.entries.remove(0));
         }
         self.entries.push((key, texture, pixels));
     }

@@ -2790,6 +2790,13 @@ impl<'a> Engine<'a> {
                 }
                 let growth = growth(rate, periods);
                 let annuity = annuity(rate, periods, kind);
+                if name == "PV" && rate > -1.0 && growth > 0.0 && growth < f64::MIN_POSITIVE {
+                    // Dividing by a subnormal growth factor loses most significant bits.
+                    return num(-exponential_scale(
+                        third * annuity + fourth,
+                        -rate.ln_1p() * periods,
+                    ) * cash_scale);
+                }
                 if name == "FV" && !growth.is_finite() && rate > -1.0 && rate != 0.0 {
                     let payments = third * ((1.0 + rate * kind) / rate);
                     let coefficient = -fourth - payments;
@@ -4917,8 +4924,10 @@ mod defect_batch_two {
     }
     #[test]
     fn named_months_and_short_years() -> Result<(), String> {
-        let mut book = Book::default();
-        book.locale_ru = false;
+        let mut book = Book {
+            locale_ru: false,
+            ..Book::default()
+        };
         assert_eq!(
             number(&book, "=DAYS(\"15-MAR-2021\",\"1-FEB-2021\")")?,
             42.0
@@ -5026,10 +5035,13 @@ fn scaled_sum(values: &[f64]) -> f64 {
     if values.iter().any(|value| !value.is_finite()) {
         return values.iter().sum();
     }
-    let scale = values.iter().map(|value| value.abs()).fold(0.0, f64::max);
-    if scale == 0.0 {
+    let magnitude = values.iter().map(|value| value.abs()).fold(0.0, f64::max);
+    if magnitude == 0.0 {
         return 0.0;
     }
+    // A power-of-two scale keeps every division exact, so ordinary sums such as
+    // 20 + 200 are not perturbed by the overflow guard.
+    let scale = 2f64.powi((magnitude.log2().floor() as i32).clamp(-1000, 1000));
     let (mut sum, mut correction) = (0.0, 0.0);
     for value in values {
         let value = value / scale;
@@ -5044,7 +5056,7 @@ fn scaled_sum(values: &[f64]) -> f64 {
     (sum + correction) * scale
 }
 fn balanced_product(values: &[f64]) -> f64 {
-    if values.iter().any(|value| *value == 0.0) {
+    if values.contains(&0.0) {
         return 0.0;
     }
     let (mut mantissa, mut exponent, mut negative) = (1.0, 0i64, false);
@@ -5613,7 +5625,7 @@ mod phase200_cashflow_defect {
             );
         }
         assert_eq!(number(&book, "=FV(1,2000,-1,1)")?, -1.0);
-        assert!((number(&book, "=PV(-0.5,1060,0,1e-308)")? / 1.235570475125E11 - 1.0).abs() < 0.01);
+        assert!((number(&book, "=PV(-0.5,1060,0,1e-308)")? / -1.2353653155963783e11 - 1.0).abs() < 1e-9);
         Ok(())
     }
 }

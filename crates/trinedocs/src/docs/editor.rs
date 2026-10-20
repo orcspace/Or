@@ -2675,10 +2675,10 @@ fn cell_editor(
     remember_text_edit(ui.ctx(), id, &text);
     if response.changed() {
         let mut next = doc.next_id;
-        if let Some(cell) = active_cell(doc, Some(cursor)) {
-            if let Err(error) = try_edit_cell_text(cell, &text, &mut next) {
-                state.message = Some(error);
-            }
+        if let Some(cell) = active_cell(doc, Some(cursor))
+            && let Err(error) = try_edit_cell_text(cell, &text, &mut next)
+        {
+            state.message = Some(error);
         }
         doc.next_id = next;
     }

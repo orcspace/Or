@@ -172,10 +172,12 @@ mod recent_defect_tests {
     use super::*;
     #[test]
     fn duplicate_settings_paths_do_not_displace_unique_recent_files() {
-        let mut settings = Settings::default();
-        settings.recent = vec![PathBuf::from("C:/a.docx"); 50];
+        let mut settings = Settings {
+            recent: vec![PathBuf::from("C:/a.docx"); 50],
+            pinned: vec!["C:/a.docx".into(), "C:/a.docx".into()],
+            ..Settings::default()
+        };
         settings.recent.push("C:/b.docx".into());
-        settings.pinned = vec!["C:/a.docx".into(), "C:/a.docx".into()];
         let settings = settings.normalized();
         assert_eq!(
             settings.recent,
@@ -190,10 +192,12 @@ mod two_hundred_settings_regressions {
     use super::*;
     #[test]
     fn saved_settings_cannot_exceed_their_own_reload_budget() -> Result<(), String> {
-        let mut settings = Settings::default();
-        settings.recent = (0..50)
-            .map(|index| PathBuf::from(format!("C:/{index}/{}.docx", "x/".repeat(12000))))
-            .collect();
+        let mut settings = Settings {
+            recent: (0..50)
+                .map(|index| PathBuf::from(format!("C:/{index}/{}.docx", "x/".repeat(12000))))
+                .collect(),
+            ..Settings::default()
+        };
         assert!(settings.clone().normalized().encoded().is_err());
         settings.recent.truncate(1);
         let bytes = settings.encoded()?;

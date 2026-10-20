@@ -1004,6 +1004,7 @@ fn apply_text_look(
         apply_run_properties(props, element, look);
     }
 }
+#[allow(clippy::too_many_arguments)]
 fn apply_inherited_text_look(
     shape: &Node,
     body: &Node,
@@ -4565,9 +4566,7 @@ mod phase200_io_tests {
         deck.add_slide("blank");
         let mut parts = read_zip(&write(&deck, "pptx")?)?;
         parts.retain(|path, _| !path.starts_with("customXml/"));
-        let shape = format!(
-            "<p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"Width only\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"1270000\" cy=\"1270000\"/></a:xfrm><a:prstGeom prst=\"rect\"/><a:ln w=\"25400\"/></p:spPr></p:sp>"
-        );
+        let shape = "<p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"Width only\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"1270000\" cy=\"1270000\"/></a:xfrm><a:prstGeom prst=\"rect\"/><a:ln w=\"25400\"/></p:spPr></p:sp>";
         parts.insert(
             "ppt/slides/slide1.xml".into(),
             wrap(

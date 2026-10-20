@@ -665,7 +665,7 @@ fn paragraph(
         .filter_map(|style| style.child("pPr"))
         .chain(node.child("pPr"))
         .filter_map(|properties| properties.child("outlineLvl").and_then(Node::value))
-        .last()
+        .next_back()
         .and_then(|value| value.parse::<u8>().ok());
     // A custom style that is a heading only through its outline level is demoted with it.
     let style_heading = chain
@@ -692,7 +692,7 @@ fn paragraph(
                     .and_then(|node| node.child("numId"))
                     .and_then(Node::value)
             })
-            .last();
+            .next_back();
         if let Some(id) = num_id {
             let level = usize::from(p.list_level.min(8));
             let first = defaults
@@ -6237,8 +6237,8 @@ impl WordTheme {
                 }
             }
         }
-        if node.name == "rFonts" {
-            if let Some(face) = ["asciiTheme", "hAnsiTheme", "eastAsiaTheme"]
+        if node.name == "rFonts"
+            && let Some(face) = ["asciiTheme", "hAnsiTheme", "eastAsiaTheme"]
                 .iter()
                 .find_map(|key| node.attr(key))
                 .and_then(|kind| {
@@ -6251,10 +6251,9 @@ impl WordTheme {
                     }
                 })
                 .filter(|face| !face.is_empty())
-            {
-                node.attrs.insert("ascii".into(), face.clone());
-                node.attrs.insert("hAnsi".into(), face.clone());
-            }
+        {
+            node.attrs.insert("ascii".into(), face.clone());
+            node.attrs.insert("hAnsi".into(), face.clone());
         }
         for child in &mut node.children {
             self.apply(child);
@@ -7509,16 +7508,15 @@ fn html_import_table(
                                 _ => None,
                             };
                         }
-                        "border" => {
+                        "border"
                             if !value.split_whitespace().any(|word| {
                                 word.eq_ignore_ascii_case("none")
                                     || word.eq_ignore_ascii_case("hidden")
-                            }) && !value.trim().starts_with('0')
-                            {
-                                borderless = false;
-                                if let Some(color) = value.split_whitespace().find_map(css_color) {
-                                    border_color = color;
-                                }
+                            }) && !value.trim().starts_with('0') =>
+                        {
+                            borderless = false;
+                            if let Some(color) = value.split_whitespace().find_map(css_color) {
+                                border_color = color;
                             }
                         }
                         _ => {}

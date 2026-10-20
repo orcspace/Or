@@ -2541,6 +2541,7 @@ fn justify_gap(chars: &[(char, TextFormat)], start: usize, end: usize, extra: f3
 }
 /// Segments of one line starting at `x`; `origin` is the line start relative to the text
 /// area (for tab stops). Tabs and widened justified spaces get their own segments.
+#[allow(clippy::too_many_arguments)]
 fn line_segments(
     chars: &[(char, TextFormat)],
     start: usize,

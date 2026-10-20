@@ -2011,8 +2011,10 @@ mod agenda_tests {
                 .any(|e| e.text.contains("First"))
         );
         deck.validate()?;
-        let mut small = Deck::default();
-        small.width = 100.0;
+        let mut small = Deck {
+            width: 100.0,
+            ..Deck::default()
+        };
         let before = small.clone();
         assert!(small.insert_agenda().is_err());
         assert_eq!(small, before);

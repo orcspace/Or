@@ -1269,10 +1269,10 @@ fn differential_fills(
                                 .is_some_and(|value| !matches!(value.as_str(), "none" | "solid"));
                         }
                         "fgColor" => foreground = rgb_with_theme(&attributes, palette, theme),
-                        "bgColor" => {
-                            if attributes.get("indexed").is_none_or(|value| value != "64") {
-                                background = rgb_with_theme(&attributes, palette, theme);
-                            }
+                        "bgColor"
+                            if attributes.get("indexed").is_none_or(|value| value != "64") =>
+                        {
+                            background = rgb_with_theme(&attributes, palette, theme);
                         }
                         _ => (),
                     }
@@ -3944,12 +3944,14 @@ mod hundred_export_tests {
     use super::*;
     #[test]
     fn xlsx_export_preserves_the_active_selection() -> Result<(), String> {
-        let mut book = Book::default();
-        book.selection = super::super::model::Selection {
-            row: 4,
-            col: 3,
-            anchor_row: 2,
-            anchor_col: 1,
+        let book = Book {
+            selection: super::super::model::Selection {
+                row: 4,
+                col: 3,
+                anchor_row: 2,
+                anchor_col: 1,
+            },
+            ..Book::default()
         };
         let decoded = read(&write(&book, "xlsx")?, "xlsx")?;
         assert_eq!(decoded.selection, book.selection);
