@@ -55,7 +55,8 @@ pub fn write_zip(parts: Vec<(String, Vec<u8>)>) -> Result<Vec<u8>, String> {
         if !safe_name(name) || !names.insert(name) {
             return Err("Недопустимое имя/дубликат ZIP".into());
         }
-        if (name.ends_with(".xml") || name.ends_with(".rels"))
+        if name.rsplit_once('.').is_some_and(|(_,extension)|
+                extension.eq_ignore_ascii_case("xml") || extension.eq_ignore_ascii_case("rels"))
             && let Ok(xml) = std::str::from_utf8(data)
             && let Some(character) = xml.chars().find(|ch| !matches!(*ch, '\u{9}' | '\u{a}' | '\u{d}' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}'))
         {
@@ -70,15 +71,14 @@ pub fn write_zip(parts: Vec<(String, Vec<u8>)>) -> Result<Vec<u8>, String> {
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
     for (name, data) in parts {
-        zip.start_file(
-            name,
-            if data.len() > 1024 * 1024 {
-                options.compression_method(zip::CompressionMethod::Stored)
-            } else {
-                options
-            },
-        )
-        .map_err(|e| e.to_string())?;
+        // OpenDocument requires an uncompressed `mimetype` as the first entry.
+        let file_options = if data.len() > 1024 * 1024 || name == "mimetype" {
+            options.compression_method(zip::CompressionMethod::Stored)
+        } else {
+            options
+        };
+        zip.start_file(name, file_options)
+            .map_err(|e| e.to_string())?;
         zip.write_all(&data).map_err(|e| e.to_string())?;
     }
     let bytes = zip.finish().map_err(|e| e.to_string())?.into_inner();
@@ -164,5 +164,18 @@ mod xml_character_tests {
             Some(&vec![0, 1, 11, 255])
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod next_package_xml_tests {
+    #[test]
+    fn xml_scalar_validation_also_covers_uppercase_part_extensions() {
+        for name in ["word/DOCUMENT.XML", "word/_rels/document.xml.RELS", "a.Xml"] {
+            assert!(
+                super::write_zip(vec![(name.into(), b"<t>\x01</t>".to_vec())]).is_err(),
+                "{name}"
+            );
+        }
     }
 }

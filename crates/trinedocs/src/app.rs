@@ -33,22 +33,38 @@ enum Pending {
         export: bool,
     },
 }
-fn palette_commands(has_document: bool, query: &str) -> Vec<(&'static str, &'static str)> {
+fn consume_shell_key(ctx: &egui::Context, modifiers: egui::Modifiers, key: egui::Key) -> bool {
+    ctx.input_mut(|input| {
+        let mut found=false;
+        input.events.retain(|event| {
+            let matches=matches!(event,egui::Event::Key{key:pressed,pressed:true,modifiers:actual,..}
+                if *pressed==key&&actual.shift==modifiers.shift&&actual.alt==modifiers.alt&&actual.matches_logically(modifiers));
+            found|=matches;!matches
+        });
+        found
+    })
+}
+fn palette_commands(
+    has_document: bool,
+    query: &str,
+    language: &str,
+) -> Vec<(&'static str, &'static str)> {
     let query = query.trim().to_lowercase();
     [
-        ("docs", "Создать документ"),
-        ("sheets", "Создать таблицу"),
-        ("slides", "Создать презентацию"),
-        ("open", "Открыть файл · Ctrl+O"),
-        ("settings", "Настройки"),
-        ("inspect", "Проверить документ"),
-        ("save", "Сохранить · Ctrl+S"),
-        ("saveas", "Сохранить как…"),
-        ("copy", "Сохранить копию…"),
-        ("pdf", "Экспорт в PDF"),
-        ("close", "Закрыть документ · Ctrl+W"),
+        ("docs", "Create a document"),
+        ("sheets", "Create a spreadsheet"),
+        ("slides", "Create a presentation"),
+        ("open", "Open a file · Ctrl+O"),
+        ("settings", "Settings"),
+        ("inspect", "Check the document"),
+        ("save", "Save · Ctrl+S"),
+        ("saveas", "Save as… · Ctrl+Shift+S"),
+        ("copy", "Save a copy…"),
+        ("pdf", "Export to PDF"),
+        ("close", "Close the document · Ctrl+W"),
     ]
     .into_iter()
+    .map(|(key, label)| (key, crate::i18n::tr(label, language)))
     .filter(|(key, label)| {
         (has_document || matches!(*key, "docs" | "sheets" | "slides" | "open" | "settings"))
             && label.to_lowercase().contains(&query)
@@ -99,6 +115,7 @@ fn prepare_open(
     reload: Option<&ReloadTarget>,
     path: &std::path::Path,
     document: Document,
+    language: &str,
 ) -> Result<PreparedOpen, String> {
     if let Some(target) = reload {
         let (index, tab, following) = prepare_reload(tabs, next_id, target, path, document)?;
@@ -116,7 +133,7 @@ fn prepare_open(
     let title = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "Без названия".into());
+        .unwrap_or_else(|| crate::i18n::tr("Untitled", language).into());
     Ok(PreparedOpen::Install {
         tab: Box::new(Tab::new(id, document, title, Some(path.to_path_buf()))),
         following,
@@ -234,6 +251,7 @@ impl App {
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(1);
+        let status = crate::i18n::tr("Ready", &settings.language);
         let app = Self {
             #[cfg(test)]
             shell_rects: BTreeMap::new(),
@@ -264,7 +282,7 @@ impl App {
             media_jobs: Vec::new(),
             pending: None,
             close_after_save: None,
-            status: "Готово".into(),
+            status: status.into(),
             error: font_error,
             show_settings: false,
             show_inspector: false,
@@ -337,6 +355,9 @@ impl App {
             egui::text_edit::TextEditState::default().store(ctx, id);
         }
         ctx.memory_mut(|m| m.request_focus(id));
+        // Every invocation starts with an empty search, otherwise a stale query
+        // hides the commands the user is looking for.
+        self.palette_query.clear();
         self.palette = true;
         self.palette_focus = true;
         self.palette_selected = 0;
@@ -513,10 +534,19 @@ impl App {
         ctx.request_repaint();
         Ok(())
     }
-    fn tr<'a>(&self, s: &'a str) -> &'a str {
-        crate::i18n::tr(s, &self.settings.language)
+    /// The interface language as one of the two supported values.
+    ///
+    /// The result is a static string, so the interface can translate a string
+    /// inside a closure without borrowing the whole app.
+    fn language(&self) -> &'static str {
+        if self.settings.language == "ru" {
+            "ru"
+        } else {
+            "en"
+        }
     }
     fn create(&mut self, kind: &str) {
+        let language = self.language();
         if let Some(id) = self.active
             && let Err(e) = self.flush_pending(id)
         {
@@ -536,11 +566,14 @@ impl App {
                 let mut t = Tab::new(
                     id,
                     d,
-                    self.tr(match kind {
-                        "docs" => "Document",
-                        "sheets" => "Spreadsheet",
-                        _ => "Presentation",
-                    })
+                    crate::i18n::tr(
+                        match kind {
+                            "docs" => "Document",
+                            "sheets" => "Spreadsheet",
+                            _ => "Presentation",
+                        },
+                        language,
+                    )
                     .into(),
                     None,
                 );
@@ -570,6 +603,7 @@ impl App {
         self.tabs.iter().find(|t| Some(t.id) == self.active)
     }
     fn flush_pending(&mut self, id: u64) -> Result<(), String> {
+        let language = self.language();
         let Some(t) = self.tabs.iter_mut().find(|t| t.id == id) else {
             return Ok(());
         };
@@ -578,7 +612,7 @@ impl App {
             if crate::sheets::editor::commit_pending(&self.editor_ctx, id, &mut book)? {
                 t.apply(Op::Replace {
                     document: Document::Sheets(book),
-                    label: "Редактирование".into(),
+                    label: crate::i18n::tr("Editing", language).into(),
                     author: Author::User,
                     base_version: None,
                 })?;
@@ -587,6 +621,7 @@ impl App {
         Ok(())
     }
     fn save(&mut self, id: u64, copy: bool, export: bool, choose: bool, extension: Option<&str>) {
+        let language = self.language();
         if self.picking.contains(&id) {
             self.error = "Дождитесь выбора файла".into();
             return;
@@ -600,7 +635,7 @@ impl App {
             return;
         }
         if self.saving.contains(&id) {
-            self.error = "Сохранение уже выполняется".into();
+            self.error = crate::i18n::tr("Saving is already running", language).into();
             return;
         }
         let Some(t) = self.tabs.iter().find(|t| t.id == id) else {
@@ -632,7 +667,7 @@ impl App {
                 .and_then(|p| p.file_stem())
                 .and_then(|s| s.to_str())
                 .map(str::to_string)
-                .unwrap_or_else(|| "Без названия".into());
+                .unwrap_or_else(|| crate::i18n::tr("Untitled", language).into());
             match self.worker.send(Job::PickSave {
                 id,
                 name,
@@ -669,6 +704,7 @@ impl App {
         }
     }
     fn reload(&mut self, id: u64) {
+        let language = self.language();
         if let Err(e) = self.flush_pending(id) {
             self.error = e;
             return;
@@ -698,7 +734,7 @@ impl App {
             Ok(()) => {
                 self.reloading.insert(id, target);
                 self.disk_changed = None;
-                self.status = "Перезагрузка…".into();
+                self.status = crate::i18n::tr("Reloading…", language).into();
             }
             Err(e) => self.error = e,
         }
@@ -725,6 +761,7 @@ impl App {
         }
     }
     fn write(&mut self, id: u64, path: PathBuf, copy: bool, export: bool, print: bool) {
+        let language = self.language();
         if let Err(e) = self.flush_pending(id) {
             self.fail_save(id, e);
             return;
@@ -781,7 +818,7 @@ impl App {
                         .unwrap_or_else(Instant::now);
                 }
                 self.saving.insert(id);
-                self.status = "Сохранение…".into();
+                self.status = crate::i18n::tr("Saving…", language).into();
             }
             Err(e) => self.fail_save(id, e),
         }
@@ -850,6 +887,7 @@ impl App {
         }
     }
     fn events(&mut self) {
+        let language = self.language();
         while let Ok(event) = self.worker.rx.try_recv() {
             match event {
                 Event::UnlockPreview { id, path, marker } => {
@@ -870,7 +908,11 @@ impl App {
                     {
                         t.save_locked = false;
                         self.locks.insert(id, lock);
-                        self.status = "Блокировка снята · можно сохранить файл".into();
+                        self.status = crate::i18n::tr(
+                            "The lock was removed · the file can be saved",
+                            language,
+                        )
+                        .into();
                     }
                 }
                 Event::RegistrationPreview(p) => {
@@ -883,7 +925,11 @@ impl App {
                     }
                 }
                 Event::Registered => {
-                    self.status = "Клиент MCP зарегистрирован. Перезапустите клиент.".into()
+                    self.status = crate::i18n::tr(
+                        "The MCP client is registered. Restart the client.",
+                        language,
+                    )
+                    .into()
                 }
                 Event::PickedOpen(path) => {
                     self.opening = false;
@@ -942,6 +988,7 @@ impl App {
                         reload.as_ref(),
                         &path,
                         document,
+                        language,
                     ) {
                         Ok(prepared) => prepared,
                         Err(e) => {
@@ -977,9 +1024,9 @@ impl App {
                         self.error = error;
                     }
                     self.status = if reload.is_some() {
-                        "Файл перезагружен"
+                        crate::i18n::tr("File reloaded", language)
                     } else {
-                        "Файл открыт"
+                        crate::i18n::tr("File opened", language)
                     }
                     .into();
                 }
@@ -1026,11 +1073,11 @@ impl App {
                         }
                     }
                     self.status = if copy {
-                        "Копия сохранена"
+                        crate::i18n::tr("Copy saved", language)
                     } else if export {
-                        "Экспорт завершён"
+                        crate::i18n::tr("Export finished", language)
                     } else {
-                        "Сохранено"
+                        crate::i18n::tr("Saved", language)
                     }
                     .into();
                     if let Some(reply) = self.mcp_saves.remove(&id) {
@@ -1050,7 +1097,8 @@ impl App {
                         self.close_after_save = None;
                         self.exit_after_save = false;
                         self.pending = Some(Pending::Close(id));
-                        self.status = "После сохранения появились новые правки".into();
+                        self.status =
+                            crate::i18n::tr("New edits appeared after saving", language).into();
                     }
                 }
                 Event::Canceled { id } => {
@@ -1065,7 +1113,7 @@ impl App {
                     }
                     self.saving.remove(&id);
                     if let Some(reply) = self.mcp_saves.remove(&id) {
-                        let _ = reply.send(Err("Отменено".into()));
+                        let _ = reply.send(Err(crate::i18n::tr("Cancelled", language).into()));
                     }
                 }
                 Event::Error { message, id } => {
@@ -1357,6 +1405,7 @@ impl App {
         }
     }
     fn workspace_strip(&mut self, ui: &mut egui::Ui) {
+        let language = self.language();
         if !self.workspace_jobs.iter().any(|task| task.running()) {
             return;
         }
@@ -1374,9 +1423,9 @@ impl App {
                             "ИИ · {} документа · {}",
                             task.targets.len(),
                             if task.cancelled() {
-                                "Отмена…"
+                                crate::i18n::tr("Cancel…", language)
                             } else {
-                                "Подготовка правок"
+                                crate::i18n::tr("Preparing the edits", language)
                             }
                         ));
                         let titles = task
@@ -1387,7 +1436,10 @@ impl App {
                             .join(" · ");
                         ui.weak(titles);
                         if ui
-                            .add_enabled(!task.cancelled(), egui::Button::new("Отменить"))
+                            .add_enabled(
+                                !task.cancelled(),
+                                egui::Button::new(crate::i18n::tr("Cancel", language)),
+                            )
                             .clicked()
                         {
                             task.cancel();
@@ -1395,6 +1447,13 @@ impl App {
                     });
                 }
             });
+    }
+    fn queue_client_approval(&mut self, client: String) -> Result<(), String> {
+        if !self.clients.contains(&client) && self.clients.len() >= 128 {
+            return Err("too_large: уже ожидают128 клиентов MCP; завершите запросы доступа".into());
+        }
+        self.clients.insert(client);
+        Ok(())
     }
     fn mcp_requests(&mut self, ctx: &egui::Context) {
         for key in self.client_access.reap() {
@@ -1422,6 +1481,16 @@ impl App {
                 let _ = r.reply.send(Err("cancelled: ход чата остановлен".into()));
                 continue;
             }
+            if !crate::mcp::tools::names().contains(&r.tool.as_str()) {
+                let _ = r
+                    .reply
+                    .send(Err("unsupported_feature: неизвестный инструмент MCP".into()));
+                continue;
+            }
+            if let Err(error) = crate::mcp::tools::validate_args(&r.tool, &r.args) {
+                let _ = r.reply.send(Err(error));
+                continue;
+            }
             if r.tool == "request_access" {
                 let result = (|| -> Result<Value, String> {
                     let args = r
@@ -1441,13 +1510,19 @@ impl App {
                             json!({"client_access":null,"status":"allowed","expires_in_seconds":0}),
                         );
                     }
+                    if token.is_none() && self.clients.len() >= 128 {
+                        return Err(
+                            "too_large: уже ожидают128 клиентов MCP; завершите запросы доступа"
+                                .into(),
+                        );
+                    }
                     let access = self.client_access.request(&r.client, token)?;
                     let status = if access.denied {
                         "denied"
                     } else if self.allowed.contains(&access.key) {
                         "allowed"
                     } else {
-                        self.clients.insert(access.key);
+                        self.queue_client_approval(access.key)?;
                         "pending"
                     };
                     Ok(
@@ -1480,10 +1555,10 @@ impl App {
                 }
             }
             if !self.allowed.contains(&r.client) && !self.chat.owns(&r.client) {
-                self.clients.insert(r.client);
-                let _ = r.reply.send(Err(
-                    "needs_confirmation: разрешите клиент в окне TrineDocs".into()
-                ));
+                let result = self.queue_client_approval(r.client).and_then(|_| {
+                    Err("needs_confirmation: разрешите клиент в окне TrineDocs".into())
+                });
+                let _ = r.reply.send(result);
                 continue;
             }
             if !crate::mcp::tools::read_only(&r.tool)
@@ -1495,10 +1570,6 @@ impl App {
                     .send(Err("busy: подтвердите действие в интерфейсе".into()));
                 continue;
             }
-            if let Err(error) = crate::mcp::tools::validate_args(&r.tool, &r.args) {
-                let _ = r.reply.send(Err(error));
-                continue;
-            }
             if r.args
                 .get("mode")
                 .is_some_and(|v| !matches!(v.as_str(), Some("apply" | "dry_run")))
@@ -1507,12 +1578,6 @@ impl App {
                     .is_some_and(|v| v.as_u64().is_none())
             {
                 let _ = r.reply.send(Err("invalid_args: mode/base_version".into()));
-                continue;
-            }
-            if !crate::mcp::tools::names().contains(&r.tool.as_str()) {
-                let _ = r
-                    .reply
-                    .send(Err("unsupported_feature: неизвестный инструмент MCP".into()));
                 continue;
             }
             if matches!(
@@ -1564,7 +1629,10 @@ impl App {
                 "save_document" | "close_document" | "open_document" | "export"
             ) && dry_run
             {
-                let _ = r.reply.send(Ok(json!({"applied":false})));
+                let result = self
+                    .preflight_file_request(&r.tool, &r.args)
+                    .map(|_| json!({"applied":false}));
+                let _ = r.reply.send(result);
                 continue;
             }
             if crate::mcp::media::is_background(&r.tool) {
@@ -1670,6 +1738,61 @@ impl App {
         }
     }
     /// Starts a design-guide, image or export tool on a worker thread (ADR-0027).
+    fn preflight_file_request(&self, tool: &str, args: &Value) -> Result<(), String> {
+        if tool == "open_document" {
+            let path = args
+                .get("path")
+                .and_then(Value::as_str)
+                .filter(|path| !path.trim().is_empty())
+                .ok_or("invalid_args: требуется непустой path")?;
+            if path.chars().any(|ch| ch == '\0') {
+                return Err("invalid_args: недопустимый path".into());
+            }
+            return Err("needs_confirmation: открытие пути выполняется через меню Файл".into());
+        }
+        let id = args
+            .get("document_id")
+            .and_then(Value::as_u64)
+            .ok_or("invalid_args: требуется document_id")?;
+        let tab = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == id)
+            .ok_or("not_found: документ не открыт")?;
+        if tool == "export" {
+            let ext = args
+                .get("format_extension")
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| tab.document.office_extension());
+            let ext = ext.trim_start_matches('.').to_ascii_lowercase();
+            if !tab
+                .document
+                .save_formats()
+                .iter()
+                .any(|(format, _)| *format == ext)
+            {
+                return Err("invalid_args: неподдерживаемый format_extension".into());
+            }
+        } else if tool == "save_document" {
+            if tab.read_only {
+                return Err("read_only: документ защищён от правки".into());
+            }
+            if tab.save_locked {
+                return Err("file_locked: сохраните копию или снимите блокировку".into());
+            }
+            if tab.path.is_none() {
+                return Err("needs_path: сначала выберите путь через интерфейс".into());
+            }
+            if self.picking.contains(&id)
+                || self.saving.contains(&id)
+                || self.reloading.contains_key(&id)
+                || self.mcp_saves.contains_key(&id)
+            {
+                return Err("busy: дождитесь файловой операции".into());
+            }
+        }
+        Ok(())
+    }
     fn start_media_job(&mut self, r: crate::mcp::BridgeRequest, ctx: &egui::Context) {
         use crate::mcp::media::Snapshot;
         if self.media_jobs.len() >= MAX_MEDIA_JOBS {
@@ -1767,6 +1890,15 @@ impl App {
             };
             let request = job.request;
             if request.reply.is_closed() {
+                continue;
+            }
+            if !self.settings.mcp
+                || (self.chat.was_ours(&request.client) && !self.chat.owns(&request.client))
+                || (!self.allowed.contains(&request.client) && !self.chat.owns(&request.client))
+            {
+                let _ = request
+                    .reply
+                    .send(Err("permission_denied: доступ MCP отозван".into()));
                 continue;
             }
             let result = match output {
@@ -1944,7 +2076,9 @@ impl App {
             let _ = self.worker.send(Job::Watch(paths));
             self.last_watch = Instant::now();
         }
-        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        // Workers and the MCP server wake the UI themselves; this tick only drives the
+        // multi-second timers above, so an idle window redraws once a second, not four times.
+        ctx.request_repaint_after(std::time::Duration::from_secs(1));
     }
     fn shortcuts(&mut self, ctx: &egui::Context) {
         if self.pending.is_some() {
@@ -1954,26 +2088,31 @@ impl App {
             return;
         }
         let cmd = egui::Modifiers::COMMAND;
-        if ctx.input_mut(|i| i.consume_key(cmd | egui::Modifiers::SHIFT, egui::Key::A)) {
+        if consume_shell_key(ctx, cmd | egui::Modifiers::SHIFT, egui::Key::A) {
             self.show_ai = !self.show_ai;
         }
-        if ctx.input_mut(|i| i.consume_key(cmd, egui::Key::O)) {
+        if consume_shell_key(ctx, cmd, egui::Key::O) {
             self.send(Job::PickOpen);
         }
-        if ctx.input_mut(|i| i.consume_key(cmd, egui::Key::S))
+        if consume_shell_key(ctx, cmd | egui::Modifiers::SHIFT, egui::Key::S)
+            && let Some(id) = self.active
+        {
+            self.deferred.push((id, "saveas"));
+        }
+        if consume_shell_key(ctx, cmd, egui::Key::S)
             && let Some(id) = self.active
         {
             self.deferred.push((id, "save"));
         }
-        if ctx.input_mut(|i| i.consume_key(cmd, egui::Key::W))
+        if consume_shell_key(ctx, cmd, egui::Key::W)
             && let Some(id) = self.active
         {
             self.deferred.push((id, "close"));
         }
-        let palette_boundary = ctx.input(|i| i.events.iter().position(|e| matches!(e, egui::Event::Key { key: egui::Key::K, pressed: true, modifiers, .. } if modifiers.command || modifiers.ctrl)));
+        let palette_boundary = ctx.input(|i| i.events.iter().position(|e| matches!(e, egui::Event::Key { key: egui::Key::K, pressed: true, repeat:false, modifiers, .. } if (modifiers.command || modifiers.ctrl)&&!modifiers.alt&&!modifiers.shift)));
         if let Some(boundary) = palette_boundary {
             if self.palette {
-                ctx.input_mut(|i| i.consume_key(cmd, egui::Key::K));
+                consume_shell_key(ctx, cmd, egui::Key::K);
                 self.palette = false;
                 ctx.memory_mut(|m| m.surrender_focus(egui::Id::new("command-palette-query")));
             } else {
@@ -1986,15 +2125,25 @@ impl App {
             self.palette = false;
         }
         if !ctx.text_edit_focused() {
+            if consume_shell_key(ctx, cmd | egui::Modifiers::SHIFT, egui::Key::Z)
+                && let Some(id) = self.active
+            {
+                self.deferred.push((id, "redo"));
+            }
             for (key, action) in [(egui::Key::Z, "undo"), (egui::Key::Y, "redo")] {
-                if ctx.input_mut(|i| i.consume_key(cmd, key))
+                if consume_shell_key(ctx, cmd, key)
                     && let Some(id) = self.active
                 {
                     self.deferred.push((id, action));
                 }
             }
         }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Tab))
+        let backwards = consume_shell_key(
+            ctx,
+            egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
+            egui::Key::Tab,
+        );
+        if (backwards || consume_shell_key(ctx, egui::Modifiers::CTRL, egui::Key::Tab))
             && !self.tabs.is_empty()
         {
             let index = self
@@ -2002,7 +2151,15 @@ impl App {
                 .iter()
                 .position(|t| Some(t.id) == self.active)
                 .unwrap_or(self.tabs.len() - 1);
-            if let Some(id) = self.tabs.get((index + 1) % self.tabs.len()).map(|t| t.id) {
+            if let Some(id) = self
+                .tabs
+                .get(if backwards {
+                    (index + self.tabs.len() - 1) % self.tabs.len()
+                } else {
+                    (index + 1) % self.tabs.len()
+                })
+                .map(|t| t.id)
+            {
                 self.deferred.push((id, "activate"));
             }
         }
@@ -2011,49 +2168,83 @@ impl App {
         }
     }
     fn home(&mut self, ui: &mut egui::Ui) {
+        let language = self.language();
         let filter_id = egui::Id::new("home-filter");
         let mut filter: usize = ui.data(|d| d.get_temp(filter_id)).unwrap_or_default();
         let kind_id = egui::Id::new("home-kind");
         let mut kind_filter: usize = ui.data(|d| d.get_temp(kind_id)).unwrap_or_default();
         egui::ScrollArea::vertical().id_salt("home").show(ui, |ui| {
             let width = (ui.available_width() - 32.0).clamp(0.0, 960.0);
-            let inset = ((ui.available_width() - width) * 0.5 - ui.spacing().item_spacing.x).max(0.0);
+            let inset =
+                ((ui.available_width() - width) * 0.5 - ui.spacing().item_spacing.x).max(0.0);
             ui.horizontal(|ui| {
                 ui.add_space(inset);
                 ui.vertical(|ui| {
                     ui.set_width(width);
                     ui.add_space(28.0);
-                    ui.label(egui::RichText::new("Ваше рабочее пространство").size(26.0).strong());
-                    ui.weak("Документы, таблицы и презентации в одном месте.");
+                    ui.label(
+                        egui::RichText::new(crate::i18n::tr("Your workspace", language))
+                            .size(26.0)
+                            .strong(),
+                    );
+                    ui.weak(crate::i18n::tr(
+                        "Documents, spreadsheets and presentations in one place.",
+                        language,
+                    ));
                     ui.add_space(20.0);
                     let cards = [
-                        ("docs", "Документ", crate::chrome::accent_for("docs", ui.visuals().dark_mode)),
-                        ("sheets", "Таблица", crate::chrome::accent_for("sheets", ui.visuals().dark_mode)),
-                        ("slides", "Презентация", crate::chrome::accent_for("slides", ui.visuals().dark_mode)),
+                        (
+                            "docs",
+                            crate::i18n::tr("Document", language),
+                            crate::chrome::accent_for("docs", ui.visuals().dark_mode),
+                        ),
+                        (
+                            "sheets",
+                            crate::i18n::tr("Spreadsheet", language),
+                            crate::chrome::accent_for("sheets", ui.visuals().dark_mode),
+                        ),
+                        (
+                            "slides",
+                            crate::i18n::tr("Presentation", language),
+                            crate::chrome::accent_for("slides", ui.visuals().dark_mode),
+                        ),
                     ];
                     let gap = 12.0;
                     let card_width = ((width - gap * 2.0) / 3.0).clamp(132.0, 312.0);
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
                         for (kind, label, color) in cards {
-                            if new_card(ui, kind, label, color, card_width).clicked() {
+                            if new_card(ui, kind, label, color, card_width, language).clicked() {
                                 self.create(kind);
                             }
                         }
                     });
                     ui.add_space(32.0);
                     ui.horizontal_wrapped(|ui| {
-                        for (index, label) in ["Недавние", "Закреплённые"].into_iter().enumerate() {
+                        for (index, label) in [
+                            crate::i18n::tr("Recent", language),
+                            crate::i18n::tr("Pinned", language),
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        {
                             let selected = filter % 2 == index;
                             let text = egui::RichText::new(label).size(15.0);
                             let response = ui.add(
-                                egui::Button::new(if selected { text.strong() } else { text.color(crate::chrome::muted(ui)) })
-                                    .frame_when_inactive(false)
-                                    .min_size(egui::vec2(0.0, 30.0)),
+                                egui::Button::new(if selected {
+                                    text.strong()
+                                } else {
+                                    text.color(crate::chrome::muted(ui))
+                                })
+                                .frame_when_inactive(false)
+                                .min_size(egui::vec2(0.0, 30.0)),
                             );
                             if selected {
                                 ui.painter().line_segment(
-                                    [response.rect.left_bottom() + egui::vec2(8.0, -1.0), response.rect.right_bottom() - egui::vec2(8.0, 1.0)],
+                                    [
+                                        response.rect.left_bottom() + egui::vec2(8.0, -1.0),
+                                        response.rect.right_bottom() - egui::vec2(8.0, 1.0),
+                                    ],
                                     egui::Stroke::new(2.0, crate::chrome::accent(ui)),
                                 );
                             }
@@ -2061,94 +2252,234 @@ impl App {
                                 filter = index;
                             }
                         }
+                        let search_hint = crate::i18n::tr("Search files", language);
                         ui.add(
                             egui::TextEdit::singleline(&mut self.query)
-                                .hint_text("Поиск файлов")
+                                .hint_text(search_hint)
                                 .desired_width((width - 380.0).clamp(120.0, 220.0))
                                 .margin(egui::Margin::symmetric(10, 6)),
                         );
-                        if crate::chrome::icon_button(ui, crate::chrome::Icon::Open, "Открыть файл · Ctrl+O", true).clicked() {
+                        if crate::chrome::icon_button(
+                            ui,
+                            crate::chrome::Icon::Open,
+                            crate::i18n::tr("Open a file · Ctrl+O", language),
+                            true,
+                        )
+                        .clicked()
+                        {
                             self.send(Job::PickOpen);
                         }
                     });
                     ui.horizontal_wrapped(|ui| {
-                        for (index, label) in ["Все файлы", "Docs", "Sheets", "Slides"].into_iter().enumerate() {
+                        for (index, label) in [
+                            crate::i18n::tr("All files", language),
+                            "Docs",
+                            "Sheets",
+                            "Slides",
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        {
                             ui.selectable_value(&mut kind_filter, index, label);
                         }
-                        if !self.query.is_empty() && crate::chrome::tool(ui, "×", "Очистить поиск", false).clicked() {
+                        if !self.query.is_empty()
+                            && crate::chrome::tool(
+                                ui,
+                                "×",
+                                crate::i18n::tr("Clear search", language),
+                                false,
+                            )
+                            .clicked()
+                        {
                             self.query.clear();
                         }
                     });
                     ui.add_space(6.0);
-                    let list: Vec<PathBuf> = if filter % 2 == 1 { self.settings.pinned.clone() } else { self.settings.recent.clone() };
+                    let list: Vec<PathBuf> = if filter % 2 == 1 {
+                        self.settings.pinned.clone()
+                    } else {
+                        self.settings.recent.clone()
+                    };
                     let q = self.query.trim().to_lowercase();
-                    let shown: Vec<&PathBuf> = list.iter().filter(|p| {
-                        p.to_string_lossy().to_lowercase().contains(&q)
-                            && (kind_filter == 0 || file_kind(p) == Some(kind_filter))
-                    }).collect();
+                    let shown: Vec<&PathBuf> = list
+                        .iter()
+                        .filter(|p| {
+                            p.to_string_lossy().to_lowercase().contains(&q)
+                                && (kind_filter == 0 || file_kind(p) == Some(kind_filter))
+                        })
+                        .collect();
                     if shown.is_empty() {
                         ui.add_space(24.0);
                         ui.vertical_centered(|ui| {
-                            ui.label(egui::RichText::new(if !q.is_empty() || kind_filter != 0 { "Ничего не найдено" } else if filter % 2 == 1 { "Нет закреплённых файлов" } else { "Здесь появятся ваши файлы" }).strong());
-                            ui.label(egui::RichText::new(if !q.is_empty() || kind_filter != 0 { "Измените имя, путь или тип файла." } else if filter % 2 == 1 { "Откройте ··· рядом с файлом и выберите «Закрепить»." } else { "Создайте файл или перетащите его в окно." }).color(crate::chrome::muted(ui)));
+                            ui.label(
+                                egui::RichText::new(if !q.is_empty() || kind_filter != 0 {
+                                    crate::i18n::tr("Nothing found", language)
+                                } else if filter % 2 == 1 {
+                                    crate::i18n::tr("No pinned files", language)
+                                } else {
+                                    crate::i18n::tr("Your files will appear here", language)
+                                })
+                                .strong(),
+                            );
+                            ui.label(
+                                egui::RichText::new(if !q.is_empty() || kind_filter != 0 {
+                                    crate::i18n::tr("Change the name, path or file type.", language)
+                                } else if filter % 2 == 1 {
+                                    crate::i18n::tr(
+                                        "Open ··· next to a file and choose «Pin».",
+                                        language,
+                                    )
+                                } else {
+                                    crate::i18n::tr(
+                                        "Create a file or drag it into the window.",
+                                        language,
+                                    )
+                                })
+                                .color(crate::chrome::muted(ui)),
+                            );
                         });
                     } else {
                         ui.horizontal(|ui| {
                             ui.add_space(52.0);
-                            ui.label(egui::RichText::new("Имя").size(11.5).color(crate::chrome::muted(ui)));
+                            ui.label(
+                                egui::RichText::new(crate::i18n::tr("Name", language))
+                                    .size(11.5)
+                                    .color(crate::chrome::muted(ui)),
+                            );
                         });
                         ui.add_space(2.0);
                     }
                     for p in shown {
                         let pin = self.settings.pinned.contains(p);
+                        let unpin_label = crate::i18n::tr("Unpin", language);
+                        let pin_label = crate::i18n::tr("Pin", language);
+                        let remove_label = crate::i18n::tr("Remove from list", language);
+                        let actions_label = crate::i18n::tr("File actions", language);
                         let row = ui.allocate_ui(egui::vec2(width, 60.0), |ui| {
-                            let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 60.0), egui::Sense::click());
-                            response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), p.display().to_string()));
+                            let (rect, response) = ui
+                                .allocate_exact_size(egui::vec2(width, 60.0), egui::Sense::click());
+                            response.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::WidgetType::Button,
+                                    ui.is_enabled(),
+                                    p.display().to_string(),
+                                )
+                            });
                             let hovered = ui.rect_contains_pointer(rect);
                             if hovered || response.has_focus() {
-                                ui.painter().rect_filled(rect, 6.0, crate::chrome::hover_fill(ui));
+                                ui.painter()
+                                    .rect_filled(rect, 6.0, crate::chrome::hover_fill(ui));
                             }
                             let (glyph, _) = file_badge(p);
-                            let color = crate::chrome::accent_for(match file_kind(p) { Some(2) => "sheets", Some(3) => "slides", _ => "docs" }, ui.visuals().dark_mode);
-                            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(egui::vec2(12.0, 8.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+                            let color = crate::chrome::accent_for(
+                                match file_kind(p) {
+                                    Some(2) => "sheets",
+                                    Some(3) => "slides",
+                                    _ => "docs",
+                                },
+                                ui.visuals().dark_mode,
+                            );
+                            let mut child = ui.new_child(
+                                egui::UiBuilder::new()
+                                    .max_rect(rect.shrink2(egui::vec2(12.0, 8.0)))
+                                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                            );
                             crate::chrome::badge(&mut child, glyph, color, 28.0);
                             child.add_space(10.0);
                             child.vertical(|ui| {
                                 ui.set_width((width - 122.0).max(40.0));
                                 ui.spacing_mut().item_spacing.y = 0.0;
-                                ui.add(egui::Label::new(egui::RichText::new(p.file_name().map(|s| s.to_string_lossy()).unwrap_or_default()).size(13.5)).truncate());
-                                ui.add(egui::Label::new(egui::RichText::new(p.parent().map(|d| d.display().to_string()).unwrap_or_default()).color(crate::chrome::muted(ui)).size(11.0)).truncate());
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(
+                                            p.file_name()
+                                                .map(|s| s.to_string_lossy())
+                                                .unwrap_or_default(),
+                                        )
+                                        .size(13.5),
+                                    )
+                                    .truncate(),
+                                );
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(
+                                            p.parent()
+                                                .map(|d| d.display().to_string())
+                                                .unwrap_or_default(),
+                                        )
+                                        .color(crate::chrome::muted(ui))
+                                        .size(11.0),
+                                    )
+                                    .truncate(),
+                                );
                             });
                             let mut action = None;
-                            child.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.menu_button("···", |ui| {
-                                    if ui.button(if pin { "Открепить" } else { "Закрепить" }).clicked() { action = Some("pin"); ui.close(); }
-                                    if ui.button("Убрать из списка").clicked() { action = Some("remove"); ui.close(); }
-                                }).response.on_hover_text("Действия с файлом");
-                                if pin { ui.weak("★"); }
-                            });
+                            child.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.menu_button("···", |ui| {
+                                        if ui
+                                            .button(if pin { unpin_label } else { pin_label })
+                                            .clicked()
+                                        {
+                                            action = Some("pin");
+                                            ui.close();
+                                        }
+                                        if ui.button(remove_label).clicked() {
+                                            action = Some("remove");
+                                            ui.close();
+                                        }
+                                    })
+                                    .response
+                                    .on_hover_text(actions_label);
+                                    if pin {
+                                        ui.weak("★");
+                                    }
+                                },
+                            );
                             (response, action)
                         });
                         let (response, action) = row.inner;
                         match action {
                             Some("pin") => {
-                                if let Err(error) = self.settings.toggle_pin(p.clone()) { self.error = error; }
-                                if let Err(e) = self.worker.save_settings(self.settings.clone()) { self.error = e; }
+                                if let Err(error) = self.settings.toggle_pin(p.clone()) {
+                                    self.error = error;
+                                }
+                                if let Err(e) = self.worker.save_settings(self.settings.clone()) {
+                                    self.error = e;
+                                }
                             }
                             Some(_) => {
                                 self.settings.recent.retain(|v| v != p);
                                 self.settings.pinned.retain(|v| v != p);
-                                if let Err(e) = self.worker.save_settings(self.settings.clone()) { self.error = e; }
+                                if let Err(e) = self.worker.save_settings(self.settings.clone()) {
+                                    self.error = e;
+                                }
                             }
                             None => {
-                                if response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(p.display().to_string()).clicked() {
+                                if response
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                    .on_hover_text(p.display().to_string())
+                                    .clicked()
+                                {
                                     self.send(Job::Open(p.clone()));
                                 }
                             }
                         }
                     }
                     ui.add_space(28.0);
-                    ui.label(egui::RichText::new(format!("TrineDocs {} · поддержка всех возможностей Microsoft Office пока неполная.", env!("CARGO_PKG_VERSION"))).color(crate::chrome::muted(ui)).size(11.0));
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "TrineDocs {} · {}",
+                            env!("CARGO_PKG_VERSION"),
+                            crate::i18n::tr(
+                                "Support for all Microsoft Office features is not complete yet.",
+                                language
+                            )
+                        ))
+                        .color(crate::chrome::muted(ui))
+                        .size(11.0),
+                    );
                 });
             });
         });
@@ -2158,18 +2489,19 @@ impl App {
         });
     }
     fn dialogs(&mut self, ctx: &egui::Context) {
+        let language = self.language();
         if self.show_inspector {
             let mut open = true;
             let mut refresh = false;
             let mut navigate = None;
-            egui::Window::new("Проверка документа")
+            egui::Window::new(crate::i18n::tr("Document check", language))
                 .open(&mut open)
                 .default_width(520.0)
                 .show(ctx, |ui| {
                     if self.inspection.is_some() {
                         ui.horizontal(|ui| {
                             ui.spinner();
-                            ui.label("Проверяем документ…");
+                            ui.label(crate::i18n::tr("Checking the document…", language));
                         });
                     }
                     if let Some(result) = &self.inspection_result {
@@ -2180,17 +2512,22 @@ impl App {
                             .iter()
                             .any(|tab| tab.id == result.id && tab.version == result.version);
                         if !unchanged {
-                            ui.label("Документ изменён или закрыт после проверки.");
+                            ui.label(crate::i18n::tr(
+                                "The document changed or closed after the check.",
+                                language,
+                            ));
                         }
                         ui.separator();
                         ui.horizontal(|ui| {
+                            let search_hint =
+                                crate::i18n::tr("Search by location and description", language);
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.inspector_query)
-                                    .hint_text("Поиск по месту и описанию")
+                                    .hint_text(search_hint)
                                     .char_limit(160)
                                     .desired_width(260.0),
                             );
-                            if ui.button("Сбросить").clicked() {
+                            if ui.button(crate::i18n::tr("Reset", language)).clicked() {
                                 self.inspector_query.clear();
                                 self.inspector_category = Default::default();
                             }
@@ -2207,13 +2544,17 @@ impl App {
                                         );
                                     }
                                 });
-                            if ui.button("Копировать отчёт").clicked() {
+                            if ui
+                                .button(crate::i18n::tr("Copy the report", language))
+                                .clicked()
+                            {
                                 ctx.copy_text(result.copy_report(
                                     &self.inspector_query,
                                     self.inspector_category,
                                     unchanged,
                                 ));
-                                self.status = "Отчёт проверки скопирован".into();
+                                self.status =
+                                    crate::i18n::tr("Check report copied", language).into();
                             }
                         });
                         let findings = result
@@ -2226,11 +2567,14 @@ impl App {
                                 result.report.findings.len()
                             ));
                             if findings.is_empty() {
-                                ui.label("По этому фильтру замечаний нет.");
+                                ui.label(crate::i18n::tr("No findings for this filter.", language));
                             }
                         }
                         if result.report.findings.is_empty() {
-                            ui.label("По поддерживаемым проверкам замечаний нет.");
+                            ui.label(crate::i18n::tr(
+                                "No findings for the supported checks.",
+                                language,
+                            ));
                         }
                         egui::ScrollArea::vertical()
                             .max_height(420.0)
@@ -2271,7 +2615,10 @@ impl App {
                             self.active.is_some()
                                 && self.inspection.is_none()
                                 && self.pending.is_none(),
-                            egui::Button::new("Проверить текущий документ"),
+                            egui::Button::new(crate::i18n::tr(
+                                "Check the current document",
+                                language,
+                            )),
                         )
                         .clicked();
                 });
@@ -2287,7 +2634,7 @@ impl App {
         }
         if !self.error.is_empty() {
             let error = self.error.clone();
-            egui::Window::new("Сообщение")
+            egui::Window::new(crate::i18n::tr("Message", language))
                 .collapsible(false)
                 .resizable(false)
                 .show(ctx, |ui| {
@@ -2298,19 +2645,20 @@ impl App {
                 });
         }
         if let Some(client) = self.clients.first().cloned() {
-            egui::Window::new("Разрешить MCP-клиент?")
+            egui::Window::new(crate::i18n::tr("Allow the MCP client?", language))
                 .collapsible(false)
                 .show(ctx, |ui| {
                     ui.label(format!("Клиент: {client}"));
-                    ui.label(
-                        "Чтение и правка открытых документов. Файлы на диске — через интерфейс.",
-                    );
+                    ui.label(crate::i18n::tr(
+                        "Read and edit open documents. Files on disk go through the interface.",
+                        language,
+                    ));
                     ui.horizontal(|ui| {
-                        if ui.button("Разрешить").clicked() {
+                        if ui.button(crate::i18n::tr("Allow", language)).clicked() {
                             self.allowed.insert(client.clone());
                             self.clients.remove(&client);
                         }
-                        if ui.button("Запретить").clicked() {
+                        if ui.button(crate::i18n::tr("Deny", language)).clicked() {
                             self.clients.remove(&client);
                             self.client_access.deny(&client);
                         }
@@ -2318,20 +2666,23 @@ impl App {
                 });
         }
         if !self.recoveries.is_empty() {
-            egui::Window::new("Восстановление")
+            egui::Window::new(crate::i18n::tr("Recovery", language))
                 .collapsible(false)
                 .show(ctx, |ui| {
                     for s in self.recoveries.clone() {
                         ui.horizontal(|ui| {
                             ui.label(&s.title);
-                            if ui.button("Восстановить").clicked()
+                            if ui.button(crate::i18n::tr("Recover", language)).clicked()
                                 && let Err(error) = self.restore_snapshot(&s)
                             {
                                 self.error = error;
                             }
                         });
                     }
-                    if ui.button("Удалить снимки").clicked() {
+                    if ui
+                        .button(crate::i18n::tr("Delete snapshots", language))
+                        .clicked()
+                    {
                         for s in &self.recoveries {
                             self.recovery.clear(s.id);
                         }
@@ -2340,30 +2691,50 @@ impl App {
                 });
         }
         if let Some(id) = self.disk_changed {
-            egui::Window::new("Файл изменён на диске").collapsible(false).show(ctx,|ui|{
-            ui.label("Перезагрузка заменит текущие правки. Для их сохранения используйте «Сохранить копию».");ui.horizontal(|ui|{
-                if ui.button("Перезагрузить").clicked() { self.reload(id); }
-                if ui.button("Оставить правки").clicked(){if let Some(observed) = self.observed_stamps.get(&id).copied() { self.stamps.insert(id, observed); self.disk_changed=None; } else { self.status="Дождитесь повторной проверки файла".into(); }}
-            });
-        });
+            egui::Window::new(crate::i18n::tr("The file changed on disk", language))
+                .collapsible(false)
+                .show(ctx, |ui| {
+                    ui.label(crate::i18n::tr(
+                        "Reloading replaces the current edits. Use “Save a copy” to keep them.",
+                        language,
+                    ));
+                    ui.horizontal(|ui| {
+                        if ui.button(crate::i18n::tr("Reload", language)).clicked() {
+                            self.reload(id);
+                        }
+                        if ui
+                            .button(crate::i18n::tr("Keep the edits", language))
+                            .clicked()
+                        {
+                            if let Some(observed) = self.observed_stamps.get(&id).copied() {
+                                self.stamps.insert(id, observed);
+                                self.disk_changed = None;
+                            } else {
+                                self.status =
+                                    crate::i18n::tr("Wait for the file check to repeat", language)
+                                        .into();
+                            }
+                        }
+                    });
+                });
         }
         if self.pending.is_some() {
             let mut action = 0;
             egui::Modal::new(egui::Id::new("confirmation")).show(ctx,|ui|{
             ui.set_max_width(520.0);
-            ui.heading("Подтверждение");
+            ui.heading(crate::i18n::tr("Confirmation", language));
             ui.add_space(8.0);
             match self.pending.as_ref(){Some(Pending::Unlock{path,marker,..})=>{
                 ui.label(format!("Файл: {}", path.file_name().map(|v| v.to_string_lossy()).unwrap_or_default()));
-                ui.label(if marker.is_some() { "Удалить оставшийся lock-маркер? Закройте этот файл в других программах. Активная блокировка TrineDocs остаётся защищённой." } else { "Lock-маркер уже отсутствует. Получить блокировку для сохранения?" });
-                ui.horizontal(|ui| { if ui.button("Разблокировать сохранение").clicked(){action=1}
-                if ui.button("Отмена").clicked(){action=3} });
-            },Some(Pending::Register(p))=>{ui.label(format!("Добавить сервер trinedocs в {}",p.path.display()));ui.label("Остальные записи сохранятся. Существующая запись trinedocs не заменяется.");ui.monospace(&p.change);ui.horizontal(|ui|{if ui.button("Добавить").clicked(){action=1}
-if ui.button("Отмена").clicked(){action=3}});},Some(Pending::SaveFormat{id,..})=>{if let Some(t)=self.tabs.iter().find(|t|t.id==*id){match &t.document{Document::Docs(d)=>{for loss in &d.losses{ui.label(loss);}},Document::Slides(d)=>{for loss in d.export_warnings(){ui.label(loss);}},_=>{}}}ui.label("Экспорт сохраняет только возможности выбранного формата. Форматирование и объекты могут измениться или исчезнуть. Для редактируемой копии выберите .docx, .xlsx или .pptx; ограничения Office-экспорта также остаются.");ui.horizontal(|ui|{if ui.button("Продолжить").clicked(){action=1}
-if ui.button("Отмена").clicked(){action=3}});}
-            _=>{ui.label("Сохранить изменения?");ui.horizontal(|ui|{if ui.button("Сохранить").clicked(){action=1}
-if ui.button("Не сохранять").clicked(){action=2}
-if ui.button("Отмена").clicked(){action=3}});}}
+                ui.label(if marker.is_some() { crate::i18n::tr("Delete the remaining lock marker? Close this file in other programs. The active TrineDocs lock stays protected.", language) } else { crate::i18n::tr("The lock marker is already gone. Take the lock for saving?", language) });
+                ui.horizontal(|ui| { if ui.button(crate::i18n::tr("Unlock saving", language)).clicked(){action=1}
+                if ui.button(crate::i18n::tr("Cancel", language)).clicked(){action=3} });
+            },Some(Pending::Register(p))=>{ui.label(format!("Добавить сервер trinedocs в {}",p.path.display()));ui.label(crate::i18n::tr("The other entries are kept. The existing trinedocs entry is not replaced.", language));ui.monospace(&p.change);ui.horizontal(|ui|{if ui.button(crate::i18n::tr("Add", language)).clicked(){action=1}
+if ui.button(crate::i18n::tr("Cancel", language)).clicked(){action=3}});},Some(Pending::SaveFormat{id,..})=>{if let Some(t)=self.tabs.iter().find(|t|t.id==*id){match &t.document{Document::Docs(d)=>{for loss in &d.losses{ui.label(loss);}},Document::Slides(d)=>{for loss in d.export_warnings(){ui.label(loss);}},_=>{}}}ui.label(crate::i18n::tr("Export keeps only what the chosen format supports. Formatting and objects may change or disappear. For an editable copy choose .docx, .xlsx or .pptx; the Office export limits remain.", language));ui.horizontal(|ui|{if ui.button(crate::i18n::tr("Continue", language)).clicked(){action=1}
+if ui.button(crate::i18n::tr("Cancel", language)).clicked(){action=3}});}
+            _=>{ui.label(crate::i18n::tr("Save changes?", language));ui.horizontal(|ui|{if ui.button(crate::i18n::tr("Save", language)).clicked(){action=1}
+if ui.button(crate::i18n::tr("Discard", language)).clicked(){action=2}
+if ui.button(crate::i18n::tr("Cancel", language)).clicked(){action=3}});}}
         });
             if action != 0
                 && let Some(p) = self.pending.take()
@@ -2384,7 +2755,11 @@ if ui.button("Отмена").clicked(){action=3}});}}
                                 expected: self.stamps.get(&id).copied().flatten(),
                             });
                         } else {
-                            self.error = "Документ изменился или занят файловой операцией".into();
+                            self.error = crate::i18n::tr(
+                                "The document changed or is busy with a file operation",
+                                language,
+                            )
+                            .into();
                         }
                     }
                     (Pending::Register(p), 1) => self.send(Job::ApplyRegistration(p)),
@@ -2435,25 +2810,37 @@ if ui.button("Отмена").clicked(){action=3}});}}
         if self.show_settings {
             let mut open = true;
             let mut changed = false;
-            egui::Window::new("Настройки")
+            let language_label = crate::i18n::tr("Language", language);
+            let russian_label = crate::i18n::tr("Russian", language);
+            let theme_label = crate::i18n::tr("Theme", language);
+            let theme_labels = [
+                ("system", crate::i18n::tr("System", language)),
+                ("light", crate::i18n::tr("Light", language)),
+                ("dark", crate::i18n::tr("Dark", language)),
+            ];
+            let scale_label = crate::i18n::tr("Scale", language);
+            let backup_label = crate::i18n::tr("Backup .bak", language);
+            let motion_label = crate::i18n::tr("Reduced motion", language);
+            let mcp_label = crate::i18n::tr("MCP: local clients", language);
+            egui::Window::new(crate::i18n::tr("Settings", language))
                 .open(&mut open)
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label("Язык");
+                        ui.label(language_label);
                         changed |= ui
-                            .selectable_value(&mut self.settings.language, "ru".into(), "Русский")
+                            .selectable_value(
+                                &mut self.settings.language,
+                                "ru".into(),
+                                russian_label,
+                            )
                             .changed();
                         changed |= ui
                             .selectable_value(&mut self.settings.language, "en".into(), "English")
                             .changed();
                     });
                     ui.horizontal(|ui| {
-                        ui.label("Тема");
-                        for (v, l) in [
-                            ("system", "Системная"),
-                            ("light", "Светлая"),
-                            ("dark", "Тёмная"),
-                        ] {
+                        ui.label(theme_label);
+                        for (v, l) in theme_labels {
                             changed |= ui
                                 .selectable_value(&mut self.settings.theme, v.into(), l)
                                 .changed();
@@ -2461,19 +2848,17 @@ if ui.button("Отмена").clicked(){action=3}});}}
                     });
                     changed |= ui
                         .add(
-                            egui::Slider::new(&mut self.settings.scale, 0.75..=2.0).text("Масштаб"),
+                            egui::Slider::new(&mut self.settings.scale, 0.75..=2.0)
+                                .text(scale_label),
                         )
                         .changed();
                     changed |= ui
-                        .checkbox(&mut self.settings.backup, "Резервная копия .bak")
+                        .checkbox(&mut self.settings.backup, backup_label)
                         .changed();
                     changed |= ui
-                        .checkbox(&mut self.settings.reduced_motion, "Уменьшить движение")
+                        .checkbox(&mut self.settings.reduced_motion, motion_label)
                         .changed();
-                    if ui
-                        .checkbox(&mut self.settings.mcp, "MCP: локальные клиенты")
-                        .changed()
-                    {
+                    if ui.checkbox(&mut self.settings.mcp, mcp_label).changed() {
                         changed = true;
                         self.allowed.clear();
                         self.clients.clear();
@@ -2496,7 +2881,10 @@ if ui.button("Отмена").clicked(){action=3}});}}
                             }
                         }
                     }
-                    if ui.button("Скопировать конфиг MCP").clicked() {
+                    if ui
+                        .button(crate::i18n::tr("Copy MCP config", language))
+                        .clicked()
+                    {
                         let shim = std::env::current_exe()
                             .ok()
                             .map(|p| p.with_file_name("trinedocs-mcp.exe"))
@@ -2506,7 +2894,7 @@ if ui.button("Отмена").clicked(){action=3}});}}
                                 .to_string(),
                         );
                     }
-                    ui.label("Регистрация MCP с предпросмотром:");
+                    ui.label(crate::i18n::tr("MCP registration with preview:", language));
                     for client in [
                         crate::mcp::register::Client::Codex,
                         crate::mcp::register::Client::Claude,
@@ -2528,7 +2916,7 @@ if ui.button("Отмена").clicked(){action=3}});}}
         }
         if self.palette {
             let mut open = true;
-            egui::Window::new("Команды")
+            egui::Window::new(crate::i18n::tr("Commands", language))
                 .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
@@ -2548,10 +2936,11 @@ if ui.button("Отмена").clicked(){action=3}});}}
                     let enter = focused
                         && ctx
                             .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+                    let query_hint = crate::i18n::tr("Find an action…", language);
                     let response = ui.add(
                         egui::TextEdit::singleline(&mut self.palette_query)
                             .id(query_id)
-                            .hint_text("Найти действие…")
+                            .hint_text(query_hint)
                             .desired_width(400.0),
                     );
                     if self.palette_focus {
@@ -2561,7 +2950,11 @@ if ui.button("Отмена").clicked(){action=3}});}}
                     if response.changed() {
                         self.palette_selected = 0;
                     }
-                    let commands = palette_commands(self.current().is_some(), &self.palette_query);
+                    let commands = palette_commands(
+                        self.current().is_some(),
+                        &self.palette_query,
+                        &self.settings.language,
+                    );
                     if !commands.is_empty() {
                         self.palette_selected = self.palette_selected.min(commands.len() - 1);
                         if down {
@@ -2588,7 +2981,7 @@ if ui.button("Отмена").clicked(){action=3}});}}
                         }
                     }
                     if commands.is_empty() {
-                        ui.weak("Команды не найдены");
+                        ui.weak(crate::i18n::tr("No commands found", language));
                     }
                     if let Some(key) = picked {
                         match key {
@@ -2635,6 +3028,7 @@ impl eframe::App for App {
         crate::clipboard::observe(ctx);
     }
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
+        let language = self.language();
         let ctx = ui.ctx().clone();
         if let Some(smoke) = &mut self.smoke {
             self.allow_exit = true;
@@ -2645,8 +3039,12 @@ impl eframe::App for App {
             } {
                 Ok(Some(document)) => {
                     self.tabs.clear();
-                    let mut t =
-                        Tab::new(self.next_id, document, "Проверка интерфейса".into(), None);
+                    let mut t = Tab::new(
+                        self.next_id,
+                        document,
+                        crate::i18n::tr("Interface check", language).into(),
+                        None,
+                    );
                     self.next_id += 1;
                     t.saved_version = 0;
                     self.active = Some(t.id);
@@ -2689,7 +3087,7 @@ impl eframe::App for App {
                         ui.label(egui::RichText::new("TrineDocs").size(14.0).strong());
                     }
                     ui.add_space(8.0);
-                    ui.menu_button(self.tr("File"), |ui| {
+                    ui.menu_button(crate::i18n::tr("File", language), |ui| {
                         for (c, l) in [
                             ("docs", "Document"),
                             ("sheets", "Spreadsheet"),
@@ -2706,7 +3104,7 @@ impl eframe::App for App {
                                 .add_enabled(
                                     matches!(c, "docs" | "sheets" | "slides" | "open")
                                         || self.active.is_some(),
-                                    egui::Button::new(self.tr(l)),
+                                    egui::Button::new(crate::i18n::tr(l, language)),
                                 )
                                 .clicked()
                             {
@@ -2716,37 +3114,34 @@ impl eframe::App for App {
                         }
                         if let Some(t) = self.current() {
                             ui.separator();
-                            ui.menu_button(
-                                "Сохранить / экспортировать…",
-                                |ui| {
-                                    let formats: &[&str] = match &t.document {
-                                        Document::Docs(_) => &["docx", "pdf", "txt", "md", "html"],
-                                        Document::Sheets(_) => {
-                                            &["xlsx", "pdf", "csv", "tsv", "html"]
-                                        }
-                                        Document::Slides(_) => &["pptx", "pdf", "png"],
-                                    };
-                                    for ext in formats {
-                                        let label = t
-                                            .document
-                                            .save_formats()
-                                            .iter()
-                                            .find(|(e, _)| e == ext)
-                                            .map(|(_, l)| *l)
-                                            .unwrap_or(ext);
-                                        if ui.button(format!("{label}  ·  .{ext}")).clicked() {
-                                            command = Some(*ext);
-                                            ui.close();
-                                        }
+                            ui.menu_button(crate::i18n::tr("Save / export…", language), |ui| {
+                                let formats: &[&str] = match &t.document {
+                                    Document::Docs(_) => {
+                                        &["docx", "pdf", "odt", "txt", "md", "html"]
                                     }
-                                },
-                            );
+                                    Document::Sheets(_) => &["xlsx", "pdf", "csv", "tsv", "html"],
+                                    Document::Slides(_) => &["pptx", "pdf", "png"],
+                                };
+                                for ext in formats {
+                                    let label = t
+                                        .document
+                                        .save_formats()
+                                        .iter()
+                                        .find(|(e, _)| e == ext)
+                                        .map(|(_, l)| *l)
+                                        .unwrap_or(ext);
+                                    if ui.button(format!("{label}  ·  .{ext}")).clicked() {
+                                        command = Some(*ext);
+                                        ui.close();
+                                    }
+                                }
+                            });
                         }
                     });
                     if crate::chrome::icon_button(
                         ui,
                         crate::chrome::Icon::Open,
-                        "Открыть · Ctrl+O",
+                        crate::i18n::tr("Open · Ctrl+O", language),
                         true,
                     )
                     .clicked()
@@ -2756,7 +3151,7 @@ impl eframe::App for App {
                     if crate::chrome::icon_button(
                         ui,
                         crate::chrome::Icon::Save,
-                        "Сохранить · Ctrl+S",
+                        crate::i18n::tr("Save · Ctrl+S", language),
                         self.active.is_some(),
                     )
                     .clicked()
@@ -2768,7 +3163,7 @@ impl eframe::App for App {
                     if crate::chrome::icon_button(
                         ui,
                         crate::chrome::Icon::Undo,
-                        "Отменить · Ctrl+Z",
+                        crate::i18n::tr("Undo · Ctrl+Z", language),
                         can_undo,
                     )
                     .clicked()
@@ -2778,7 +3173,7 @@ impl eframe::App for App {
                     if crate::chrome::icon_button(
                         ui,
                         crate::chrome::Icon::Redo,
-                        "Повторить · Ctrl+Y",
+                        crate::i18n::tr("Redo · Ctrl+Y", language),
                         can_redo,
                     )
                     .clicked()
@@ -2788,21 +3183,27 @@ impl eframe::App for App {
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.menu_button("···", |ui| {
-                            if ui.button(self.tr("Settings")).clicked() {
+                            if ui.button(crate::i18n::tr("Settings", language)).clicked() {
                                 self.show_settings = true;
                                 ui.close();
                             }
                             if ui
                                 .add_enabled(
                                     self.current().is_some() && self.inspection.is_none(),
-                                    egui::Button::new("Проверить документ"),
+                                    egui::Button::new(crate::i18n::tr(
+                                        "Check the document",
+                                        language,
+                                    )),
                                 )
                                 .clicked()
                             {
                                 command = Some("inspect");
                                 ui.close();
                             }
-                            if ui.button("Поиск команд · Ctrl+K").clicked() {
+                            if ui
+                                .button(crate::i18n::tr("Find commands · Ctrl+K", language))
+                                .clicked()
+                            {
                                 self.queue_palette_click(&ctx);
                                 ui.close();
                             }
@@ -2810,9 +3211,9 @@ impl eframe::App for App {
                             let dark = ui.visuals().dark_mode;
                             if ui
                                 .button(if dark {
-                                    "Светлая тема"
+                                    crate::i18n::tr("Light theme", language)
                                 } else {
-                                    "Тёмная тема"
+                                    crate::i18n::tr("Dark theme", language)
                                 })
                                 .clicked()
                             {
@@ -2825,14 +3226,17 @@ impl eframe::App for App {
                             }
                         })
                         .response
-                        .on_hover_text("Настройки и команды");
+                        .on_hover_text(crate::i18n::tr("Settings and commands", language));
                         if ui
                             .add(
-                                egui::Button::new("Ассистент")
+                                egui::Button::new(crate::i18n::tr("Assistant", language))
                                     .selected(self.show_ai)
                                     .frame_when_inactive(false),
                             )
-                            .on_hover_text("AI-чат и изменения · Ctrl+Shift+A")
+                            .on_hover_text(crate::i18n::tr(
+                                "AI chat and changes · Ctrl+Shift+A",
+                                language,
+                            ))
                             .clicked()
                         {
                             self.show_ai = !self.show_ai;
@@ -2841,7 +3245,7 @@ impl eframe::App for App {
                             if crate::chrome::icon_button(
                                 ui,
                                 crate::chrome::Icon::Search,
-                                "Поиск команд · Ctrl+K",
+                                crate::i18n::tr("Find commands · Ctrl+K", language),
                                 true,
                             )
                             .clicked()
@@ -2852,8 +3256,11 @@ impl eframe::App for App {
                             .add_sized(
                                 [210.0, 28.0],
                                 egui::Button::new(
-                                    egui::RichText::new("Поиск команд    Ctrl+K")
-                                        .color(crate::chrome::muted(ui)),
+                                    egui::RichText::new(format!(
+                                        "{}    Ctrl+K",
+                                        crate::i18n::tr("Find commands", language)
+                                    ))
+                                    .color(crate::chrome::muted(ui)),
                                 )
                                 .fill(ui.visuals().panel_fill),
                             )
@@ -2872,7 +3279,7 @@ impl eframe::App for App {
                             ui.spacing_mut().item_spacing.x = 4.0;
                             let home = doc_tab(
                                 ui,
-                                "Главная",
+                                crate::i18n::tr("Home", language),
                                 self.active.is_none(),
                                 egui::Color32::TRANSPARENT,
                                 false,
@@ -2910,7 +3317,7 @@ impl eframe::App for App {
                                     let close = crate::chrome::icon_button(
                                         ui,
                                         crate::chrome::Icon::Close,
-                                        "Закрыть документ",
+                                        crate::i18n::tr("Close the document", language),
                                         true,
                                     );
                                     ui.add_space(6.0);
@@ -2938,21 +3345,24 @@ impl eframe::App for App {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if let Some(tab) = self.current() {
                             if tab.read_only {
-                                ui.weak("Только чтение");
+                                ui.weak(crate::i18n::tr("Read only", language));
                             }
                             if tab.save_locked {
-                                ui.weak("Файл занят")
-                                    .on_hover_text("Правки можно сохранить в отдельную копию.");
+                                ui.weak(crate::i18n::tr("File is locked", language))
+                                    .on_hover_text(crate::i18n::tr(
+                                        "Edits can be saved to a separate copy.",
+                                        language,
+                                    ));
                             }
                             ui.label(
                                 egui::RichText::new(if self.saving.contains(&tab.id) {
-                                    "Сохранение…"
+                                    crate::i18n::tr("Saving…", language)
                                 } else if tab.dirty() {
-                                    "Не сохранено"
+                                    crate::i18n::tr("Not saved", language)
                                 } else if tab.path.is_none() {
-                                    "Новый файл"
+                                    crate::i18n::tr("New file", language)
                                 } else {
-                                    "Сохранено"
+                                    crate::i18n::tr("Saved", language)
                                 })
                                 .small()
                                 .color(crate::chrome::muted(ui)),
@@ -2987,9 +3397,9 @@ impl eframe::App for App {
         if let Some(id) = self.current().filter(|t| t.save_locked).map(|t| t.id) {
             egui::Panel::top("file-lock").frame(egui::Frame::new().fill(ui.visuals().window_fill).inner_margin(egui::Margin::symmetric(12, 7))).show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    ui.label("Файл занят. Редактирование доступно; исходный файл защищён от перезаписи.");
-                    if ui.button("Сохранить копию…").clicked() { command = Some("copy"); }
-                    if ui.button("Блокировка…").clicked() { self.deferred.push((id, "unlock")); }
+                    ui.label(crate::i18n::tr("The file is locked for writing. Editing stays available; the original file is protected from being overwritten.", language));
+                    if ui.button(crate::i18n::tr("Save a copy…", language)).clicked() { command = Some("copy"); }
+                    if ui.button(crate::i18n::tr("Lock…", language)).clicked() { self.deferred.push((id, "unlock")); }
                 });
             });
         }
@@ -3022,12 +3432,17 @@ impl eframe::App for App {
                 .frame(crate::chrome::sidebar_frame(ui))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("Ассистент").strong());
+                        ui.label(
+                            egui::RichText::new(crate::i18n::tr("Assistant", language)).strong(),
+                        );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if crate::chrome::icon_button(
                                 ui,
                                 crate::chrome::Icon::Close,
-                                "Закрыть панель ассистента · Ctrl+Shift+A",
+                                crate::i18n::tr(
+                                    "Close the assistant panel · Ctrl+Shift+A",
+                                    language,
+                                ),
                                 true,
                             )
                             .clicked()
@@ -3040,9 +3455,10 @@ impl eframe::App for App {
                     let changes = if pending_changes > 0 {
                         format!("Изменения · {pending_changes}")
                     } else {
-                        "Изменения".into()
+                        crate::i18n::tr("Changes", language).into()
                     };
-                    crate::chrome::tabs(ui, &mut self.ai_tab, &["Чат", &changes]);
+                    let chat_label = crate::i18n::tr("Chat", language);
+                    crate::chrome::tabs(ui, &mut self.ai_tab, &[chat_label, &changes]);
                     ui.add_space(6.0);
                     if !self.workspace_jobs.is_empty() {
                         egui::CollapsingHeader::new(format!(
@@ -3058,11 +3474,11 @@ impl eframe::App for App {
                                     for task in self.workspace_jobs.iter().rev().take(12) {
                                         let status = task.status();
                                         let label = match task.state() {
-                                            "preparing" => "Подготовка",
-                                            "completed" => "Применено",
-                                            "preview" => "Предпросмотр",
-                                            "cancelled" => "Отменено",
-                                            _ => "Не применено",
+                                            "preparing" => crate::i18n::tr("Preparing", language),
+                                            "completed" => crate::i18n::tr("Applied", language),
+                                            "preview" => crate::i18n::tr("Preview", language),
+                                            "cancelled" => crate::i18n::tr("Cancelled", language),
+                                            _ => crate::i18n::tr("Not applied", language),
                                         };
                                         ui.label(format!(
                                             "{label} · документов {}",
@@ -3098,12 +3514,17 @@ impl eframe::App for App {
                         if pending_changes == 0 {
                             ui.add_space(16.0);
                             ui.label(
-                                egui::RichText::new("Нет непринятых правок AI.")
-                                    .color(crate::chrome::muted(ui)),
+                                egui::RichText::new(crate::i18n::tr(
+                                    "No unaccepted AI changes.",
+                                    language,
+                                ))
+                                .color(crate::chrome::muted(ui)),
                             );
                         }
                         let mut accept_all = false;
-                        if pending_changes > 1 && ui.button("Принять все").clicked() {
+                        if pending_changes > 1
+                            && ui.button(crate::i18n::tr("Accept all", language)).clicked()
+                        {
                             accept_all = true;
                         }
                         egui::ScrollArea::vertical()
@@ -3114,13 +3535,18 @@ impl eframe::App for App {
                                     if !c.accepted {
                                         ui.add(egui::Label::new(&c.label).wrap());
                                         ui.horizontal(|ui| {
-                                            if ui.button("Принять").clicked()
+                                            if ui
+                                                .button(crate::i18n::tr("Accept", language))
+                                                .clicked()
                                                 && let Some(v) =
                                                     t.ai.iter_mut().find(|v| v.id == c.id)
                                             {
                                                 v.accepted = true;
                                             }
-                                            if ui.button("Откатить").clicked() {
+                                            if ui
+                                                .button(crate::i18n::tr("Reject", language))
+                                                .clicked()
+                                            {
                                                 reject = Some(c.id)
                                             }
                                         });
@@ -3174,7 +3600,7 @@ impl eframe::App for App {
                     if changed {
                         if let Err(e) = t.apply(Op::Replace {
                             document: d,
-                            label: "Редактирование".into(),
+                            label: crate::i18n::tr("Editing", language).into(),
                             author: Author::User,
                             base_version: None,
                         }) {
@@ -3210,6 +3636,7 @@ impl eframe::App for App {
             match action {
                 "activate_external" => external_activation = Some(id),
                 "save" => self.save(id, false, false, false, None),
+                "saveas" => self.save(id, false, false, true, None),
                 "close" => self.close(id),
                 "unlock" => self.request_unlock(id),
                 "activate" | "home" => {
@@ -3275,13 +3702,14 @@ impl eframe::App for App {
                 }
             }
             Some(
-                ext @ ("docx" | "xlsx" | "pptx" | "txt" | "md" | "html" | "csv" | "tsv" | "png"),
+                ext @ ("docx" | "xlsx" | "pptx" | "odt" | "txt" | "md" | "html" | "csv" | "tsv"
+                | "png"),
             ) => {
                 if let Some(id) = self.active {
                     self.save(
                         id,
                         false,
-                        matches!(ext, "txt" | "md" | "html" | "csv" | "tsv" | "png"),
+                        matches!(ext, "odt" | "txt" | "md" | "html" | "csv" | "tsv" | "png"),
                         true,
                         Some(ext),
                     );
@@ -3338,7 +3766,11 @@ impl eframe::App for App {
             || !self.reloading.is_empty();
         if ctx.input(|i| i.viewport().close_requested()) && close_busy && !self.allow_exit {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.status = "Завершите диалог или файловую операцию перед закрытием".into();
+            self.status = crate::i18n::tr(
+                "Finish the dialog or the file operation before closing",
+                language,
+            )
+            .into();
         }
         if ctx.input(|i| i.viewport().close_requested()) && !close_busy {
             let ids: Vec<_> = self.tabs.iter().map(|t| t.id).collect();
@@ -3374,6 +3806,7 @@ fn new_card(
     label: &str,
     color: egui::Color32,
     width: f32,
+    language: &str,
 ) -> egui::Response {
     let response = ui.add_sized(
         [width, 104.0],
@@ -3428,7 +3861,7 @@ fn new_card(
     painter.text(
         rect.min + egui::vec2(16.0, 81.0),
         egui::Align2::LEFT_TOP,
-        "Создать",
+        crate::i18n::tr("Create", language),
         egui::FontId::proportional(11.0),
         crate::chrome::muted(ui),
     );
@@ -3462,7 +3895,8 @@ fn file_badge(path: &std::path::Path) -> (&'static str, egui::Color32) {
 /// Document tab of the shell: a rounded pill with a coloured kind marker.
 fn file_kind(path: &std::path::Path) -> Option<usize> {
     match crate::native::extension(path).as_str() {
-        "docx" | "dotx" | "docm" | "trinedoc" | "txt" | "md" | "html" | "htm" | "lock" => Some(1),
+        "docx" | "dotx" | "docm" | "odt" | "ott" | "fodt" | "trinedoc" | "txt" | "md" | "html"
+        | "htm" | "lock" => Some(1),
         "xlsx" | "xltx" | "xlsm" | "trinesheet" | "csv" | "tsv" | "xls" | "xlsb" | "ods" => Some(2),
         "pptx" | "potx" | "ppsx" | "pptm" | "trineslide" => Some(3),
         _ => None,
@@ -3584,6 +4018,7 @@ mod reload_tests {
             None,
             &target.path,
             Document::create("docs")?,
+            "ru",
         )?;
         assert!(matches!(prepared, PreparedOpen::Activate(10)));
         assert_eq!(commit_open(&mut tabs, &mut next_id, prepared), 10);
@@ -3612,7 +4047,8 @@ mod reload_tests {
                     11,
                     Some(&target),
                     &target.path,
-                    Document::create("docs")?
+                    Document::create("docs")?,
+                    "ru",
                 )
                 .is_err()
             );
@@ -3650,6 +4086,7 @@ mod reload_tests {
             Some(&target),
             &target.path,
             Document::create("docs")?,
+            "ru",
         )?;
         assert_eq!(commit_open(&mut tabs, &mut next_id, prepared), 12);
         assert_eq!(next_id, 13);
@@ -3690,7 +4127,8 @@ mod reload_tests {
                     next_id,
                     Some(&target),
                     &target.path,
-                    Document::create("docs")?
+                    Document::create("docs")?,
+                    "ru",
                 )
                 .is_err()
             );
@@ -3703,7 +4141,8 @@ mod reload_tests {
                 11,
                 Some(&target),
                 &target.path,
-                Document::create("docs")?
+                Document::create("docs")?,
+                "ru",
             )
             .is_err()
         );
@@ -3713,7 +4152,8 @@ mod reload_tests {
                 11,
                 Some(&target),
                 std::path::Path::new("other.docx"),
-                Document::create("docs")?
+                Document::create("docs")?,
+                "ru",
             )
             .is_err()
         );
@@ -3723,7 +4163,8 @@ mod reload_tests {
                 11,
                 Some(&target),
                 &target.path,
-                Document::create("docs")?
+                Document::create("docs")?,
+                "ru",
             )
             .is_err()
         );
@@ -3806,8 +4247,8 @@ mod shell_input_tests {
         assert!(app.show_settings);
         assert!(!app.palette);
         assert_eq!(text(&app), before);
-        assert!(palette_commands(false, "сохранить").is_empty());
-        assert!(palette_commands(true, "несуществующая команда").is_empty());
+        assert!(palette_commands(false, "сохранить", "ru").is_empty());
+        assert!(palette_commands(true, "несуществующая команда", "ru").is_empty());
         Ok(())
     }
 
@@ -3855,6 +4296,7 @@ mod shell_input_tests {
         let (mcp, bridge) = (None, None);
         let next_id = 12;
         let font_error = String::new();
+        let status = crate::i18n::tr("Ready", &settings.language);
         let mut app = App {
             shell_rects: BTreeMap::new(),
             editor_ctx: ctx.clone(),
@@ -3888,7 +4330,7 @@ mod shell_input_tests {
             media_jobs: Vec::new(),
             pending: None,
             close_after_save: None,
-            status: "Готово".into(),
+            status: status.into(),
             error: font_error,
             show_settings: false,
             show_inspector: false,
@@ -4624,6 +5066,63 @@ mod shell_input_tests {
         Ok(())
     }
     #[test]
+    fn the_language_setting_switches_the_shell_text() -> Result<(), String> {
+        let mut app = fixture()?;
+        app.settings.language = "en".into();
+        assert_eq!(
+            crate::i18n::tr("Settings", &app.settings.language),
+            "Settings"
+        );
+        assert_eq!(crate::i18n::tr("Recent", &app.settings.language), "Recent");
+        app.settings.language = "ru".into();
+        assert_eq!(
+            crate::i18n::tr("Settings", &app.settings.language),
+            "Настройки"
+        );
+        assert_eq!(
+            crate::i18n::tr("Recent", &app.settings.language),
+            "Недавние"
+        );
+        Ok(())
+    }
+    #[test]
+    fn the_palette_search_follows_the_visible_language() {
+        assert!(!palette_commands(true, "сохранить", "ru").is_empty());
+        assert!(
+            palette_commands(true, "save", "en")
+                .iter()
+                .any(|(_, label)| label.contains("Save"))
+        );
+        assert!(palette_commands(true, "сохранить", "en").is_empty());
+    }
+    #[test]
+    fn opening_the_palette_starts_with_an_empty_query() -> Result<(), String> {
+        let mut app = fixture()?;
+        focus_page(&mut app)?;
+        app.palette_query = "старый запрос".into();
+        let cmd = egui::Modifiers {
+            ctrl: true,
+            command: true,
+            ..Default::default()
+        };
+        frame(
+            &mut app,
+            vec![
+                egui::Event::ModifiersChanged(cmd),
+                egui::Event::Key {
+                    key: egui::Key::K,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: cmd,
+                },
+            ],
+        );
+        assert!(app.palette);
+        assert!(app.palette_query.is_empty());
+        Ok(())
+    }
+    #[test]
     fn shell_actions_keep_last_frame_text_before_switch_or_close() -> Result<(), String> {
         for (id, action) in [(0, "home"), (11, "activate"), (10, "close")] {
             let mut app = fixture()?;
@@ -4923,6 +5422,208 @@ mod shell_input_tests {
         assert_eq!(poll["status"], "preparing");
         assert!(crate::mcp::tools::read_only("inspect_document"));
         assert!(!crate::mcp::workspace::batchable("inspect_document"));
+        Ok(())
+    }
+    /// Sends one key press to the shell.
+    ///
+    /// egui derives the repeat flag itself: a key that was already held down in the
+    /// previous frame arrives as a key repeat, so a repeat needs a second frame.
+    fn hundred_shortcut_frame(app: &mut App, key: egui::Key, modifiers: egui::Modifiers) {
+        let ctx = app.editor_ctx.clone();
+        ctx.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                }],
+                ..Default::default()
+            },
+            |ui| app.shortcuts(ui.ctx()),
+        )
+        .textures_delta
+        .clear();
+    }
+    #[test]
+    fn shift_save_routes_to_save_as_without_overwriting_the_current_path() -> Result<(), String> {
+        let mut app = fixture()?;
+        hundred_shortcut_frame(
+            &mut app,
+            egui::Key::S,
+            egui::Modifiers::CTRL | egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+        );
+        assert_eq!(app.deferred, vec![(10, "saveas")]);
+        Ok(())
+    }
+    #[test]
+    fn reverse_tab_switching_uses_the_previous_document() -> Result<(), String> {
+        let mut app = fixture()?;
+        app.tabs.push(Tab::new(
+            12,
+            Document::create("docs")?,
+            "Third".into(),
+            None,
+        ));
+        hundred_shortcut_frame(
+            &mut app,
+            egui::Key::Tab,
+            egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
+        );
+        assert_eq!(app.deferred, vec![(12, "activate")]);
+        Ok(())
+    }
+    #[test]
+    fn shift_undo_routes_to_redo_instead_of_undo() -> Result<(), String> {
+        let mut app = fixture()?;
+        hundred_shortcut_frame(
+            &mut app,
+            egui::Key::Z,
+            egui::Modifiers::CTRL | egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+        );
+        assert_eq!(app.deferred, vec![(10, "redo")]);
+        Ok(())
+    }
+    #[test]
+    fn altgr_combinations_do_not_trigger_shell_commands() -> Result<(), String> {
+        for key in [egui::Key::S, egui::Key::K, egui::Key::O, egui::Key::W] {
+            let mut app = fixture()?;
+            hundred_shortcut_frame(
+                &mut app,
+                key,
+                egui::Modifiers::CTRL | egui::Modifiers::COMMAND | egui::Modifiers::ALT,
+            );
+            assert!(app.deferred.is_empty());
+            assert!(!app.palette);
+            assert!(!app.opening);
+        }
+        Ok(())
+    }
+    #[test]
+    fn repeating_the_palette_shortcut_does_not_toggle_the_palette() -> Result<(), String> {
+        let mut app = fixture()?;
+        let command = egui::Modifiers::CTRL | egui::Modifiers::COMMAND;
+        // The first press queues the palette for the next frame.
+        hundred_shortcut_frame(&mut app, egui::Key::K, command);
+        assert!(!app.palette);
+        assert!(app.palette_tail.is_some());
+        let ctx = app.editor_ctx.clone();
+        app.palette_tail = None;
+        app.open_palette(&ctx);
+        assert!(app.palette);
+        // Holding the key down sends repeats; they must not toggle the palette.
+        hundred_shortcut_frame(&mut app, egui::Key::K, command);
+        assert!(app.palette);
+        assert!(app.palette_tail.is_none());
+        Ok(())
+    }
+    #[test]
+    fn dry_run_of_file_tools_checks_real_arguments_and_preconditions() -> Result<(), String> {
+        let app = fixture()?;
+        assert!(app.preflight_file_request("export", &json!({})).is_err());
+        assert!(
+            app.preflight_file_request(
+                "export",
+                &json!({"document_id":10,"format_extension":"exe"})
+            )
+            .is_err()
+        );
+        assert!(
+            app.preflight_file_request("save_document", &json!({"document_id":10}))
+                .is_err()
+        );
+        assert!(
+            app.preflight_file_request("close_document", &json!({"document_id":10}))
+                .is_ok()
+        );
+        assert!(
+            app.preflight_file_request(
+                "export",
+                &json!({"document_id":10,"format_extension":"pdf"})
+            )
+            .is_ok()
+        );
+        Ok(())
+    }
+    #[test]
+    fn finished_media_replies_are_rejected_after_access_is_revoked() -> Result<(), String> {
+        let mut app = fixture()?;
+        app.settings.mcp = true;
+        let (reply, mut received) = tokio::sync::oneshot::channel();
+        let (sender, result) = std::sync::mpsc::channel();
+        sender
+            .send(Ok(crate::mcp::media::Output::Reply(
+                json!({"private":"result"}),
+            )))
+            .map_err(|e| e.to_string())?;
+        app.media_jobs.push(MediaJob {
+            request: crate::mcp::BridgeRequest {
+                tool: "export".into(),
+                args: json!({"document_id":10}),
+                client: "revoked".into(),
+                reply,
+                deadline: Instant::now() + std::time::Duration::from_secs(10),
+            },
+            result,
+        });
+        let ctx = app.editor_ctx.clone();
+        app.finish_media_jobs(&ctx);
+        assert!(received.try_recv().map_err(|e| e.to_string())?.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_unknown_client_requests_do_not_create_approval_prompts() -> Result<(), String> {
+        let mut app = fixture()?;
+        app.allowed.clear();
+        app.clients.clear();
+        assert!(
+            mcp_roundtrip_as(&mut app, "Unknown", "no_such_tool", json!({}))
+                .is_err_and(|error| error.starts_with("unsupported_feature:"))
+        );
+        assert!(app.clients.is_empty());
+        assert!(
+            mcp_roundtrip_as(
+                &mut app,
+                "Unknown",
+                "docs_insert_text",
+                json!({"document_id":"bad"})
+            )
+            .is_err_and(|error| error.starts_with("invalid_args:"))
+        );
+        assert!(app.clients.is_empty());
+        assert!(
+            mcp_roundtrip_as(&mut app, "Unknown", "list_documents", json!({}))
+                .is_err_and(|error| error.starts_with("needs_confirmation:"))
+        );
+        assert_eq!(app.clients.len(), 1);
+        Ok(())
+    }
+    #[test]
+    fn pending_client_approvals_are_bounded_and_existing_requests_can_retry() -> Result<(), String>
+    {
+        let mut app = fixture()?;
+        app.allowed.clear();
+        app.clients = (0..128).map(|index| format!("Pending{index}")).collect();
+        assert!(
+            mcp_roundtrip_as(&mut app, "Overflow", "list_documents", json!({}))
+                .is_err_and(|error| error.starts_with("too_large:"))
+        );
+        assert_eq!(app.clients.len(), 128);
+        assert!(
+            mcp_roundtrip_as(&mut app, "Pending0", "list_documents", json!({}))
+                .is_err_and(|error| error.starts_with("needs_confirmation:"))
+        );
+        assert_eq!(app.clients.len(), 128);
+        assert!(
+            mcp_roundtrip_as(&mut app, "Stateless", "request_access", json!({}))
+                .is_err_and(|error| error.starts_with("too_large:"))
+        );
+        app.clients.clear();
+        let access = mcp_roundtrip_as(&mut app, "Stateless", "request_access", json!({}))?;
+        assert_eq!(access["status"], "pending");
+        assert_eq!(app.clients.len(), 1);
         Ok(())
     }
 }

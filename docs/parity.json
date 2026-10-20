@@ -42,10 +42,10 @@
     "priority": "P0",
     "phase": 1,
     "requirement": "REQ-11-002",
-    "mcp": "GAP: точная ops/tool-схема ещё не определена",
-    "import": "planned",
-    "export": "planned",
-    "status": "planned"
+    "mcp": "UI typed clipboard: все/значения/ввод/форматы, transpose; относительные merges в режиме Всё, partial cut/несовпадающее пересечение отклоняются атомарно. GAP: внешние Office/HTML/RTF, cut-reference movement, отдельная MCP schema и runtime acceptance.",
+    "import": "internal clipboard",
+    "export": "n/a",
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-COM-005",
@@ -54,10 +54,10 @@
     "priority": "P0",
     "phase": 1,
     "requirement": "REQ-11-002",
-    "mcp": "GAP: точная ops/tool-схема ещё не определена",
-    "import": "planned",
-    "export": "planned",
-    "status": "planned"
+    "mcp": "Sheets literal Unicode search; Docs body search от курсора, назад/вперёд, Enter/Shift+Enter и checked bulk replace с preflight. Существующие MCP tools сохраняются; GAP: Docs tables, words/regex/format, остальные режимы и runtime acceptance.",
+    "import": "n/a",
+    "export": "n/a",
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-COM-006",
@@ -186,10 +186,10 @@
     "priority": "P0",
     "phase": 1,
     "requirement": "REQ-11-002",
-    "mcp": "GAP: точная ops/tool-схема ещё не определена",
-    "import": "planned",
-    "export": "planned",
-    "status": "planned"
+    "mcp": "undo/redo через существующие ops; Ctrl+Shift+Z маршрутизируется в redo. GAP: полный history scope/межрежимная и runtime keyboard acceptance.",
+    "import": "n/a",
+    "export": "n/a",
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-COM-017",
@@ -450,10 +450,10 @@
     "priority": "P0",
     "phase": 1,
     "requirement": "REQ-11-004",
-    "mcp": "apply_style / define_style",
-    "import": "planned",
-    "export": "planned",
-    "status": "planned"
+    "mcp": "Code style экспортируется HTML pre с сохранением whitespace. GAP: полный code editing/language semantics и runtime round-trip.",
+    "import": "subset",
+    "export": "HTML pre subset",
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-DOC-018",
@@ -726,10 +726,10 @@
     "priority": "P0",
     "phase": 1,
     "requirement": "REQ-11-004",
-    "mcp": "insert_image; GAP: image update/delete",
-    "import": "planned",
-    "export": "planned",
-    "status": "planned"
+    "mcp": "HTML PNG/JPEG data URI: width/height и aspect ratio, ошибки изображения возвращают loss notice; insert_image остаётся. GAP: внешние URL, полный browser sizing и runtime acceptance.",
+    "import": "data images subset",
+    "export": "subset",
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-DOC-041",
@@ -738,10 +738,10 @@
     "priority": "P0",
     "phase": 1,
     "requirement": "REQ-11-004",
-    "mcp": "insert_image; GAP: image update/delete",
-    "import": "planned",
-    "export": "planned",
-    "status": "planned"
+    "mcp": "Модель сохраняет положительную дробную геометрию; HTML absolute dimensions/aspect ratio. GAP: container sizing/crop, полный UI/MCP и runtime acceptance.",
+    "import": "subset",
+    "export": "subset",
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-DOC-042",
@@ -1446,10 +1446,10 @@
     "priority": "P0",
     "phase": 5,
     "requirement": "REQ-11-007",
-    "mcp": "read_cells / write_cells / set_formula",
-    "import": "planned",
-    "export": "planned",
-    "status": "planned"
+    "mcp": "Существующий formula engine; RANDBETWEEN сохраняет конечность для огромных конечных границ, boxed AST ограничен. GAP: полный Excel parity и runtime acceptance; большие границы проверены только инвариантом движка.",
+    "import": "formula subset",
+    "export": "formula subset",
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-SHT-007",
@@ -1470,10 +1470,10 @@
     "priority": "P0",
     "phase": 5,
     "requirement": "REQ-11-007",
-    "mcp": "read_cells / write_cells / set_formula",
-    "import": "planned",
-    "export": "planned",
-    "status": "planned"
+    "mcp": "NUMBERVALUE пробелы/проценты; SEARCH использует один folded buffer и общий backtracking budget. GAP: полный набор Excel text functions и runtime acceptance.",
+    "import": "formula subset",
+    "export": "formula subset",
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-SHT-009",
@@ -1622,14 +1622,14 @@
   {
     "id": "PAR-SHT-021",
     "mode": "Sheets",
-    "feature": "Автодополнение функций",
+    "feature": "Автодополнение функций и подсказка аргументов в строке формул",
     "priority": "P0",
     "phase": 5,
     "requirement": "REQ-11-007",
-    "mcp": "explain_formula; GAP: UI hints API",
+    "mcp": "explain_formula; UI: sheets/hints.rs — префикс EN/RU, ↑↓/Tab, сигнатура с текущим аргументом (ADR-0028). GAP: выбор мышью, русские описания библиотечных функций, GUI acceptance",
     "import": "n/a",
     "export": "n/a",
-    "status": "planned"
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-SHT-022",
@@ -1854,10 +1854,10 @@
     "priority": "P0",
     "phase": 5,
     "requirement": "REQ-11-007",
-    "mcp": "format_cells",
-    "import": "planned",
-    "export": "planned",
-    "status": "planned"
+    "mcp": "CellFormat.rotation передаётся в native TextShape на холсте; galley содержит underline/strike. GAP: общий PDF/print renderer и runtime visual acceptance.",
+    "import": "subset",
+    "export": "subset",
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-SHT-041",
@@ -2166,10 +2166,10 @@
     "priority": "P0",
     "phase": 5,
     "requirement": "REQ-11-007",
-    "mcp": "GAP: точная ops/tool-схема ещё не определена",
-    "import": "planned",
-    "export": "planned",
-    "status": "planned"
+    "mcp": "UI read-only selection statistics: sparse обход для полного столбца/листа, устойчивое среднее; dedicated MCP summary пока нет. GAP: runtime/performance acceptance.",
+    "import": "n/a",
+    "export": "n/a",
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-SHT-067",
@@ -2802,10 +2802,10 @@
     "priority": "P0",
     "phase": 6,
     "requirement": "REQ-11-010",
-    "mcp": "add_slide / duplicate_slide / delete_slide / hide_slide / reorder_slides; GAP: sections",
-    "import": "planned",
-    "export": "planned",
-    "status": "planned"
+    "mcp": "PPTX section extension сохраняет названия и последовательные группы; UI/model section поля существующие. GAP: исходные section GUID, dedicated section MCP contract и runtime acceptance.",
+    "import": "subset",
+    "export": "subset",
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-SLD-007",
@@ -2814,10 +2814,10 @@
     "priority": "P0",
     "phase": 6,
     "requirement": "REQ-11-010",
-    "mcp": "set_layout / apply_theme / add_shape / update_shape / align_shapes / group_shapes / set_z_order; GAP: master editing/distribute schema",
-    "import": "planned",
-    "export": "planned",
-    "status": "planned"
+    "mcp": "Layout смена сохраняет дополнительные placeholder-объекты; supported layout metadata импортируется. GAP: master editing, полная placeholder hierarchy и runtime acceptance.",
+    "import": "subset",
+    "export": "subset",
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-SLD-008",
@@ -2886,10 +2886,10 @@
     "priority": "P0",
     "phase": 6,
     "requirement": "REQ-11-010",
-    "mcp": "set_layout / apply_theme / add_shape / update_shape / align_shapes / group_shapes / set_z_order; GAP: master editing/distribute schema",
-    "import": "planned",
-    "export": "planned",
-    "status": "planned"
+    "mcp": "slides_update_element element.fill_visible и UI: отдельный noFill для Rect/Ellipse, контур/текст сохраняются, Page/PPTX путь. GAP: все DrawingML fills/effects, runtime/Office acceptance.",
+    "import": "subset",
+    "export": "subset",
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-SLD-014",
@@ -2946,10 +2946,10 @@
     "priority": "P0",
     "phase": 6,
     "requirement": "REQ-11-010",
-    "mcp": "set_layout / apply_theme / add_shape / update_shape / align_shapes / group_shapes / set_z_order; GAP: master editing/distribute schema",
-    "import": "planned",
-    "export": "planned",
-    "status": "planned"
+    "mcp": "PPTX: пустая/неровная таблица дополнена до прямоугольника с общим лимитом100000 ячеек; UI multiline cell editor. GAP: rotated canvas tables, полный Office layout и runtime acceptance.",
+    "import": "subset",
+    "export": "subset",
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-SLD-019",
@@ -2958,10 +2958,10 @@
     "priority": "P0",
     "phase": 6,
     "requirement": "REQ-11-010",
-    "mcp": "set_layout / apply_theme / add_shape / update_shape / align_shapes / group_shapes / set_z_order; GAP: master editing/distribute schema",
-    "import": "planned",
-    "export": "planned",
-    "status": "planned"
+    "mcp": "PPTX import: title и series fill, отсутствующий chart part пропускается с warning. GAP: полный chart style/series parity и runtime acceptance.",
+    "import": "subset",
+    "export": "subset",
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-SLD-020",
@@ -3030,10 +3030,10 @@
     "priority": "P0",
     "phase": 6,
     "requirement": "REQ-11-010",
-    "mcp": "set_layout / apply_theme / add_shape / update_shape / align_shapes / group_shapes / set_z_order; GAP: master editing/distribute schema",
-    "import": "planned",
-    "export": "planned",
-    "status": "planned"
+    "mcp": "PPTX p:xfrm rotation для graphicFrame; canvas picking учитывает повёрнутые границы поддержанных фигур. GAP: rotated table/chart canvas, handles, Page/PDF rotation и runtime acceptance.",
+    "import": "subset",
+    "export": "subset",
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-SLD-026",
@@ -3042,10 +3042,10 @@
     "priority": "P0",
     "phase": 6,
     "requirement": "REQ-11-010",
-    "mcp": "set_layout / apply_theme / add_shape / update_shape / align_shapes / group_shapes / set_z_order; GAP: master editing/distribute schema",
-    "import": "planned",
-    "export": "planned",
-    "status": "planned"
+    "mcp": "PPTX picture flipH/flipV нормализуется в PNG с pixel budget. GAP: UI/MCP flip для всех объектов, lossless original encoding и runtime acceptance.",
+    "import": "picture subset",
+    "export": "normalized picture subset",
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-SLD-027",
@@ -3750,10 +3750,10 @@
     "priority": "P0",
     "phase": 2,
     "requirement": "REQ-08-001",
-    "mcp": "export_document / open_document; format implementation pending",
-    "import": "planned",
-    "export": "planned",
-    "status": "planned"
+    "mcp": "DOCX: hidden style/direct text фильтруется с loss notice, double-strike→single с notice, table vAlign/gridBefore, numFmt none и block ins/moveTo. GAP: lossless hidden/revision history, полный OOXML corpus и Office acceptance.",
+    "import": "subset",
+    "export": "subset",
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-DOC-096",
@@ -3774,10 +3774,10 @@
     "priority": "P0",
     "phase": 7,
     "requirement": "REQ-08-003",
-    "mcp": "export_document / open_document; format implementation pending",
-    "import": "planned",
-    "export": "planned",
-    "status": "planned"
+    "mcp": "export_document / open_document; .odt/.ott/.fodt — собственный читатель/писатель docs/io/odt.rs (стили с наследованием, списки, таблицы с объединениями, рисунки, колонтитулы, номера страниц; ADR-0028). GAP: .doc, .rtf; сноски/комментарии/надписи ODT; проверка открытием в LibreOffice",
+    "import": "partial_unverified",
+    "export": "partial_unverified",
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-DOC-098",
@@ -3798,10 +3798,10 @@
     "priority": "P0",
     "phase": 2,
     "requirement": "REQ-08-005",
-    "mcp": "export_document / open_document; format implementation pending",
-    "import": "planned",
-    "export": "planned",
-    "status": "planned"
+    "mcp": "open/export: BOM UTF-8/16/32, строгий legacy decode; текст таблиц и span-поля в TXT. GAP: runtime/encoding corpus, полная структура отсутствует по природе TXT.",
+    "import": "text subset",
+    "export": "body/table text",
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-DOC-100",
@@ -3810,10 +3810,10 @@
     "priority": "P0",
     "phase": 2,
     "requirement": "REQ-08-006",
-    "mcp": "export_document / open_document; format implementation pending",
-    "import": "planned",
-    "export": "planned",
-    "status": "planned"
+    "mcp": "Markdown subset: fence info/indent, indented code и blank lines, angle destinations/quoted titles, emphasis flanking, native LF→hard break. GAP: полный CommonMark/GFM, image display size и runtime round-trip.",
+    "import": "subset",
+    "export": "subset",
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-DOC-101",
@@ -3822,10 +3822,10 @@
     "priority": "P0",
     "phase": 2,
     "requirement": "REQ-08-007",
-    "mcp": "export_document / open_document; format implementation pending",
-    "import": "planned",
-    "export": "planned",
-    "status": "planned"
+    "mcp": "HTML subset: normal whitespace/CSS inheritance, pre/code, bounded tables/merges/row groups/rowspan0/widths/rich cells, data images и title/author. GAP: nested tables/images in cells, полный CSS/layout и runtime corpus.",
+    "import": "subset",
+    "export": "subset",
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-DOC-102",
@@ -3858,10 +3858,10 @@
     "priority": "P0",
     "phase": 5,
     "requirement": "REQ-08-010",
-    "mcp": "export_document / open_document; format implementation pending",
-    "import": "planned",
-    "export": "planned",
-    "status": "planned"
+    "mcp": "XLSX subset: selection export; cellStyleXfs apply*=false; chart worksheet/drawing/part ownership и cell-anchor; signed drawing offsets. Cross-sheet chart source явно отклоняется. GAP: subcell chart offsets, complex series/conditional formats, полный corpus и Office acceptance.",
+    "import": "subset",
+    "export": "subset",
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-SHT-115",
@@ -3930,10 +3930,10 @@
     "priority": "P0",
     "phase": 5,
     "requirement": "REQ-08-016",
-    "mcp": "export_document / open_document; format implementation pending",
-    "import": "planned",
-    "export": "planned",
-    "status": "planned"
+    "mcp": "HTML сохраняет merged value/format при скрытом anchor; CSV/MD streaming output budget; HTML data images и основной text formatting. GAP: charts/полный conditional formatting/floating image geometry/runtime acceptance.",
+    "import": "unsupported",
+    "export": "subset",
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-SHT-121",
@@ -3954,10 +3954,10 @@
     "priority": "P0",
     "phase": 6,
     "requirement": "REQ-08-018",
-    "mcp": "export_document / open_document; format implementation pending",
-    "import": "planned",
-    "export": "planned",
-    "status": "planned"
+    "mcp": "PPTX subset: theme/layout name, placeholder defaults/partial xfrm/text inheritance, chart title/fill, section groups, picture flips, group uniform font/stroke scale. GAP: mixed text, complex groups/masters, полный OOXML corpus и Office acceptance.",
+    "import": "subset",
+    "export": "subset",
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-SLD-067",
@@ -4242,10 +4242,10 @@
     "priority": "P1",
     "phase": 8,
     "requirement": "REQ-11-008",
-    "mcp": "GAP: read-only sheets_explain_formula, bounded graph/result",
-    "import": "planned",
-    "export": "n/a",
-    "status": "planned"
+    "mcp": "sheets_explain_formula и UI Паспорт формулы: cached value/type, direct/named dependencies до64, 4 samples с типами, parse/missing reference diagnostics, no evaluation/mutation. GAP: полный trace вычисления и runtime acceptance.",
+    "import": "n/a",
+    "export": "clipboard report",
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-TRI-035",
@@ -4290,10 +4290,10 @@
     "priority": "P1",
     "phase": 8,
     "requirement": "REQ-11-005",
-    "mcp": "GAP: read-only style audit со stable paragraph/run anchors",
-    "import": "planned",
-    "export": "n/a",
-    "status": "planned"
+    "mcp": "inspect_document kind=formatting и UI инспектора: размер/bold/italic относительно встроенных стилей TrineDocs, stable paragraph targets, bounded report. GAP: произвольные стили Office, таблицы и runtime acceptance.",
+    "import": "n/a",
+    "export": "clipboard report",
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-TRI-039",
@@ -4302,10 +4302,10 @@
     "priority": "P1",
     "phase": 8,
     "requirement": "REQ-11-011",
-    "mcp": "GAP: preview agenda + обычные slides ops после выбора",
-    "import": "planned",
-    "export": "planned",
-    "status": "planned"
+    "mcp": "UI Вставка → Повестка: preview видимых заголовков/разделов до200, редактируемые страницы в начале, atomic insert и undo. Заголовки80/разделы40 знаков, min480×320pt. MCP: обычные slides ops; GAP: dedicated generator tool и runtime acceptance.",
+    "import": "current deck",
+    "export": "ordinary editable slides",
+    "status": "implemented_unverified"
   },
   {
     "id": "PAR-TRI-040",
@@ -4329,6 +4329,126 @@
     "mcp": "inspect_document: preparing/completed, snapshot/current version, refresh, query/kind, index/count до100; первые200 с omitted/stale; один фоновый inspector. GAP: runtime/visual acceptance и полный анализ Office.",
     "import": "n/a",
     "export": "clipboard plain text",
+    "status": "partial_unverified"
+  },
+  {
+    "id": "PAR-SHT-122",
+    "mode": "Sheets",
+    "feature": "Инженерные функции: системы счисления, комплексные числа, биты, CONVERT, ERF, BESSEL* (GridCraft, ADR-0028)",
+    "priority": "P1",
+    "phase": 5,
+    "requirement": "REQ-11-007",
+    "mcp": "read_cells / write_cells / set_formula; разлив массивов в соседние ячейки с #SPILL! при блокировке; GAP: экспорт разлива в XLSX как dynamic array не реализован (сохраняется только формула), runtime/GUI acceptance",
+    "import": "planned",
+    "export": "planned",
+    "status": "partial_unverified"
+  },
+  {
+    "id": "PAR-SHT-123",
+    "mode": "Sheets",
+    "feature": "Функции баз данных DSUM/DAVERAGE/DCOUNT/DGET/DMAX/… с диапазоном условий (GridCraft, ADR-0028)",
+    "priority": "P1",
+    "phase": 5,
+    "requirement": "REQ-11-007",
+    "mcp": "read_cells / write_cells / set_formula; разлив массивов в соседние ячейки с #SPILL! при блокировке; GAP: экспорт разлива в XLSX как dynamic array не реализован (сохраняется только формула), runtime/GUI acceptance",
+    "import": "planned",
+    "export": "planned",
+    "status": "partial_unverified"
+  },
+  {
+    "id": "PAR-SHT-124",
+    "mode": "Sheets",
+    "feature": "Статистические распределения и проверки гипотез: NORM/T/CHISQ/F/BETA/GAMMA/BINOM/POISSON …, PERCENTRANK, ранги (GridCraft, ADR-0028)",
+    "priority": "P1",
+    "phase": 5,
+    "requirement": "REQ-11-007",
+    "mcp": "read_cells / write_cells / set_formula; разлив массивов в соседние ячейки с #SPILL! при блокировке; GAP: экспорт разлива в XLSX как dynamic array не реализован (сохраняется только формула), runtime/GUI acceptance",
+    "import": "planned",
+    "export": "planned",
+    "status": "partial_unverified"
+  },
+  {
+    "id": "PAR-SHT-125",
+    "mode": "Sheets",
+    "feature": "Регулярные выражения REGEXTEST/REGEXEXTRACT/REGEXREPLACE и TEXTSPLIT/TEXTBEFORE/TEXTAFTER (GridCraft + regex, ADR-0028)",
+    "priority": "P1",
+    "phase": 5,
+    "requirement": "REQ-11-007",
+    "mcp": "read_cells / write_cells / set_formula; разлив массивов в соседние ячейки с #SPILL! при блокировке; GAP: экспорт разлива в XLSX как dynamic array не реализован (сохраняется только формула), runtime/GUI acceptance",
+    "import": "planned",
+    "export": "planned",
+    "status": "partial_unverified"
+  },
+  {
+    "id": "PAR-SHT-126",
+    "mode": "Sheets",
+    "feature": "Матричные и массивные функции MMULT/MINVERSE/MDETERM/SEQUENCE/FILTER/SORT/UNIQUE/TOCOL/WRAPROWS … внутри формул (GridCraft, ADR-0028)",
+    "priority": "P1",
+    "phase": 5,
+    "requirement": "REQ-11-007",
+    "mcp": "read_cells / write_cells / set_formula; разлив массивов в соседние ячейки с #SPILL! при блокировке; GAP: экспорт разлива в XLSX как dynamic array не реализован (сохраняется только формула), runtime/GUI acceptance",
+    "import": "planned",
+    "export": "planned",
+    "status": "partial_unverified"
+  },
+  {
+    "id": "PAR-TRI-042",
+    "mode": "Общее",
+    "feature": "Адаптация вкладок ленты и доступные палитры цветов",
+    "priority": "P0",
+    "phase": 1,
+    "requirement": "REQ-11-002",
+    "mcp": "UI view-only: горизонтальная прокрутка ленты, scoped font filter, имена swatches и видимый фокус. GAP: runtime keyboard/AccessKit/visual acceptance.",
+    "import": "n/a",
+    "export": "n/a",
+    "status": "implemented_unverified"
+  },
+  {
+    "id": "PAR-TRI-043",
+    "mode": "Sheets",
+    "feature": "Отдельная строка статистики выделения с локалью и устойчивым средним",
+    "priority": "P1",
+    "phase": 8,
+    "requirement": "REQ-11-008",
+    "mcp": "UI read-only: сумма/среднее/заполненность отдельно от вкладок, sparse statistics полных строк/столбцов; overflow суммы —. GAP: runtime/performance/visual acceptance.",
+    "import": "n/a",
+    "export": "n/a",
+    "status": "implemented_unverified"
+  },
+  {
+    "id": "PAR-TRI-044",
+    "mode": "Slides",
+    "feature": "Чернила докладчика в координатах слайда и разделение клавиш панели/показа",
+    "priority": "P1",
+    "phase": 8,
+    "requirement": "REQ-11-011",
+    "mcp": "UI-only presentation state: normalized ink/clipping, 100000 точек/1000 штрихов и clear, blank/end click, manual navigation перед timer. GAP: runtime resize/keyboard/visual acceptance.",
+    "import": "n/a",
+    "export": "n/a",
+    "status": "implemented_unverified"
+  },
+  {
+    "id": "PAR-TRI-045",
+    "mode": "Slides",
+    "feature": "Фильтр навигатора по заголовку/разделу, фиксированные карточки и вставка перед drop-marker",
+    "priority": "P1",
+    "phase": 8,
+    "requirement": "REQ-11-011",
+    "mcp": "Фильтр view-only; перенос через существующие model/ops и undo. Native buttons с полными подписями. GAP: runtime DnD/keyboard/AccessKit/visual acceptance.",
+    "import": "n/a",
+    "export": "n/a",
+    "status": "implemented_unverified"
+  },
+  {
+    "id": "PAR-TRI-046",
+    "mode": "Общее",
+    "feature": "Постраничное чтение структуры крупных Docs/Sheets через MCP",
+    "priority": "P1",
+    "phase": 8,
+    "requirement": "REQ-11-002",
+    "mcp": "docs_read_objects: table_id, row/rows/col/columns; Sheets geometry/objects/names: index/count и total_*; metadata noFill/table layout. GAP: rich cell content paging, snapshot across edits и runtime/MCP acceptance.",
+    "import": "n/a",
+    "export": "bounded JSON subset",
     "status": "partial_unverified"
   }
 ]

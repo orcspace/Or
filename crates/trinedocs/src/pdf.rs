@@ -15,11 +15,9 @@ fn requested(item: &Primitive) -> FontKey {
         Primitive::TextStyled {
             bold, italic, font, ..
         } => (
-            if crate::fonts::is_installed(font) {
-                font.clone()
-            } else {
-                String::new()
-            },
+            crate::fonts::canonical_name(font)
+                .unwrap_or_default()
+                .to_string(),
             usize::from(*bold) + 2 * usize::from(*italic),
         ),
         _ => (String::new(), 0),
@@ -57,7 +55,7 @@ pub fn write(pages: &[Page]) -> Result<Vec<u8>, String> {
     let mut faces: BTreeMap<FontKey, (Arc<Vec<u8>>, u32)> = BTreeMap::new();
     let mut keys = Vec::new();
     for item in pages.iter().flat_map(|p| p.items.iter()) {
-        let Some(t) = text(item) else {
+        let Some(t) = text(item).filter(|value| !value.is_empty()) else {
             keys.push((String::new(), 0));
             continue;
         };
@@ -82,7 +80,13 @@ pub fn write(pages: &[Page]) -> Result<Vec<u8>, String> {
     }
     let mut slots: BTreeMap<FontKey, usize> = BTreeMap::new();
     let mut fonts = Vec::new();
-    let used_keys: BTreeSet<FontKey> = keys.iter().cloned().collect();
+    let used_keys: BTreeSet<FontKey> = pages
+        .iter()
+        .flat_map(|page| page.items.iter())
+        .zip(&keys)
+        .filter(|(item, _)| text(item).is_some_and(|value| !value.is_empty()))
+        .map(|(_, key)| key.clone())
+        .collect();
     for (index, key) in used_keys.into_iter().enumerate() {
         let used: BTreeSet<char> = pages
             .iter()
@@ -250,6 +254,9 @@ pub fn write(pages: &[Page]) -> Result<Vec<u8>, String> {
                     color,
                     ..
                 } => {
+                    if text.is_empty() {
+                        continue;
+                    }
                     let f = slots
                         .get(key)
                         .and_then(|slot| fonts.get(*slot))
@@ -302,6 +309,10 @@ pub fn write(pages: &[Page]) -> Result<Vec<u8>, String> {
                     width,
                     color,
                 } => {
+                    // Screen strokes with zero width are invisible; PDF's 0 w is a visible hairline.
+                    if *width == 0.0 {
+                        continue;
+                    }
                     let c = rgb(*color);
                     content.set_stroke_rgb(c[0], c[1], c[2]);
                     content.set_line_width(*width);
@@ -495,5 +506,68 @@ mod limit_tests {
             }],
         };
         assert!(write(&[p]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod hundred_pdf_shape_tests {
+    use super::*;
+    #[test]
+    fn shape_only_pdf_exports_do_not_load_or_embed_a_system_font() -> Result<(), String> {
+        let bytes = write(&[Page {
+            width: 200.0,
+            height: 200.0,
+            items: vec![
+                Primitive::Text {
+                    x: 0.0,
+                    y: 0.0,
+                    size: 12.0,
+                    text: String::new(),
+                    color: [0; 3],
+                },
+                Primitive::Rect {
+                    x: 10.0,
+                    y: 10.0,
+                    w: 40.0,
+                    h: 20.0,
+                    color: [10, 20, 30],
+                },
+            ],
+        }])?;
+        assert!(bytes.starts_with(b"%PDF-"));
+        assert!(
+            !bytes
+                .windows(b"/FontFile2".len())
+                .any(|value| value == b"/FontFile2")
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod two_hundred_pdf_regressions {
+    #[test]
+    fn zero_width_lines_do_not_become_pdf_hairlines() -> Result<(), String> {
+        use crate::render::{Page, Primitive};
+        let mut page = Page {
+            width: 100.0,
+            height: 100.0,
+            items: Vec::new(),
+        };
+        let empty = super::write(&[page.clone()])?;
+        page.items.push(Primitive::Line {
+            x1: 5.0,
+            y1: 5.0,
+            x2: 90.0,
+            y2: 90.0,
+            width: 0.0,
+            color: [0, 0, 0],
+        });
+        assert_eq!(super::write(&[page.clone()])?, empty);
+        if let Primitive::Line { width, .. } = &mut page.items[0] {
+            *width = 1.0;
+        }
+        assert_ne!(super::write(&[page])?, empty);
+        Ok(())
     }
 }

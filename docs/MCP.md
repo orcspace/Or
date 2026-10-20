@@ -232,3 +232,5 @@ Subscriptions: document edit → resource-updated; resource set change → list_
 - MCP Inspector/Claude Desktop/Codex CLI ручная проверка каждого релиза. <!-- REQ-M11-004 -->
 - Reject missing bearer/foreign Origin/other-user IPC; injection fixture не вызывает действий вне запроса. <!-- REQ-M11-005 -->
 - Tasks/elicitation capability fallback реально тестируется, не предполагается по наличию фичи в протоколе. <!-- REQ-M11-006 -->
+
+## Уточнения контрактов после 2026-10-18 — см. [mcp-contract-notes.md](mcp-contract-notes.md)

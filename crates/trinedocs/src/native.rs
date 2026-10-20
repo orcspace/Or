@@ -48,6 +48,8 @@ impl Document {
             Self::Docs(_) => &[
                 ("docx", "Документ Word"),
                 ("pdf", "PDF"),
+                ("odt", "Текст OpenDocument"),
+                ("fodt", "Плоский XML OpenDocument"),
                 ("txt", "Обычный текст"),
                 ("md", "Markdown"),
                 ("html", "Веб-страница"),
@@ -55,7 +57,7 @@ impl Document {
             Self::Sheets(_) => &[
                 ("xlsx", "Книга Excel"),
                 ("pdf", "PDF"),
-                ("csv", "CSV (разделители — запятые)"),
+                ("csv", "CSV (разделитель — точка с запятой)"),
                 ("tsv", "TSV (разделители — табуляция)"),
                 ("html", "Веб-страница"),
             ],
@@ -120,7 +122,13 @@ pub fn encode(doc: &Document) -> Result<Vec<u8>, String> {
                 }
             }
         }
-        Document::Sheets(_) => {}
+        Document::Sheets(book) => {
+            for sheet in &mut book.sheets {
+                for image in &mut sheet.images {
+                    add(image.id, &mut image.bytes);
+                }
+            }
+        }
     }
     parts.push((
         "document.json".into(),
@@ -144,21 +152,25 @@ pub fn decode(bytes: &[u8]) -> Result<Document, String> {
         return Err("Версия документа не поддерживается".into());
     }
     if env.version == 2 {
-        let mut restore = |id: u64, bytes: &mut Vec<u8>| -> Result<(), String> {
-            let path = env
-                .assets
-                .remove(&id)
-                .ok_or("Нет записи изображения в manifest")?;
-            if path != format!("assets/{id}.bin") {
-                return Err("Неверный путь asset".into());
-            }
-            *bytes = parts.remove(&path).ok_or("Нет части изображения")?;
-            Ok(())
-        };
+        let mut restore =
+            |id: u64, bytes: &mut Vec<u8>, inline_legacy: bool| -> Result<(), String> {
+                if inline_legacy && !env.assets.contains_key(&id) && !bytes.is_empty() {
+                    return Ok(());
+                }
+                let path = env
+                    .assets
+                    .remove(&id)
+                    .ok_or("Нет записи изображения в manifest")?;
+                if path != format!("assets/{id}.bin") {
+                    return Err("Неверный путь asset".into());
+                }
+                *bytes = parts.remove(&path).ok_or("Нет части изображения")?;
+                Ok(())
+            };
         match &mut env.document {
             Document::Docs(d) => {
                 for image in &mut d.images {
-                    restore(image.id, &mut image.bytes)?;
+                    restore(image.id, &mut image.bytes, false)?;
                 }
             }
             Document::Slides(d) => {
@@ -167,18 +179,29 @@ pub fn decode(bytes: &[u8]) -> Result<Document, String> {
                         if let crate::slides::model::ElementKind::Image { bytes } =
                             &mut element.kind
                         {
-                            restore(element.id, bytes)?;
+                            restore(element.id, bytes, false)?;
                         }
                     }
                 }
             }
-            Document::Sheets(_) => {}
+            Document::Sheets(book) => {
+                for sheet in &mut book.sheets {
+                    for image in &mut sheet.images {
+                        // Existing v2 Sheets packages kept images inline; retain that compatibility.
+                        restore(image.id, &mut image.bytes, true)?;
+                    }
+                }
+            }
         }
         if !env.assets.is_empty() {
             return Err("Неизвестный ID в asset manifest".into());
         }
     }
     env.document.validate()?;
+    if let Document::Sheets(book) = &mut env.document {
+        // Spilled array results are not stored; rebuild them like an XLSX import does.
+        book.recalculate();
+    }
     Ok(env.document)
 }
 pub fn open(path: &Path) -> Result<Document, String> {
@@ -187,7 +210,7 @@ pub fn open(path: &Path) -> Result<Document, String> {
     let doc = match ext.as_str() {
         "trinedoc" | "trinesheet" | "trineslide" => decode(&bytes)?,
         "lock" => Document::Docs(crate::docs::io::read(&bytes, "txt")?),
-        "docx" | "dotx" | "docm" | "txt" | "md" | "html" | "htm" => {
+        "docx" | "dotx" | "docm" | "odt" | "ott" | "fodt" | "txt" | "md" | "html" | "htm" => {
             Document::Docs(crate::docs::io::read(&bytes, &ext)?)
         }
         "xlsx" | "xlsm" | "xltx" | "xls" | "xlsb" | "ods" | "csv" | "tsv" => {
@@ -235,13 +258,32 @@ pub fn export(doc: &Document, ext: &str) -> Result<Vec<u8>, String> {
 /// Every slide that is not hidden as PNG, with its 1-based slide number.
 pub fn slide_pictures(deck: &crate::slides::model::Deck) -> Result<Vec<(usize, Vec<u8>)>, String> {
     deck.validate()?;
-    let pictures = deck
+    collect_slide_pictures(deck, 256 * 1024 * 1024, |slide| {
+        crate::png::write(&deck.page(slide), 2.0)
+    })
+}
+fn collect_slide_pictures(
+    deck: &crate::slides::model::Deck,
+    limit: usize,
+    mut render: impl FnMut(&crate::slides::model::Slide) -> Result<Vec<u8>, String>,
+) -> Result<Vec<(usize, Vec<u8>)>, String> {
+    let mut pictures = Vec::new();
+    let mut bytes = 0usize;
+    for (index, slide) in deck
         .slides
         .iter()
         .enumerate()
         .filter(|(_, slide)| !slide.hidden)
-        .map(|(index, slide)| Ok((index + 1, crate::png::write(&deck.page(slide), 2.0)?)))
-        .collect::<Result<Vec<_>, String>>()?;
+    {
+        let picture = render(slide)?;
+        bytes = bytes
+            .checked_add(picture.len())
+            .ok_or("Размер PNG экспорта переполнен")?;
+        if bytes > limit {
+            return Err("Совокупный PNG экспорт превышает безопасный лимит256 МиБ".into());
+        }
+        pictures.push((index + 1, picture));
+    }
     if pictures.is_empty() {
         return Err("В презентации нет показываемых слайдов".into());
     }
@@ -390,5 +432,95 @@ mod asset_tests {
         assert!(p.contains_key(&format!("assets/{id}.bin")));
         assert_eq!(decode(&zip)?, doc);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod next_native_image_tests {
+    use super::*;
+    #[test]
+    fn native_sheets_store_image_bytes_as_assets_and_open_legacy_inline_images()
+    -> Result<(), String> {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(2, 2)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .map_err(|e| e.to_string())?;
+        let mut book = crate::sheets::model::Book::default();
+        let id = book.active_id();
+        let image_id = book.add_image(id, 0, 0, png.into_inner())?;
+        let document = Document::Sheets(book);
+        let bytes = encode(&document)?;
+        let parts = crate::package::read_zip(&bytes)?;
+        assert!(parts.contains_key(&format!("assets/{image_id}.bin")));
+        let metadata: serde_json::Value =
+            serde_json::from_slice(parts.get("document.json").ok_or("json")?)
+                .map_err(|e| e.to_string())?;
+        assert_eq!(
+            metadata["document"]["data"]["sheets"][0]["images"][0]["bytes"],
+            serde_json::json!([])
+        );
+        assert_eq!(decode(&bytes)?, document);
+        let legacy = crate::package::write_zip(vec![(
+            "document.json".into(),
+            serde_json::to_vec(&Envelope {
+                version: 2,
+                document: document.clone(),
+                assets: Default::default(),
+            })
+            .map_err(|e| e.to_string())?,
+        )])?;
+        assert_eq!(decode(&legacy)?, document);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod next_csv_label_tests {
+    #[test]
+    fn csv_save_description_matches_the_written_separator() -> Result<(), String> {
+        let mut book = crate::sheets::model::Book::default();
+        let id = book.active_id();
+        book.set_cell(id, 0, 0, "left")?;
+        book.set_cell(id, 0, 1, "right")?;
+        let document = super::Document::Sheets(book);
+        let label = document
+            .save_formats()
+            .iter()
+            .find(|(ext, _)| *ext == "csv")
+            .map(|(_, label)| *label)
+            .ok_or("CSV label")?;
+        assert!(label.contains("точка с запятой"));
+        let output =
+            String::from_utf8(super::export(&document, "csv")?).map_err(|e| e.to_string())?;
+        assert!(output.contains("left;right"));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod hundred_png_aggregate_tests {
+    use super::*;
+    #[test]
+    fn multi_slide_pngs_have_one_aggregate_byte_budget() {
+        let mut deck = crate::slides::model::Deck::empty();
+        for _ in 0..3 {
+            deck.add_slide("blank");
+        }
+        let mut calls = 0;
+        let result = collect_slide_pictures(&deck, 10, |_| {
+            calls += 1;
+            Ok(vec![1; 6])
+        });
+        assert!(result.is_err());
+        assert_eq!(calls, 2);
+        deck.slides[1].hidden = true;
+        let output = collect_slide_pictures(&deck, 12, |_| Ok(vec![1; 6]));
+        assert_eq!(
+            output.map(|items| items
+                .into_iter()
+                .map(|(number, _)| number)
+                .collect::<Vec<_>>()),
+            Ok(vec![1, 3])
+        );
     }
 }

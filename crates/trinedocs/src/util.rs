@@ -12,6 +12,9 @@ pub fn app_dir() -> PathBuf {
         .join("TrineDocs")
 }
 pub fn decode_text(bytes: &[u8]) -> String {
+    if let Some(decoded) = decode_utf32_bom(bytes) {
+        return decoded.unwrap_or_else(|_| "\u{fffd}".into());
+    }
     if bytes.starts_with(&[0xff, 0xfe]) {
         encoding_rs::UTF_16LE.decode(&bytes[2..]).0.into_owned()
     } else if bytes.starts_with(&[0xfe, 0xff]) {
@@ -138,11 +141,20 @@ pub fn decode_image(bytes: &[u8]) -> Result<image::DynamicImage, String> {
     let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| e.to_string())?;
-    let (w, h) = reader.into_dimensions().map_err(|e| e.to_string())?;
+    use image::ImageDecoder;
+    let mut decoder = reader.into_decoder().map_err(|error| error.to_string())?;
+    let (w, h) = decoder.dimensions();
     if w == 0 || h == 0 || u64::from(w) * u64::from(h) > 32_000_000 {
         return Err("Изображение превышает 32 млн пикселей".into());
     }
-    image::load_from_memory(bytes).map_err(|e| e.to_string())
+    // Optional malformed EXIF must not make otherwise decodable pixels unreadable.
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut decoded =
+        image::DynamicImage::from_decoder(decoder).map_err(|error| error.to_string())?;
+    decoded.apply_orientation(orientation);
+    Ok(decoded)
 }
 #[cfg(test)]
 mod tests {
@@ -242,6 +254,125 @@ mod tests {
         );
         assert_eq!(fs::read(&path).map_err(|e| e.to_string())?, b"source");
         fs::remove_dir_all(root).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+}
+
+/// Applies an affine luminance transform while keeping hue and saturation.
+pub fn adjust_rgb_luminance(rgb: [u8; 3], multiplier: f64, offset: f64) -> [u8; 3] {
+    let [r, g, b] = rgb.map(|channel| f64::from(channel) / 255.0);
+    let high = r.max(g).max(b);
+    let low = r.min(g).min(b);
+    let light = (high + low) / 2.0;
+    let next = (light * multiplier + offset).clamp(0.0, 1.0);
+    let delta = high - low;
+    if delta <= f64::EPSILON {
+        return [(next * 255.0).round() as u8; 3];
+    }
+    let saturation = delta / (1.0 - (2.0 * light - 1.0).abs());
+    let chroma = (1.0 - (2.0 * next - 1.0).abs()) * saturation;
+    let shift = next - chroma / 2.0;
+    [r, g, b].map(|channel| {
+        (((channel - low) / delta * chroma + shift) * 255.0)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    })
+}
+
+/// A UTF-32 BOM must be checked before the UTF-16 LE prefix that it shares.
+pub fn decode_utf32_bom(bytes: &[u8]) -> Option<Result<String, String>> {
+    let little = bytes.starts_with(&[0xff, 0xfe, 0, 0]);
+    if !little && !bytes.starts_with(&[0, 0, 0xfe, 0xff]) {
+        return None;
+    }
+    Some((|| {
+        if !(bytes.len() - 4).is_multiple_of(4) {
+            return Err("Неполный UTF-32 символ".into());
+        }
+        let mut out = String::new();
+        for unit in bytes[4..].as_chunks::<4>().0 {
+            let value = if little {
+                u32::from_le_bytes(*unit)
+            } else {
+                u32::from_be_bytes(*unit)
+            };
+            out.push(char::from_u32(value).ok_or("Недопустимый UTF-32 scalar")?);
+        }
+        Ok(out)
+    })())
+}
+#[cfg(test)]
+mod next_text_encoding_tests {
+    #[test]
+    fn utf32_bom_is_decoded_before_utf16_and_rejects_invalid_scalars() -> Result<(), String> {
+        for little in [true, false] {
+            let mut bytes = if little {
+                vec![0xff, 0xfe, 0, 0]
+            } else {
+                vec![0, 0, 0xfe, 0xff]
+            };
+            for ch in "A😀".chars() {
+                bytes.extend_from_slice(&if little {
+                    (ch as u32).to_le_bytes()
+                } else {
+                    (ch as u32).to_be_bytes()
+                });
+            }
+            assert_eq!(super::decode_utf32_bom(&bytes).ok_or("BOM")??, "A😀");
+            assert_eq!(crate::docs::io::read(&bytes, "txt")?.plain_text(), "A😀");
+            assert_eq!(crate::sheets::io::decode_text(&bytes)?, "A😀");
+        }
+        assert!(
+            super::decode_utf32_bom(&[0xff, 0xfe, 0, 0, 0, 0xd8, 0, 0])
+                .ok_or("BOM")?
+                .is_err()
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod two_hundred_image_regressions {
+    #[test]
+    fn camera_exif_orientation_is_applied_when_decoding_images() -> Result<(), String> {
+        let pixels = image::RgbImage::from_fn(2, 1, |x, _| {
+            image::Rgb(if x == 0 { [255, 0, 0] } else { [0, 0, 255] })
+        });
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 100)
+            .encode_image(&pixels)
+            .map_err(|error| error.to_string())?;
+        let plain = super::decode_image(&jpeg)?;
+        assert_eq!((plain.width(), plain.height()), (2, 1));
+        // A little-endian TIFF IFD containing only Orientation (SHORT, one value).
+        let mut exif = b"Exif\0\0II".to_vec();
+        exif.extend_from_slice(&42u16.to_le_bytes());
+        exif.extend_from_slice(&8u32.to_le_bytes());
+        exif.extend_from_slice(&1u16.to_le_bytes());
+        exif.extend_from_slice(&0x0112u16.to_le_bytes());
+        exif.extend_from_slice(&3u16.to_le_bytes());
+        exif.extend_from_slice(&1u32.to_le_bytes());
+        let orientation_at = exif.len();
+        exif.extend_from_slice(&6u16.to_le_bytes());
+        exif.extend_from_slice(&0u16.to_le_bytes());
+        exif.extend_from_slice(&0u32.to_le_bytes());
+        let with_exif = |metadata: &[u8]| {
+            let mut bytes = jpeg[..2].to_vec();
+            bytes.extend_from_slice(&[0xff, 0xe1]);
+            bytes.extend_from_slice(&((metadata.len() + 2) as u16).to_be_bytes());
+            bytes.extend_from_slice(metadata);
+            bytes.extend_from_slice(&jpeg[2..]);
+            bytes
+        };
+        let rotated = super::decode_image(&with_exif(&exif))?;
+        assert_eq!((rotated.width(), rotated.height()), (1, 2));
+        let expected = plain.rotate90().to_rgba8();
+        assert_eq!(rotated.to_rgba8(), expected);
+        exif[orientation_at..orientation_at + 2].copy_from_slice(&2u16.to_le_bytes());
+        assert_eq!(
+            super::decode_image(&with_exif(&exif))?.to_rgba8(),
+            plain.fliph().to_rgba8()
+        );
         Ok(())
     }
 }
