@@ -1,6 +1,10 @@
 name: Apply rustfmt to a branch
 
+# Agents may not run cargo on the owner's machine (AGENTS.md), so formatting is applied here.
+# The bot commit does not trigger other workflows; push again afterwards to run the checks.
 on:
+  push:
+    branches: ['claude/**']
   workflow_dispatch:
 
 permissions:
