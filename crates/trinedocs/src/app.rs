@@ -3805,8 +3805,8 @@ fn new_card(
     kind: &str,
     label: &str,
     color: egui::Color32,
-    language: &str,
     width: f32,
+    language: &str,
 ) -> egui::Response {
     let response = ui.add_sized(
         [width, 104.0],
