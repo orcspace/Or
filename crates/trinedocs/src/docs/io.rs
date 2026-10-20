@@ -675,9 +675,7 @@ fn paragraph(
         .any(|value| value.parse::<u8>().is_ok_and(|level| level <= 5));
     match outline {
         Some(level @ 0..=5) => p.style = format!("Heading{}", level + 1),
-        Some(9) if style_heading || heading_level(&p.style).is_some() => {
-            p.style = "Normal".into()
-        }
+        Some(9) if style_heading || heading_level(&p.style).is_some() => p.style = "Normal".into(),
         Some(6..=8) => doc
             .losses
             .push("Уровни структуры DOCX 7–9 пока не отображаются в оглавлении.".into()),
@@ -8069,7 +8067,10 @@ mod hundred_docs_io_regressions {
     fn markdown_emphasis_requires_non_whitespace_delimiter_edges() -> Result<(), String> {
         // A leading "* " would open a list item, so the stray delimiters start mid-line.
         let doc = md("Text * word * and __ word__ and *valid*")?;
-        assert_eq!(doc.paragraphs[0].text(), "Text * word * and __ word__ and valid");
+        assert_eq!(
+            doc.paragraphs[0].text(),
+            "Text * word * and __ word__ and valid"
+        );
         assert!(
             doc.paragraphs[0]
                 .runs

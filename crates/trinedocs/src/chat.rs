@@ -2586,7 +2586,9 @@ mod hundred_chat_content_tests {
         let mut result = None;
         ctx.run_ui(egui::RawInput::default(), |ui| {
             result = Some(inline(ui, "plain **bold**"));
-        }).textures_delta.clear();
+        })
+        .textures_delta
+        .clear();
         let job = result.unwrap_or_default();
         assert!(job.sections.iter().any(|section| &job.text
             [section.byte_range.start.0..section.byte_range.end.0]
@@ -2608,7 +2610,9 @@ mod hundred_chat_content_tests {
             let mut output = String::new();
             ctx.run_ui(egui::RawInput::default(), |ui| {
                 output = inline(ui, source).text;
-            }).textures_delta.clear();
+            })
+            .textures_delta
+            .clear();
             assert_eq!(output, expected);
         }
         Ok(())

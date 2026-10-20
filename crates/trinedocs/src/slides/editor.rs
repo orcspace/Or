@@ -4303,7 +4303,9 @@ mod next_property_range_tests {
         let before = animation.clone();
         ctx.run_ui(egui::RawInput::default(), |ui| {
             animation_controls(ui, &mut animation, 0);
-        }).textures_delta.clear();
+        })
+        .textures_delta
+        .clear();
         assert_eq!(animation, before);
         let mut element = Element {
             kind: ElementKind::Rect,
@@ -4323,7 +4325,9 @@ mod next_property_range_tests {
         ctx.run_ui(egui::RawInput::default(), |ui| {
             properties(ui, &mut element);
             transition_timing_controls(ui, &mut transition);
-        }).textures_delta.clear();
+        })
+        .textures_delta
+        .clear();
         assert_eq!(element, before);
         assert_eq!(transition, before_transition);
         Ok(())
@@ -4603,7 +4607,9 @@ mod phase200_editor_tests {
         ctx.run_ui(egui::RawInput::default(), |ui| {
             field_id = Some(ui.id().with(("slide-property", 1_u64, "title")));
             slide_property_text(ui, &mut a, 1, "title", "");
-        }).textures_delta.clear();
+        })
+        .textures_delta
+        .clear();
         if let Some(id) = field_id {
             ctx.memory_mut(|memory| memory.request_focus(id));
         }
@@ -4615,7 +4621,9 @@ mod phase200_editor_tests {
             |ui| {
                 slide_property_text(ui, &mut b, 2, "title", "");
             },
-        ).textures_delta.clear();
+        )
+        .textures_delta
+        .clear();
         assert_eq!(b, "Slide B");
     }
 }

@@ -758,7 +758,9 @@ mod ui_review_tests {
             assert_ne!(a, b);
             ui.data_mut(|data| data.insert_temp(a, "Arial".to_string()));
             assert!(ui.data(|data| data.get_temp::<String>(b)).is_none());
-        }).textures_delta.clear();
+        })
+        .textures_delta
+        .clear();
     }
     #[test]
     fn palette_swatches_are_focusable_named_controls() -> Result<(), String> {
@@ -797,7 +799,9 @@ mod ui_review_tests {
                 assert_eq!(active, 4);
                 assert!(ui.min_rect().right() <= right + 1.0);
             },
-        ).textures_delta.clear();
+        )
+        .textures_delta
+        .clear();
         Ok(())
     }
 }

@@ -5065,7 +5065,9 @@ mod shell_input_tests {
                 ..Default::default()
             },
             |ui| app.shortcuts(ui.ctx()),
-        ).textures_delta.clear();
+        )
+        .textures_delta
+        .clear();
     }
     #[test]
     fn shift_save_routes_to_save_as_without_overwriting_the_current_path() -> Result<(), String> {

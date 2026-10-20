@@ -3481,11 +3481,11 @@ mod tests {
         // Decorations are part of the cell's text galley, so both strokes ride on one text shape.
         let decorated = output.shapes.iter().any(|shape| {
             matches!(&shape.shape, egui::Shape::Text(text)
-                if text.galley.job.text == "both"
-                    && text.galley.job.sections.iter().all(|section| {
-                        section.format.underline.width > 0.0
-                            && section.format.strikethrough.width > 0.0
-                    }))
+            if text.galley.job.text == "both"
+                && text.galley.job.sections.iter().all(|section| {
+                    section.format.underline.width > 0.0
+                        && section.format.strikethrough.width > 0.0
+                }))
         });
         output.textures_delta.clear();
         assert!(decorated);
@@ -4756,7 +4756,9 @@ mod additional_search_status_tests {
         ctx.run_ui(input, |ui| {
             assert!(close_find_on_escape(ui, &mut state));
             assert!(!ui.input(|input| input.key_pressed(Key::Escape)));
-        }).textures_delta.clear();
+        })
+        .textures_delta
+        .clear();
         assert!(!state.find_open);
     }
 }
@@ -4912,7 +4914,9 @@ mod hundred_cell_ui_tests {
                 false,
             );
             assert!((shape.angle + std::f32::consts::FRAC_PI_4).abs() < 1e-6);
-        }).textures_delta.clear();
+        })
+        .textures_delta
+        .clear();
         Ok(())
     }
     #[test]
@@ -4939,7 +4943,9 @@ mod hundred_cell_ui_tests {
                 assert_eq!(section.format.underline, Stroke::new(1.0, Color32::RED));
                 assert_eq!(section.format.strikethrough, Stroke::new(1.0, Color32::RED));
             }
-        }).textures_delta.clear();
+        })
+        .textures_delta
+        .clear();
         Ok(())
     }
     #[test]
