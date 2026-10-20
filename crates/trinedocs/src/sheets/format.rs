@@ -39,22 +39,8 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
     }
     let sections = split_sections(code);
     let negative = *number < 0.0;
-    let conditional = sections
-        .iter()
-        .take(2)
-        .any(|section| condition(section, *number).is_some());
-    let section = if conditional {
-        sections
-            .iter()
-            .take(3)
-            .find(|section| condition(section, *number).unwrap_or(true))
-    } else if *number == 0.0 && sections.len() > 2 {
-        sections.get(2)
-    } else if negative && sections.len() > 1 {
-        sections.get(1)
-    } else {
-        sections.first()
-    };
+    let conditional = sections.iter().take(2).any(|section| condition(section,*number).is_some());
+    let section = selected_numeric_section(&sections, *number);
     let Some(section) = section else {
         return String::new();
     };
@@ -79,7 +65,10 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
         return date_display(numeric, &section,ru);
     }
     let percent = bare.chars().filter(|c| *c == '%').count();
-    if bare.contains('/') && bare.contains('?') {
+    if bare.split_once('/').is_some_and(|(left, right)| {
+        left.chars().last().is_some_and(|ch| matches!(ch, '0' | '#' | '?'))
+            && right.chars().next().is_some_and(|ch| ch.is_ascii_digit() || matches!(ch, '#' | '?'))
+    }) {
         let (left, right) = bare.split_once('/').unwrap_or(("", ""));
         let denominator = right
             .chars()
@@ -90,7 +79,7 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
             .filter(|den| *den > 0 && *den <= 1_000_000);
         let mixed = left.split_whitespace().count() > 1;
         let sign = if numeric < 0.0 { "-" } else { "" };
-        let n = numeric.abs()*100f64.powi(percent as i32);
+        let n = decimal_scale(numeric.abs(), 2 * percent as i32);
         if !n.is_finite() {return "#NUM!".into();}
         let whole = if mixed { n.floor() } else { 0.0 };
         let fraction = n - whole;
@@ -105,11 +94,13 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
         let candidates = denominator.map_or(1..=max_den, |den| den..=den);
         for den in candidates {
             let numerator = round_half_away(fraction * f64::from(den), 0);
+            if !numerator.is_finite() { continue; }
             let diff = (fraction - numerator / f64::from(den)).abs();
             if diff < best.2 {
                 best = (numerator, den, diff);
             }
         }
+        if !best.2.is_finite() { return "#NUM!".into(); }
         let body=if mixed && best.0==0.0 {format!("{sign}{whole:.0}")}
             else if mixed && best.0==f64::from(best.1) {format!("{sign}{:.0}",whole+1.0)}
             else {format!("{sign}{}{:.0}/{}",
@@ -121,7 +112,7 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
             .last().map(|(i,c)|slash+1+i+c.len_utf8()).unwrap_or(slash+1);
         return format!("{}{}{}",unquote(&section[..start]),body,unquote(&section[end..]));
     }
-    let mut n = numeric * 100f64.powi(percent as i32);
+    let mut n = numeric;
     let tokens = outside_tokens(&section);
     let first = tokens
         .iter()
@@ -146,7 +137,7 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
         pattern.replace_range(decimal-inner_scale..decimal,"");
     }
     let scale = tail.chars().take_while(|c| *c == ',').count()+inner_scale;
-    n /= 1000f64.powi(scale as i32);
+    n = decimal_scale(n, 2 * percent as i32 - 3 * scale as i32);
     if !n.is_finite() {
         return "#NUM!".into();
     }
@@ -199,6 +190,14 @@ pub fn display(value: &Value, code: &str, ru: bool) -> String {
         rendered,
         unquote(tail.trim_start_matches(','))
     )
+}
+/// Apply only the net decimal exponent; never form an infinite scale factor.
+fn decimal_scale(mut value: f64, mut exponent: i32) -> f64 {
+    while exponent >= 3 { value *= 1000.0; exponent -= 3; }
+    while exponent <= -3 { value /= 1000.0; exponent += 3; }
+    while exponent > 0 { value *= 10.0; exponent -= 1; }
+    while exponent < 0 { value /= 10.0; exponent += 1; }
+    value
 }
 /// Rounds half away from zero like Excel (Rust's formatter rounds ties to even, and binary
 /// fractions such as 1.005 sit just below the tie).
@@ -446,6 +445,34 @@ fn text_section(code: &str, value: &str) -> String {
     }
     result.push_str(&unquote(&code[start..]));
     result
+}
+fn selected_numeric_section(sections:&[String], number:f64)->Option<&String> {
+    let conditional=sections.iter().take(2).any(|section|condition(section,number).is_some());
+    if conditional {
+        sections.iter().take(3).find(|section|condition(section,number).unwrap_or(true))
+    } else if number==0.0 && sections.len()>2 {sections.get(2)}
+    else if number<0.0 && sections.len()>1 {sections.get(1)}
+    else {sections.first()}
+}
+/// Named number-format colors override the cell's font color only in the chosen section.
+pub fn color(value:&Value,code:&str)->Option<[u8;3]> {
+    let sections=split_sections(code);
+    let section=match value {
+        Value::Number(number)=>selected_numeric_section(&sections,*number)?,
+        Value::Text(_)=>sections.get(3).or_else(||sections.first().filter(|section|outside_quotes(section).contains('@')))?,
+        _=>return None,
+    };
+    let tokens=outside_quotes(section);
+    for tail in tokens.split('[').skip(1) {
+        let Some((name,_))=tail.split_once(']') else {continue;};
+        let color=match name.to_ascii_lowercase().as_str() {
+            "black"=>[0,0,0],"blue"=>[0,0,255],"cyan"=>[0,255,255],"green"=>[0,255,0],
+            "magenta"=>[255,0,255],"red"=>[255,0,0],"white"=>[255,255,255],"yellow"=>[255,255,0],
+            _=>continue,
+        };
+        return Some(color);
+    }
+    None
 }
 fn condition(code: &str, number: f64) -> Option<bool> {
     let tokens = outside_tokens(code);
@@ -1037,5 +1064,45 @@ mod hundred_format_tests {
         let serial = super::super::formula::date_serial(2024, 1, 15);
         assert_eq!(display(&Value::Number(serial), "yyyy_m-mm", false), "2024 -01");
         assert_eq!(display(&Value::Number(serial), "yyyy*mmm", false), "202401");
+    }
+}
+
+#[cfg(test)]
+mod phase200_format_defects {
+    use super::*;
+    #[test]
+    fn numeric_scaling_keeps_finite_results_without_infinite_scale_factors() {
+        let code=format!("0.00E+00{}", "%".repeat(155));
+        assert!(display(&Value::Number(1e-300),&code,false).starts_with("1.00E+10"));
+        let code=format!("0.00E+00{}", ",".repeat(110));
+        assert_eq!(display(&Value::Number(1e308),&code,false),"1.00E-22");
+        assert_eq!(display(&Value::Number(1e308),"0.00E+00,,%",false),"1.00E+304%");
+        assert_eq!(display(&Value::Number(0.0),&format!("0{}", "%".repeat(200)),false),format!("0{}", "%".repeat(200)));
+    }
+    #[test]
+    fn fraction_masks_accept_zero_and_hash_numerator_placeholders() {
+        assert_eq!(display(&Value::Number(1.5),"0/0",false),"3/2");
+        assert_eq!(display(&Value::Number(1.5),"#/#",false),"3/2");
+        assert_eq!(display(&Value::Number(1.5),"0/8",false),"12/8");
+    }
+    #[test]
+    fn unrepresentable_fraction_numerators_never_fall_back_to_zero() {
+        assert_eq!(display(&Value::Number(1e308),"?/8",false),"#NUM!");
+        assert_eq!(display(&Value::Number(0.0),"?/8",false),"0/8");
+    }
+}
+
+#[cfg(test)]
+mod phase200_number_color_defect {
+    use super::*;
+    #[test]
+    fn chosen_number_format_section_supplies_its_own_color() {
+        let code="[Blue]0;[Red](0);[Green]0;[Magenta]@";
+        assert_eq!(color(&Value::Number(-2.0),code),Some([255,0,0]));
+        assert_eq!(color(&Value::Number(2.0),code),Some([0,0,255]));
+        assert_eq!(color(&Value::Number(0.0),code),Some([0,255,0]));
+        assert_eq!(color(&Value::Text("x".into()),code),Some([255,0,255]));
+        assert_eq!(color(&Value::Number(2.0),"[>5][Red]0;[Blue]0"),Some([0,0,255]));
+        assert_eq!(color(&Value::Number(2.0),"\"[Red]\"0"),None);
     }
 }

@@ -1,14 +1,14 @@
 use super::model::{
-    Align, Book, CellFormat, ChartKind, MAX_RANGE_CELLS, Value, parse_address, parse_range,
+    Align, Book, CellFormat, ChartKind, ConditionalRule, MAX_RANGE_CELLS, Value, parse_address, parse_range,
 };
 use calamine::{Data, Reader as _, open_workbook_auto_from_rs};
 use quick_xml::{
     NsReader as Reader, Writer,
-    events::{BytesStart, BytesText, Event},
+    events::{BytesRef, BytesStart, BytesText, Event},
 };
 use rust_xlsxwriter::{
     Chart, ChartType, Color, Format, FormatAlign, FormatBorder, FormatUnderline, Formula, Image,
-    Workbook,
+    Workbook, ConditionalFormatCell, ConditionalFormatCellRule,
 };
 use std::{collections::BTreeMap, io::Cursor};
 
@@ -406,6 +406,13 @@ fn ods_preflight(bytes: &[u8]) -> Result<(), String> {
     }
     Ok(())
 }
+fn xml_reference(reference: &BytesRef<'_>) -> Result<char,String> {
+    if let Some(character)=reference.resolve_char_ref().map_err(|error|error.to_string())? {return Ok(character);}
+    match reference.as_ref() {
+        "amp"=>Ok('&'),"lt"=>Ok('<'),"gt"=>Ok('>'),"quot"=>Ok('"'),"apos"=>Ok('\''),
+        _=>Err("XLSX: неизвестная XML entity".into()),
+    }
+}
 fn xml_bounds(bytes: &[u8]) -> Result<Option<Vec<usize>>, String> {
     let mut reader = Reader::from_str(std::str::from_utf8(bytes).map_err(|e| e.to_string())?);
     let mut root = String::new();
@@ -481,7 +488,7 @@ fn xml_bounds(bytes: &[u8]) -> Result<Option<Vec<usize>>, String> {
             }
             Event::Text(t) if in_string => length = length.saturating_add(t.xml10_content().len()),
             Event::CData(t) if in_string => length = length.saturating_add(t.len()),
-            Event::GeneralRef(_) if in_string => length = length.saturating_add(8),
+            Event::GeneralRef(reference) if in_string => length = length.saturating_add(xml_reference(&reference)?.len_utf8()),
             Event::End(e) => {
                 depth = depth.saturating_sub(1);
                 if e.local_name().as_ref() == "si" && root == "sst" {
@@ -514,6 +521,7 @@ fn worksheet_bounds(bytes: &[u8], strings: &[usize]) -> Result<(u64, usize), Str
     let mut in_value = false;
     let mut in_text = false;
     let mut in_formula = false;
+    let mut inline_length = 0usize;
     let mut formula_length = 0usize;
     let mut shared_id = None;
     let mut shared_anchor = false;
@@ -577,6 +585,7 @@ fn worksheet_bounds(bytes: &[u8], strings: &[usize]) -> Result<(u64, usize), Str
                             return Err("Неверный индекс стиля XLSX".into());
                         }
                         cell_type = a.get("t").cloned().unwrap_or_default();
+                        inline_length = 0;
                         value.clear();
                     }
                     "v" => {
@@ -611,35 +620,39 @@ fn worksheet_bounds(bytes: &[u8], strings: &[usize]) -> Result<(u64, usize), Str
                 }
                 if in_text {
                     text_bytes = text_bytes.saturating_add(size);
+                    inline_length = inline_length.saturating_add(size);
                 }
                 if in_formula {
                     formula_length = formula_length.saturating_add(size);
                 }
             }
             Event::CData(t) => {
+                if in_value {
+                    if value.len().saturating_add(t.len())>32767 {return Err("XLSX: слишком длинное значение".into());}
+                    value.push_str(&t);
+                }
                 if in_text {
                     text_bytes = text_bytes.saturating_add(t.len());
+                    inline_length = inline_length.saturating_add(t.len());
                 }
                 if in_formula {
                     formula_length = formula_length.saturating_add(t.len());
                 }
             }
             Event::GeneralRef(r) => {
+                let ch=xml_reference(&r)?;
                 if in_value {
-                    let ch = r
-                        .resolve_char_ref()
-                        .map_err(|e| e.to_string())?
-                        .ok_or("XLSX: именованная entity в числовом поле")?;
                     value.push(ch);
                     if value.len() > 32767 {
                         return Err("XLSX: слишком длинное значение".into());
                     }
                 }
                 if in_text {
-                    text_bytes = text_bytes.saturating_add(8);
+                    text_bytes = text_bytes.saturating_add(ch.len_utf8());
+                    inline_length = inline_length.saturating_add(ch.len_utf8());
                 }
                 if in_formula {
-                    formula_length = formula_length.saturating_add(8);
+                    formula_length = formula_length.saturating_add(ch.len_utf8());
                 }
             }
             Event::End(e) => match e.local_name().as_ref() {
@@ -649,6 +662,7 @@ fn worksheet_bounds(bytes: &[u8], strings: &[usize]) -> Result<(u64, usize), Str
                 }
                 "v" => {
                     in_value = false;
+                    if cell_type == "str" { text_bytes=text_bytes.saturating_add(value.len()); }
                     if cell_type == "s" {
                         let index = value
                             .parse::<usize>()
@@ -678,7 +692,7 @@ fn worksheet_bounds(bytes: &[u8], strings: &[usize]) -> Result<(u64, usize), Str
             Event::Eof => break,
             _ => (),
         }
-        if formula_length > 32767 || text_bytes > 64 * 1024 * 1024 {
+        if formula_length > 32767 || inline_length > 32767 || text_bytes > 64 * 1024 * 1024 {
             return Err("XLSX: превышен предел распакованного текста/формул".into());
         }
     }
@@ -701,7 +715,7 @@ fn preflight(parts: &BTreeMap<String, Vec<u8>>) -> Result<(), String> {
     }
     let mut shared_strings = Vec::new();
     for (name, bytes) in parts {
-        if name.ends_with(".xml")
+        if name.to_ascii_lowercase().ends_with(".xml")
             && let Some(strings) = xml_bounds(bytes)?
         {
             if !shared_strings.is_empty() {
@@ -716,7 +730,7 @@ fn preflight(parts: &BTreeMap<String, Vec<u8>>) -> Result<(), String> {
         if name == "content.xml" {
             ods_preflight(bytes)?;
         }
-        if name.ends_with(".xml") && worksheet_root(bytes)? {
+        if name.to_ascii_lowercase().ends_with(".xml") && worksheet_root(bytes)? {
             let (area, text) = worksheet_bounds(bytes, &shared_strings)?;
             dense_total = dense_total
                 .checked_add(area)
@@ -1136,6 +1150,113 @@ fn styles_with_theme_fonts(bytes: &[u8],theme:&[[u8;3]],faces:&BTreeMap<String,S
     }
     Ok(formats)
 }
+fn differential_fills(bytes:&[u8],palette:&[[u8;3]],theme:&[[u8;3]]) -> Result<Vec<Option<[u8;3]>>,String> {
+    let mut reader=Reader::from_str(std::str::from_utf8(bytes).map_err(|error|error.to_string())?);
+    let mut fills=Vec::new();
+    let (mut inside,mut unsupported,mut foreground,mut background,mut solid)=(false,false,None,None,false);
+    loop {
+        let event=reader.read_event().map_err(|error|error.to_string())?;
+        let empty=matches!(event,Event::Empty(_));
+        match event {
+            Event::Start(element)|Event::Empty(element) => {
+                let tag=local(&element);
+                if tag=="dxf" {
+                    inside=!empty;unsupported=false;foreground=None;background=None;solid=false;
+                    if empty {fills.push(None);}
+                } else if inside {
+                    let attributes=attrs(&element,&reader)?;
+                    match tag.as_str() {
+                        "font"|"border"|"numFmt"|"alignment"|"protection"|"gradientFill"=>unsupported=true,
+                        "patternFill"=>{
+                            solid=attributes.get("patternType").is_some_and(|value|value=="solid");
+                            unsupported|=attributes.get("patternType").is_some_and(|value|!matches!(value.as_str(),"none"|"solid"));
+                        }
+                        "fgColor"=>foreground=rgb_with_theme(&attributes,palette,theme),
+                        "bgColor"=>{
+                            if attributes.get("indexed").is_none_or(|value|value!="64") {
+                                background=rgb_with_theme(&attributes,palette,theme);
+                            }
+                        }
+                        _=>(),
+                    }
+                }
+            }
+            Event::End(element) if element.local_name().as_ref()=="dxf" => {
+                fills.push(if unsupported {None}else if solid {foreground.or(background)}else{background.or(foreground)});
+                inside=false;
+            }
+            Event::DocType(_)=>return Err("DTD запрещён".into()),
+            Event::Eof=>break,
+            _=>(),
+        }
+        if fills.len()>65536 {return Err("Слишком много дифференциальных форматов".into());}
+    }
+    Ok(fills)
+}
+fn conditional_rules(bytes:&[u8],fills:&[Option<[u8;3]>]) -> Result<Vec<ConditionalRule>,String> {
+    let mut reader=Reader::from_str(std::str::from_utf8(bytes).map_err(|error|error.to_string())?);
+    let mut ranges=Vec::new();
+    let mut current:Option<BTreeMap<String,String>>=None;
+    let mut formulas=Vec::new();
+    let mut result=Vec::new();
+    loop {
+        let event=reader.read_event().map_err(|error|error.to_string())?;
+        let empty=matches!(event,Event::Empty(_));
+        match event {
+            Event::Start(element)|Event::Empty(element) => {
+                let tag=local(&element);
+                let attributes=attrs(&element,&reader)?;
+                match tag.as_str() {
+                    "conditionalFormatting"=>{
+                        ranges=attributes.get("sqref").ok_or("Не поддерживается conditionalFormatting без sqref")?
+                            .split_whitespace().map(parse_range).collect::<Result<Vec<_>,_>>()?;
+                        if ranges.is_empty()||ranges.len()>10000 {return Err("Недопустимые области conditionalFormatting".into());}
+                    }
+                    "cfRule"=>{
+                        if empty {return Err("Не поддерживается пустое правило conditionalFormatting".into());}
+                        current=Some(attributes);formulas.clear();
+                    }
+                    "formula" if current.is_some()=>{
+                        if empty {formulas.push(String::new());}
+                        else {
+                            let raw=reader.read_text(element.name()).map_err(|error|error.to_string())?;
+                            formulas.push(quick_xml::escape::unescape(&raw).map_err(|error|error.to_string())?.into_owned());
+                        }
+                    }
+                    _=>(),
+                }
+            }
+            Event::End(element) if element.local_name().as_ref()=="cfRule" => {
+                let attributes=current.take().ok_or("Нет начала правила conditionalFormatting")?;
+                let operator=match attributes.get("operator").map(String::as_str) {
+                    Some("greaterThan")=>">",Some("lessThan")=>"<",Some("equal")=>"=",
+                    Some("greaterThanOrEqual")=>">=",Some("lessThanOrEqual")=>"<=",
+                    _=>return Err("Не поддерживается оператор conditionalFormatting".into()),
+                };
+                if attributes.get("type").is_none_or(|kind|kind!="cellIs")||formulas.len()!=1 {
+                    return Err("Поддерживаются только числовые cellIs правила условной заливки".into());
+                }
+                let threshold=formulas[0].trim().trim_start_matches('=').parse::<f64>()
+                    .ok().filter(|value|value.is_finite()).ok_or("Не поддерживается формула порога conditionalFormatting")?;
+                let index=attributes.get("dxfId").and_then(|value|value.parse::<usize>().ok())
+                    .ok_or("Нет формата conditionalFormatting")?;
+                let fill=fills.get(index).copied().flatten().ok_or("Не поддерживается формат conditionalFormatting: нужна только сплошная заливка")?;
+                let priority=attributes.get("priority").and_then(|value|value.parse::<u32>().ok())
+                    .filter(|value|*value>0).ok_or("Нет приоритета conditionalFormatting")?;
+                for range in &ranges {
+                    result.push((priority,ConditionalRule{range:*range,operator:operator.into(),threshold,fill}));
+                    if result.len()>10000 {return Err("Слишком много правил conditionalFormatting".into());}
+                }
+            }
+            Event::End(element) if element.local_name().as_ref()=="conditionalFormatting"=>ranges.clear(),
+            Event::DocType(_)=>return Err("DTD запрещён".into()),
+            Event::Eof=>break,
+            _=>(),
+        }
+    }
+    result.sort_by_key(|(priority,_)|*priority);
+    Ok(result.into_iter().map(|(_,rule)|rule).collect())
+}
 fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(), String> {
     let workbook_rels = relationships("xl/workbook.xml", parts);
     let style_path = workbook_rels
@@ -1156,6 +1277,8 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
         .map(|b| styles_with_theme_fonts(b,&theme,&faces))
         .transpose()?
         .unwrap_or_default();
+    let differential = parts.get(style_path).map(|bytes| differential_fills(bytes,&palette,&theme))
+        .transpose()?.unwrap_or_default();
     let mut targets = BTreeMap::new();
     if let Some(bytes) = parts.get("xl/_rels/workbook.xml.rels") {
         each_tag(bytes, |tag, a| {
@@ -1199,6 +1322,10 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
         };
         if let Some(s) = book.sheet_by_id_mut(id) {
             s.hidden = hidden;
+            // Standard XLSX fallback differs from a newly created native sheet.
+            // Explicit sheetFormatPr values below take precedence.
+            s.default_col_width=64.0;
+            s.default_row_height=20.0;
         }
         let Some(bytes) = parts.get(&path) else {
             continue;
@@ -1246,6 +1373,22 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
             }
             let s = book.sheet_by_id_mut(id).ok_or("Лист не найден")?;
             match tag {
+                "sheetFormatPr" => {
+                    if let Some(raw)=a.get("defaultColWidth") {
+                        let width=raw.parse::<f64>().ok().filter(|value|value.is_finite()&&*value>0.0)
+                            .ok_or("Недопустимая defaultColWidth")?;
+                        let pixels=((256.0*width+18.0)/256.0*7.0).trunc();
+                        if !(1.0..=1800.0).contains(&pixels) {return Err("defaultColWidth вне поддерживаемых пределов".into());}
+                        s.default_col_width=pixels as f32;
+                    }
+                    if let Some(raw)=a.get("defaultRowHeight") {
+                        let points=raw.parse::<f64>().ok().filter(|value|value.is_finite()&&*value>0.0)
+                            .ok_or("Недопустимая defaultRowHeight")?;
+                        let pixels=points*4.0/3.0;
+                        if !(1.0..=600.0).contains(&pixels) {return Err("defaultRowHeight вне поддерживаемых пределов".into());}
+                        s.default_row_height=pixels as f32;
+                    }
+                }
                 "col" => {
                     let min = a
                         .get("min")
@@ -1322,7 +1465,9 @@ fn read_metadata(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(
         if let Some((_,selection))=sheet_selections.iter().find(|(name,_)|name==&pane).or_else(||sheet_selections.first()) {
             selections.insert(id,selection.clone());
         }
-        read_sheet_images(book, id, &path, parts);
+        let rules=conditional_rules(bytes,&differential)?;
+        book.sheet_by_id_mut(id).ok_or("Лист не найден")?.conditional=rules;
+        read_sheet_images(book, id, &path, parts)?;
     }
     if book.active_sheet().is_some_and(|sheet| sheet.hidden) {
         book.active = book
@@ -1378,10 +1523,15 @@ fn chart_locations(book: &Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<Vec
 }
 fn read_charts(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(), String> {
     for location in chart_locations(book, parts)? {
-        let Some(bytes) = parts.get(&location.path) else { continue; };
+        let bytes=parts.get(&location.path).ok_or("Не найдена XML-часть диаграммы")?;
         let mut reader = Reader::from_str(std::str::from_utf8(bytes).map_err(|e| e.to_string())?);
         let mut kind = ChartKind::Column;
         let mut refs = Vec::new();
+        let mut header_refs = Vec::new();
+()=>`        let mut category_refs = Vec::new();
+        let mut value_refs = Vec::new();
+        let mut plot_types=0usize;`
+        let mut in_categories = false;
         let mut title = String::new();
         let mut title_refs=Vec::new();
         let mut in_title = false;
@@ -1393,8 +1543,16 @@ fn read_charts(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(),
             match event {
                 Event::Start(e) | Event::Empty(e) => {
                     let tag = local(&e);
+()=>`                    if in_plot_area && tag.ends_with("Chart") {
+                        if !matches!(tag.as_str(),"barChart"|"lineChart"|"areaChart"|"pieChart"|"doughnutChart"|"scatterChart") {
+                            return Err(format!("Тип диаграммы {tag} пока не поддерживается; импорт остановлен без замены на столбчатую"));
+                        }
+                        plot_types+=1;
+                        if plot_types>1 {return Err("Комбинированные диаграммы пока не поддерживаются".into());}
+                    }
                     match tag.as_str() {
-                        "plotArea" if !empty => in_plot_area = true,
+                        "plotArea" if !empty` => in_plot_area = true,
+                        "cat"|"xVal" if !empty => in_categories = true,
                         "tx" if !in_title && !empty => in_series_name = true,
                         "title" if !in_plot_area && !empty => in_title = true,
                         "barChart" => kind = ChartKind::Column,
@@ -1418,7 +1576,13 @@ fn read_charts(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(),
                                 .map_err(|e| e.to_string())?
                                 .into_owned();
                             let found=super::formula::dependencies(&format!("={text}"));
-                            if in_title {title_refs.extend(found);}else if !in_series_name {refs.extend(found);}
+                            if in_title {title_refs.extend(found);}
+                            else if in_series_name {header_refs.extend(found);}
+                            else if in_categories {category_refs.extend(found.clone());refs.extend(found);}
+                            else {value_refs.extend(found.clone());refs.extend(found);}
+                            if refs.len().saturating_add(header_refs.len()).saturating_add(title_refs.len())>100000 {
+                                return Err("Слишком много ссылок в диаграмме".into());
+                            }
                         }
                         "t" if in_title => {
                             let text = reader
@@ -1434,6 +1598,7 @@ fn read_charts(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(),
                     }
                 }
                 Event::End(e) => {
+                    if matches!(e.local_name().as_ref(),"cat"|"xVal") {in_categories=false;}
                     if e.local_name().as_ref() == "plotArea" { in_plot_area = false; }
                     if e.local_name().as_ref() == "tx" { in_series_name = false; }
                     if e.local_name().as_ref() == "title" {
@@ -1449,12 +1614,11 @@ fn read_charts(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(),
             && let Some(sheet)=book.sheets.iter().find(|value|value.name.to_lowercase() == sheet.to_lowercase()) {
             title=sheet.display(range.r0,range.c0,book.locale_ru);
         }
-        if let Some((Some(sheet), first)) = refs.first()
-            && let Some(id) = book
-                .sheets
-                .iter()
-                .find(|s| s.name.to_lowercase() == sheet.to_lowercase())
-                .map(|s| s.id)
+        let (source,first)=refs.first().ok_or("Диаграмма не содержит поддерживаемых ссылок на данные")?;
+        if value_refs.is_empty() {return Err("Диаграмма не содержит поддерживаемых рядов данных".into());}
+        let sheet=source.clone().unwrap_or_else(||book.sheet_by_id(location.sheet).map(|sheet|sheet.name.clone()).unwrap_or_default());
+        let id=book.sheets.iter().find(|value|value.name.to_lowercase()==sheet.to_lowercase()).map(|sheet|sheet.id)
+            .ok_or("Не найден лист данных диаграммы")?;
         {
             let mut range = *first;
             for (_, r) in &refs {
@@ -1463,8 +1627,20 @@ fn read_charts(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(),
                 range.r1 = range.r1.max(r.r1);
                 range.c1 = range.c1.max(r.c1);
             }
-            if range.validate().is_ok() {
-                let owner = book.sheet_by_id(location.sheet).ok_or("Нет листа диаграммы")?;
+()=>`            let data_columns:std::collections::BTreeSet<_>=refs.iter().map(|(_,range)|range.c0).collect();
+            if refs.iter().any(|(_,part)|part.c0!=part.c1||part.r0!=range.r0||part.r1!=range.r1)
+                || data_columns.len() as u32!=range.c1-range.c0+1
+                || category_refs.iter().any(|(_,part)|part.c0!=range.c0) {
+                return Err("Несмежные или горизонтальные источники диаграммы пока не поддерживаются; импорт остановлен без включения посторонних ячеек".into());
+            }
+            let has_headers=range.r0>0` && header_refs.iter().any(|(source,header)|
+                source.as_ref().is_none_or(|source|source.to_lowercase()==sheet.to_lowercase())
+                    && header.r0==header.r1 && header.r0+1==range.r0
+                    && header.c0==header.c1 && header.c0>=range.c0 && header.c0<=range.c1);
+            if has_headers {range.r0-=1;}
+()=>`            range.validate().map_err(|error|format!("Диапазон диаграммы: {error}"))?;
+            {
+                let owner` = book.sheet_by_id(location.sheet).ok_or("Нет листа диаграммы")?;
                 if owner.id != id || refs.iter().any(|(source, _)| source.as_ref()
                     .is_some_and(|source| source.to_lowercase() != owner.name.to_lowercase())) {
                     return Err("Диаграмма с данными другого листа пока не поддерживается; импорт остановлен без переноса её на чужой лист".into());
@@ -1474,6 +1650,9 @@ fn read_charts(book: &mut Book, parts: &BTreeMap<String, Vec<u8>>) -> Result<(),
                 if let Some(chart) = book.sheet_by_id_mut(location.sheet)
                     .and_then(|sheet| sheet.charts.iter_mut().find(|chart| chart.id == chart_id)) {
                     chart.row = row; chart.col = col;
+                    chart.has_headers=has_headers;
+()=>`                    chart.has_categories=!category_refs.is_empty()
+                        && !value_refs.iter().any(|(_,value)|value.c0==range.c0);`
                     if width > 0.0 && height > 0.0 {
                         chart.width = width.clamp(1.0, 4000.0);
                         chart.height = height.clamp(1.0, 4000.0);
@@ -1532,47 +1711,47 @@ fn relationships(
     }
     rels
 }
-/// Pictures from the sheet's drawing part. Best effort: a broken drawing never blocks opening.
+/// Import only drawings referenced by the worksheet; fail explicitly when a referenced picture is lost.
 fn read_sheet_images(
     book: &mut Book,
     id: u64,
     sheet_path: &str,
     parts: &BTreeMap<String, Vec<u8>>,
-) {
-    for (kind, drawing) in relationships(sheet_path, parts).into_values() {
-        if !kind.ends_with("/drawing") {
-            continue;
+) -> Result<(),String> {
+    let worksheet=parts.get(sheet_path).ok_or("Нет части листа с рисунками")?;
+    let rels=relationships(sheet_path,parts);
+    let mut drawings=Vec::new();
+    each_tag(worksheet,|tag,attrs| {
+        if tag=="drawing" {
+            let reference=attrs.get("r:id").ok_or("Нет связи рисунков листа")?;
+            let (kind,target)=rels.get(reference).ok_or("Не найдена связь рисунков листа")?;
+            if !kind.ends_with("/drawing") {return Err("Связь рисунков имеет неверный тип".into());}
+            drawings.push(target.clone());
         }
-        let media = relationships(&drawing, parts);
-        let Some(Ok(text)) = parts.get(&drawing).map(|b| std::str::from_utf8(b)) else {
-            continue;
-        };
-        for anchor in drawing_pictures(text).unwrap_or_default() {
-            let Some(bytes) = media
-                .get(&anchor.embed)
-                .and_then(|(_, target)| parts.get(target))
-            else {
-                continue;
-            };
-            let Some(sheet) = book.sheet_by_id(id) else {
-                continue;
-            };
-            let (row, col, x_offset, y_offset, width, height) = picture_geometry(sheet, &anchor);
-            if let Ok(image_id) = book.add_image(id, row, col, bytes.clone())
-                && let Some(image) = book
-                    .sheet_by_id_mut(id)
-                    .and_then(|s| s.images.iter_mut().find(|i| i.id == image_id))
-            {
-                image.x_offset = x_offset;
-                image.y_offset = y_offset;
-                if width > 0.0 && height > 0.0 {
-                    image.width = width.clamp(1.0, 8000.0);
-                    image.height = height.clamp(1.0, 8000.0);
-                }
-                image.alt = anchor.alt;
+        Ok(())
+    })?;
+    for drawing in drawings {
+        let media=relationships(&drawing,parts);
+        let bytes=parts.get(&drawing).ok_or("Не найдена часть рисунков листа")?;
+        let text=std::str::from_utf8(bytes).map_err(|error|error.to_string())?;
+        for anchor in drawing_pictures(text)? {
+            if anchor.embed.is_empty() {continue;} // Chart anchors are handled separately.
+            let (kind,target)=media.get(&anchor.embed).ok_or("Не найдена связь изображения")?;
+            if !kind.ends_with("/image") {return Err("Связь изображения имеет неверный тип".into());}
+            let bytes=parts.get(target).ok_or("Не найдены байты изображения")?;
+            let sheet=book.sheet_by_id(id).ok_or("Лист не найден")?;
+            let (row,col,x_offset,y_offset,width,height)=picture_geometry(sheet,&anchor);
+            let image_id=book.add_image(id,row,col,bytes.clone())?;
+            let image=book.sheet_by_id_mut(id).and_then(|sheet|sheet.images.iter_mut().find(|image|image.id==image_id))
+                .ok_or("Импортированный рисунок не найден")?;
+            image.x_offset=x_offset;image.y_offset=y_offset;
+            if width>0.0 && height>0.0 {
+                image.width=width.clamp(1.0,8000.0);image.height=height.clamp(1.0,8000.0);
             }
+            image.alt=anchor.alt;
         }
     }
+    Ok(())
 }
 #[derive(Default)]
 struct PicturePoint {
@@ -1659,7 +1838,10 @@ fn drawing_pictures(text: &str) -> Result<Vec<PictureAnchor>, String> {
                 _ => {}
             },
             Event::DocType(_) => return Err("DTD запрещён".into()),
-            Event::Eof => break,
+            Event::Eof => {
+                if current.is_some() {return Err("Незавершённая привязка рисунка".into());}
+                break;
+            },
             _ => {}
         }
     }
@@ -1746,11 +1928,11 @@ fn picture_geometry(
     sheet: &super::model::Sheet,
     anchor: &PictureAnchor,
 ) -> (u32, u32, f32, f32, f32, f32) {
-    let x = drawing_axis_position(anchor.from.col, 96.0, &sheet.widths, &sheet.hidden_cols)
+    let x = drawing_axis_position(anchor.from.col, sheet.default_col_width, &sheet.widths, &sheet.hidden_cols)
         + anchor.from.col_off as f32 / 9525.0;
     let y = drawing_axis_position(
         anchor.from.row,
-        26.0,
+        sheet.default_row_height,
         &sheet.row_heights,
         &sheet.hidden_rows,
     ) + anchor.from.row_off as f32 / 9525.0;
@@ -1763,22 +1945,22 @@ fn picture_geometry(
         let row = drawing_axis_index(
             y,
             super::model::MAX_ROWS,
-            26.0,
+            sheet.default_row_height,
             &sheet.row_heights,
             &sheet.hidden_rows,
         );
         let col = drawing_axis_index(
             x,
             super::model::MAX_COLS,
-            96.0,
+            sheet.default_col_width,
             &sheet.widths,
             &sheet.hidden_cols,
         );
         (
             row,
             col,
-            x - drawing_axis_position(col, 96.0, &sheet.widths, &sheet.hidden_cols),
-            y - drawing_axis_position(row, 26.0, &sheet.row_heights, &sheet.hidden_rows),
+            x - drawing_axis_position(col, sheet.default_col_width, &sheet.widths, &sheet.hidden_cols),
+            y - drawing_axis_position(row, sheet.default_row_height, &sheet.row_heights, &sheet.hidden_rows),
         )
     } else {
         (
@@ -1793,10 +1975,10 @@ fn picture_geometry(
         .as_ref()
         .map(|end| {
             (
-                drawing_axis_position(end.col, 96.0, &sheet.widths, &sheet.hidden_cols)
+                drawing_axis_position(end.col, sheet.default_col_width, &sheet.widths, &sheet.hidden_cols)
                     + end.col_off as f32 / 9525.0
                     - x,
-                drawing_axis_position(end.row, 26.0, &sheet.row_heights, &sheet.hidden_rows)
+                drawing_axis_position(end.row, sheet.default_row_height, &sheet.row_heights, &sheet.hidden_rows)
                     + end.row_off as f32 / 9525.0
                     - y,
             )
@@ -1852,6 +2034,16 @@ fn xlsx_format(fmt: &CellFormat) -> Format {
 fn rgb_number(v: [u8; 3]) -> u32 {
     u32::from(v[0]) * 65536 + u32::from(v[1]) * 256 + u32::from(v[2])
 }
+fn pin_drawing_columns(ws:&mut rust_xlsxwriter::Worksheet,sheet:&super::model::Sheet,col:u32,offset:f32,width:f32)->Result<(),String> {
+    let end=drawing_axis_index(drawing_axis_position(col,sheet.default_col_width,&sheet.widths,&sheet.hidden_cols)+offset+width,
+        super::model::MAX_COLS,sheet.default_col_width,&sheet.widths,&sheet.hidden_cols);
+    for column in col..=end {
+        if !sheet.widths.contains_key(&column)&&!sheet.hidden_cols.contains(&column) {
+            ws.set_column_width_pixels(column as u16,sheet.default_col_width.round() as u32).map_err(|error|error.to_string())?;
+        }
+    }
+    Ok(())
+}
 fn write_xlsx(book: &Book) -> Result<Vec<u8>, String> {
     if book.sheets.is_empty() {
         return Err("Книга не содержит листов".into());
@@ -1867,6 +2059,7 @@ fn write_xlsx(book: &Book) -> Result<Vec<u8>, String> {
         ws.set_name(&sheet.name).map_err(|e| e.to_string())?;
         ws.set_active(index == book.active);
         ws.set_hidden(sheet.hidden);
+        ws.set_default_row_height(f64::from(sheet.default_row_height)*0.75);
         if index == book.active {
             ws.set_selection(book.selection.row, book.selection.col as u16,
                 book.selection.anchor_row, book.selection.anchor_col as u16)
@@ -1955,7 +2148,23 @@ fn write_xlsx(book: &Book) -> Result<Vec<u8>, String> {
                 }
             }
         }
+        for rule in &sheet.conditional {
+            let comparison=match rule.operator.as_str() {
+                ">"=>ConditionalFormatCellRule::GreaterThan(rule.threshold),
+                "<"=>ConditionalFormatCellRule::LessThan(rule.threshold),
+                "="=>ConditionalFormatCellRule::EqualTo(rule.threshold),
+                ">="=>ConditionalFormatCellRule::GreaterThanOrEqualTo(rule.threshold),
+                "<="=>ConditionalFormatCellRule::LessThanOrEqualTo(rule.threshold),
+                _=>return Err("Недопустимое условное форматирование".into()),
+            };
+            let format=ConditionalFormatCell::new().set_rule(comparison)
+                .set_format(Format::new().set_background_color(Color::RGB(rgb_number(rule.fill)))).set_stop_if_true(true);
+            let range=rule.range;
+            ws.add_conditional_format(range.r0,range.c0 as u16,range.r1,range.c1 as u16,&format)
+                .map_err(|error|error.to_string())?;
+        }
         for model in &sheet.charts {
+            pin_drawing_columns(ws,sheet,model.col,0.0,model.width)?;
             let mut chart = Chart::new(match model.kind {
                 ChartKind::Column => ChartType::Column,
                 ChartKind::Bar => ChartType::Bar,
@@ -1970,13 +2179,13 @@ fn write_xlsx(book: &Book) -> Result<Vec<u8>, String> {
                 .set_width(model.width.round().clamp(1.0, 4000.0) as u32)
                 .set_height(model.height.round().clamp(1.0, 4000.0) as u32);
             let r = model.range;
-            let data_start = if r.r1 > r.r0 { r.r0 + 1 } else { r.r0 };
-            let start_col = if r.c1 > r.c0 { r.c0 + 1 } else { r.c0 };
+            let data_start = if model.has_headers && r.r1 > r.r0 { r.r0 + 1 } else { r.r0 };
+            let start_col = if model.has_categories && r.c1 > r.c0 { r.c0 + 1 } else { r.c0 };
             for c in start_col..=r.c1 {
                 let series = chart.add_series();
                 series.set_values((sheet.name.as_str(), data_start, c as u16, r.r1, c as u16));
-                if r.c1 > r.c0 {
-                    series.set_categories((
+()=>`                if (model.has_categories && r.c1 > r.c0) || model.kind==ChartKind::Scatter {
+                    series.set_categories`((
                         sheet.name.as_str(),
                         data_start,
                         r.c0 as u16,
@@ -2003,32 +2212,7 @@ fn write_xlsx(book: &Book) -> Result<Vec<u8>, String> {
             if !model.alt.is_empty() {
                 image = image.set_alt_text(&model.alt);
             }
-            // The app's default cell is 96x26 px, Excel's is 64x20: pin the spanned
-            // cells so the two-cell anchor written for the picture reads back unchanged.
-            let spanned_cols = ((model.x_offset.max(0.0) + model.width) / 96.0).ceil() as u32 + 1;
-            let spanned_rows = ((model.y_offset.max(0.0) + model.height) / 26.0).ceil() as u32 + 1;
-            for col in model.col
-                ..model
-                    .col
-                    .saturating_add(spanned_cols)
-                    .min(super::model::MAX_COLS)
-            {
-                if !sheet.widths.contains_key(&col) && !sheet.hidden_cols.contains(&col) {
-                    ws.set_column_width_pixels(col as u16, 96)
-                        .map_err(|e| e.to_string())?;
-                }
-            }
-            for row in model.row
-                ..model
-                    .row
-                    .saturating_add(spanned_rows)
-                    .min(super::model::MAX_ROWS)
-            {
-                if !sheet.row_heights.contains_key(&row) && !sheet.hidden_rows.contains(&row) {
-                    ws.set_row_height(row, 26.0 * 72.0 / 96.0)
-                        .map_err(|e| e.to_string())?;
-                }
-            }
+            pin_drawing_columns(ws,sheet,model.col,model.x_offset,model.width)?;
             ws.insert_image_with_offset(
                 model.row,
                 model.col as u16,
@@ -2074,6 +2258,19 @@ fn typed_formula_strings(xml: &[u8], sheet: &super::model::Sheet) -> Result<Vec<
     loop {
         let event = reader.read_event().map_err(|error| error.to_string())?;
         match event {
+            Event::Empty(e) if e.local_name().as_ref()=="sheetFormatPr" => {
+                let values=attrs(&e,&reader)?;
+                let mut element=e.into_owned();element.clear_attributes();
+                for (key,value) in values.iter().filter(|(key,_)|!matches!(key.as_str(),"defaultColWidth"|"defaultRowHeight"|"customHeight")) {
+                    element.push_attribute((key.as_str(),value.as_str()));
+                }
+                let width=((f64::from(sheet.default_col_width.round())+0.5)/7.0-18.0/256.0).to_string();
+                let height=(f64::from(sheet.default_row_height)*0.75).to_string();
+                element.push_attribute(("defaultColWidth",width.as_str()));
+                element.push_attribute(("defaultRowHeight",height.as_str()));
+                element.push_attribute(("customHeight","1"));
+                writer.write_event(Event::Empty(element)).map_err(|error|error.to_string())?;
+            }
             Event::Start(e) if e.local_name().as_ref() == "c" => {
                 let values = attrs(&e, &reader)?;
                 result = values
@@ -2155,7 +2352,7 @@ fn exact_row_height(
     Ok(element)
 }
 fn sheet_needs_patch(sheet: &super::model::Sheet) -> bool {
-    sheet
+    sheet.default_col_width != 64.0 || sheet.default_row_height != 20.0 || sheet
         .row_heights
         .values()
         .any(|height| height.fract() != 0.0)
@@ -2846,11 +3043,11 @@ fn write_html_book(book:&Book,cell_limit:u64,byte_limit:usize)->Result<Vec<u8>,S
         }
         html_push(&mut out,&format!("<section><h2>{}</h2><table><colgroup>",crate::package::xml_escape(&sheet.name)),byte_limit)?;
         for col in (0..=cols).filter(|col|!sheet.hidden_cols.contains(col)) {
-            html_push(&mut out,&format!("<col style=\"width:{}px\">",sheet.widths.get(&col).copied().unwrap_or(96.0)),byte_limit)?;
+            html_push(&mut out,&format!("<col style=\"width:{}px\">",sheet.widths.get(&col).copied().unwrap_or(sheet.default_col_width)),byte_limit)?;
         }
         html_push(&mut out,"</colgroup>",byte_limit)?;
         for row in (0..=rows).filter(|row|!sheet.hidden_rows.contains(row)) {
-            html_push(&mut out,&format!("<tr style=\"height:{}px\">",sheet.row_heights.get(&row).copied().unwrap_or(26.0)),byte_limit)?;
+            html_push(&mut out,&format!("<tr style=\"height:{}px\">",sheet.row_heights.get(&row).copied().unwrap_or(sheet.default_row_height)),byte_limit)?;
             for col in (0..=cols).filter(|col|!sheet.hidden_cols.contains(col)) {
                 let merge=merged.get(&(row,col)).copied();
                 let display_anchor = merge.and_then(|range| {
@@ -2862,7 +3059,8 @@ fn write_html_book(book:&Book,cell_limit:u64,byte_limit:usize)->Result<Vec<u8>,S
                 let span=merge.map(|range|format!(" rowspan=\"{}\" colspan=\"{}\"",
                     (range.r0..=range.r1).filter(|row|!sheet.hidden_rows.contains(row)).count(),
                     (range.c0..=range.c1).filter(|col|!sheet.hidden_cols.contains(col)).count())).unwrap_or_default();
-                let format=sheet.cell(source_row,source_col).map(|cell|cell.fmt.clone()).unwrap_or_default();
+                let mut format=sheet.cell(source_row,source_col).map(|cell|cell.fmt.clone()).unwrap_or_default();
+                if let Some(rgb)=sheet.cell(source_row,source_col).and_then(|cell|super::format::color(&cell.value,&format.number)) {format.color=rgb;}
                 let align=match format.align {Align::Left=>"left",Align::Center=>"center",Align::Right=>"right",
                     Align::General=>if sheet.cell(source_row,source_col).is_some_and(|cell|matches!(cell.value,Value::Number(_))) {"right"}else{"left"}};
                 let decoration=format!("{}{}",if format.underline {"underline "}else{""},if format.strike {"line-through"}else{""});
@@ -3099,6 +3297,191 @@ mod hundred_chart_unicode_tests {
         read_charts(&mut book, &parts)?;
         assert_eq!(book.sheets[0].charts.len(), 1);
         assert_eq!(book.sheets[0].charts[0].title, "Доход");
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod phase200_preflight_defects {
+    use super::*;
+    #[test]
+    fn xml_entity_budgets_use_decoded_utf8_lengths() -> Result<(),String> {
+        let xml=format!("<sst><si><t>{}</t></si></sst>","&amp;".repeat(10000));
+        assert_eq!(xml_bounds(xml.as_bytes())?,Some(vec![10000]));
+        let xml=format!("<worksheet><sheetData><row><c><f>\"{}\"</f></c></row></sheetData></worksheet>","&amp;".repeat(10000));
+        assert!(worksheet_bounds(xml.as_bytes(),&[]).is_ok());
+        let xml=br#"<worksheet><sheetData><row><c t="str"><v>A&amp;B&#x410;</v></c></row></sheetData></worksheet>"#;
+        assert_eq!(worksheet_bounds(xml,&[])?.1,5);
+        Ok(())
+    }
+    #[test]
+    fn formula_string_caches_are_charged_before_calamine_import() -> Result<(),String> {
+        let xml=br#"<worksheet><sheetData><row><c t="str"><f>1</f><v>cached text</v></c></row></sheetData></worksheet>"#;
+        assert_eq!(worksheet_bounds(xml,&[])?.1,258+"cached text".len());
+        let xml=br#"<worksheet><sheetData><row><c t="str"><v><![CDATA[cached text]]></v></c></row></sheetData></worksheet>"#;
+        assert_eq!(worksheet_bounds(xml,&[])?.1,"cached text".len());
+        Ok(())
+    }
+    #[test]
+    fn inline_rich_text_checks_the_combined_cell_length() {
+        let xml=format!("<worksheet><sheetData><row><c t=\"inlineStr\"><is><r><t>{}</t></r><r><t>{}</t></r></is></c></row></sheetData></worksheet>","a".repeat(20000),"b".repeat(20000));
+        assert!(worksheet_bounds(xml.as_bytes(),&[]).is_err());
+        let xml=xml.replace(&"b".repeat(20000),&"b".repeat(10000));
+        assert!(worksheet_bounds(xml.as_bytes(),&[]).is_ok());
+    }
+    #[test]
+    fn uppercase_xml_parts_receive_the_same_resource_preflight() {
+        let bytes=br#"<worksheet><dimension ref="A1:XFD1048576"/></worksheet>"#.to_vec();
+        let parts=BTreeMap::from([("custom/Sheet.XML".into(),bytes)]);
+        assert!(preflight(&parts).is_err());
+        let parts=BTreeMap::from([("custom/Strings.XML".into(),br#"<sst uniqueCount="1000001"/>"#.to_vec())]);
+        assert!(preflight(&parts).is_err());
+    }
+}
+
+#[cfg(test)]
+mod phase200_drawing_defects {
+    use super::*;
+    fn parts(drawing:&str,referenced:bool)->BTreeMap<String,Vec<u8>> {
+        BTreeMap::from([
+            ("xl/worksheets/sheet1.xml".into(),if referenced {
+                br#"<worksheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><drawing r:id="d"/></worksheet>"#.to_vec()
+            } else {b"<worksheet/>".to_vec()}),
+            ("xl/worksheets/_rels/sheet1.xml.rels".into(),br#"<Relationships><Relationship Id="d" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#.to_vec()),
+            ("xl/drawings/drawing1.xml".into(),drawing.as_bytes().to_vec()),
+            ("xl/drawings/_rels/drawing1.xml.rels".into(),br#"<Relationships><Relationship Id="p" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/p.png"/></Relationships>"#.to_vec()),
+            ("xl/media/p.png".into(),b"broken image".to_vec()),
+        ])
+    }
+    const DRAWING:&str=r#"<wsDr xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><oneCellAnchor><from><col>0</col><row>0</row></from><ext cx="9525" cy="9525"/><pic><blip r:embed="p"/></pic></oneCellAnchor></wsDr>"#;
+    #[test]
+    fn referenced_invalid_pictures_fail_instead_of_disappearing() {
+        let mut book=Book::default();let id=book.active_id();
+        assert!(read_sheet_images(&mut book,id,"xl/worksheets/sheet1.xml",&parts(DRAWING,true)).is_err());
+        assert!(read_sheet_images(&mut book,id,"xl/worksheets/sheet1.xml",&parts("<wsDr><oneCellAnchor>",true)).is_err());
+    }
+    #[test]
+    fn orphan_drawing_relationships_do_not_import_unreferenced_content() -> Result<(),String> {
+        let mut book=Book::default();let id=book.active_id();
+        read_sheet_images(&mut book,id,"xl/worksheets/sheet1.xml",&parts(DRAWING,false))?;
+        assert!(book.sheets[0].images.is_empty());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod phase200_conditional_defect {
+    use super::*;
+    #[test]
+    fn numeric_conditional_fills_round_trip_through_xlsx() -> Result<(),String> {
+        let mut book=Book::default();let id=book.active_id();
+        book.set_cell(id,0,0,"20")?;
+        for (index,operator) in [">","<","=",">=","<="].into_iter().enumerate() {
+            book.sheets[0].conditional.push(ConditionalRule{
+                range:super::super::model::Range::new(0,0,1,1),operator:operator.into(),
+                threshold:index as f64-2.0,fill:[index as u8,100,200],
+            });
+        }
+        let imported=read(&write(&book,"xlsx")?,"xlsx")?;
+        assert_eq!(imported.sheets[0].conditional,book.sheets[0].conditional);
+        let formats=differential_fills(br#"<styleSheet><dxfs><dxf/><dxf><fill><patternFill><bgColor rgb="FFABCDEF"/></patternFill></fill></dxf></dxfs></styleSheet>"#,&[],&[])?;
+        assert_eq!(formats,vec![None,Some([0xAB,0xCD,0xEF])]);
+        assert!(conditional_rules(br#"<worksheet><conditionalFormatting sqref="A1"><cfRule type="expression" dxfId="1" priority="1"><formula>A1&gt;2</formula></cfRule></conditionalFormatting></worksheet>"#,&formats).is_err());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod phase200_default_geometry_defect {
+    use super::*;
+    #[test]
+    fn worksheet_default_geometry_survives_import_export_and_old_native_files() -> Result<(),String> {
+        let mut book=Book::default();let id=book.active_id();book.sheets[0].name="Sheet1".into();
+        let parts=BTreeMap::from([
+            ("xl/workbook.xml".into(),br#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" r:id="s"/></sheets></workbook>"#.to_vec()),
+            ("xl/_rels/workbook.xml.rels".into(),br#"<Relationships><Relationship Id="s" Target="worksheets/sheet1.xml"/></Relationships>"#.to_vec()),
+            ("xl/worksheets/sheet1.xml".into(),br#"<worksheet><sheetFormatPr defaultColWidth="20" defaultRowHeight="30"/></worksheet>"#.to_vec()),
+        ]);
+        read_metadata(&mut book,&parts)?;
+        assert_eq!(book.sheets[0].default_col_width,140.0);
+        assert_eq!(book.sheets[0].default_row_height,40.0);
+        book.set_cell(id,0,0,"text")?;
+        let imported=read(&write(&book,"xlsx")?,"xlsx")?;
+        assert_eq!(imported.sheets[0].default_col_width,140.0);
+        assert_eq!(imported.sheets[0].default_row_height,40.0);
+        let old:super::super::model::Sheet=serde_json::from_str("{}").map_err(|error|error.to_string())?;
+        assert_eq!((old.default_col_width,old.default_row_height),(96.0,26.0));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod phase200_chart_roles_defect {
+    use super::*;
+    #[test]
+    fn chart_round_trip_keeps_header_and_category_roles() -> Result<(),String> {
+        let mut book=Book::default();let id=book.active_id();
+        book.set_range(id,0,0,&[vec!["Name".into(),"Sales".into()],vec!["first".into(),"10".into()],vec!["last".into(),"20".into()]])?;
+        book.add_chart(id,ChartKind::Column,super::super::model::Range::new(0,0,2,1),"Sales")?;
+        let imported=read(&write(&book,"xlsx")?,"xlsx")?;
+        let chart=imported.sheets[0].charts.first().ok_or("chart")?;
+        assert_eq!(chart.range,book.sheets[0].charts[0].range);
+        assert!(chart.has_headers&&chart.has_categories);
+        book.sheets[0].charts[0].has_headers=false;
+        book.sheets[0].charts[0].has_categories=false;
+        let imported=read(&write(&book,"xlsx")?,"xlsx")?;
+        let chart=imported.sheets[0].charts.first().ok_or("chart")?;
+        assert!(!chart.has_headers&&!chart.has_categories);
+        assert_eq!(chart.range,book.sheets[0].charts[0].range);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod phase200_chart_integrity_defects {
+    use super::*;
+    fn chart(series:&str,kind:&str)->String {
+        format!("<chartSpace><chart><plotArea><{kind}>{series}</{kind}></plotArea></chart></chartSpace>")
+    }
+    #[test]
+    fn referenced_chart_parts_and_sources_cannot_silently_disappear() -> Result<(),String> {
+        let mut book=Book::default();
+        let xml=chart("<ser><val><numRef><f>A1:A2</f></numRef></val></ser>","barChart");
+        let mut parts=chart_fixture_parts(&book,0,"art/part.xml",&xml);
+        parts.remove("art/part.xml");
+        assert!(read_charts(&mut book,&parts).is_err());
+        let xml=chart("<ser><val><numLit><pt idx=\"0\"><v>1</v></pt></numLit></val></ser>","barChart");
+        assert!(read_charts(&mut book,&chart_fixture_parts(&Book::default(),0,"art/literal.xml",&xml)).is_err());
+        let xml=chart("<ser><val><numRef><f>A1:A2</f></numRef></val></ser>","barChart");
+        read_charts(&mut book,&chart_fixture_parts(&Book::default(),0,"art/local.xml",&xml))?;
+        assert_eq!(book.sheets[0].charts.len(),1);
+        Ok(())
+    }
+    #[test]
+    fn unsupported_chart_types_are_not_falsely_imported_as_columns() {
+        let mut book=Book::default();let name=book.sheets[0].name.clone();
+        let series=format!("<ser><val><numRef><f>'{name}'!A1:A2</f></numRef></val></ser>");
+        let xml=chart(&series,"radarChart");
+        assert!(read_charts(&mut book,&chart_fixture_parts(&Book::default(),0,"art/radar.xml",&xml)).is_err());
+        let xml=format!("<chartSpace><chart><plotArea><barChart>{series}</barChart><lineChart>{series}</lineChart></plotArea></chart></chartSpace>");
+        assert!(read_charts(&mut book,&chart_fixture_parts(&Book::default(),0,"art/mixed.xml",&xml)).is_err());
+        assert!(book.sheets[0].charts.is_empty());
+    }
+    #[test]
+    fn disjoint_chart_sources_do_not_pull_intervening_unrelated_cells() {
+        let mut book=Book::default();let name=book.sheets[0].name.clone();
+        let series=format!("<ser><val><numRef><f>'{name}'!A1:A2</f></numRef></val></ser><ser><val><numRef><f>'{name}'!C1:C2</f></numRef></val></ser>");
+        assert!(read_charts(&mut book,&chart_fixture_parts(&Book::default(),0,"art/gap.xml",&chart(&series,"barChart"))).is_err());
+        assert!(book.sheets[0].charts.is_empty());
+    }
+    #[test]
+    fn a_single_column_scatter_chart_exports_its_visible_x_values() -> Result<(),String> {
+        let mut book=Book::default();let id=book.active_id();
+        book.set_range(id,0,0,&[vec!["Value".into()],vec!["1".into()],vec!["2".into()]])?;
+        book.add_chart(id,ChartKind::Scatter,super::super::model::Range::new(0,0,2,0),"One")?;
+        let bytes=write(&book,"xlsx")?;
+        let imported=read(&bytes,"xlsx")?;
+        assert_eq!(imported.sheets[0].charts.first().ok_or("chart")?.kind,ChartKind::Scatter);
         Ok(())
     }
 }
