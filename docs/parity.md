@@ -2,7 +2,7 @@
 
 Первичный feature inventory по заданию и первым проверенным пробелам. Полная сверка всех вкладок Office ещё не завершена. Внутри каждого PAR-пункта варианты поведения проверяются отдельно. Ни одна функция не объявлена готовой. P2 не удаляется из конечного объёма; поздние фазы ждут решения владельца ADR-0005.
 
-Всего функций/вариантов: **366**.
+Всего функций/вариантов: **371**.
 
 | PAR ID | Режим | Функция | P | Фаза | REQ | MCP / пробел | Import | Export | Статус |
 |---|---|---|---|---|---|---|---|---|---|
@@ -372,18 +372,8 @@
 | PAR-SHT-124 | Sheets | Статистические распределения и проверки гипотез: NORM/T/CHISQ/F/BETA/GAMMA/BINOM/POISSON …, PERCENTRANK, ранги (GridCraft, ADR-0028) | P1 | 5 | REQ-11-007 | read_cells / write_cells / set_formula; GAP: разлива динамических массивов нет (ячейка показывает верхний левый элемент), runtime/GUI acceptance | planned | planned | partial_unverified |
 | PAR-SHT-125 | Sheets | Регулярные выражения REGEXTEST/REGEXEXTRACT/REGEXREPLACE и TEXTSPLIT/TEXTBEFORE/TEXTAFTER (GridCraft + regex, ADR-0028) | P1 | 5 | REQ-11-007 | read_cells / write_cells / set_formula; GAP: разлива динамических массивов нет (ячейка показывает верхний левый элемент), runtime/GUI acceptance | planned | planned | partial_unverified |
 | PAR-SHT-126 | Sheets | Матричные и массивные функции MMULT/MINVERSE/MDETERM/SEQUENCE/FILTER/SORT/UNIQUE/TOCOL/WRAPROWS … внутри формул (GridCraft, ADR-0028) | P1 | 5 | REQ-11-007 | read_cells / write_cells / set_formula; GAP: разлива динамических массивов нет (ячейка показывает верхний левый элемент), runtime/GUI acceptance | planned | planned | partial_unverified |
-
 | PAR-TRI-042 | Общее | Адаптация вкладок ленты и доступные палитры цветов | P0 | 1 | REQ-11-002 | UI view-only: горизонтальная прокрутка ленты, scoped font filter, имена swatches и видимый фокус. GAP: runtime keyboard/AccessKit/visual acceptance. | n/a | n/a | implemented_unverified |
 | PAR-TRI-043 | Sheets | Отдельная строка статистики выделения с локалью и устойчивым средним | P1 | 8 | REQ-11-008 | UI read-only: сумма/среднее/заполненность отдельно от вкладок, sparse statistics полных строк/столбцов; overflow суммы —. GAP: runtime/performance/visual acceptance. | n/a | n/a | implemented_unverified |
 | PAR-TRI-044 | Slides | Чернила докладчика в координатах слайда и разделение клавиш панели/показа | P1 | 8 | REQ-11-011 | UI-only presentation state: normalized ink/clipping, 100000 точек/1000 штрихов и clear, blank/end click, manual navigation перед timer. GAP: runtime resize/keyboard/visual acceptance. | n/a | n/a | implemented_unverified |
 | PAR-TRI-045 | Slides | Фильтр навигатора по заголовку/разделу, фиксированные карточки и вставка перед drop-marker | P1 | 8 | REQ-11-011 | Фильтр view-only; перенос через существующие model/ops и undo. Native buttons с полными подписями. GAP: runtime DnD/keyboard/AccessKit/visual acceptance. | n/a | n/a | implemented_unverified |
-
 | PAR-TRI-046 | Общее | Постраничное чтение структуры крупных Docs/Sheets через MCP | P1 | 8 | REQ-11-002 | docs_read_objects: table_id, row/rows/col/columns; Sheets geometry/objects/names: index/count и total_*; metadata noFill/table layout. GAP: rich cell content paging, snapshot across edits и runtime/MCP acceptance. | n/a | bounded JSON subset | partial_unverified |
-
-Дополнение 2026-10-18: [50 исправлений кода с регрессиями](audit/bugs-50-2026-10-18.md) и [отчёт фазы](plan/phase-capabilities-50-fixes-2026-10-18-report.md). Сборка и тесты запрещены владельцем; runtime-приёмка и полный Office/MCP-паритет этим срезом не подтверждены.
-
-Дополнение UI 2026-10-18: [ещё 50 дефектов BUG-051…100](audit/bugs-51-100-2026-10-18.md) и [отчёт UI-фазы](plan/phase-ui-50-more-fixes-2026-10-18-report.md). Все добавления остаются implemented/partial_unverified; 50 новых тестов только написаны, не запускались.
-
-Следующий проход2026-10-18: [BUG-101…150](audit/bugs-101-150-2026-10-18.md) и [отчёт](plan/phase-ui-50-next-2026-10-18-report.md). Статусы указывают наличие кода; сборка, тесты и runtime-приёмка не проводились.
-
-Проход1002026-10-18: [BUG-151…250](audit/bugs-151-250-2026-10-18.md), [отчёт](plan/phase-100-more-2026-10-18-report.md). Ровно100 новых сценариев и100 новых регрессионных тестов, не запускавшихся. JSON синхронизирован с этой таблицей, включая ранее пропущенный PAR-TRI-045; все статусы отражают только просмотренный код.
