@@ -4778,16 +4778,16 @@ mod next_find_defects {
             show_find: true,
             ..Default::default()
         };
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        ctx.run_ui(egui::RawInput::default(), |ui| {
             find_bar(ui, &mut doc, &mut state, canvas)
-        });
+        }).textures_delta.clear();
         ctx.memory_mut(|memory| memory.request_focus(find_field_id(canvas, false)));
         for (shift, offset) in [(false, 1), (true, 3)] {
             let modifiers = egui::Modifiers {
                 shift,
                 ..Default::default()
             };
-            let _ = ctx.run_ui(
+            ctx.run_ui(
                 egui::RawInput {
                     events: vec![
                         egui::Event::ModifiersChanged(modifiers),
@@ -4802,9 +4802,9 @@ mod next_find_defects {
                     ..Default::default()
                 },
                 |ui| find_bar(ui, &mut doc, &mut state, canvas),
-            );
+            ).textures_delta.clear();
             assert_eq!(state.cursor.offset, offset);
-            let _ = ctx.run_ui(
+            ctx.run_ui(
                 egui::RawInput {
                     events: vec![egui::Event::Key {
                         key: Key::Enter,
@@ -4816,7 +4816,7 @@ mod next_find_defects {
                     ..Default::default()
                 },
                 |ui| find_bar(ui, &mut doc, &mut state, canvas),
-            );
+            ).textures_delta.clear();
         }
         Ok(())
     }
@@ -4971,7 +4971,7 @@ mod two_hundred_docs_editor_regressions {
         };
         let ctx = egui::Context::default();
         let modifiers = egui::Modifiers::SHIFT;
-        let _ = ctx.run_ui(
+        ctx.run_ui(
             egui::RawInput {
                 events: vec![
                     Event::ModifiersChanged(modifiers),
@@ -4992,7 +4992,7 @@ mod two_hundred_docs_editor_regressions {
                     step_cell(&mut doc, &mut state, forward);
                 }
             },
-        );
+        ).textures_delta.clear();
         assert_eq!(
             state.table_cell,
             Some(TableCursor {
@@ -5193,7 +5193,7 @@ mod two_hundred_docs_editor_regressions {
         target.paragraphs[0].right_indent = 18.0;
         let mut state = EditorState::default();
         let layout = target.layout();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        ctx.run_ui(egui::RawInput::default(), |ui| {
             let canvas = ui.id().with("suffix-paste");
             ui.memory_mut(|memory| memory.request_focus(canvas));
             handle_event(
@@ -5204,7 +5204,7 @@ mod two_hundred_docs_editor_regressions {
                 canvas,
                 Event::Paste("copied".into()),
             );
-        });
+        }).textures_delta.clear();
         assert_eq!(target.plain_text(), "copiedsuffix");
         assert_eq!(target.paragraphs[0].style, "Normal");
         assert_eq!(target.paragraphs[0].align, Align::Right);

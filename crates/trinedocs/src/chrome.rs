@@ -752,23 +752,24 @@ mod ui_review_tests {
     #[test]
     fn font_filters_are_scoped_to_their_parent_ui() {
         let ctx = egui::Context::default();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        ctx.run_ui(egui::RawInput::default(), |ui| {
             let a = ui.push_id("doc-a", |ui| font_filter_id(ui, "font")).inner;
             let b = ui.push_id("doc-b", |ui| font_filter_id(ui, "font")).inner;
             assert_ne!(a, b);
             ui.data_mut(|data| data.insert_temp(a, "Arial".to_string()));
             assert!(ui.data(|data| data.get_temp::<String>(b)).is_none());
-        });
+        }).textures_delta.clear();
     }
     #[test]
     fn palette_swatches_are_focusable_named_controls() -> Result<(), String> {
         let ctx = egui::Context::default();
         crate::fonts::install(&ctx)?;
         ctx.enable_accesskit();
-        let out = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
             let swatch = color_swatch(ui, [12, 34, 56], true);
             assert!(swatch.sense.is_focusable());
         });
+        out.textures_delta.clear();
         let tree = format!("{:?}", out.platform_output.accesskit_update);
         assert!(tree.contains("Цвет #0C2238"));
         Ok(())
@@ -777,7 +778,7 @@ mod ui_review_tests {
     fn ribbon_tabs_keep_a_horizontal_scroll_extent() -> Result<(), String> {
         let ctx = egui::Context::default();
         crate::fonts::install(&ctx)?;
-        let _ = ctx.run_ui(
+        ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -796,7 +797,7 @@ mod ui_review_tests {
                 assert_eq!(active, 4);
                 assert!(ui.min_rect().right() <= right + 1.0);
             },
-        );
+        ).textures_delta.clear();
         Ok(())
     }
 }

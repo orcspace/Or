@@ -2584,9 +2584,9 @@ mod hundred_chat_content_tests {
         let ctx = egui::Context::default();
         crate::fonts::install(&ctx)?;
         let mut result = None;
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        ctx.run_ui(egui::RawInput::default(), |ui| {
             result = Some(inline(ui, "plain **bold**"));
-        });
+        }).textures_delta.clear();
         let job = result.unwrap_or_default();
         assert!(job.sections.iter().any(|section| &job.text
             [section.byte_range.start.0..section.byte_range.end.0]
@@ -2606,9 +2606,9 @@ mod hundred_chat_content_tests {
             (r"path \folder", r"path \folder"),
         ] {
             let mut output = String::new();
-            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ctx.run_ui(egui::RawInput::default(), |ui| {
                 output = inline(ui, source).text;
-            });
+            }).textures_delta.clear();
             assert_eq!(output, expected);
         }
         Ok(())

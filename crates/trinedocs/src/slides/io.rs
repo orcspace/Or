@@ -3076,14 +3076,17 @@ mod tests {
                 labels: vec!["Продажи".into(), "Расходы".into(), "Без значения".into()],
             },
         )?;
-        for extension in ["txt", "md"] {
-            let text =
-                String::from_utf8(write(&deck, extension)?).map_err(|error| error.to_string())?;
-            assert!(text.contains("A&B\t<2>\n次"));
-            assert!(text.contains("Продажи\t-12.5"));
-            assert!(text.contains("Расходы\t0"));
-            assert!(text.contains("Без значения\t"));
-        }
+        let text = String::from_utf8(write(&deck, "txt")?).map_err(|error| error.to_string())?;
+        assert!(text.contains("A&B\t<2>\n次"));
+        assert!(text.contains("Продажи\t-12.5"));
+        assert!(text.contains("Расходы\t0"));
+        assert!(text.contains("Без значения\t"));
+        // Markdown escapes punctuation and keeps line breaks as hard breaks.
+        let md = String::from_utf8(write(&deck, "md")?).map_err(|error| error.to_string())?;
+        assert!(md.contains("A\\&B\t\\<2\\>  \n次"));
+        assert!(md.contains("Продажи\t\\-12\\.5"));
+        assert!(md.contains("Расходы\t0"));
+        assert!(md.contains("Без значения\t"));
         let html = String::from_utf8(write(&deck, "html")?).map_err(|error| error.to_string())?;
         assert!(html.contains("<td>A&amp;B</td><td>&lt;2&gt;\n次</td>"));
         assert!(html.contains("Продажи\t-12.5"));

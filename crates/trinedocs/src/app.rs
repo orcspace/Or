@@ -5053,7 +5053,7 @@ mod shell_input_tests {
         repeat: bool,
     ) {
         let ctx = app.editor_ctx.clone();
-        let _ = ctx.run_ui(
+        ctx.run_ui(
             egui::RawInput {
                 events: vec![egui::Event::Key {
                     key,
@@ -5065,7 +5065,7 @@ mod shell_input_tests {
                 ..Default::default()
             },
             |ui| app.shortcuts(ui.ctx()),
-        );
+        ).textures_delta.clear();
     }
     #[test]
     fn shift_save_routes_to_save_as_without_overwriting_the_current_path() -> Result<(), String> {

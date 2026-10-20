@@ -338,7 +338,8 @@ fn decode_text(bytes: &[u8]) -> Result<String, String> {
         return Ok(text.into());
     }
     let (text, _, errors) = encoding_rs::WINDOWS_1251.decode(content);
-    if errors {
+    // WHATWG maps the byte 0x98, undefined in Microsoft's code page 1251, to a C1 control.
+    if errors || content.contains(&0x98) {
         Err("Некорректный Windows-1251".into())
     } else {
         Ok(text.into_owned())
@@ -666,9 +667,17 @@ fn paragraph(
         .filter_map(|properties| properties.child("outlineLvl").and_then(Node::value))
         .last()
         .and_then(|value| value.parse::<u8>().ok());
+    // A custom style that is a heading only through its outline level is demoted with it.
+    let style_heading = chain
+        .iter()
+        .filter_map(|style| style.child("pPr"))
+        .filter_map(|properties| properties.child("outlineLvl").and_then(Node::value))
+        .any(|value| value.parse::<u8>().is_ok_and(|level| level <= 5));
     match outline {
         Some(level @ 0..=5) => p.style = format!("Heading{}", level + 1),
-        Some(9) if heading_level(&p.style).is_some() => p.style = "Normal".into(),
+        Some(9) if style_heading || heading_level(&p.style).is_some() => {
+            p.style = "Normal".into()
+        }
         Some(6..=8) => doc
             .losses
             .push("Уровни структуры DOCX 7–9 пока не отображаются в оглавлении.".into()),
@@ -4104,7 +4113,8 @@ mod tests {
             &mut format,
             &xml(br#"<w:rPr xmlns:w="urn:w"><w:color w:val="auto"/></w:rPr>"#)?,
         );
-        assert_eq!(format.color, TextFormat::default().color);
+        // Word's automatic ink is black, not the inherited red.
+        assert_eq!(format.color, [0, 0, 0]);
         assert_eq!(format.highlight, Some([255, 255, 0]));
         Ok(())
     }
@@ -8057,8 +8067,9 @@ mod hundred_docs_io_regressions {
     }
     #[test]
     fn markdown_emphasis_requires_non_whitespace_delimiter_edges() -> Result<(), String> {
-        let doc = md("* word * and __ word__ and *valid*")?;
-        assert_eq!(doc.paragraphs[0].text(), "* word * and __ word__ and valid");
+        // A leading "* " would open a list item, so the stray delimiters start mid-line.
+        let doc = md("Text * word * and __ word__ and *valid*")?;
+        assert_eq!(doc.paragraphs[0].text(), "Text * word * and __ word__ and valid");
         assert!(
             doc.paragraphs[0]
                 .runs

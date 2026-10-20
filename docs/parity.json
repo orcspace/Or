@@ -4338,7 +4338,7 @@
     "priority": "P1",
     "phase": 5,
     "requirement": "REQ-11-007",
-    "mcp": "read_cells / write_cells / set_formula; GAP: разлива динамических массивов нет (ячейка показывает верхний левый элемент), runtime/GUI acceptance",
+    "mcp": "read_cells / write_cells / set_formula; разлив массивов в соседние ячейки с #SPILL! при блокировке; GAP: экспорт разлива в XLSX как dynamic array не реализован (сохраняется только формула), runtime/GUI acceptance",
     "import": "planned",
     "export": "planned",
     "status": "partial_unverified"
@@ -4350,7 +4350,7 @@
     "priority": "P1",
     "phase": 5,
     "requirement": "REQ-11-007",
-    "mcp": "read_cells / write_cells / set_formula; GAP: разлива динамических массивов нет (ячейка показывает верхний левый элемент), runtime/GUI acceptance",
+    "mcp": "read_cells / write_cells / set_formula; разлив массивов в соседние ячейки с #SPILL! при блокировке; GAP: экспорт разлива в XLSX как dynamic array не реализован (сохраняется только формула), runtime/GUI acceptance",
     "import": "planned",
     "export": "planned",
     "status": "partial_unverified"
@@ -4362,7 +4362,7 @@
     "priority": "P1",
     "phase": 5,
     "requirement": "REQ-11-007",
-    "mcp": "read_cells / write_cells / set_formula; GAP: разлива динамических массивов нет (ячейка показывает верхний левый элемент), runtime/GUI acceptance",
+    "mcp": "read_cells / write_cells / set_formula; разлив массивов в соседние ячейки с #SPILL! при блокировке; GAP: экспорт разлива в XLSX как dynamic array не реализован (сохраняется только формула), runtime/GUI acceptance",
     "import": "planned",
     "export": "planned",
     "status": "partial_unverified"
@@ -4374,7 +4374,7 @@
     "priority": "P1",
     "phase": 5,
     "requirement": "REQ-11-007",
-    "mcp": "read_cells / write_cells / set_formula; GAP: разлива динамических массивов нет (ячейка показывает верхний левый элемент), runtime/GUI acceptance",
+    "mcp": "read_cells / write_cells / set_formula; разлив массивов в соседние ячейки с #SPILL! при блокировке; GAP: экспорт разлива в XLSX как dynamic array не реализован (сохраняется только формула), runtime/GUI acceptance",
     "import": "planned",
     "export": "planned",
     "status": "partial_unverified"
@@ -4386,7 +4386,7 @@
     "priority": "P1",
     "phase": 5,
     "requirement": "REQ-11-007",
-    "mcp": "read_cells / write_cells / set_formula; GAP: разлива динамических массивов нет (ячейка показывает верхний левый элемент), runtime/GUI acceptance",
+    "mcp": "read_cells / write_cells / set_formula; разлив массивов в соседние ячейки с #SPILL! при блокировке; GAP: экспорт разлива в XLSX как dynamic array не реализован (сохраняется только формула), runtime/GUI acceptance",
     "import": "planned",
     "export": "planned",
     "status": "partial_unverified"

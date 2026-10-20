@@ -3477,27 +3477,18 @@ mod tests {
                     .map(|rect| rect.translate(Vec2::new(-96.0, 0.0)));
             },
         );
-        let rect = target.ok_or("grid geometry")?;
-        let mut lines = output
-            .shapes
-            .iter()
-            .filter_map(|shape| {
-                if let egui::Shape::LineSegment { points, stroke } = &shape.shape {
-                    (stroke.width == 1.0
-                        && stroke.color == color([28, 32, 38])
-                        && rect.contains(points[0])
-                        && rect.contains(points[1])
-                        && (points[0].y - points[1].y).abs() < 0.01)
-                        .then_some(points[0].y)
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-        lines.sort_by(f32::total_cmp);
+        target.ok_or("grid geometry")?;
+        // Decorations are part of the cell's text galley, so both strokes ride on one text shape.
+        let decorated = output.shapes.iter().any(|shape| {
+            matches!(&shape.shape, egui::Shape::Text(text)
+                if text.galley.job.text == "both"
+                    && text.galley.job.sections.iter().all(|section| {
+                        section.format.underline.width > 0.0
+                            && section.format.strikethrough.width > 0.0
+                    }))
+        });
         output.textures_delta.clear();
-        assert_eq!(lines.len(), 2);
-        assert!((lines[1] - lines[0] - 7.0).abs() < 0.01);
+        assert!(decorated);
         Ok(())
     }
 
@@ -4762,10 +4753,10 @@ mod additional_search_status_tests {
             }],
             ..Default::default()
         };
-        let _ = ctx.run_ui(input, |ui| {
+        ctx.run_ui(input, |ui| {
             assert!(close_find_on_escape(ui, &mut state));
             assert!(!ui.input(|input| input.key_pressed(Key::Escape)));
-        });
+        }).textures_delta.clear();
         assert!(!state.find_open);
     }
 }
@@ -4911,7 +4902,7 @@ mod hundred_cell_ui_tests {
             rotation: 45,
             ..CellFormat::default()
         };
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        ctx.run_ui(egui::RawInput::default(), |ui| {
             let shape = cell_text_shape(
                 ui,
                 Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, 30.0)),
@@ -4921,7 +4912,7 @@ mod hundred_cell_ui_tests {
                 false,
             );
             assert!((shape.angle + std::f32::consts::FRAC_PI_4).abs() < 1e-6);
-        });
+        }).textures_delta.clear();
         Ok(())
     }
     #[test]
@@ -4934,7 +4925,7 @@ mod hundred_cell_ui_tests {
             wrap: true,
             ..CellFormat::default()
         };
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        ctx.run_ui(egui::RawInput::default(), |ui| {
             let shape = cell_text_shape(
                 ui,
                 Rect::from_min_size(Pos2::ZERO, Vec2::new(200.0, 60.0)),
@@ -4948,7 +4939,7 @@ mod hundred_cell_ui_tests {
                 assert_eq!(section.format.underline, Stroke::new(1.0, Color32::RED));
                 assert_eq!(section.format.strikethrough, Stroke::new(1.0, Color32::RED));
             }
-        });
+        }).textures_delta.clear();
         Ok(())
     }
     #[test]

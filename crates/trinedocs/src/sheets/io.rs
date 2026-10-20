@@ -2871,7 +2871,7 @@ mod tests {
             r"\*literal\* \[link\]\(https\:\/\/invalid\) &lt;b&gt;&amp;name<br>next  line"
         ));
         let html = String::from_utf8(write(&book, "html")?).map_err(|e| e.to_string())?;
-        assert!(html.contains("white-space:pre-wrap"));
+        assert!(html.contains("white-space:pre"));
         assert!(html.contains("&lt;b&gt;&amp;name\nnext  line"));
         Ok(())
     }

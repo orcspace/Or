@@ -4301,9 +4301,9 @@ mod next_property_range_tests {
             ..Default::default()
         };
         let before = animation.clone();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        ctx.run_ui(egui::RawInput::default(), |ui| {
             animation_controls(ui, &mut animation, 0);
-        });
+        }).textures_delta.clear();
         assert_eq!(animation, before);
         let mut element = Element {
             kind: ElementKind::Rect,
@@ -4320,10 +4320,10 @@ mod next_property_range_tests {
             advance_after: Some(60000.0),
         };
         let before_transition = transition.clone();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        ctx.run_ui(egui::RawInput::default(), |ui| {
             properties(ui, &mut element);
             transition_timing_controls(ui, &mut transition);
-        });
+        }).textures_delta.clear();
         assert_eq!(element, before);
         assert_eq!(transition, before_transition);
         Ok(())
@@ -4600,14 +4600,14 @@ mod phase200_editor_tests {
         let mut a = "Slide A".to_string();
         let mut b = "Slide B".to_string();
         let mut field_id = None;
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        ctx.run_ui(egui::RawInput::default(), |ui| {
             field_id = Some(ui.id().with(("slide-property", 1_u64, "title")));
             slide_property_text(ui, &mut a, 1, "title", "");
-        });
+        }).textures_delta.clear();
         if let Some(id) = field_id {
             ctx.memory_mut(|memory| memory.request_focus(id));
         }
-        let _ = ctx.run_ui(
+        ctx.run_ui(
             egui::RawInput {
                 events: vec![egui::Event::Text("wrong slide".into())],
                 ..Default::default()
@@ -4615,7 +4615,7 @@ mod phase200_editor_tests {
             |ui| {
                 slide_property_text(ui, &mut b, 2, "title", "");
             },
-        );
+        ).textures_delta.clear();
         assert_eq!(b, "Slide B");
     }
 }
