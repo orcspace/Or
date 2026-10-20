@@ -71,15 +71,14 @@ pub fn write_zip(parts: Vec<(String, Vec<u8>)>) -> Result<Vec<u8>, String> {
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
     for (name, data) in parts {
-        zip.start_file(
-            name,
-            if data.len() > 1024 * 1024 {
-                options.compression_method(zip::CompressionMethod::Stored)
-            } else {
-                options
-            },
-        )
-        .map_err(|e| e.to_string())?;
+        // OpenDocument requires an uncompressed `mimetype` as the first entry.
+        let file_options = if data.len() > 1024 * 1024 || name == "mimetype" {
+            options.compression_method(zip::CompressionMethod::Stored)
+        } else {
+            options
+        };
+        zip.start_file(name, file_options)
+            .map_err(|e| e.to_string())?;
         zip.write_all(&data).map_err(|e| e.to_string())?;
     }
     let bytes = zip.finish().map_err(|e| e.to_string())?.into_inner();

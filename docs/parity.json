@@ -1622,14 +1622,14 @@
   {
     "id": "PAR-SHT-021",
     "mode": "Sheets",
-    "feature": "Автодополнение функций",
+    "feature": "Автодополнение функций и подсказка аргументов в строке формул",
     "priority": "P0",
     "phase": 5,
     "requirement": "REQ-11-007",
-    "mcp": "explain_formula; GAP: UI hints API",
+    "mcp": "explain_formula; UI: sheets/hints.rs — префикс EN/RU, ↑↓/Tab, сигнатура с текущим аргументом (ADR-0028). GAP: выбор мышью, русские описания библиотечных функций, GUI acceptance",
     "import": "n/a",
     "export": "n/a",
-    "status": "planned"
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-SHT-022",
@@ -3774,10 +3774,10 @@
     "priority": "P0",
     "phase": 7,
     "requirement": "REQ-08-003",
-    "mcp": "export_document / open_document; format implementation pending",
-    "import": "planned",
-    "export": "planned",
-    "status": "planned"
+    "mcp": "export_document / open_document; .odt/.ott/.fodt — собственный читатель/писатель docs/io/odt.rs (стили с наследованием, списки, таблицы с объединениями, рисунки, колонтитулы, номера страниц; ADR-0028). GAP: .doc, .rtf; сноски/комментарии/надписи ODT; проверка открытием в LibreOffice",
+    "import": "partial_unverified",
+    "export": "partial_unverified",
+    "status": "partial_unverified"
   },
   {
     "id": "PAR-DOC-098",
@@ -4329,6 +4329,66 @@
     "mcp": "inspect_document: preparing/completed, snapshot/current version, refresh, query/kind, index/count до100; первые200 с omitted/stale; один фоновый inspector. GAP: runtime/visual acceptance и полный анализ Office.",
     "import": "n/a",
     "export": "clipboard plain text",
+    "status": "partial_unverified"
+  },
+  {
+    "id": "PAR-SHT-122",
+    "mode": "Sheets",
+    "feature": "Инженерные функции: системы счисления, комплексные числа, биты, CONVERT, ERF, BESSEL* (GridCraft, ADR-0028)",
+    "priority": "P1",
+    "phase": 5,
+    "requirement": "REQ-11-007",
+    "mcp": "read_cells / write_cells / set_formula; GAP: разлива динамических массивов нет (ячейка показывает верхний левый элемент), runtime/GUI acceptance",
+    "import": "planned",
+    "export": "planned",
+    "status": "partial_unverified"
+  },
+  {
+    "id": "PAR-SHT-123",
+    "mode": "Sheets",
+    "feature": "Функции баз данных DSUM/DAVERAGE/DCOUNT/DGET/DMAX/… с диапазоном условий (GridCraft, ADR-0028)",
+    "priority": "P1",
+    "phase": 5,
+    "requirement": "REQ-11-007",
+    "mcp": "read_cells / write_cells / set_formula; GAP: разлива динамических массивов нет (ячейка показывает верхний левый элемент), runtime/GUI acceptance",
+    "import": "planned",
+    "export": "planned",
+    "status": "partial_unverified"
+  },
+  {
+    "id": "PAR-SHT-124",
+    "mode": "Sheets",
+    "feature": "Статистические распределения и проверки гипотез: NORM/T/CHISQ/F/BETA/GAMMA/BINOM/POISSON …, PERCENTRANK, ранги (GridCraft, ADR-0028)",
+    "priority": "P1",
+    "phase": 5,
+    "requirement": "REQ-11-007",
+    "mcp": "read_cells / write_cells / set_formula; GAP: разлива динамических массивов нет (ячейка показывает верхний левый элемент), runtime/GUI acceptance",
+    "import": "planned",
+    "export": "planned",
+    "status": "partial_unverified"
+  },
+  {
+    "id": "PAR-SHT-125",
+    "mode": "Sheets",
+    "feature": "Регулярные выражения REGEXTEST/REGEXEXTRACT/REGEXREPLACE и TEXTSPLIT/TEXTBEFORE/TEXTAFTER (GridCraft + regex, ADR-0028)",
+    "priority": "P1",
+    "phase": 5,
+    "requirement": "REQ-11-007",
+    "mcp": "read_cells / write_cells / set_formula; GAP: разлива динамических массивов нет (ячейка показывает верхний левый элемент), runtime/GUI acceptance",
+    "import": "planned",
+    "export": "planned",
+    "status": "partial_unverified"
+  },
+  {
+    "id": "PAR-SHT-126",
+    "mode": "Sheets",
+    "feature": "Матричные и массивные функции MMULT/MINVERSE/MDETERM/SEQUENCE/FILTER/SORT/UNIQUE/TOCOL/WRAPROWS … внутри формул (GridCraft, ADR-0028)",
+    "priority": "P1",
+    "phase": 5,
+    "requirement": "REQ-11-007",
+    "mcp": "read_cells / write_cells / set_formula; GAP: разлива динамических массивов нет (ячейка показывает верхний левый элемент), runtime/GUI acceptance",
+    "import": "planned",
+    "export": "planned",
     "status": "partial_unverified"
   },
   {

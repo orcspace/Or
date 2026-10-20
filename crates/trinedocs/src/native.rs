@@ -48,6 +48,8 @@ impl Document {
             Self::Docs(_) => &[
                 ("docx", "Документ Word"),
                 ("pdf", "PDF"),
+                ("odt", "Текст OpenDocument"),
+                ("fodt", "Плоский XML OpenDocument"),
                 ("txt", "Обычный текст"),
                 ("md", "Markdown"),
                 ("html", "Веб-страница"),
@@ -191,6 +193,10 @@ pub fn decode(bytes: &[u8]) -> Result<Document, String> {
         }
     }
     env.document.validate()?;
+    if let Document::Sheets(book) = &mut env.document {
+        // Spilled array results are not stored; rebuild them like an XLSX import does.
+        book.recalculate();
+    }
     Ok(env.document)
 }
 pub fn open(path: &Path) -> Result<Document, String> {
@@ -199,7 +205,7 @@ pub fn open(path: &Path) -> Result<Document, String> {
     let doc = match ext.as_str() {
         "trinedoc" | "trinesheet" | "trineslide" => decode(&bytes)?,
         "lock" => Document::Docs(crate::docs::io::read(&bytes, "txt")?),
-        "docx" | "dotx" | "docm" | "txt" | "md" | "html" | "htm" => {
+        "docx" | "dotx" | "docm" | "odt" | "ott" | "fodt" | "txt" | "md" | "html" | "htm" => {
             Document::Docs(crate::docs::io::read(&bytes, &ext)?)
         }
         "xlsx" | "xlsm" | "xltx" | "xls" | "xlsb" | "ods" | "csv" | "tsv" => {

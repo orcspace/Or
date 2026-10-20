@@ -879,6 +879,8 @@ pub fn file_stem(title: &str) -> String {
                     | "docx"
                     | "dotx"
                     | "docm"
+                    | "odt"
+                    | "fodt"
                     | "xlsx"
                     | "xlsm"
                     | "xltx"

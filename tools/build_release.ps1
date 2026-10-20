@@ -30,6 +30,9 @@ if(!$Makensis){
 }
 python -B tools/audit_dependencies.py --output dist/THIRD-PARTY-NOTICES.txt --check-age
 if($LASTEXITCODE -ne 0){throw 'Dependency license audit failed'}
+# Vendored source (not a crate): GridCraft worksheet functions, ADR-0028.
+$vendored=[Environment]::NewLine+'GridCraft worksheet function library (vendored in crates/trinedocs/src/sheets/xlfn), MIT OR Apache-2.0; MIT selected.'+[Environment]::NewLine+[Environment]::NewLine+(Get-Content -LiteralPath crates/trinedocs/src/sheets/xlfn/LICENSE-MIT -Raw)
+[IO.File]::AppendAllText((Join-Path $taskRoot 'dist/THIRD-PARTY-NOTICES.txt'),$vendored,[Text.UTF8Encoding]::new($false))
 Copy-Item -LiteralPath target/dist/TrineDocs.exe,target/dist/trinedocs-mcp.exe -Destination dist -Force
 Copy-Item -LiteralPath docs/audit/release-review.md -Destination dist/RELEASE-REVIEW.md -Force
 $payload=Join-Path $taskRoot 'dist'

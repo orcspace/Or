@@ -1,6 +1,8 @@
 use super::model::{Book, MAX_COLS, MAX_ROWS, Range, Value, address, parse_address};
+use super::xlfn;
 use chrono::{Datelike, Timelike};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 type CalcResult<T> = Result<T, String>;
@@ -174,147 +176,156 @@ fn lexer(input: &str) -> CalcResult<Vec<Token>> {
     });
     Ok(out)
 }
+/// Russian Excel function names and their canonical English names.
+pub(crate) const RU_NAMES: &[(&str, &str)] = &[
+    ("СУММ", "SUM"),
+    ("СРЗНАЧ", "AVERAGE"),
+    ("МИН", "MIN"),
+    ("МАКС", "MAX"),
+    ("СЧЁТ", "COUNT"),
+    ("СЧЕТ", "COUNT"),
+    ("СЧЁТЗ", "COUNTA"),
+    ("СЧЕТЗ", "COUNTA"),
+    ("СЧИТАТЬПУСТОТЫ", "COUNTBLANK"),
+    ("ЕСЛИ", "IF"),
+    ("ЕСЛИОШИБКА", "IFERROR"),
+    ("ЕСНД", "IFNA"),
+    ("И", "AND"),
+    ("ИЛИ", "OR"),
+    ("НЕ", "NOT"),
+    ("ИСКЛИЛИ", "XOR"),
+    ("ВПР", "VLOOKUP"),
+    ("ГПР", "HLOOKUP"),
+    ("ПРОСМОТРX", "XLOOKUP"),
+    ("ПРОСМОТРХ", "XLOOKUP"),
+    ("ИНДЕКС", "INDEX"),
+    ("ПОИСКПОЗ", "MATCH"),
+    ("ПОИСКПОЗX", "XMATCH"),
+    ("ПОИСКПОЗХ", "XMATCH"),
+    ("СУММЕСЛИ", "SUMIF"),
+    ("СУММЕСЛИМН", "SUMIFS"),
+    ("СЧЁТЕСЛИ", "COUNTIF"),
+    ("СЧЕТЕСЛИ", "COUNTIF"),
+    ("СЧЁТЕСЛИМН", "COUNTIFS"),
+    ("СЧЕТЕСЛИМН", "COUNTIFS"),
+    ("СРЗНАЧЕСЛИ", "AVERAGEIF"),
+    ("СРЗНАЧЕСЛИМН", "AVERAGEIFS"),
+    ("ОКРУГЛ", "ROUND"),
+    ("ОКРУГЛВВЕРХ", "ROUNDUP"),
+    ("ОКРУГЛВНИЗ", "ROUNDDOWN"),
+    ("ЦЕЛОЕ", "INT"),
+    ("ОСТАТ", "MOD"),
+    ("СТЕПЕНЬ", "POWER"),
+    ("КОРЕНЬ", "SQRT"),
+    ("ПИ", "PI"),
+    ("СЛЧИС", "RAND"),
+    ("СЛУЧМЕЖДУ", "RANDBETWEEN"),
+    ("ПРОИЗВЕД", "PRODUCT"),
+    ("СУММПРОИЗВ", "SUMPRODUCT"),
+    ("СЦЕПИТЬ", "CONCATENATE"),
+    ("СЦЕП", "CONCAT"),
+    ("ОБЪЕДИНИТЬ", "TEXTJOIN"),
+    ("ЛЕВСИМВ", "LEFT"),
+    ("ПРАВСИМВ", "RIGHT"),
+    ("ПСТР", "MID"),
+    ("ДЛСТР", "LEN"),
+    ("СТРОЧН", "LOWER"),
+    ("ПРОПИСН", "UPPER"),
+    ("ПРОПНАЧ", "PROPER"),
+    ("СЖПРОБЕЛЫ", "TRIM"),
+    ("ПОДСТАВИТЬ", "SUBSTITUTE"),
+    ("ЗАМЕНИТЬ", "REPLACE"),
+    ("НАЙТИ", "FIND"),
+    ("ПОИСК", "SEARCH"),
+    ("ТЕКСТ", "TEXT"),
+    ("ЗНАЧЕН", "VALUE"),
+    ("ПОВТОР", "REPT"),
+    ("СОВПАД", "EXACT"),
+    ("СЕГОДНЯ", "TODAY"),
+    ("ТДАТА", "NOW"),
+    ("ДАТА", "DATE"),
+    ("ВРЕМЯ", "TIME"),
+    ("ГОД", "YEAR"),
+    ("МЕСЯЦ", "MONTH"),
+    ("ДЕНЬ", "DAY"),
+    ("ЧАС", "HOUR"),
+    ("МИНУТЫ", "MINUTE"),
+    ("СЕКУНДЫ", "SECOND"),
+    ("ДЕНЬНЕД", "WEEKDAY"),
+    ("ДАТАМЕС", "EDATE"),
+    ("КОНМЕСЯЦА", "EOMONTH"),
+    ("РАЗНДАТ", "DATEDIF"),
+    ("ЧИСТРАБДНИ", "NETWORKDAYS"),
+    ("РАБДЕНЬ", "WORKDAY"),
+    ("ПЛТ", "PMT"),
+    ("БС", "FV"),
+    ("ПС", "PV"),
+    ("ЧПС", "NPV"),
+    ("ВСД", "IRR"),
+    ("ЕЧИСЛО", "ISNUMBER"),
+    ("ЕТЕКСТ", "ISTEXT"),
+    ("ЕПУСТО", "ISBLANK"),
+    ("ЕОШИБКА", "ISERROR"),
+    ("ЕНД", "ISNA"),
+    ("ЕОШ", "ISERR"),
+    ("ЕЛОГИЧ", "ISLOGICAL"),
+    ("СТРОКА", "ROW"),
+    ("СТОЛБЕЦ", "COLUMN"),
+    ("ЧСТРОК", "ROWS"),
+    ("ЧИСЛСТОЛБ", "COLUMNS"),
+    ("МЕДИАНА", "MEDIAN"),
+    ("МОДА", "MODE"),
+    ("СТАНДОТКЛОН", "STDEV"),
+    ("ДИСП", "VAR"),
+    ("ВЫБОР", "CHOOSE"),
+    ("ПЕРЕКЛЮЧ", "SWITCH"),
+    ("ИСТИНА", "TRUE"),
+    ("ЛОЖЬ", "FALSE"),
+    ("НД", "NA"),
+    ("МАКСЕСЛИ", "MAXIFS"),
+    ("МИНЕСЛИ", "MINIFS"),
+    ("МАКСА", "MAXA"),
+    ("МИНА", "MINA"),
+    ("УРЕЗСРЕДНЕЕ", "TRIMMEAN"),
+    ("СКОС", "SKEW"),
+    ("ЭКСЦЕСС", "KURT"),
+    ("КОРРЕЛ", "CORREL"),
+    ("ПИРСОН", "PEARSON"),
+    ("КВПИРСОН", "RSQ"),
+    ("НАКЛОН", "SLOPE"),
+    ("ОТРЕЗОК", "INTERCEPT"),
+    ("КОВАР", "COVAR"),
+    ("КОВАРИАЦИЯ.Г", "COVARIANCE.P"),
+    ("КОВАРИАЦИЯ.В", "COVARIANCE.S"),
+    ("ТЕКСТДО", "TEXTBEFORE"),
+    ("ТЕКСТПОСЛЕ", "TEXTAFTER"),
+    ("КПЕР", "NPER"),
+    ("СТАВКА", "RATE"),
+    ("ПРПЛТ", "IPMT"),
+    ("ОСПЛТ", "PPMT"),
+    ("РИМСКОЕ", "ROMAN"),
+    ("АРАБСКОЕ", "ARABIC"),
+    ("ДЕС.В.ДВ", "DEC2BIN"),
+    ("ДЕС.В.ВОСЬМ", "DEC2OCT"),
+    ("ДЕС.В.ШЕСТН", "DEC2HEX"),
+    ("ДВ.В.ДЕС", "BIN2DEC"),
+    ("ВОСЬМ.В.ДЕС", "OCT2DEC"),
+    ("ШЕСТН.В.ДЕС", "HEX2DEC"),
+    ("ОСНОВАНИЕ", "BASE"),
+    ("ДЕС", "DECIMAL"),
+    ("НОМНЕДЕЛИ", "WEEKNUM"),
+    ("НОМНЕДЕЛИ.ISO", "ISOWEEKNUM"),
+    ("ДНЕЙ360", "DAYS360"),
+    ("ПРОМЕЖУТОЧНЫЕ.ИТОГИ", "SUBTOTAL"),
+];
 fn alias(name: &str) -> String {
     let upper = name.to_uppercase();
     let canonical = upper.strip_prefix("_XLFN.").unwrap_or(&upper);
     let canonical = canonical.strip_prefix("_XLWS.").unwrap_or(canonical);
-    match canonical {
-        "СУММ" => "SUM",
-        "СРЗНАЧ" => "AVERAGE",
-        "МИН" => "MIN",
-        "МАКС" => "MAX",
-        "СЧЁТ" | "СЧЕТ" => "COUNT",
-        "СЧЁТЗ" | "СЧЕТЗ" => "COUNTA",
-        "СЧИТАТЬПУСТОТЫ" => "COUNTBLANK",
-        "ЕСЛИ" => "IF",
-        "ЕСЛИОШИБКА" => "IFERROR",
-        "ЕСНД" => "IFNA",
-        "И" => "AND",
-        "ИЛИ" => "OR",
-        "НЕ" => "NOT",
-        "ИСКЛИЛИ" => "XOR",
-        "ВПР" => "VLOOKUP",
-        "ГПР" => "HLOOKUP",
-        "ПРОСМОТРX" | "ПРОСМОТРХ" => "XLOOKUP",
-        "ИНДЕКС" => "INDEX",
-        "ПОИСКПОЗ" => "MATCH",
-        "ПОИСКПОЗX" | "ПОИСКПОЗХ" => "XMATCH",
-        "СУММЕСЛИ" => "SUMIF",
-        "СУММЕСЛИМН" => "SUMIFS",
-        "СЧЁТЕСЛИ" | "СЧЕТЕСЛИ" => "COUNTIF",
-        "СЧЁТЕСЛИМН" | "СЧЕТЕСЛИМН" => "COUNTIFS",
-        "СРЗНАЧЕСЛИ" => "AVERAGEIF",
-        "СРЗНАЧЕСЛИМН" => "AVERAGEIFS",
-        "ОКРУГЛ" => "ROUND",
-        "ОКРУГЛВВЕРХ" => "ROUNDUP",
-        "ОКРУГЛВНИЗ" => "ROUNDDOWN",
-        "ЦЕЛОЕ" => "INT",
-        "ОСТАТ" => "MOD",
-        "СТЕПЕНЬ" => "POWER",
-        "КОРЕНЬ" => "SQRT",
-        "ПИ" => "PI",
-        "СЛЧИС" => "RAND",
-        "СЛУЧМЕЖДУ" => "RANDBETWEEN",
-        "ПРОИЗВЕД" => "PRODUCT",
-        "СУММПРОИЗВ" => "SUMPRODUCT",
-        "СЦЕПИТЬ" => "CONCATENATE",
-        "СЦЕП" => "CONCAT",
-        "ОБЪЕДИНИТЬ" => "TEXTJOIN",
-        "ЛЕВСИМВ" => "LEFT",
-        "ПРАВСИМВ" => "RIGHT",
-        "ПСТР" => "MID",
-        "ДЛСТР" => "LEN",
-        "СТРОЧН" => "LOWER",
-        "ПРОПИСН" => "UPPER",
-        "ПРОПНАЧ" => "PROPER",
-        "СЖПРОБЕЛЫ" => "TRIM",
-        "ПОДСТАВИТЬ" => "SUBSTITUTE",
-        "ЗАМЕНИТЬ" => "REPLACE",
-        "НАЙТИ" => "FIND",
-        "ПОИСК" => "SEARCH",
-        "ТЕКСТ" => "TEXT",
-        "ЗНАЧЕН" => "VALUE",
-        "ПОВТОР" => "REPT",
-        "СОВПАД" => "EXACT",
-        "СЕГОДНЯ" => "TODAY",
-        "ТДАТА" => "NOW",
-        "ДАТА" => "DATE",
-        "ВРЕМЯ" => "TIME",
-        "ГОД" => "YEAR",
-        "МЕСЯЦ" => "MONTH",
-        "ДЕНЬ" => "DAY",
-        "ЧАС" => "HOUR",
-        "МИНУТЫ" => "MINUTE",
-        "СЕКУНДЫ" => "SECOND",
-        "ДЕНЬНЕД" => "WEEKDAY",
-        "ДАТАМЕС" => "EDATE",
-        "КОНМЕСЯЦА" => "EOMONTH",
-        "РАЗНДАТ" => "DATEDIF",
-        "ЧИСТРАБДНИ" => "NETWORKDAYS",
-        "РАБДЕНЬ" => "WORKDAY",
-        "ПЛТ" => "PMT",
-        "БС" => "FV",
-        "ПС" => "PV",
-        "ЧПС" => "NPV",
-        "ВСД" => "IRR",
-        "ЕЧИСЛО" => "ISNUMBER",
-        "ЕТЕКСТ" => "ISTEXT",
-        "ЕПУСТО" => "ISBLANK",
-        "ЕОШИБКА" => "ISERROR",
-        "ЕНД" => "ISNA",
-        "ЕОШ" => "ISERR",
-        "ЕЛОГИЧ" => "ISLOGICAL",
-        "СТРОКА" => "ROW",
-        "СТОЛБЕЦ" => "COLUMN",
-        "ЧСТРОК" => "ROWS",
-        "ЧИСЛСТОЛБ" => "COLUMNS",
-        "МЕДИАНА" => "MEDIAN",
-        "МОДА" => "MODE",
-        "СТАНДОТКЛОН" => "STDEV",
-        "ДИСП" => "VAR",
-        "ВЫБОР" => "CHOOSE",
-        "ПЕРЕКЛЮЧ" => "SWITCH",
-        "ИСТИНА" => "TRUE",
-        "ЛОЖЬ" => "FALSE",
-        "НД" => "NA",
-        "МАКСЕСЛИ" => "MAXIFS",
-        "МИНЕСЛИ" => "MINIFS",
-        "МАКСА" => "MAXA",
-        "МИНА" => "MINA",
-        "УРЕЗСРЕДНЕЕ" => "TRIMMEAN",
-        "СКОС" => "SKEW",
-        "ЭКСЦЕСС" => "KURT",
-        "КОРРЕЛ" => "CORREL",
-        "ПИРСОН" => "PEARSON",
-        "КВПИРСОН" => "RSQ",
-        "НАКЛОН" => "SLOPE",
-        "ОТРЕЗОК" => "INTERCEPT",
-        "КОВАР" => "COVAR",
-        "КОВАРИАЦИЯ.Г" => "COVARIANCE.P",
-        "КОВАРИАЦИЯ.В" => "COVARIANCE.S",
-        "ТЕКСТДО" => "TEXTBEFORE",
-        "ТЕКСТПОСЛЕ" => "TEXTAFTER",
-        "КПЕР" => "NPER",
-        "СТАВКА" => "RATE",
-        "ПРПЛТ" => "IPMT",
-        "ОСПЛТ" => "PPMT",
-        "РИМСКОЕ" => "ROMAN",
-        "АРАБСКОЕ" => "ARABIC",
-        "ДЕС.В.ДВ" => "DEC2BIN",
-        "ДЕС.В.ВОСЬМ" => "DEC2OCT",
-        "ДЕС.В.ШЕСТН" => "DEC2HEX",
-        "ДВ.В.ДЕС" => "BIN2DEC",
-        "ВОСЬМ.В.ДЕС" => "OCT2DEC",
-        "ШЕСТН.В.ДЕС" => "HEX2DEC",
-        "ОСНОВАНИЕ" => "BASE",
-        "ДЕС" => "DECIMAL",
-        "НОМНЕДЕЛИ" => "WEEKNUM",
-        "НОМНЕДЕЛИ.ISO" => "ISOWEEKNUM",
-        "ДНЕЙ360" => "DAYS360",
-        "ПРОМЕЖУТОЧНЫЕ.ИТОГИ" => "SUBTOTAL",
-        _ => return canonical.into(),
-    }
-    .into()
+    RU_NAMES
+        .iter()
+        .find(|(ru, _)| *ru == canonical)
+        .map_or_else(|| canonical.into(), |(_, en)| (*en).into())
 }
 pub fn canonicalize(input: &str) -> String {
     if !input.starts_with('=') {
@@ -815,7 +826,14 @@ struct Engine<'a> {
     budget_exhausted: bool,
     cached_text: usize,
     cache_text_limit: usize,
+    /// Values spilled into empty cells by the previous recalculation pass.
+    spilled: HashMap<CellKey, Value>,
+    /// Array formulas whose spill area was obstructed in the previous pass.
+    blocked: HashSet<CellKey>,
+    /// Multi-cell results of formula cells evaluated in this pass, by anchor cell.
+    arrays: HashMap<CellKey, Grid>,
 }
+type CellKey = (usize, u32, u32);
 impl<'a> Engine<'a> {
     fn new(book: &'a Book) -> Self {
         let elapsed = SystemTime::now()
@@ -833,6 +851,9 @@ impl<'a> Engine<'a> {
             budget_exhausted: false,
             cached_text: 0,
             cache_text_limit: 64*1024*1024,
+            spilled: HashMap::new(),
+            blocked: HashSet::new(),
+            arrays: HashMap::new(),
         }
     }
     fn root_cell(&mut self, sheet: usize, row: u32, col: u32) -> Value {
@@ -848,7 +869,8 @@ impl<'a> Engine<'a> {
             return value.clone();
         }
         if self.book.sheets.get(sheet).and_then(|s|s.cell(row,col)).is_none() {
-            return Value::Empty;
+            // An empty cell shows the value an array formula spilled into it, if any.
+            return self.spilled.get(&key).cloned().unwrap_or_default();
         }
         if self.depth >= 256 {
             self.budget_exhausted = true;
@@ -867,9 +889,20 @@ impl<'a> Engine<'a> {
             .unwrap_or_default();
         let mut value = if input.starts_with('=') {
             match parse(&input).and_then(|e| self.eval(&e, sheet, row, col)) {
+                Ok(grid) if grid.values.len() > 1 => {
+                    let first = if self.blocked.contains(&key) {
+                        Value::Error("#SPILL!".into())
+                    } else {
+                        formula_result(grid.first())
+                    };
+                    self.arrays.insert(key, grid);
+                    first
+                }
                 Ok(grid) => formula_result(grid.first()),
                 Err(e) => Value::Error(e),
             }
+        } else if input.is_empty() {
+            self.spilled.get(&key).cloned().unwrap_or_default()
         } else {
             literal(&input)
         };
@@ -1245,11 +1278,15 @@ impl<'a> Engine<'a> {
                 let target = self.book.sheets.get(target).ok_or("#REF!")?.name.clone();
                 self.skip_subtotal_cells(grid, Some(&target), &range, sheet, hidden);
             }
-            evaluated.push(if name.starts_with("IS") || matches!(name, "TYPE" | "COUNT" | "COUNTA") {
-                value.unwrap_or_else(|e| Grid::scalar(Value::Error(e)))
-            } else {
-                value?
-            });
+            evaluated.push(
+                if name.starts_with("IS")
+                    || matches!(name, "TYPE" | "ERROR.TYPE" | "COUNT" | "COUNTA")
+                {
+                    value.unwrap_or_else(|e| Grid::scalar(Value::Error(e)))
+                } else {
+                    value?
+                },
+            );
         }
         let (name, a) = if name == "SUBTOTAL" {
             if evaluated.len() < 2 {
@@ -3300,8 +3337,93 @@ impl<'a> Engine<'a> {
                 }
                 num(((y2 - y1) * 360 + (m2 - m1) * 30 + d2 - d1) as f64)
             }
-            _ => Err("#NAME?".into()),
+            _ => self.library_call(name, a),
         }
+    }
+    /// Functions the engine does not implement itself come from the vendored worksheet function
+    /// library (ADR-0028). Unknown names stay `#NAME?`.
+    fn library_call(&mut self, name: &str, a: &[Grid]) -> CalcResult<Grid> {
+        let spec = xlfn::lookup(name).ok_or("#NAME?")?;
+        let args: Vec<xlfn::Arg> = a.iter().map(library_arg).collect();
+        let mut host = LibraryHost {
+            now: self.now,
+            random: &mut self.random,
+        };
+        library_grid(xlfn::call(spec, &args, &mut host))
+    }
+}
+struct LibraryHost<'a> {
+    now: f64,
+    random: &'a mut u64,
+}
+impl xlfn::Ctx for LibraryHost<'_> {
+    fn date_system(&self) -> xlfn::base::DateSystem {
+        xlfn::base::DateSystem::D1900
+    }
+    fn now_serial(&self) -> f64 {
+        self.now
+    }
+    fn random(&mut self) -> f64 {
+        *self.random ^= *self.random << 13;
+        *self.random ^= *self.random >> 7;
+        *self.random ^= *self.random << 17;
+        (*self.random >> 11) as f64 / (1u64 << 53) as f64
+    }
+}
+fn library_value(value: &Value) -> xlfn::base::Value {
+    use xlfn::base::{CellError, Value as L};
+    match value {
+        Value::Empty => L::Empty,
+        Value::Number(n) => L::Number(*n),
+        Value::Text(t) => L::Text(Arc::from(t.as_str())),
+        Value::Bool(b) => L::Bool(*b),
+        Value::Error(e) => L::Error(CellError::parse(e).unwrap_or(CellError::Value)),
+    }
+}
+/// A single cell or literal goes over as a scalar; ranges and arrays as an array. `from_ref`
+/// tells the library which values came from cells (text in a referenced cell is skipped by
+/// COUNT-like functions, while typed text is coerced).
+fn library_arg(grid: &Grid) -> xlfn::Arg {
+    let value = if grid.rows * grid.cols == 1 {
+        library_value(&grid.first())
+    } else {
+        let data = grid.values.iter().map(library_value).collect();
+        match xlfn::base::Array::new(grid.rows, grid.cols, data) {
+            Some(array) => xlfn::base::Value::Array(Arc::new(array)),
+            None => xlfn::base::Value::Error(xlfn::base::CellError::Value),
+        }
+    };
+    xlfn::Arg {
+        value,
+        from_ref: grid.reference,
+    }
+}
+fn engine_value(value: &xlfn::base::Value) -> Value {
+    use xlfn::base::Value as L;
+    match value {
+        L::Empty => Value::Empty,
+        L::Number(n) => Value::Number(*n),
+        L::Text(t) => Value::Text(t.to_string()),
+        L::Bool(b) => Value::Bool(*b),
+        L::Error(e) => Value::Error(e.as_str().into()),
+        L::Array(a) => a.data.first().map(engine_value).unwrap_or_default(),
+    }
+}
+fn library_grid(value: xlfn::base::Value) -> CalcResult<Grid> {
+    match value {
+        xlfn::base::Value::Error(e) => Err(e.as_str().into()),
+        xlfn::base::Value::Array(array) => {
+            if array.data.is_empty() {
+                return Err("#CALC!".into());
+            }
+            Ok(Grid {
+                values: array.data.iter().map(engine_value).collect(),
+                rows: array.rows,
+                cols: array.cols,
+                reference: false,
+            })
+        }
+        other => Ok(Grid::scalar(engine_value(&other))),
     }
 }
 fn ansi_encoding(ru: bool) -> &'static encoding_rs::Encoding {
@@ -3973,17 +4095,86 @@ pub fn recalculate(book: &mut Book) {
                 .filter_map(move |key| parse_address(key).map(|(r, c)| (i, r, c)))
         })
         .collect();
-    let values = {
+    // Array results spill into the empty cells below and to the right of their formula. Cells
+    // that read a spilled area need the spill from the pass before, so passes repeat until the
+    // spill layout stops changing; a book without array results needs exactly one pass.
+    let mut spilled = HashMap::new();
+    let mut blocked = HashSet::new();
+    let mut values = Vec::new();
+    for _ in 0..4 {
         let mut engine = Engine::new(book);
-        keys.iter()
+        engine.spilled = std::mem::take(&mut spilled);
+        engine.blocked = std::mem::take(&mut blocked);
+        values = keys
+            .iter()
             .map(|&(s, r, c)| engine.root_cell(s, r, c))
-            .collect::<Vec<_>>()
-    };
+            .collect();
+        let (next_spilled, next_blocked) = spill_layout(book, &engine.arrays);
+        let stable = next_spilled == engine.spilled && next_blocked == engine.blocked;
+        spilled = next_spilled;
+        blocked = next_blocked;
+        if stable {
+            break;
+        }
+    }
+    for sheet in &mut book.sheets {
+        sheet.spill.clear();
+    }
+    for ((si, r, c), value) in spilled {
+        if let Some(sheet) = book.sheets.get_mut(si) {
+            sheet.spill.insert((r, c), value);
+        }
+    }
     for ((si, r, c), value) in keys.into_iter().zip(values) {
         if let Some(cell) = book.sheets.get_mut(si).and_then(|s| s.cell_mut(r, c)) {
             cell.value = value;
         }
     }
+}
+/// Places each array result: its spill area must lie on the sheet and be free of other input
+/// and of earlier spills, otherwise the formula shows #SPILL! (as in Excel).
+fn spill_layout(
+    book: &Book,
+    arrays: &HashMap<CellKey, Grid>,
+) -> (HashMap<CellKey, Value>, HashSet<CellKey>) {
+    let mut anchors: Vec<_> = arrays.keys().copied().collect();
+    anchors.sort_unstable();
+    let mut spilled = HashMap::new();
+    let mut blocked = HashSet::new();
+    let mut total = 0usize;
+    for key in anchors {
+        let (si, row, col) = key;
+        let (Some(grid), Some(sheet)) = (arrays.get(&key), book.sheets.get(si)) else {
+            continue;
+        };
+        total = total.saturating_add(grid.values.len());
+        let fits = u64::from(row) + grid.rows as u64 <= u64::from(MAX_ROWS)
+            && u64::from(col) + grid.cols as u64 <= u64::from(MAX_COLS)
+            && grid.values.len() == grid.rows * grid.cols
+            && total <= super::model::MAX_RANGE_CELLS;
+        if !fits {
+            blocked.insert(key);
+            continue;
+        }
+        let area: Vec<_> = (0..grid.rows)
+            .flat_map(|i| (0..grid.cols).map(move |j| (i, j)))
+            .skip(1)
+            .map(|(i, j)| ((si, row + i as u32, col + j as u32), i * grid.cols + j))
+            .collect();
+        let free = area.iter().all(|&(target @ (_, r, c), _)| {
+            !spilled.contains_key(&target)
+                && sheet.cell(r, c).is_none_or(|cell| cell.input.is_empty())
+        });
+        if free {
+            for (target, index) in area {
+                let value = grid.values.get(index).cloned().unwrap_or_default();
+                spilled.insert(target, formula_result(value));
+            }
+        } else {
+            blocked.insert(key);
+        }
+    }
+    (spilled, blocked)
 }
 pub fn dependencies(input: &str) -> Vec<(Option<String>, Range)> {
     fn visit(e: &Expr, out: &mut Vec<(Option<String>, Range)>) {

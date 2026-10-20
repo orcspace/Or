@@ -1,7 +1,7 @@
 # Зависимости и лицензии
 
-Полный production Cargo.lock: 444 registry packages. Проверка exact versions на 2026-10-13T00:00:00+00:00.
-Cargo.lock SHA-256: a799a9c9cfebd0d3df604b765563b896565a43d512a5335174779b1ce809ed80.
+Полный production Cargo.lock: 448 registry packages. Проверка exact versions на 2026-10-17T11:10:44.283881+00:00.
+Cargo.lock SHA-256: c04eee5ce6e4c0622a23b5184b73e533079da2f807c9ff962b45af3e14696cea.
 
 Реестр консервативно включает все target-specific и build-time зависимости lock; это не заявление, что каждый crate связан с Windows exe. Qt/CRDT spike не входят в этот граф.
 Декларации лицензий взяты из checksum-verified crates, даты/yank/checksum — из crates.io API. Отсутствующие в package LICENSE/NOTICE дополнены только с exact upstream commit из .cargo_vcs_info.json.
@@ -26,6 +26,7 @@ Online refresh: python -B tools/audit_dependencies.py --refresh
 | [accesskit_winit](https://crates.io/api/v1/crates/accesskit_winit/0.32.2) | 0.32.2 | Apache-2.0 | Apache-2.0 | 2026-03-04T20:54:22.635328Z | 3; exact-upstream-commit | True | pass |
 | [adler2](https://crates.io/api/v1/crates/adler2/2.0.1) | 2.0.1 | 0BSD OR MIT OR Apache-2.0 | MIT | 2025-06-09T22:31:53.608434Z | 3; checksum-verified-registry-archive | True | pass |
 | [ahash](https://crates.io/api/v1/crates/ahash/0.8.12) | 0.8.12 | MIT OR Apache-2.0 | MIT | 2025-05-08T05:05:32.999746Z | 2; checksum-verified-registry-archive | True | pass |
+| [aho-corasick](https://crates.io/api/v1/crates/aho-corasick/1.1.5) | 1.1.5 | Unlicense OR MIT | MIT | 2026-08-03T11:44:11.111398Z | 2; checksum-verified-registry-archive | True | pass |
 | [android-activity](https://crates.io/api/v1/crates/android-activity/0.6.1) | 0.6.1 | MIT OR Apache-2.0 | MIT | 2026-03-24T00:59:18.755650Z | 3; checksum-verified-registry-archive |  | pass |
 | [android-properties](https://crates.io/api/v1/crates/android-properties/0.2.2) | 0.2.2 | MIT | MIT | 2021-01-11T20:37:22.070209Z | 1; checksum-verified-registry-archive |  | pass |
 | [android_system_properties](https://crates.io/api/v1/crates/android_system_properties/0.1.6) | 0.1.6 | MIT OR Apache-2.0 | MIT | 2026-08-05T13:44:27.717073Z | 2; checksum-verified-registry-archive |  | pass |
@@ -288,6 +289,9 @@ Online refresh: python -B tools/audit_dependencies.py --refresh
 | [redox_syscall](https://crates.io/api/v1/crates/redox_syscall/0.9.4) | 0.9.4 | MIT | MIT | 2026-09-05T08:52:15.805729Z | 1; checksum-verified-registry-archive |  | pass |
 | [ref-cast](https://crates.io/api/v1/crates/ref-cast/1.0.27) | 1.0.27 | MIT OR Apache-2.0 | MIT | 2026-08-19T04:27:28.040119Z | 2; checksum-verified-registry-archive | True | pass |
 | [ref-cast-impl](https://crates.io/api/v1/crates/ref-cast-impl/1.0.27) | 1.0.27 | MIT OR Apache-2.0 | MIT | 2026-08-19T04:27:24.118760Z | 2; checksum-verified-registry-archive | True | pass |
+| [regex](https://crates.io/api/v1/crates/regex/1.13.1) | 1.13.1 | MIT OR Apache-2.0 | MIT | 2026-07-15T20:19:35.162139Z | 2; checksum-verified-registry-archive | True | pass |
+| [regex-automata](https://crates.io/api/v1/crates/regex-automata/0.4.18) | 0.4.18 | MIT OR Apache-2.0 | MIT | 2026-08-04T13:10:37.385020Z | 2; checksum-verified-registry-archive | True | pass |
+| [regex-syntax](https://crates.io/api/v1/crates/regex-syntax/0.8.11) | 0.8.11 | MIT OR Apache-2.0 | MIT | 2026-06-09T15:00:25.566550Z | 3; checksum-verified-registry-archive | True | pass |
 | [reqwest](https://crates.io/api/v1/crates/reqwest/0.13.5) | 0.13.5 | MIT OR Apache-2.0 | MIT | 2026-09-08T20:55:26.479356Z | 2; checksum-verified-registry-archive | True | pass |
 | [rfd](https://crates.io/api/v1/crates/rfd/0.17.2) | 0.17.2 | MIT | MIT | 2026-01-12T20:57:19.255609Z | 2; checksum-verified-registry-archive | True | pass |
 | [rmcp](https://crates.io/api/v1/crates/rmcp/3.5.0) | 3.5.0 | Apache-2.0 | Apache-2.0 | 2026-09-28T00:16:06.911025Z | 1; exact-upstream-commit | True | pass |
@@ -467,7 +471,3 @@ Online refresh: python -B tools/audit_dependencies.py --refresh
 - Loro CRDT spike изолирован: docs/dependencies/crdt-spike.{md,json}. Он не включён в production Cargo.lock, и его notices не подменяют этот граф.
 - Rust 1.98.1, Microsoft Windows SDK/MSVC CRT и NSIS — build/platform components. Для static CRT installer применяются отдельно подтверждённые redistribution terms; этот Cargo реестр не является их аудитом.
 - CI actions и NSIS script проверяются отдельным release review. AGPL запрещён. Age/yank/prerelease/checksum gate применяется ко всему lock; license/source-text gate — к Windows target graph. Non-Windows source gaps сохраняются честно в audit report.
-
-## Системный curl для изображений (ADR-0027)
-
-Приложение вызывает уже установленный Windows curl.exe, не включает его в установщик и не добавляет Rust-зависимости. curl: [лицензия curl/MIT-style](https://curl.se/docs/copyright.html), [параметр connect-to](https://curl.se/docs/manpage.html#--connect-to). Состав TLS/лицензий системной сборки принадлежит Windows; отдельная поставка curl требует собственной проверки и notices.

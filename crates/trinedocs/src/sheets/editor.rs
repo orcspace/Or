@@ -32,6 +32,7 @@ struct State {
     chart_drag: Option<(u64,Vec2)>,
     image_job: Option<ImageJob>,
     image_target: Option<(u64, u32, u32)>,
+    hint_selected: usize,
     #[cfg(test)]
     formula_rect: Option<Rect>,
     #[cfg(test)]
@@ -795,6 +796,101 @@ pub fn commit_pending(ctx: &egui::Context, tab_id: u64, book: &mut Book) -> Resu
         None => Ok(changed),
     }
 }
+/// Hint for the formula bar text at its current caret.
+fn formula_hint(ctx: &egui::Context, id: egui::Id, text: &str) -> super::hints::Hint {
+    let caret = egui::text_edit::TextEditState::load(ctx, id)
+        .and_then(|edit| edit.cursor.char_range())
+        .map_or_else(|| text.chars().count(), |range| range.primary.index.0);
+    super::hints::hint(text, caret, 8)
+}
+/// Signature of the call around the caret (current argument in bold) and name completions.
+fn show_formula_popup(
+    ui: &egui::Ui,
+    state_id: egui::Id,
+    anchor: Rect,
+    hint: &super::hints::Hint,
+    selected: usize,
+) {
+    let accent = crate::chrome::accent(ui);
+    let muted = crate::chrome::muted(ui);
+    egui::Area::new(state_id.with("formula-hint"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(anchor.left_bottom() + Vec2::new(0.0, 4.0))
+        .interactable(false)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_max_width(520.0);
+                if let Some((info, arg)) = hint.call {
+                    let (name, params) = super::hints::parameters(info.signature);
+                    let current = super::hints::parameter_index(&params, arg);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        ui.label(egui::RichText::new(format!("{name}(")).monospace());
+                        for (i, param) in params.iter().enumerate() {
+                            if i > 0 {
+                                ui.label(egui::RichText::new(", ").monospace());
+                            }
+                            let text = egui::RichText::new(*param).monospace();
+                            ui.label(if Some(i) == current {
+                                text.strong().color(accent)
+                            } else {
+                                text
+                            });
+                        }
+                        ui.label(egui::RichText::new(")").monospace());
+                    });
+                    if hint.completions.is_empty() {
+                        ui.label(egui::RichText::new(info.description).small().color(muted));
+                    }
+                }
+                if !hint.completions.is_empty() {
+                    if hint.call.is_some() {
+                        ui.separator();
+                    }
+                    for (i, completion) in hint.completions.iter().enumerate() {
+                        let chosen = i == selected;
+                        let row = egui::RichText::new(completion.insert).monospace();
+                        ui.horizontal(|ui| {
+                            ui.label(if chosen {
+                                row.strong().color(accent)
+                            } else {
+                                row
+                            });
+                            if completion.insert != completion.info.name {
+                                ui.label(
+                                    egui::RichText::new(completion.info.name)
+                                        .small()
+                                        .color(muted),
+                                );
+                            }
+                            ui.label(
+                                egui::RichText::new(completion.info.category)
+                                    .small()
+                                    .color(muted),
+                            );
+                        });
+                        if chosen {
+                            ui.label(
+                                egui::RichText::new(completion.info.signature)
+                                    .monospace()
+                                    .small(),
+                            );
+                            ui.label(
+                                egui::RichText::new(completion.info.description)
+                                    .small()
+                                    .color(muted),
+                            );
+                        }
+                    }
+                    ui.label(
+                        egui::RichText::new("↑↓ — выбор · Tab — вставить")
+                            .small()
+                            .color(muted),
+                    );
+                }
+            });
+        });
+}
 fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
     let mut state = ui
         .ctx()
@@ -872,6 +968,7 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
         }
     }
     ui.add_space(4.0);
+    let mut formula_popup: Option<(Rect, super::hints::Hint)> = None;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         let location_id = state_id.with("location");
@@ -937,6 +1034,42 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
         );
         let focused = ui.memory(|memory| memory.has_focus(formula_id));
         let modifiers = ui.input(|i| i.modifiers);
+        // Function completion: ↑/↓ choose, Tab inserts the name and "(".
+        let before = if focused && ui.is_enabled() {
+            formula_hint(ui.ctx(), formula_id, &state.buffer)
+        } else {
+            super::hints::Hint::default()
+        };
+        let count = before.completions.len();
+        state.hint_selected = state.hint_selected.min(count.saturating_sub(1));
+        if count > 0 {
+            let mut accept = false;
+            ui.input_mut(|i| {
+                if i.consume_key(egui::Modifiers::NONE, Key::ArrowDown) {
+                    state.hint_selected = (state.hint_selected + 1) % count;
+                }
+                if i.consume_key(egui::Modifiers::NONE, Key::ArrowUp) {
+                    state.hint_selected = (state.hint_selected + count - 1) % count;
+                }
+                accept = i.consume_key(egui::Modifiers::NONE, Key::Tab);
+            });
+            if accept
+                && let (Some(word), Some(completion)) =
+                    (before.word, before.completions.get(state.hint_selected))
+            {
+                let (text, caret) = super::hints::accept(&state.buffer, word, completion);
+                state.buffer = text;
+                state.editing = true;
+                state.hint_selected = 0;
+                let mut edit =
+                    egui::text_edit::TextEditState::load(ui.ctx(), formula_id).unwrap_or_default();
+                edit.cursor
+                    .set_char_range(Some(egui::text::CCursorRange::one(
+                        egui::text::CCursor::new(caret),
+                    )));
+                edit.store(ui.ctx(), formula_id);
+            }
+        }
         let action = if ui.is_enabled() && (focused || (state.editing && formula_active)) {
             ui.input_mut(|i| {
                 if i.consume_key(modifiers, Key::Escape) {
@@ -983,6 +1116,13 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
         }
         if response.changed() {
             state.editing = true;
+            state.hint_selected = 0;
+        }
+        if response.has_focus() && action.is_none() {
+            let hint = formula_hint(ui.ctx(), formula_id, &state.buffer);
+            if !hint.completions.is_empty() || hint.call.is_some() {
+                formula_popup = Some((response.rect, hint));
+            }
         }
         if let Some(key) = action {
             if key == Key::Escape {
@@ -1012,6 +1152,9 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                 .unwrap_or_default();
         }
     });
+    if let Some((anchor, hint)) = formula_popup {
+        show_formula_popup(ui, state_id, anchor, &hint, state.hint_selected);
+    }
     if book
         .active_sheet()
         .is_some_and(|sheet| sheet.frozen_rows > 20 || sheet.frozen_cols > 10)
@@ -1264,8 +1407,9 @@ fn show_impl(ui: &mut egui::Ui, book: &mut Book, state_id: egui::Id) -> bool {
                     .iter()
                     .find(|rule| {
                         rule.range.contains(r, c)
-                            && cell
-                                .and_then(|c| c.value.number().ok())
+                            && sheet
+                                .value(r, c)
+                                .and_then(|v| v.number().ok())
                                 .is_some_and(|n| match rule.operator.as_str() {
                                     ">" => n > rule.threshold,
                                     "<" => n < rule.threshold,
@@ -2764,8 +2908,8 @@ fn paint_chart(ui: &egui::Ui, sheet: &Sheet, chart: &super::model::Chart, rect: 
             (start..=r.r1.min(start + 199))
                 .map(|row| {
                     sheet
-                        .cell(row, c)
-                        .and_then(|c| c.value.number().ok())
+                        .value(row, c)
+                        .and_then(|v| v.number().ok())
                         .unwrap_or(0.0)
                 })
                 .collect()
@@ -2848,13 +2992,12 @@ fn paint_chart(ui: &egui::Ui, sheet: &Sheet, chart: &super::model::Chart, rect: 
                 }
                 ChartKind::Scatter => {
                     let xv = sheet
-                        .cell(start + i as u32, r.c0)
-                        .and_then(|c| c.value.number().ok())
+                        .value(start + i as u32, r.c0)
+                        .and_then(|v| v.number().ok())
                         .unwrap_or(i as f64);
                     let (xmin, xmax) = chart_bounds(
-                        (start..=r.r1.min(start + 199)).filter_map(|rr| {
-                            sheet.cell(rr, r.c0).and_then(|c| c.value.number().ok())
-                        }),
+                        (start..=r.r1.min(start + 199))
+                            .filter_map(|rr| sheet.value(rr, r.c0).and_then(|v| v.number().ok())),
                         false,
                     );
                     painter.circle_filled(
@@ -3103,6 +3246,46 @@ mod tests {
         );
         output.textures_delta.clear();
         saved.ok_or_else(|| "Состояние редактора не сохранено".into())
+    }
+    #[test]
+    fn tab_accepts_function_completion_in_formula_bar() -> Result<(), String> {
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx)?;
+        let mut book = Book::default();
+        book.set_cell(book.active_id(), 0, 1, "5")?;
+        frame(&ctx, &mut book, Vec::new(), false)?;
+        frame(
+            &ctx,
+            &mut book,
+            vec![egui::Event::Text("=SU".into())],
+            false,
+        )?;
+        frame(&ctx, &mut book, Vec::new(), false)?;
+        // ↓ moves to the second suggestion and ↑ back to SUM before Tab inserts it.
+        frame(
+            &ctx,
+            &mut book,
+            vec![key(Key::ArrowDown, false), key(Key::ArrowUp, false)],
+            false,
+        )?;
+        let state = frame(&ctx, &mut book, vec![key(Key::Tab, false)], false)?;
+        assert_eq!(state.buffer, "=SUM(");
+        assert!(state.editing);
+        assert_eq!((book.selection.row, book.selection.col), (0, 0));
+        frame(
+            &ctx,
+            &mut book,
+            vec![egui::Event::Text("B1)".into())],
+            false,
+        )?;
+        frame(&ctx, &mut book, vec![key(Key::Enter, false)], false)?;
+        let cell = book.active_sheet().and_then(|sheet| sheet.cell(0, 0));
+        assert_eq!(cell.map(|cell| cell.input.as_str()), Some("=SUM(B1)"));
+        assert_eq!(
+            cell.map(|cell| cell.value.clone()),
+            Some(Value::Number(5.0))
+        );
+        Ok(())
     }
     #[test]
     fn text_events_accumulate_and_escape_keeps_original_cell() -> Result<(), String> {
@@ -3451,7 +3634,8 @@ mod tests {
                 (action == "toolbar-new-sheet").then_some(1),
             )?;
             let original = book.clone();
-            let draft = "я".repeat(16384);
+            // One character over the 32 767-character cell limit.
+            let draft = "я".repeat(32768);
             let state = frame(
                 &ctx,
                 &mut book,
